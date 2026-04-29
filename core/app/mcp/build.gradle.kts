@@ -1,3 +1,5 @@
+import java.util.concurrent.TimeUnit
+
 plugins {
     kotlin("jvm")
     kotlin("plugin.serialization")
@@ -92,6 +94,9 @@ tasks.register("deploy") {
     group = "distribution"
     description = "Deploy MCP server JAR and launcher"
 
+    // UD-292 (inline): always-run, see :app:cli:deploy for rationale.
+    outputs.upToDateWhen { false }
+
     // Capture at config time (Gradle 10: no Task.project at execution).
     val projectVersion = project.version.toString()
     val shadowJarFile = tasks.shadowJar.flatMap { it.archiveFile }
@@ -101,11 +106,15 @@ tasks.register("deploy") {
         val jarFile = shadowJarFile.get().asFile
         val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
 
+        println("[deploy:mcp] starting — version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
+
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion)
         } else {
             deployLinux(home, jarFile, projectVersion)
         }
+
+        println("[deploy:mcp] complete.")
     }
 }
 
@@ -123,26 +132,31 @@ fun deployWindows(
     libDir.mkdirs()
     binDir.mkdirs()
 
-    // UD-712: Kill any running MCP java process before overwriting the JAR.
-    // Matches java.exe whose cmdline references the unidrive-mcp shadow jar
-    // (MCP servers are spawned by Claude Desktop / other clients, so they
-    // carry no window title and the old taskkill-by-title approach missed
-    // them entirely — FileAlreadyExistsException on the copy).
-    run(
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        // Filter uses PowerShell escaped single-quotes: Windows
-        // ProcessBuilder strips embedded double-quotes from command-line
-        // args, which breaks `-Filter "Name='java.exe'"`. The doubled
-        // single-quote (`''`) is PowerShell's in-string escape for `'`.
-        "Get-CimInstance Win32_Process -Filter 'Name=''java.exe''' | " +
-            "Where-Object { \$_.CommandLine -match 'unidrive-mcp-[^ ]*\\.jar' } | " +
-            "ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }",
-        ignoreExit = true,
-    )
+    // UD-712 (inline-rewritten 2026-04-29): Kill any running MCP java
+    // process before overwriting the JAR. See :app:cli:deploy for the
+    // PowerShell-Get-CimInstance hang rationale; same fix applies here.
+    // ProcessHandle.allProcesses() is JDK-9+ pure Java, no shell, no WMI.
+    val targetJarName = jarFile.name
+    val killed =
+        ProcessHandle
+            .allProcesses()
+            .filter { ph ->
+                val cmd = ph.info().commandLine().orElse("")
+                cmd.contains(targetJarName) && !cmd.contains("gradle-")
+            }.toList()
+    killed.forEach { ph ->
+        try {
+            ph.destroyForcibly()
+            ph.onExit().get(5L, TimeUnit.SECONDS)
+            println("[deploy:mcp] killed running MCP process pid=${ph.pid()}")
+        } catch (e: Exception) {
+            println("[deploy:mcp] could not kill pid=${ph.pid()}: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+    if (killed.isEmpty()) println("[deploy:mcp] no running MCP process to kill — proceeding to copy")
 
     jarFile.copyTo(targetJar, overwrite = true)
+    println("[deploy:mcp] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
     launcher.writeText(
         // UD-258 (follow-up): force UTF-8 stdout/stderr so JSON-RPC payloads

@@ -1,3 +1,5 @@
+import java.util.concurrent.TimeUnit
+
 plugins {
     kotlin("jvm")
     application
@@ -96,6 +98,15 @@ tasks.register("deploy") {
     group = "distribution"
     description = "Build fat JAR and deploy to local system"
 
+    // UD-292 (inline): without this Gradle 9's task-skipping
+    // heuristics elide doLast {} blocks on tasks that declare no
+    // outputs. The CLI deploy was silently NOT running between Gradle
+    // task graph evaluations even with --rerun-tasks, leaving the
+    // %LOCALAPPDATA%\unidrive\unidrive-*.jar stale relative to the
+    // build/libs jar. Always-run is the right semantic here: deploy
+    // must copy on every invocation.
+    outputs.upToDateWhen { false }
+
     // Capture at config time (Gradle 10: no Task.project at execution).
     val projectVersion = project.version.toString()
     val shadowJarFile = tasks.shadowJar.flatMap { it.archiveFile }
@@ -105,11 +116,15 @@ tasks.register("deploy") {
         val jarFile = shadowJarFile.get().asFile
         val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
 
+        println("[deploy] starting — version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
+
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion)
         } else {
             deployLinux(home, jarFile, projectVersion)
         }
+
+        println("[deploy] complete.")
     }
 }
 
@@ -130,31 +145,43 @@ fun deployWindows(
     libDir.mkdirs()
     binDir.mkdirs()
 
-    // UD-712: Kill any running unidrive java process before overwriting the
-    // JAR. The old taskkill filter only matched `WINDOWTITLE eq UniDriveSync`,
-    // which misses background daemons started by the VBS/startup wrapper —
-    // those have no window title, so the overwrite raced the open file
-    // handle and failed with FileAlreadyExistsException. Match by command
-    // line via CIM instead: any java.exe whose cmdline references the CLI
-    // shadow jar (`unidrive-<version>.jar`). The two negative lookaheads
-    // exclude sibling jars — `unidrive-mcp-*.jar` is killed by
-    // `:app:mcp:deploy`. The `unidrive-ui.jar` clause was retired with
-    // the `ui/` tier in ADR-0013.
-    run(
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        // Filter uses PowerShell escaped single-quotes: Windows
-        // ProcessBuilder strips embedded double-quotes from command-line
-        // args, which breaks `-Filter "Name='java.exe'"`. The doubled
-        // single-quote (`''`) is PowerShell's in-string escape for `'`.
-        "Get-CimInstance Win32_Process -Filter 'Name=''java.exe''' | " +
-            "Where-Object { \$_.CommandLine -match 'unidrive-(?!mcp-)(?!ui)[^ ]*\\.jar' } | " +
-            "ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }",
-        ignoreExit = true,
-    )
+    // UD-712 (inline-rewritten 2026-04-29): Kill any running unidrive java
+    // process before overwriting the JAR. The previous Get-CimInstance
+    // PowerShell subroutine intermittently hung the gradle daemon (WMI /
+    // DCOM auth stalls under load) — the deploy task body would never
+    // reach the copyTo() below, the build exited cleanly without a
+    // BUILD SUCCESSFUL marker, and the AppData jar stayed stale. The
+    // user spent a session debugging "deploy didn't deploy."
+    //
+    // Replaced with ProcessHandle.allProcesses() — pure Java since JDK 9,
+    // no shell, no WMI, no PowerShell. Filters by commandLine substring
+    // (more reliable than the old WINDOWTITLE filter that missed
+    // background daemons launched from the startup VBS).
+    val targetJarName = jarFile.name
+    val killed =
+        ProcessHandle
+            .allProcesses()
+            .filter { ph ->
+                val cmd = ph.info().commandLine().orElse("")
+                // Match the CLI shadow-jar specifically, not the MCP
+                // sibling (which is killed by :app:mcp:deploy) and not
+                // gradle's own daemon, which always has gradle on its
+                // command line.
+                cmd.contains(targetJarName) && !cmd.contains("gradle-")
+            }.toList()
+    killed.forEach { ph ->
+        try {
+            ph.destroyForcibly()
+            ph.onExit().get(5L, TimeUnit.SECONDS)
+            println("[deploy] killed running CLI process pid=${ph.pid()}")
+        } catch (e: Exception) {
+            println("[deploy] could not kill pid=${ph.pid()}: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+    if (killed.isEmpty()) println("[deploy] no running CLI process to kill — proceeding to copy")
 
     jarFile.copyTo(targetJar, overwrite = true)
+    println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
     launcher.writeText(
         """
