@@ -6447,3 +6447,38 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **S3 specifics: AWS SDK already provides retry policies + backoff — audit whether we use the SDK defaults or override. 503 SlowDown handling, date-formatted Retry-After. Concurrency: S3 handles thousands of parallel requests; likely a soft cap of 64-128 is fine.**
+
+---
+id: UD-318
+title: HiDrive HTTP robustness audit
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 71a8213. HiDrive audit doc — zero retries, vendor-doc void on throttling, OAuth gaps vs OneDrive (no NonCancellable refresh wrap), download path is the UD-329 anti-pattern. 9 follow-ups.
+opened: 2026-04-20
+chunk: sg5
+---
+**Part of UD-228 split — per-provider HTTP robustness audit.**
+
+**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
+
+1. **Non-2xx body parsing** — does this provider extract structured detail
+   (retry hints, quota info, recoverable-vs-fatal distinction) from error
+   bodies, or just stringify the Ktor exception?
+2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
+   SyncEngine action layer (fatal on non-whitelisted errors)?
+3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
+4. **Idempotency** — is the authenticatedRequest equivalent body-replay
+   safe?
+5. **Concurrency recommendations** — `maxConcurrentTransfers` +
+   `minRequestSpacingMs` based on provider docs + observed behaviour.
+
+**Deliverable:** `docs/providers/hidrive-robustness.md`.
+
+**Consumed by:**
+- UD-262 — findings inform `HttpRetryBudget` config surface
+- UD-263 — findings produce concurrency hint values
+
+**HiDrive specifics to check: X-RateLimit-* headers, JSON error body conventions, Strato endpoint quirks.**
