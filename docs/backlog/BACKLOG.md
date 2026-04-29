@@ -2927,3 +2927,664 @@ inside the budget.
   fix.
 - ADR-0006 — toolchain (Ktor 3.x choice). No re-evaluation needed;
   the timeout is a misuse of a healthy API surface, not a Ktor flaw.
+---
+id: UD-286
+title: CloudRelocator swallows per-file failures with no log line + breaks CancellationException propagation
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play-webdav`
+(128 681 files / 345 GB), per-file failures surface to the CLI with
+their `e.message` only — but `unidrive.log` (verified at 7.5 MB)
+contains **zero ERROR/WARN lines** for the relocate. Only `DEBUG
+skip-check` lines from CloudRelocator. Postmortem of any failed
+file is impossible without re-running with TRACE logging.
+
+Compounding: each `catch (Exception)` block also absorbs Kotlin's
+`CancellationException`, breaking structured concurrency. Ctrl-C
+on the relocate hangs for up to `requestTimeoutMillis = 600 000 ms`
+because the parent scope thinks children are still running.
+
+**Root cause.** `core/app/sync/.../CloudRelocator.kt` has four
+catch blocks that share both anti-patterns:
+
+| Line | Code | Anti-pattern |
+|---|---|---|
+| 138 | `catch (e: Exception) { log.warn("targetIndex failed for '{}', skip check disabled: {}", path, e.message) }` | message-only, no class, no throwable |
+| 162-166 | `try { target.createFolder(newTarget) } catch (e: Exception) { /* Folder may already exist */ }` | empty body, no log at all |
+| 213-216 | `} catch (e: Exception) { errorCount++; emit(MigrateEvent.Error("Failed to migrate $newSource: ${e.message}")) }` | **smoking gun** — no log, message only |
+| 223-227 | outer migration catch | same as 213 |
+
+None of the four re-throw `CancellationException` first. Compare with
+`SyncEngine.kt:416-426` which does it correctly:
+
+```kotlin
+} catch (e: CancellationException) {
+    throw e
+} catch (e: Exception) {
+    log.warn("Failed to {} {}: {}: {}", op, path, e.javaClass.simpleName, e.message, e)
+    ...
+}
+```
+
+UD-300 / `CancellationPropagationTest.kt` was filed against OneDrive
+for exactly this. CloudRelocator does not pass that test contract.
+
+**Proposed fix.** Mechanical, low-risk. For each of the four
+catches:
+
+1. Add `catch (e: CancellationException) { throw e }` **before** the
+   generic `catch (Exception)`.
+2. Replace `e.message` with `"{}: {}"` + `e.javaClass.simpleName`,
+   `e.message`, plus pass `e` as the SLF4J throwable parameter so
+   the stack reaches the log.
+3. Drop the empty-body catch on line 162; if folder creation throws
+   any `WebDavException` other than 405 Method Not Allowed (the
+   "already exists" signal), log + propagate.
+
+**Acceptance.**
+- New `CloudRelocatorCancellationTest.kt` mirroring
+  `CancellationPropagationTest.kt`: launch a relocate, cancel the
+  parent scope mid-flight, assert `CancellationException` propagates
+  to the caller within 100 ms (not 600 000 ms).
+- New regression: stub a provider that throws `IOException("test")`
+  on the third upload — assert `unidrive.log` contains a `WARN` line
+  with `IOException: test` and the throwable's stack trace.
+- Manual: re-run a relocate that hits a real WebDAV failure;
+  confirm the failure appears in `unidrive.log` with class +
+  stack.
+
+**Why this is filed first.** Without this fix, every other ticket
+in the WebDAV-relocate cluster (UD-287/288/289/290) is harder to
+diagnose because the log doesn't preserve the failure mode. Land
+this first; the remaining tickets become tractable.
+
+**Related.**
+- UD-300 — same pattern in OneDrive, already fixed there.
+- UD-284 — MDC `[???????]` in relocate log lines; same module.
+- UD-285 — REQUEST_TIMEOUT_MS=600s; the failure mode this ticket
+  helps diagnose.
+- UD-287, UD-288, UD-289, UD-290, UD-291 — the rest of the audit
+  cluster.
+---
+id: UD-287
+title: WebDAV Apache5 connection pool reuses half-closed sockets after timeout (WSAECONNABORTED cascade)
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, every Ktor
+`requestTimeoutMillis` (UD-285, 600 s) failure is immediately followed
+by 1–N **`Eine bestehende Verbindung wurde softwaregesteuert durch
+den Hostcomputer abgebrochen`** errors (Windows TCP
+`WSAECONNABORTED 10053`) on subsequent unrelated PUTs, before the
+relocate self-recovers.
+
+**Root cause.** `core/providers/webdav/.../WebDavApiService.kt:107-114`
+builds an Apache5 `PoolingAsyncClientConnectionManagerBuilder` with
+**default settings**:
+
+- No `setValidateAfterInactivity(...)` — connections aren't probed
+  before reuse.
+- No `evictExpiredConnections()` / `evictIdleConnections(...)` —
+  expired sockets stay in the pool.
+- No idle-timeout config — DSM (Synology Apache `mod_dav`) closes
+  keep-alive at ~5 minutes; the next reuse hits a half-closed
+  socket.
+
+When `requestTimeoutMillis` fires, Ktor cancels the in-flight write
+but Apache5 returns the connection to the pool **half-closed at
+the OS level**. The next PUT that picks it up gets WSAECONNABORTED
+from Windows TCP — which propagates as a "permanent" failure for
+that file (no retry, see UD-288).
+
+**Companion bug — `flushAndClose()` outside `withContext`.**
+`WebDavApiService.kt:175-186`:
+```kotlin
+override suspend fun writeTo(channel: ByteWriteChannel) {
+    withContext(Dispatchers.IO) {
+        Files.newInputStream(localPath).use { input ->
+            val buf = ByteArray(65536)
+            while (input.read(buf).also { n = it } != -1) {
+                channel.writeFully(buf, 0, n)
+            }
+        }
+    }
+    channel.flushAndClose()  // ← outside the IO block
+}
+```
+If the IO block throws (cancellation, file-read error, partial
+write), `flushAndClose()` is skipped → the PUT never gets its
+terminating chunk frame → server drops the connection → that
+connection still goes back to the pool → cascading WSAECONNABORTED.
+**This is the bug that *creates* the bad pool entries** the
+eviction-policy fix above cleans up. Fix one without the other and
+the pool fills up faster than eviction empties it.
+
+**Proposed fix.**
+
+1. Connection pool eviction (covers reuse hygiene):
+   ```kotlin
+   PoolingAsyncClientConnectionManagerBuilder.create()
+     .setValidateAfterInactivity(TimeValue.of(2, SECONDS))
+     .setMaxConnTotal(50)
+     .setMaxConnPerRoute(8)
+     .build()
+   // plus on the HttpAsyncClient:
+   //   .evictExpiredConnections()
+   //   .evictIdleConnections(TimeValue.of(30, SECONDS))
+   ```
+   Synology DSM keep-alive is ~5 min; 30 s idle eviction is well
+   inside that. `setValidateAfterInactivity(2s)` adds a cheap
+   probe before any second-or-later reuse.
+
+2. Move `flushAndClose()` inside the `withContext(Dispatchers.IO)`
+   block (or drop the `withContext` entirely — Ktor's engine already
+   runs `writeTo` on its own IO selector). On exception path,
+   ensure the channel is closed with the failure cause:
+   ```kotlin
+   try { ... } catch (e: Throwable) {
+       channel.cancel(e)  // half-close with cause; pool drops it
+       throw e
+   }
+   ```
+
+3. Same review of all other Ktor PUT paths in the WebDAV adapter
+   (download, propfind, mkcol) for the same `flushAndClose`
+   placement.
+
+**Acceptance.**
+- New `WebDavApiServiceConnectionPoolTest`: stub a server that
+  drops the connection mid-PUT after N bytes; assert subsequent
+  PUTs succeed (currently fail with WSAECONNABORTED).
+- New unit test: simulate `withContext` block throwing; assert
+  `channel.cancel` is called and the pooled connection is invalidated.
+- Manual: re-run the same 345 GB relocate after fix; verify zero
+  WSAECONNABORTED in `unidrive.log` (the WARN lines from UD-286
+  are the source of truth).
+
+**Compatibility.** Apache5 `evictExpiredConnections` /
+`setValidateAfterInactivity` are stable since httpclient5 5.0; we're
+on a current version. No external API change; behavior change is
+"fewer transient failures."
+
+**Related.**
+- UD-285 — `requestTimeoutMillis` cap that triggers the cascade.
+- UD-286 — silent-swallow that hides this from the log.
+- UD-288 — no retry on transient WebDAV failures.
+- ADR-0006 — toolchain (Ktor + Apache5 choice).
+---
+id: UD-288
+title: WebDAV provider has no retry logic on transient HTTP failures (timeout, WSAECONNABORTED, 5xx)
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, **one transient HTTP
+failure = one permanently failed file** in this run. The relocate
+moves on to the next file without ever retrying. The user sees a
+list of `Failed to migrate /Pictures/...` errors that are mostly
+single-shot recoverable conditions (UD-285 timeout, UD-287 connection
+abort).
+
+**Root cause.** Grepped `core/providers/webdav/` for
+`retry|retryOn|HttpRequestTimeoutException|backoff` — **zero
+matches.** `WebDavApiService.upload`, `download`, `propfind`,
+`mkcol`, `delete` all do a single Ktor request and propagate the
+exception unmodified. Compare with OneDrive:
+
+- `GraphApiService.kt` has `HttpRetryBudget` (UD-232).
+- `authenticatedRequest` retries on 401 (UD-310), 429/503 (UD-207),
+  `SerializationException` (UD-308), `IOException` short reads
+  (UD-309), CDN download failures (UD-227).
+- 5 attempts, exponential backoff with `Retry-After` honoring,
+  cumulative budget caps.
+
+WebDAV gets none of this. Yet WebDAV is served from heterogeneous
+backends (DSM Apache, nginx-dav, Nextcloud, Box, ownCloud, IIS
+WebDAV) — each with its own transient-failure profile. WebDAV needs
+retry **at least as much** as Graph does.
+
+**Proposed fix.** Mirror the OneDrive shape, scaled to WebDAV's
+narrower error vocabulary:
+
+```kotlin
+private suspend fun <T> withRetry(
+    op: String,
+    path: String,
+    block: suspend () -> T,
+): T {
+    val maxAttempts = 5
+    var lastException: Throwable? = null
+    repeat(maxAttempts) { attempt ->
+        try {
+            return block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpRequestTimeoutException) {
+            lastException = e
+            log.warn("WebDAV {} {} timed out (attempt {}/{}): {}",
+                op, path, attempt + 1, maxAttempts, e.message)
+        } catch (e: IOException) {
+            // WSAECONNABORTED, ConnectionClosedException, etc.
+            if (!isRetriable(e)) throw e
+            lastException = e
+            log.warn("WebDAV {} {} I/O error (attempt {}/{}): {}: {}",
+                op, path, attempt + 1, maxAttempts,
+                e.javaClass.simpleName, e.message)
+        } catch (e: ResponseException) {
+            // 5xx retriable, 4xx (except 408/425/429) terminal
+            if (!isRetriable(e.response.status)) throw e
+            lastException = e
+            log.warn("WebDAV {} {} HTTP {} (attempt {}/{}): {}",
+                op, path, e.response.status.value,
+                attempt + 1, maxAttempts, e.message)
+        }
+        delay(backoffMs(attempt))  // exponential: 1s, 2s, 4s, 8s, 16s
+    }
+    throw lastException ?: IllegalStateException("retry budget exhausted")
+}
+```
+
+Wrap `upload`, `download`, `propfind`, `mkcol`, `delete` in
+`withRetry`. Honor `Retry-After` header where present (DSM emits
+it on 503 Service Unavailable).
+
+**`isRetriable` policy.**
+- HTTP status: retry 408, 425, 429, 500, 502, 503, 504. Terminal:
+  401, 403, 404, 409, 410, other 4xx.
+- IOException: retry `WSAECONNABORTED`, `WSAECONNRESET`,
+  `SocketTimeoutException`, `ConnectionClosedException`. Terminal:
+  `UnknownHostException`, `SSLPeerUnverifiedException`,
+  `SSLHandshakeException` (these signal misconfig, not transient).
+
+**Acceptance.**
+- New `WebDavApiServiceRetryTest`: stub server that fails twice
+  with 503 then succeeds; assert the call returns ok.
+- New: stub fails with `IOException("WSAECONNABORTED")` 4 times
+  then succeeds; assert ok.
+- New: stub returns 404 (terminal); assert no retry, immediate
+  throw.
+- New: outstanding `delay(backoffMs)` is cancellable —
+  `CancellationException` aborts the retry loop fast.
+- Manual: re-run the 345 GB relocate; the file count that previously
+  failed terminally should now mostly succeed on attempt 2 or 3.
+
+**Implementation note.** Place `HttpRetryBudget` (or a WebDAV-shaped
+twin) at the `WebDavApiService` level, not per-call. Per-call
+budget burns through the retry allowance independently for adjacent
+files; per-service budget shares the signal across the whole
+relocate.
+
+**Related.**
+- UD-285 — REQUEST_TIMEOUT_MS too short; UD-287 — pool
+  poisoning. **Both currently surface as permanent failures
+  because of this ticket.** Fix this and they become invisible to
+  the user (modulo the log line) until they exhaust the budget.
+- UD-232 — OneDrive `ThrottleBudget` for 429 storms; reusable
+  pattern.
+- UD-227 — OneDrive download retry logic (template).
+---
+id: UD-289
+title: CloudRelocator is fully sequential; one hung PUT halts entire migration for up to 10 minutes
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, the user reports long
+unexplained pauses where progress stops moving entirely, then
+resumes. Pauses correlate with errors but stretch up to 10 minutes
+(the `requestTimeoutMillis` ceiling, UD-285).
+
+**Root cause.** `core/app/sync/.../CloudRelocator.kt` walks the
+source tree **fully sequentially**. Grepped the file for `launch`,
+`async`, `coroutineScope`, `supervisorScope`, `Semaphore` — **zero
+matches.** Migration is a single coroutine doing one
+download-then-upload at a time:
+
+```kotlin
+fun migrate(...) = flow {
+    walk(source, sourcePath).forEach { entry ->
+        emit(MigrateEvent.Progress(...))
+        val tempFile = downloadFromSource(entry)        // serial
+        try {
+            uploadToTarget(tempFile, newTarget)         // serial
+        } finally {
+            Files.deleteIfExists(tempFile)
+        }
+    }
+}
+```
+
+Combined with UD-285 (`requestTimeoutMillis = 600 000 ms`), one hung
+PUT halts the **entire** 345 GB walk for up to 10 minutes. With
+128 681 files and even a 1% transient-failure rate, the wall-clock
+cost in stalls dominates the actual transfer time.
+
+**Why parallelism is safe here.** Source = localfs (no rate limit,
+abundant disk-read bandwidth). Target = WebDAV → DSM Apache (LAN
++ disk-bound, but accepts concurrent connections happily — Apache
+worker MPM defaults to 256 simultaneous). The throttling shape of
+the relocate is "saturate target's accept rate without driving disk
+to thrash"; that's not 1.
+
+**Compare with `SyncEngine.kt`.** Already does this for downloads
+via `semaphoreForSize(...)` — sliding window per provider, sized
+by file size class, configurable via `concurrency_per_provider`.
+Same module conventions; lift-and-shift.
+
+**Proposed fix.**
+
+```kotlin
+fun migrate(
+    source: CloudProvider,
+    target: CloudProvider,
+    sourcePath: String,
+    targetPath: String,
+    concurrency: Int = 4,  // configurable via [providers.X].concurrency
+): Flow<MigrateEvent> = channelFlow {
+    val semaphore = Semaphore(concurrency)
+    coroutineScope {
+        walk(source, sourcePath).forEach { entry ->
+            launch {
+                semaphore.withPermit {
+                    try {
+                        send(MigrateEvent.Progress(...))
+                        migrateOne(entry)
+                        send(MigrateEvent.Completed(entry))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        log.warn("Failed to migrate {}: {}: {}", entry.path,
+                            e.javaClass.simpleName, e.message, e)
+                        send(MigrateEvent.Error(entry.path, e))
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+`coroutineScope` (not `supervisorScope`) — one fatal failure should
+still halt the migration. But UD-286's per-job `try/catch` ensures
+only true cancellation/auth/programmer-error escalates; transient
+failures are absorbed into `MigrateEvent.Error` and the next file
+proceeds.
+
+**Concurrency knob.**
+- Default `4` — sane for residential link + Synology.
+- Per-target override via `[providers.X].concurrency` in
+  config.toml. UD-282 lands the warning surface for unknown keys
+  before this can be merged.
+- Per-source-class override might be useful (localfs source has no
+  rate limit; OneDrive source needs to stay below the Graph
+  throttle). Defer to follow-up if the static default works.
+
+**Acceptance.**
+- New `CloudRelocatorParallelismTest`: instrument a fake provider
+  that records concurrent inflight count; assert peak ≥ 2 with
+  default config and 10 small files.
+- New: assert one slow file (1 s `delay`) doesn't block other
+  files completing — total time < `concurrency` × per-file time.
+- New: under `coroutineScope` semantics, asserts a single auth
+  failure halts the migration (does not become Error event).
+- Manual: re-run the 345 GB relocate with `concurrency = 4`;
+  expected wall-clock improvement ~3-4× when transient failures
+  are present.
+
+**Order matters.** Land **after** UD-286 (need cancellation hygiene
+for the `coroutineScope` semantics to work) and **after** UD-288
+(per-file retry; without it, parallelism multiplies failures
+N-fold). UD-287 is independent.
+
+**Related.**
+- UD-285 — request timeout that the parallelism is hiding from.
+- UD-286 — cancellation hygiene (prerequisite).
+- UD-288 — retry (prerequisite for safe parallelism).
+- `SyncEngine.semaphoreForSize` — pattern source.
+---
+id: UD-290
+title: WebDavApiService.listAll buffers entire PROPFIND XML in memory; should stream via Flow
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-04-29
+---
+**Symptom (audited, 2026-04-29).** During a deep audit of WebDAV
+behaviour against a 128 681-file source tree, `WebDavApiService.listAll`
+accumulates entire PROPFIND XML responses into a single
+`mutableListOf` for the entire BFS. JVM heap pressure from a
+multi-MB string per directory (and many directories on a 128 681
+file tree) is a candidate cause for the user's reported "long
+unexplained pauses" — GC cycles on a near-full heap pause every
+running thread, including the relocate.
+
+**Root cause.** `WebDavApiService.kt:294, 321` — both PROPFIND-
+response paths call `response.bodyAsText()`:
+
+```kotlin
+val xmlText = response.bodyAsText()  // entire body buffered
+val parsed = parseMultistatus(xmlText)
+```
+
+For DSM serving a 5 000-entry directory, the multistatus XML easily
+runs 1-3 MB. With Java's UTF-16 String storage, that's 2-6 MB on the
+heap **per call**. `listAll`'s recursive BFS holds onto the entire
+flattened result list:
+
+```kotlin
+fun listAll(path: String): List<DavResource> {
+    val results = mutableListOf<DavResource>()
+    walk(path, results)  // mutates `results` for every dir
+    return results
+}
+```
+
+For 128 681 entries, that's ~10-15 MB of `DavResource` objects (each
+holding `path`, `etag`, `lastModified`, `contentLength`, `isCollection`).
+Combined with the per-PROPFIND text buffering, peak heap during the
+relocate's pre-scan can hit 100+ MB.
+
+**Why this matches the symptom.** GC pauses on a 256-512 MB JVM
+heap (default for `java -jar` without `-Xmx`) under that load can be
+1–5 seconds. Several back-to-back can compound into a perceived
+multi-second freeze with no log activity.
+
+**Proposed fix.** Stream PROPFIND in two layers:
+
+1. **Parse XML incrementally** via SAX or StAX (Java's built-in
+   `XMLStreamReader`), emitting `DavResource` records as
+   `<D:response>` elements close — never buffering the full XML.
+2. **Return a `Flow<DavResource>`** from `listAll` instead of
+   `List<DavResource>`. CloudRelocator already consumes via
+   `.forEach`; minor `flow.collect` change at the call site.
+
+```kotlin
+fun listAll(path: String): Flow<DavResource> = flow {
+    val resp = httpClient.request(...) {
+        method = HttpMethod("PROPFIND")
+        ...
+    }
+    resp.body<ByteReadChannel>().use { channel ->
+        val parser = XMLStreamReaderFactory.create(channel.toInputStream())
+        while (parser.hasNext()) {
+            if (parser.next() == END_ELEMENT
+                && parser.localName == "response") {
+                emit(parseDavResource(parser))
+            }
+        }
+    }
+}
+```
+
+Caveat: needs a buffered StAX parser variant (Aalto, Woodstox)
+because the JDK default `XMLInputFactory` allocates the full
+character buffer up-front for some configurations. Aalto-XML is the
+safe choice for true streaming.
+
+**Acceptance.**
+- New `WebDavApiServiceListAllStreamingTest`: stub a server that
+  emits a 100 000-entry multistatus response chunked over the wire;
+  assert peak heap allocation during `listAll` stays under 20 MB
+  (use `-XX:+PrintGCDetails` + JFR if needed for the regression).
+- New: assert `listAll` returns a `Flow` that the caller can
+  `take(10)` from without buffering the rest of the tree.
+- Update `WebDavProvider.listChildren` and `listAll` consumers
+  (CloudRelocator, SyncEngine, ProfileEnumerationService) to consume
+  the flow.
+
+**Priority.** Medium. The user's reported "long pauses" are most
+plausibly explained by UD-289 (sequential migration on hung
+requests) and UD-287 (connection-pool poisoning) — fixing those
+should make the GC-pause contribution invisible. This ticket
+targets the *next* layer: when the visible bugs are gone, the
+streaming gap will surface as the bottleneck on truly large trees.
+
+**Out of scope for this ticket.**
+- Other providers (S3, OneDrive, HiDrive, Internxt) likely have
+  similar buffering. File companion tickets if they audit the
+  same way.
+
+**Related.**
+- UD-329 — UD-329-class buffering bug that hit OneDrive download
+  on byte arrays > 2 GiB. Same shape, different surface (XML vs
+  binary).
+- UD-289 — sequential relocate; reduces the heap pressure surface
+  for now.
+---
+id: UD-291
+title: WebDavProvider.quota() swallows all exceptions to QuotaInfo(0,0,0); pre-flight relocate guard never sees failure
+category: core
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-04-29
+---
+**Symptom (audited, 2026-04-29).** A failing PROPFIND quota query
+against a WebDAV target returns `QuotaInfo(total = 0, used = 0,
+remaining = 0)` instead of an error. Pre-flight insufficient-quota
+guard in `RelocateCommand.kt:103` interprets the all-zero result as
+"unknown / can't tell" and proceeds with the relocate. A target
+with **no free space** is indistinguishable from a target whose
+quota query failed for transient reasons.
+
+**Root cause.** `core/providers/webdav/.../WebDavProvider.kt:184-186`:
+
+```kotlin
+override suspend fun quota(): QuotaInfo {
+    return try {
+        ...quota PROPFIND...
+    } catch (_: Exception) {
+        QuotaInfo(total = 0, used = 0, remaining = 0)
+    }
+}
+```
+
+Three problems in three lines:
+
+1. **Catch-all `Exception` swallows everything**, including
+   `CancellationException`. Same UD-300 anti-pattern as UD-286.
+2. **No log line.** A network failure to the quota endpoint
+   silently degrades to "we don't know."
+3. **Returning a magic-zero record** conflates "quota is zero" (a
+   valid answer for a full disk) with "we couldn't get quota" (a
+   different problem). Caller has no way to distinguish.
+
+**Compare with the spec.** `QuotaInfo` in
+`core/app/core/.../QuotaInfo.kt` represents a successful quota
+fetch. It has no "unknown" sentinel. The expected shape for "we
+couldn't find out" is either:
+- `null` return (Kotlin `suspend fun quota(): QuotaInfo?`), or
+- `Result<QuotaInfo>` (kotlin.Result), or
+- a sealed class `QuotaResult { Success(QuotaInfo); Unknown(reason); Unsupported }`
+  matching the ADR-0005 capability-contract pattern.
+
+**Proposed fix.** Smallest change that correctly propagates the
+information:
+
+1. Change the catch to:
+   ```kotlin
+   } catch (e: CancellationException) {
+       throw e
+   } catch (e: Exception) {
+       log.warn("WebDAV quota PROPFIND failed: {}: {}",
+           e.javaClass.simpleName, e.message, e)
+       throw e  // or: return null if signature changes
+   }
+   ```
+   At minimum: log + propagate. Don't fabricate a success record.
+
+2. Change the signature to `suspend fun quota(): QuotaInfo?` (or
+   `CapabilityResult<QuotaInfo>` per ADR-0005). Update the contract
+   in `CloudProvider.kt`.
+
+3. Update `RelocateCommand.kt:103` to handle the null/unknown case
+   explicitly. If quota is unknown:
+   - Default behaviour: **abort the relocate** with a clear error
+     ("Cannot determine target quota; pass `--ignore-quota` to
+     proceed").
+   - Override: `--ignore-quota` flag for the user to accept the
+     risk.
+
+**Acceptance.**
+- New `WebDavProviderQuotaTest`: stub server returns 503 on the
+  quota PROPFIND; assert `quota()` throws (not returns zero).
+- New: `RelocateCommand` integration test — quota fails, no
+  `--ignore-quota` flag → relocate aborts with the new error
+  message.
+- New: with `--ignore-quota`, the same scenario → relocate proceeds.
+- Update `docs/providers/webdav-client-notes.md` to document the
+  quota behaviour.
+
+**Audit other providers.** The same anti-pattern likely exists in:
+- `S3Provider` — S3 doesn't expose quota; current behaviour may
+  already be a sentinel zero (which is *correct* for S3 since the
+  bucket has no quota concept). Verify and document.
+- `HiDriveProvider`, `InternxtProvider` — likely the same shape.
+  File follow-up tickets if they audit similarly.
+
+**Related.**
+- UD-286 — same swallow pattern in CloudRelocator.
+- UD-301 — `CapabilityResult` infrastructure (could host the
+  "quota unsupported" return shape).
+- ADR-0005 — capability contract.
+
+**Priority.** Medium. The current behaviour "fails open" — on a
+target that's full but where quota fetch succeeds, the relocate
+will fail mid-way once the disk fills. Bad UX (lots of mid-relocate
+errors) but not data-loss. On the audit's symptom path, this is
+not blocking; on production reliability it's a real gap.
