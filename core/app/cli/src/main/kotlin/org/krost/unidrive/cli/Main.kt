@@ -565,8 +565,19 @@ class Main : Runnable {
                 .ProcessLock(lockFile)
         if (!lock.tryLock()) {
             val profile = resolveCurrentProfile()
-            System.err.println("Another unidrive process is running for profile '${profile.name}'.")
-            System.err.println("Stop it first, or wait for it to finish.")
+            // UD-272: surface the holder's PID + an OS-appropriate kill hint
+            // so the user doesn't have to grep `tasklist | findstr java` to
+            // pick the right one from 3+ JVMs on a typical dev host.
+            val holderPid = lock.readHolderPid()
+            val pidPart = if (holderPid != null) " (PID $holderPid)" else ""
+            System.err.println("Another unidrive process$pidPart is running for profile '${profile.name}'.")
+            if (holderPid != null) {
+                val isWindows = System.getProperty("os.name").lowercase().contains("win")
+                val killCmd = if (isWindows) "taskkill /PID $holderPid /F" else "kill $holderPid"
+                System.err.println("Stop it with `$killCmd`, or wait for it to finish.")
+            } else {
+                System.err.println("Stop it first, or wait for it to finish.")
+            }
             System.exit(1)
         }
         return lock

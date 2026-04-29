@@ -2,6 +2,7 @@ package org.krost.unidrive.sync
 
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import kotlin.time.Duration
@@ -18,6 +19,15 @@ class ProcessLock(
 ) {
     private var channel: FileChannel? = null
     private var lock: FileLock? = null
+
+    /**
+     * Sibling file holding the holder's PID. Separate from [lockFile] because
+     * Windows blocks reads on a file that's currently FileLock-held — see
+     * UD-272. Linux's advisory locks would let us read [lockFile] directly,
+     * but cross-platform consistency wins.
+     */
+    @PublishedApi
+    internal val pidFile: Path = lockFile.resolveSibling(lockFile.fileName.toString() + ".pid")
 
     /**
      * Try to acquire the lock, waiting up to [timeout] for it to become available.
@@ -43,6 +53,18 @@ class ProcessLock(
                 if (candidate != null) {
                     lock = candidate
                     acquired = true
+                    // UD-272: stamp the holder's PID into a sibling .pid file
+                    // so a contending process can name the holder in its
+                    // error message ("Stop it with `taskkill /PID 1234 /F`").
+                    // Pre-fix the user had to grep `tasklist | findstr java`
+                    // and pick by hand from ≥ 3 JVMs (gradle daemon, kotlin
+                    // daemon, unidrive daemon, unrelated MCP tools).
+                    //
+                    // Write to a separate file because Windows blocks reads
+                    // on a FileLock-held file — see [pidFile].
+                    runCatching {
+                        Files.writeString(pidFile, "${ProcessHandle.current().pid()}\n")
+                    }
                     break
                 }
             } catch (_: Exception) {
@@ -61,6 +83,20 @@ class ProcessLock(
     }
 
     /**
+     * Read the PID stamped by the current holder. Returns `null` if the file
+     * is empty (older lock, lock-file race, or the holder crashed before the
+     * write completed) or contains non-numeric data.
+     *
+     * UD-272: contending processes call this on `tryLock()` failure to
+     * surface "PID 1234" in the error message. Caller is responsible for
+     * deciding whether the PID is still alive — see [ProcessHandle.of].
+     */
+    fun readHolderPid(): Long? =
+        runCatching {
+            Files.readString(pidFile).trim().toLongOrNull()
+        }.getOrNull()
+
+    /**
      * Release the lock and close the underlying file channel.
      * Idempotent.
      */
@@ -69,6 +105,9 @@ class ProcessLock(
         lock = null
         channel?.close()
         channel = null
+        // UD-272: clean up the PID sibling so a future contender that races
+        // between unlock + reacquire doesn't see a stale PID.
+        runCatching { Files.deleteIfExists(pidFile) }
     }
 
     /**
