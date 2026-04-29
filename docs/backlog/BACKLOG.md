@@ -2300,3 +2300,418 @@ file destination is in scope.
 with retries that *also* failed allocation but somehow recovered
 (or silently skipped — to be verified). User has 16+ min of dead
 time per file, plus possible silent data loss.
+---
+id: UD-330
+title: Adopt HttpRetryBudget across HiDrive / Internxt / S3 / Rclone-stderr (UD-228 cross-cutting)
+category: providers
+priority: high
+effort: L
+status: open
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 / UD-319 / UD-322 /
+UD-321 audits (Phase D of UD-228 split).**
+
+Four of the five non-OneDrive providers ship **zero HTTP-layer
+retries** despite the OneDrive baseline (UD-207 + UD-227 + UD-232)
+having proven the pattern on a 130 k-item production sync (UD-712).
+Every transient 429, 503, or network blip propagates as a fatal
+exception to SyncEngine.
+
+## Affected providers + audit citations
+
+| Provider | Retry coverage | Audit reference |
+|---|---|---|
+| **HiDrive** | Zero — `checkResponse` throws on first non-2xx | [hidrive-robustness.md §2](../providers/hidrive-robustness.md#2-retry-placement) |
+| **Internxt** | Partial — only `authenticatedGet` retries 500/503/EOF; every POST/PATCH/DELETE/PUT/CDN-PUT/streaming-GET is one-shot | [internxt-robustness.md §2](../providers/internxt-robustness.md#2-retry-placement) |
+| **S3** | Zero (no AWS SDK; raw Ktor + manual SigV4) | [s3-robustness.md §2](../providers/s3-robustness.md#2-retry-placement) |
+| **Rclone-wrapper** | Internal rclone retries are present, but stderr "retry warnings" on a successful exit-0 are discarded — sync that took 8 min looks identical to one that took 8 s in `unidrive.log` | [rclone-robustness.md §2](../providers/rclone-robustness.md#2-retry-placement-rclone-flag-passthrough) |
+
+OneDrive baseline reference: [`HttpRetryBudget` at
+core/app/core/.../HttpRetryBudget.kt](../../core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt).
+
+## Proposal
+
+Adopt `HttpRetryBudget` (or its config-lift sibling — see UD-262)
+into each affected provider's HTTP entry points:
+
+1. **HiDrive** — wrap `HiDriveApiService.authenticatedRequest` in
+   the same retry loop shape as `GraphApiService.authenticatedRequest`.
+2. **Internxt** — extend the existing `authenticatedGet` retry
+   shape to every mutating verb. Encryption-vs-retry boundary
+   (audit §4.3) MUST be designed around — IV-pinning means a
+   naïve retry is silent-corruption territory.
+3. **S3** — introduce a retry loop honouring both `Retry-After`
+   header and `x-amz-retry-after-millis`. Multipart upload
+   (currently absent — files >5 GB hard-fail at AWS cap) is a
+   separate ticket but blocks meaningful retry for large objects.
+4. **Rclone** — surface stderr retry warnings as `log.warn` rows
+   when exit code is 0 but stderr contains backoff hints, so
+   `unidrive.log` reflects what rclone actually did.
+
+## Dependencies
+
+- **UD-262** (HttpRetryBudget config surface lift) — prerequisite
+  so per-provider overrides become possible. The current
+  `MAX_THROTTLE_ATTEMPTS = 5` etc. constants in `GraphApiService`
+  would otherwise be hard-coded into each new adopter.
+- **UD-263** (per-provider concurrency hints) — sibling ticket;
+  retry adoption and concurrency tuning land best together.
+
+## Acceptance
+
+- Each affected provider's API service has a retry loop on its
+  HTTP entry point(s), wired to a shared `HttpRetryBudget`
+  instance.
+- 429 / 503 with `Retry-After` honoured.
+- Cancellation propagates through the retry loop (UD-300 pattern).
+- A regression test per provider that pins the retry contract
+  (mock server emits 429 → 200; assert exactly one retry; assert
+  `Retry-After` honoured).
+
+## Priority / effort
+
+**High priority, L effort.** This is the highest-impact remediation
+across all 5 audit docs — closes the single biggest delta between
+the OneDrive baseline and the rest.
+---
+id: UD-331
+title: Cross-provider NonCancellable OAuth refresh wrap (HiDrive, Internxt)
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 + UD-319 audits
+(Phase D of UD-228 split).**
+
+Two of the three OAuth-bearing providers (HiDrive, Internxt) have
+the OneDrive baseline mutex+double-check shape on token refresh
+but **lack the UD-310 `withContext(NonCancellable) { ... }` wrap**.
+A Pass-2 scope cancellation on a sibling coroutine's 401 can
+abort the in-flight refresh mid-write to disk, leaving the
+in-memory token disagreeing with what's persisted.
+
+## Affected providers + audit citations
+
+| Provider | NonCancellable wrap? | File:line |
+|---|---|---|
+| **OneDrive** (reference) | Yes | [TokenManager.kt:99](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/TokenManager.kt#L99) — `withContext(NonCancellable) { oauthService.refreshToken(refreshToken) }` |
+| **HiDrive** | **No** | [hidrive-robustness.md §4](../providers/hidrive-robustness.md#4-idempotency) |
+| **Internxt** | **No** | [internxt-robustness.md §4.2](../providers/internxt-robustness.md#4-idempotency) |
+
+## Why it matters
+
+UD-310 root cause (verbatim from OneDrive's TokenManager):
+> Pass-2 scope cancel on a sibling's 401 was cancelling the
+> in-flight refresh as collateral damage. The `refresh_token`
+> itself was perfectly valid; cancellation chewed through the
+> flake budget logging the misleading "ScopeCoroutine was
+> cancelled" and falling through to the re-auth error.
+
+For HiDrive and Internxt this manifests as: a sync hits a 401 on
+worker A, the scope is cancelled to retry the file, worker B's
+in-flight refresh is cancelled, the refresh `oauthService.refreshToken(...)`
+half-completes (network call out, response came back, `saveToken`
+to disk did NOT run because cancellation interrupted between
+the receive and the file-write). Next session loads a stale
+token, gets 401, refreshes again — eventually thrashes.
+
+## Proposal
+
+In each affected `TokenManager.refreshToken` (or equivalent), wrap
+the actual refresh call in `withContext(NonCancellable) { ... }`.
+The mutex-guarded outer block stays on the parent context; the
+inner refresh becomes atomic w.r.t. cancellation.
+
+```kotlin
+val refreshed =
+    withContext(NonCancellable) {
+        oauthService.refreshToken(refreshToken)
+    }
+token = refreshed
+oauthService.saveToken(refreshed)
+return refreshed
+```
+
+## Acceptance
+
+- Each affected provider's refresh path uses `NonCancellable`.
+- A test per provider that cancels the parent scope mid-refresh
+  and asserts the refresh completes anyway (saveToken is called).
+  Pattern: copy `OneDriveTokenManagerTest`'s NonCancellable
+  test where it exists, or write a new one against a mock
+  OAuth service.
+
+## Priority / effort
+
+**Medium priority, S effort.** Each provider is a one-line wrap
+change plus one test. Could be bundled into one PR across the
+two providers.
+
+## Related
+
+- **UD-310** (closed) — original OneDrive fix; the canonical
+  example to copy.
+- **UD-330** (sibling cross-cutting follow-up) — HttpRetryBudget
+  adoption. Lands well alongside since both touch
+  TokenManager / authenticatedRequest call sites.
+---
+id: UD-332
+title: HiDrive download path uses UD-329 byte[contentLength] anti-pattern; >2 GB OOM
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 audit (Phase D of
+UD-228 split).**
+
+`HiDriveApiService.download` uses the **UD-329 anti-pattern**:
+`response.body<ByteReadChannel>()` after a buffered `httpClient.get(url)`
+call. On Ktor 3.x this buffers the entire response body into a
+single `byte[contentLength]` array before the channel is exposed.
+Files larger than `Integer.MAX_VALUE` (~2.147 GiB) fail at
+allocation time:
+
+```
+java.lang.OutOfMemoryError: Can't create an array of size N
+```
+
+Symptom is identical to the original UD-329 OneDrive incident
+(closed) — same Ktor mechanism, same anti-pattern, just a different
+provider that didn't get the fix when OneDrive did.
+
+## Affected files
+
+- [HiDriveApiService.kt](../../core/providers/hidrive/src/main/kotlin/org/krost/unidrive/hidrive/HiDriveApiService.kt)
+  — download path. See [hidrive-robustness.md "field observations"](../providers/hidrive-robustness.md#hidrive--field-observations).
+
+## Proposal
+
+Mirror the closed UD-329 OneDrive fix at
+[GraphApiService.kt:235-296](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt#L235):
+
+```kotlin
+val statement = httpClient.prepareGet(url) { ... }
+statement.execute { response ->
+    // ... checks ...
+    val channel: ByteReadChannel = response.bodyAsChannel()
+    withContext(Dispatchers.IO) {
+        Files.newOutputStream(destPath, ...).use { out ->
+            val buf = ByteArray(8192)
+            while (true) {
+                val n = channel.readAvailable(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+            }
+        }
+    }
+    DownloadOutcome.Done
+}
+```
+
+8 KiB ring buffer is the only memory the download holds; allocation
+no longer scales with file size.
+
+## Acceptance
+
+- HiDrive download path uses `prepareGet(url).execute { ... }`
+  pattern.
+- Regression test that mocks a 3 GB response body (or asserts that
+  `bodyAsChannel()` is called via `prepareGet(url).execute { }`,
+  not via buffered `body()`).
+- Bonus: extract the streaming-download primitive into a shared
+  helper in `:app:core` so future providers don't re-introduce
+  the anti-pattern. (Defer to a follow-on if scope-creeps.)
+
+## Priority / effort
+
+**High priority, S effort.** ~30 lines of code change. High
+priority because it's silent until a user uploads a >2 GB file,
+and then it's a hard OOM crash — not a graceful failure.
+
+## Related
+
+- **UD-329** (closed) — original OneDrive fix; the canonical
+  example to copy.
+- **UD-293** (open, M, high) — GraphApiService still buffers
+  byte[] for >2 GB downloads on a non-downloadFile path. Likely
+  the same anti-pattern lurks on the OneDrive `simple-download`
+  fallback that UD-329 didn't reach. Worth checking sibling-style.
+---
+id: UD-333
+title: UD-231 HTML-body guard missing on HiDrive + Internxt download (Internxt = silent corruption)
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 + UD-319 audits
+(Phase D of UD-228 split).**
+
+UD-231's HTML-body guard on the OneDrive download path is the
+single line that prevents a captive-portal page (CDN throttle
+"please wait" page, expired-URL login page) from streaming
+straight into the destination at the matching byte count and
+silently corrupting the local file. Two of the five non-OneDrive
+providers ship the same download path **without** the guard.
+
+## Affected providers + audit citations
+
+| Provider | HTML-body guard? | Severity |
+|---|---|---|
+| **OneDrive** (reference) | Yes — [GraphApiService.kt:275](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt#L275) | — |
+| **HiDrive** | **No** | Medium — captive-portal HTML written verbatim to disk; UD-226 NUL-stub sweep doesn't flag it because HTML is non-NUL content |
+| **Internxt** | **No** | **High — silent corruption** | 
+
+The Internxt severity is the headline. Internxt downloads pass
+the response body through `Cipher.update()` (AES-CTR
+decryption — see [internxt-robustness.md §4.3](../providers/internxt-robustness.md#4-idempotency))
+**before** writing to disk. A captive-portal HTML page XOR'd
+through the AES-CTR keystream produces byte output that is:
+
+- The right length (matches the encrypted-file's expected size).
+- High-entropy (XOR with a strong keystream looks random).
+- **Indistinguishable from a real decrypted file** — no NUL
+  patterns, no HTML tags, no plaintext signatures.
+
+UD-226 sweep detection catches NUL-stub corruption. It does NOT
+catch AES-CTR-encrypted HTML. The user's local file is permanently
+wrong, no observable signal until they open it.
+
+## Proposal
+
+Mirror UD-231 across the affected provider download paths. Before
+ANY decryption, transform, or write-to-disk, check
+`Content-Type`:
+
+```kotlin
+val contentType = response.contentType()
+if (contentType != null && contentType.match(ContentType.Text.Html)) {
+    val snippet = truncateErrorBody(response.bodyAsText().take(200))
+    throw java.io.IOException(
+        "Download returned HTML instead of file bytes (status=${response.status.value}, " +
+            "Content-Type=$contentType): $snippet",
+    )
+}
+```
+
+For Internxt specifically: this guard MUST be applied **before** the
+`Cipher.update()` call in the streaming-decrypt loop, otherwise
+the AES-CTR keystream has already been advanced and the IV state
+is invalid for any retry.
+
+## Acceptance
+
+- HiDrive + Internxt download paths reject 200 + `Content-Type:
+  text/*` responses before any byte hits disk.
+- Internxt's guard sits before the AES-CTR `Cipher.update()`.
+- Test per provider that mocks a 200 response with a small HTML
+  body and asserts the download throws (not silently succeeds).
+
+## Priority / effort
+
+**High priority, M effort.** ~15 lines per provider plus the
+Internxt-specific cipher-ordering surgery. High priority because
+the Internxt failure mode is silent corruption — the user has no
+observable signal that their files are wrong until they try to
+open them.
+
+## Related
+
+- **UD-231** (closed) — original OneDrive fix; the canonical
+  example.
+- **UD-226** — NUL-stub sweep; complementary detection but does
+  not catch this case.
+- **UD-330** (sibling cross-cutting follow-up) — HttpRetryBudget
+  adoption. The HTML-body guard is part of "what does
+  retry/non-retry classification look like" so the two tickets
+  land naturally together.
+---
+id: UD-334
+title: Cross-provider structured error parsing + truncateErrorBody lift to :app:core
+category: providers
+priority: medium
+effort: M
+status: open
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 / UD-319 / UD-322
+/ UD-323 audits (Phase D of UD-228 split).**
+
+Outside OneDrive's `truncateErrorBody` + `parseRetryAfterFromJsonBody`
+pair, four of the five non-OneDrive providers stringify the entire
+error response body into the exception message. This produces two
+problems:
+
+1. **Log noise.** SharePoint-style HTML error pages (or S3 XML, or
+   Internxt JSON) bloat `unidrive.log`. One SharePoint 503 dumps
+   ~60 lines of inline CSS + branding. The `truncateErrorBody`
+   log-noise guard solved this on OneDrive.
+2. **Lost diagnostic detail.** The structured fields the
+   provider's API returns — `<RequestId>`/`<HostId>` for S3
+   support tickets, `error.retryAfterSeconds` for Graph CDN-edge
+   throttle hints, `error_description` for HiDrive OAuth — get
+   buried inside a giant string and never reach the operator
+   in usable form.
+
+## Affected providers + audit citations
+
+| Provider | `truncateErrorBody` analogue? | Structured field extraction? | Audit |
+|---|---|---|---|
+| **OneDrive** (reference) | Yes | `error.retryAfterSeconds`, `error.code`, `error.message` | — |
+| **HiDrive** | **No** | None — `bodyAsText()` raw into exception | [hidrive §1](../providers/hidrive-robustness.md#1-non-2xx-body-parsing) |
+| **Internxt** | **No** | None — `bodyAsText()` raw | [internxt §1](../providers/internxt-robustness.md#1-non-2xx-body-parsing) |
+| **S3** | **No** | Only `<Code>` + `<Message>`; `<RequestId>`/`<HostId>`/`<Resource>` dropped | [s3 §1](../providers/s3-robustness.md#1-non-2xx-body-parsing) |
+| **SFTP** | N/A (no HTTP body) | Only 4 of ~25 SSH_FX_* status codes branched | [sftp §1](../providers/sftp-robustness.md#1-error-parsing) |
+
+## Proposal
+
+Two-part change:
+
+### Part A — extract `truncateErrorBody` to shared `:app:core`
+
+The OneDrive helper at
+[GraphApiService.kt:841](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt#L841)
+is provider-agnostic — it just does first-line + char-count tail
+for non-JSON bodies. Move to `core/app/core/.../http/ErrorBodyTruncate.kt`.
+Wire into HiDrive, Internxt, S3 exception construction.
+
+### Part B — per-provider structured-field extraction
+
+| Provider | Fields to extract | Surface as |
+|---|---|---|
+| HiDrive | `error`, `error_description` (OAuth-style JSON) | `HiDriveApiException(message, code, description)` |
+| Internxt | top-level `error` field | `InternxtApiException(message, errorCode)` |
+| S3 | `<Code>`, `<Message>`, `<RequestId>`, `<HostId>`, `<Resource>` | `S3Exception(message, code, requestId, hostId, resource)` — RequestId/HostId in particular for AWS support tickets |
+| SFTP | All 25 `SSH_FX_*` status codes mapped to typed exceptions | `SftpException` subclasses (PermissionDenied, QuotaExceeded, ConnectionLost, OpUnsupported, etc.) — drives retry-vs-fatal classification |
+
+## Acceptance
+
+- `truncateErrorBody` lives in `:app:core` and is used by ≥ 3
+  providers.
+- HiDrive / Internxt / S3 exception types carry structured fields
+  beyond a single message string.
+- SFTP differentiates SSH_FX_FAILURE (overloaded by OpenSSH for
+  benign mkdir-on-existing) from real failures — see
+  [sftp-robustness.md §1](../providers/sftp-robustness.md#1-error-parsing).
+- A test per provider that asserts the structured fields
+  round-trip from a fixture response into the exception object.
+
+## Priority / effort
+
+**Medium priority, M effort.** Each provider is ~30-50 lines of
+code + tests. Bigger lift than the `NonCancellable` wrap (UD-331)
+but smaller than the full retry-loop adoption (UD-330).
+
+## Related
+
+- **UD-330** (sibling) — HttpRetryBudget adoption. Lands well
+  together since retry classification depends on structured
+  error fields.
+- **UD-228** (umbrella) — the cross-provider audit ticket this
+  follow-up was filed against.
