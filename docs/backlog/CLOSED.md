@@ -6725,3 +6725,62 @@ handles thousands, SFTP typically 4–8, WebDAV varies by server.
 
 **Depends on:** UD-318..UD-324 (audit docs produce the values).
 **Relates to:** UD-262 (HttpRetryBudget extract — independent, can land either order).
+
+---
+id: UD-261
+title: status CLOUD column uses enumerated file sizes instead of quota.used — under-reports OneDrive usage
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 9e431ce. fetchQuotaUsedIfSupported helper authenticates QuotaExact providers and threads quota.used into buildAccountRow. Non-quota providers (S3/SFTP/WebDAV-no-RFC-4331) and auth/network failures fall back to the enumerated remoteSize sum. Acceptance #1 (~349 GB on onedrive-test) integration-verifiable next deploy.
+opened: 2026-04-20
+chunk: core
+---
+## Observed
+
+`unidrive status --all` shows **164 GB** in the CLOUD column for `onedrive-test`
+(81 185 files, last sync: never). Actual OneDrive quota used is **~349 GB**.
+
+```
+│  └─ onedrive-test  │ [✓ 0h] │ 81.185 │ 0 │ 164 GB │ 164 GB │ never │
+```
+
+## Root cause
+
+`buildAccountRow()` ([StatusCommand.kt:275](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt)) computes CLOUD as:
+
+```kotlin
+val totalRemoteSize = entries.filter { !it.isFolder }.sumOf { it.remoteSize }
+```
+
+`remoteSize` comes from `DriveItem.size` via Graph — the **download size** of each file.
+OneDrive's quota usage also includes revision history, the recycle bin, and OneNote
+metadata. These never appear as discrete `DriveItem` entries, so the sum always
+under-reports against `Drive.quota.used`.
+
+`quota.used` is already fetched via `provider.quota()` in the `runAudit()` path
+([StatusCommand.kt:116–124](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt))
+but that result never reaches `buildAccountRow()`.
+
+## Expected
+
+For providers that declare `Capability.QuotaExact`, `CLOUD` should show
+`quota.used` (the authoritative figure from `GET /me/drive`), not the sum of
+enumerated file sizes.
+
+## Fix sketch
+
+Pass a pre-fetched `QuotaInfo?` into `buildAccountRow()` (or call `provider.quota()`
+inside it for QuotaExact providers). Use `quota.used` for the `cloudSize` field when
+non-null; fall back to `totalRemoteSize` for non-quota providers (SFTP, WebDAV).
+
+One extra Graph round-trip per QuotaExact account per `status` invocation —
+acceptable since the command already authenticates.
+
+## Acceptance
+
+- `status --all` for `onedrive-test` shows ≈ 349 GB in CLOUD column.
+- SFTP/WebDAV accounts are unaffected (no `QuotaExact` capability).
+- No regression on `onedrive` account (should still match real quota.used).
