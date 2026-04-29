@@ -6784,3 +6784,50 @@ acceptable since the command already authenticates.
 - `status --all` for `onedrive-test` shows ≈ 349 GB in CLOUD column.
 - SFTP/WebDAV accounts are unaffected (no `QuotaExact` capability).
 - No regression on `onedrive` account (should still match real quota.used).
+
+---
+id: UD-327
+title: WebDAV pre-flight: detect DSM per-file size cap before transfer
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit f8951c7. Config-knob-based pre-flight (no PROPFIND auto-detect — Synology doesn't advertise the cap). CloudProvider.maxFileSizeBytes() defaults to null; WebDavConfig + Factory wire  from TOML. CloudRelocator.preflightOversized walks source tree returning oversized (path,size) pairs. RelocateCommand prints up to 10 with remediation hint. 4 new test cases including boundary check.
+opened: 2026-04-21
+chunk: core
+---
+DSM WebDAV (Synology DS418play and siblings) has a per-file upload cap
+(default 4 GiB unless the admin reconfigures
+`/etc/nginx/app.d/server.webdav.conf`). When the relocator sends a
+>4 GiB file over WebDAV, DSM responds with 409 or silently resets *after*
+the full-body PUT times out — the error only surfaces at minute 10 of a
+wasted transfer.
+
+## Proposal
+
+Pre-flight probe at relocation-plan time:
+
+1. PROPFIND target root for `{DAV:}quota-available-bytes` and any
+   `X-WebDAV-Max-File-Size` / server-identifying headers.
+2. If the server advertises a max-file-size cap (or identifies as
+   DSM with no explicit cap in profile), compare against the plan's
+   max file size.
+3. If plan contains files larger than cap: planner-time warning, or
+   skip with "exceeds server cap, use sftp/smb" message, or fail
+   plan loudly if `--strict`.
+
+## Acceptance
+
+1. `relocate` to DSM WebDAV with a single >4 GiB file surfaces the
+   cap *before* any transfer starts.
+2. Warning names specific files, not just a count.
+3. Overridable via `webdav.max_file_size_bytes` in profile toml.
+4. PROPFIND failure falls back to "unknown cap" — generic WebDAV
+   servers (Box, Nextcloud) must not be broken.
+5. Unit test against a stub server returning the DSM header.
+
+## Related
+
+- UD-277 (adaptive timeout) — orthogonal.
+- UD-279 (transport fitness warning) — same spirit at a higher level.
