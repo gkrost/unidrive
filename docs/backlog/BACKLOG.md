@@ -1221,36 +1221,6 @@ acceptable since the command already authenticates.
 - SFTP/WebDAV accounts are unaffected (no `QuotaExact` capability).
 - No regression on `onedrive` account (should still match real quota.used).
 ---
-id: UD-263
-title: Per-provider concurrency hints + SyncEngine Pass 2 semaphore wiring
-category: core
-priority: medium
-effort: S
-status: open
-opened: 2026-04-20
-chunk: core
----
-**Part of UD-228 split.**
-
-SyncEngine Pass 2 currently uses a hardcoded 16/6/2 concurrency split
-across providers. Per UD-228's findings, that's too blunt: Graph docs
-recommend ≤10 req/s per app-per-user (~6–8 concurrent downloads), S3
-handles thousands, SFTP typically 4–8, WebDAV varies by server.
-
-**Acceptance:**
-1. Extend `ProviderRegistry.getMetadata` (or the equivalent capability/
-   metadata API) with `maxConcurrentTransfers: Int` and
-   `minRequestSpacingMs: Long` hints.
-2. Per-provider values sourced from the audit docs produced by
-   UD-318..UD-324.
-3. `SyncEngine` Pass 2 replaces its hardcoded `16/6/2` with a lookup from
-   provider metadata; semaphores sized per-provider per-run.
-4. Token-bucket for `minRequestSpacingMs` is stateless across invocations,
-   acceptable tradeoff for simplicity.
-
-**Depends on:** UD-318..UD-324 (audit docs produce the values).
-**Relates to:** UD-262 (HttpRetryBudget extract — independent, can land either order).
----
 id: UD-269
 title: relocate — graceful CTRL-C cleanup + abort summary + stale temp-dir GC
 category: core

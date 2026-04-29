@@ -6692,3 +6692,36 @@ no recorded graph.
 lockfiles + container images". Split 2026-04-20 — the Docker half lives
 in UD-101 (Trivy scanning on Docker images) and unblocks now; the lockfile
 half needs this ticket first.
+
+---
+id: UD-263
+title: Per-provider concurrency hints + SyncEngine Pass 2 semaphore wiring
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit a091450. ProviderMetadata extended with maxConcurrentTransfers + minRequestSpacingMs (default 4/0). 8 providers override from Phase D audit values. SyncEngine Pass 2 replaced 16/6/2 size-based split with single per-provider semaphore. minRequestSpacingMs enforcement deferred to per-provider HttpRetryBudget under UD-330.
+opened: 2026-04-20
+chunk: core
+---
+**Part of UD-228 split.**
+
+SyncEngine Pass 2 currently uses a hardcoded 16/6/2 concurrency split
+across providers. Per UD-228's findings, that's too blunt: Graph docs
+recommend ≤10 req/s per app-per-user (~6–8 concurrent downloads), S3
+handles thousands, SFTP typically 4–8, WebDAV varies by server.
+
+**Acceptance:**
+1. Extend `ProviderRegistry.getMetadata` (or the equivalent capability/
+   metadata API) with `maxConcurrentTransfers: Int` and
+   `minRequestSpacingMs: Long` hints.
+2. Per-provider values sourced from the audit docs produced by
+   UD-318..UD-324.
+3. `SyncEngine` Pass 2 replaces its hardcoded `16/6/2` with a lookup from
+   provider metadata; semaphores sized per-provider per-run.
+4. Token-bucket for `minRequestSpacingMs` is stateless across invocations,
+   acceptable tradeoff for simplicity.
+
+**Depends on:** UD-318..UD-324 (audit docs produce the values).
+**Relates to:** UD-262 (HttpRetryBudget extract — independent, can land either order).
