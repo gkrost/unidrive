@@ -6587,3 +6587,71 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **Rclone provider is a process-exec wrapper, not a direct HTTP client. Audit scope narrows to: exit-code handling, stderr-parsing for recoverable errors, subprocess lifecycle + cancellation. Retry-After / concurrency hints inherit from the wrapped rclone process (--transfers, --tpslimit flags).**
+
+---
+id: UD-733
+title: Stamp short git SHA into every log line + startup banner
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit a600164. UD-234 already plumbed COMMIT into MDC; UD-733 adds DIRTY (git status --porcelain) + BUILD_INSTANT to BuildInfo, startup banner via log.info, dirty-warn via log.warn. 3 new BuildInfoTest cases pin the contract.
+opened: 2026-04-21
+chunk: core
+---
+When debugging across the daemon + MCP + UI processes, correlating a
+log line to a specific code state currently requires `git log` guesswork
+because the build plants no version stamp at log time. Every bug report
+("this happened on yesterday's build") loses the `commit → line`
+provenance chain.
+
+## Proposal
+
+At build time, stamp the short git commit SHA into a BuildInfo singleton
+consumed by the logging layer, and append it to every `DEBUG`-or-lower
+log line via the logback pattern or an MDC default.
+
+Concretely:
+
+1. Gradle task `generateBuildInfo` writes `BuildInfo.kt` (or a
+   `build-info.properties` resource) under `:app:core` with at least:
+   ```
+   GIT_SHORT_SHA = "0a43158"
+   GIT_DIRTY     = true|false
+   BUILD_INSTANT = ISO-8601
+   ```
+   Hook into `:app:core:processResources` so the file is refreshed on
+   every build without forcing a re-compile when the SHA hasn't changed.
+2. At startup, `BuildInfo.gitShortSha` is pushed into the root logger's
+   MDC (or exposed as a logback pattern converter `%X{git}`) so that
+   every log event — not just `DEBUG` — carries it. Rationale: making
+   it debug-only means any captured `INFO`/`WARN` from a user's bug
+   report still loses the stamp. One extra 7-char field per line is
+   cheap.
+3. Logback `%m` patterns in `core/`, `ui/`, `:app:mcp` config updated
+   to include the stamp. Pattern example:
+   `%d{HH:mm:ss.SSS} %-5level [%X{git:-NOGIT}] %logger{36} - %msg%n`
+4. `--version` / startup banner prints the same stamp so the bottom
+   of the log matches the version banner at the top.
+5. `GIT_DIRTY=true` surfaces as a WARN at startup so users don't
+   report bugs against uncommitted builds without knowing.
+
+## Acceptance
+
+1. Every log line in `unidrive.log` and `daemon.jfr` run metadata
+   contains the short SHA. Verified by `grep -c "\[[0-9a-f]\{7\}\]"`
+   equal to total-line-count on a 1000-line capture.
+2. Release builds stamp the SHA of the build commit; dev builds stamp
+   the working-tree SHA and warn on dirty.
+3. No measurable overhead on the hot log path (benchmark: 1 M lines
+   at INFO, pre vs post, within 2 % noise).
+4. The three log outputs stay in lockstep (daemon stdout, daemon file,
+   `ui`/`:app:mcp` forwarded lines) — same stamp on all.
+
+## Related
+
+- `unidrive-log-anomalies` skill — would add `git` as a dimension in
+  the anomaly summary.
+- Bug-report template in CONTRIBUTING / ISSUE templates should drop the
+  "paste your version" field once the log has it inline.
