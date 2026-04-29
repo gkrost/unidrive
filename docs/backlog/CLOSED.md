@@ -6552,3 +6552,38 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **Internxt specifics: encrypted-at-rest model, bridge vs drive API distinction, custom error envelope.**
+
+---
+id: UD-321
+title: Rclone wrapper robustness audit
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 75bce60. Rclone audit re-framed as process-shellout (not HTTP). 6 escape failure modes: exit-code collapse (5/6/7→same RcloneException), OAuth-refresh detection regex-dependent, pipe-buffer deadlock latent, stderr discarded on success, no --retries/--transfers passthrough, SIGKILL leaves orphaned multipart IDs + .partial files.
+opened: 2026-04-20
+chunk: sg5
+---
+**Part of UD-228 split — per-provider HTTP robustness audit.**
+
+**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
+
+1. **Non-2xx body parsing** — does this provider extract structured detail
+   (retry hints, quota info, recoverable-vs-fatal distinction) from error
+   bodies, or just stringify the Ktor exception?
+2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
+   SyncEngine action layer (fatal on non-whitelisted errors)?
+3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
+4. **Idempotency** — is the authenticatedRequest equivalent body-replay
+   safe?
+5. **Concurrency recommendations** — `maxConcurrentTransfers` +
+   `minRequestSpacingMs` based on provider docs + observed behaviour.
+
+**Deliverable:** `docs/providers/rclone-robustness.md`.
+
+**Consumed by:**
+- UD-262 — findings inform `HttpRetryBudget` config surface
+- UD-263 — findings produce concurrency hint values
+
+**Rclone provider is a process-exec wrapper, not a direct HTTP client. Audit scope narrows to: exit-code handling, stderr-parsing for recoverable errors, subprocess lifecycle + cancellation. Retry-After / concurrency hints inherit from the wrapped rclone process (--transfers, --tpslimit flags).**
