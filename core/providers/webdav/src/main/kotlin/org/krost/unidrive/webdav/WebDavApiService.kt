@@ -287,7 +287,20 @@ open class WebDavApiService(
         withRetry("download", remotePath) {
             log.debug("Download: {}", remotePath)
             val url = resourceUrl(remotePath)
-            val response = httpClient.get(url)
+            // UD-285: large-file data-plane requests must NOT inherit the
+            // 10-minute REQUEST_TIMEOUT_MS wall-clock cap from HttpDefaults.
+            // For a 5 GB file at 10 MB/s, the request legitimately takes
+            // ~8 minutes; at 1 MB/s, ~85 minutes; at 100 KB/s, > 14 hours.
+            // Throughput-bound timeouts are wrong for downloads. The
+            // 60 s SOCKET_TIMEOUT_MS (no-bytes-flowing watchdog) catches
+            // genuinely-stuck connections; that's the right safety property.
+            // Per-request override; leaves the metadata-plane PROPFIND /
+            // MKCOL / DELETE / HEAD verbs at the 10 min cap which is fine
+            // for control-plane round-trips.
+            val response =
+                httpClient.get(url) {
+                    timeout { requestTimeoutMillis = Long.MAX_VALUE }
+                }
             checkResponse(response, url)
             val channel: ByteReadChannel = response.body()
             // UD-288: re-open the destination on every retry. Files.newOutputStream
@@ -331,6 +344,14 @@ open class WebDavApiService(
         ensureParentCollections(remotePath)
         val response =
             httpClient.put(url) {
+                // UD-285: see download() above. PUT of a multi-GB file at
+                // residential-uplink speeds against a slow target (DSM
+                // mod_dav, single-threaded per connection) easily exceeds
+                // 10 min — the user's live trigger was Eternal_Tea-party-
+                // 1080p.mp4 (371 MB at ~0.6 MB/s effective = > 10 min).
+                // The 60 s socket-no-bytes watchdog still catches stuck
+                // writes; that's the right safety property.
+                timeout { requestTimeoutMillis = Long.MAX_VALUE }
                 setBody(
                     object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
                         override val contentLength = fileSize
