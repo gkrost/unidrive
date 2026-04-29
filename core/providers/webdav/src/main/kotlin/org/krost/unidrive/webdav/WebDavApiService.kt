@@ -287,16 +287,17 @@ open class WebDavApiService(
         withRetry("download", remotePath) {
             log.debug("Download: {}", remotePath)
             val url = resourceUrl(remotePath)
-            // UD-285: large-file data-plane requests must NOT inherit the
-            // 10-minute REQUEST_TIMEOUT_MS wall-clock cap from HttpDefaults.
-            // For a 5 GB file at 10 MB/s, the request legitimately takes
-            // ~8 minutes; at 1 MB/s, ~85 minutes; at 100 KB/s, > 14 hours.
-            // Throughput-bound timeouts are wrong for downloads. The
-            // 60 s SOCKET_TIMEOUT_MS (no-bytes-flowing watchdog) catches
-            // genuinely-stuck connections; that's the right safety property.
-            // Per-request override; leaves the metadata-plane PROPFIND /
-            // MKCOL / DELETE / HEAD verbs at the 10 min cap which is fine
-            // for control-plane round-trips.
+            // UD-285 / UD-277: data-plane requests must NOT inherit the
+            // 10-min REQUEST_TIMEOUT_MS wall-clock cap from HttpDefaults
+            // (a 5 GB file at 1 MB/s legitimately takes ~85 min). UD-285
+            // chose Long.MAX_VALUE; UD-277 keeps that for downloads
+            // specifically because Content-Length is unknown until the
+            // response arrives, so we cannot pre-compute a size-adaptive
+            // bound the way upload() does. Body-streaming is still bounded
+            // by the 60 s SOCKET_TIMEOUT_MS no-bytes watchdog — that's the
+            // right safety property for "completely stuck" reads. (UD-277
+            // policy IS applied to upload() below where fileSize is known
+            // up-front.)
             val response =
                 httpClient.get(url) {
                     timeout { requestTimeoutMillis = Long.MAX_VALUE }
@@ -342,16 +343,23 @@ open class WebDavApiService(
         log.debug("Upload: {} ({} bytes)", remotePath, fileSize)
         val url = resourceUrl(remotePath)
         ensureParentCollections(remotePath)
+        // UD-277: size-adaptive request-timeout. Pre-fix this was
+        // Long.MAX_VALUE (UD-285) — fine for "slow but completing" but no
+        // defence against "indefinitely slow" (a connection emitting 1 byte
+        // every 30 s never trips the 60 s socket-no-bytes watchdog yet
+        // takes days to finish a 1 GB file). Now bounded to
+        // max(uploadFloorTimeoutMs, fileSize / uploadMinThroughputBytesPerSecond).
+        // For the empirical 277 MB / 50 KiB-per-sec defaults that's ~90 min —
+        // above DSM's 22-min server-side abort, well below "forever".
+        val uploadTimeout =
+            WebDavTimeoutPolicy.computeRequestTimeoutMs(
+                fileSize = fileSize,
+                floorMs = config.uploadFloorTimeoutMs,
+                minThroughputBytesPerSecond = config.uploadMinThroughputBytesPerSecond,
+            )
         val response =
             httpClient.put(url) {
-                // UD-285: see download() above. PUT of a multi-GB file at
-                // residential-uplink speeds against a slow target (DSM
-                // mod_dav, single-threaded per connection) easily exceeds
-                // 10 min — the user's live trigger was Eternal_Tea-party-
-                // 1080p.mp4 (371 MB at ~0.6 MB/s effective = > 10 min).
-                // The 60 s socket-no-bytes watchdog still catches stuck
-                // writes; that's the right safety property.
-                timeout { requestTimeoutMillis = Long.MAX_VALUE }
+                timeout { requestTimeoutMillis = uploadTimeout }
                 setBody(
                     object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
                         override val contentLength = fileSize

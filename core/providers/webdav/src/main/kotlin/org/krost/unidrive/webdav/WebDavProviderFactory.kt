@@ -53,6 +53,17 @@ class WebDavProviderFactory : ProviderFactory {
             properties["trust_all_certs"]?.toBooleanStrictOrNull()
                 ?: isLanUrl(url)
 
+        // UD-277: per-profile override of the size-adaptive timeout knobs.
+        // Both are optional; absent → WebDavConfig defaults (10-min floor,
+        // 50 KiB/s minimum throughput). Set min_throughput_kbps = 0 to
+        // disable size-adaptive bounding (UD-285 unbounded behaviour).
+        val uploadFloorMs =
+            properties["upload_floor_timeout_ms"]?.toLongOrNull()
+                ?: 600_000L
+        val uploadMinKBps =
+            properties["upload_min_throughput_kbps"]?.toLongOrNull()
+                ?: 50L
+
         val config =
             WebDavConfig(
                 baseUrl = url,
@@ -60,6 +71,8 @@ class WebDavProviderFactory : ProviderFactory {
                 password = password,
                 tokenPath = tokenPath,
                 trustAllCerts = trustAllCerts,
+                uploadFloorTimeoutMs = uploadFloorMs,
+                uploadMinThroughputBytesPerSecond = uploadMinKBps * 1024,
             )
         return WebDavProvider(config)
     }

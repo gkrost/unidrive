@@ -229,6 +229,16 @@ user            = "alice"                                    # string.
 password        = ""                                         # vault preferred.
 trust_all_certs = false                                      # bool | default: false.
 
+# UD-277: size-adaptive HTTP request-timeout for PUT (upload). The cap scales
+# with file size: timeout = max(upload_floor_timeout_ms, file_bytes /
+# upload_min_throughput_kbps). Defaults assume a slow-but-completing link
+# (50 KiB/s sustained) — a 277 MB file gets ~90 min, well above DSM/Synology's
+# ~22-min server-side abort, but tight enough to bound a runaway slow-loris
+# write. Set upload_min_throughput_kbps = 0 to opt out (unbounded; UD-285
+# legacy behaviour).
+upload_floor_timeout_ms   = 600000   # int | default: 600000 (10 min).
+upload_min_throughput_kbps = 50      # int | default: 50.
+
 
 # ── HiDrive example ─────────────────────────────────────────────────────────
 [providers.hidrive]

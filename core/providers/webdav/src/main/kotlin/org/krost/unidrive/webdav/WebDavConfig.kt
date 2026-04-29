@@ -19,6 +19,24 @@ data class WebDavConfig(
     val password: String,
     val tokenPath: Path = defaultTokenPath(),
     val trustAllCerts: Boolean = false,
+    /**
+     * UD-277: per-PUT request-timeout floor. Small files always get at least
+     * this much, regardless of file size. 10 minutes — same as the old
+     * `HttpDefaults.REQUEST_TIMEOUT_MS` flat cap for metadata-plane verbs.
+     */
+    val uploadFloorTimeoutMs: Long = 600_000L,
+    /**
+     * UD-277: minimum sustained upload throughput (bytes per second) the
+     * size-adaptive policy assumes. Default 50 KiB/s — bounds a 277 MB file
+     * (the empirical large-file size from the 2026-04-29 traffic baseline)
+     * to ~90 minutes total, well above Synology DSM's ~22-minute server-side
+     * abort, but tight enough to catch a runaway 1-byte/sec slow-loris write.
+     * Set to 0 to opt out (fall back to UD-285's [Long.MAX_VALUE] behaviour).
+     */
+    val uploadMinThroughputBytesPerSecond: Long = 50L * 1024,
+    /** UD-277: same shape, applied to GET. */
+    val downloadFloorTimeoutMs: Long = 600_000L,
+    val downloadMinThroughputBytesPerSecond: Long = 50L * 1024,
 ) {
     companion object {
         fun defaultTokenPath(): Path {
