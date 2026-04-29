@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -135,8 +136,20 @@ class CloudRelocator(
                 if (!skipExisting) return emptyMap()
                 return try {
                     target.listChildren(path).associateBy { it.name }
+                } catch (e: CancellationException) {
+                    // UD-286: never absorb cancellation — re-throw before the
+                    // generic catch so structured concurrency keeps working.
+                    throw e
                 } catch (e: Exception) {
-                    log.warn("targetIndex failed for '{}', skip check disabled: {}", path, e.message)
+                    // UD-286: log class name + throwable so postmortem can
+                    // distinguish IOException / WSAECONNABORTED / 503 / 404 / …
+                    log.warn(
+                        "targetIndex failed for '{}', skip check disabled: {}: {}",
+                        path,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
                     emptyMap()
                 }
             }
@@ -161,8 +174,22 @@ class CloudRelocator(
                     if (item.isFolder) {
                         try {
                             target.createFolder(newTarget)
+                        } catch (e: CancellationException) {
+                            // UD-286: never absorb cancellation.
+                            throw e
                         } catch (e: Exception) {
-                            // Folder may already exist
+                            // Folder may already exist (HTTP 405 on WebDAV /
+                            // 409 on OneDrive / similar elsewhere) — that's the
+                            // intended idempotent-resume path. Log at DEBUG: a
+                            // real network failure here will surface loudly on
+                            // the subsequent walk into this folder, and the
+                            // per-file catch below produces the actual error.
+                            log.debug(
+                                "createFolder for '{}' failed (assuming exists): {}: {}",
+                                newTarget,
+                                e.javaClass.simpleName,
+                                e.message,
+                            )
                         }
                         walk(newSource, newTarget)
                     } else {
@@ -210,9 +237,28 @@ class CloudRelocator(
                                     skippedSize = skippedSize,
                                 ),
                             )
+                        } catch (e: CancellationException) {
+                            // UD-286: never absorb cancellation. The finally
+                            // block still runs and cleans up tempFile.
+                            throw e
                         } catch (e: Exception) {
+                            // UD-286: log class name + stack so unidrive.log
+                            // captures *what* failed, not just `e.message`.
+                            // The CLI surfaces e.message via MigrateEvent.Error;
+                            // postmortem reads the full record from the log.
+                            log.warn(
+                                "Failed to migrate {}: {}: {}",
+                                newSource,
+                                e.javaClass.simpleName,
+                                e.message,
+                                e,
+                            )
                             errorCount++
-                            emit(MigrateEvent.Error("Failed to migrate $newSource: ${e.message}"))
+                            emit(
+                                MigrateEvent.Error(
+                                    "Failed to migrate $newSource: ${e.javaClass.simpleName}: ${e.message}",
+                                ),
+                            )
                         } finally {
                             Files.deleteIfExists(tempFile)
                         }
@@ -221,12 +267,35 @@ class CloudRelocator(
             }
 
             try {
-                walk(sourcePath, targetPath)
-            } catch (e: Exception) {
-                emit(MigrateEvent.Error("Migration failed: ${e.message}"))
+                try {
+                    walk(sourcePath, targetPath)
+                } catch (e: CancellationException) {
+                    // UD-286: cancellation propagates past the walk so the
+                    // outer flow honours structured concurrency. The finally
+                    // below still cleans up tempDir.
+                    throw e
+                } catch (e: Exception) {
+                    log.warn(
+                        "Migration walk failed at {}: {}: {}",
+                        sourcePath,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    emit(
+                        MigrateEvent.Error(
+                            "Migration failed: ${e.javaClass.simpleName}: ${e.message}",
+                        ),
+                    )
+                }
+            } finally {
+                // UD-286: recursive cleanup that never throws. If walk was
+                // cancelled mid-download, a partial tempFile may remain in
+                // tempDir; deleteIfExists on a non-empty dir would otherwise
+                // throw DirectoryNotEmptyException and shadow the original
+                // failure cause.
+                runCatching { tempDir.toFile().deleteRecursively() }
             }
-
-            Files.deleteIfExists(tempDir)
             val duration = System.currentTimeMillis() - startTime
             emit(
                 MigrateEvent.Completed(

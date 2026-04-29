@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
@@ -383,6 +384,118 @@ class CloudRelocatorTest {
             assertEquals(42, started.totalFiles)
         }
 
+    // -- UD-286: cancellation hygiene + log-on-failure -------------------------
+    //
+    // CloudRelocator had four `catch (e: Exception)` blocks that silently
+    // absorbed `CancellationException` (breaking structured concurrency) and
+    // dropped the exception's class + stack from the log (the live unidrive.log
+    // contained zero ERROR/WARN lines for active relocates). These tests pin
+    // the post-fix contract: cancellation propagates promptly, MigrateEvent.Error
+    // carries the exception class name, and per-file failures don't halt the
+    // walk.
+
+    @Test
+    fun `UD-286 - per-file CancellationException propagates instead of being absorbed`() =
+        runTest {
+            source.children["/"] =
+                listOf(
+                    cloudItem("/cancelled.txt", size = 10),
+                    cloudItem("/never-reached.txt", size = 10),
+                )
+            source.fileContents["/never-reached.txt"] = ByteArray(10)
+            source.cancellationPaths.add("/cancelled.txt")
+
+            val relocator = CloudRelocator(source, target)
+
+            assertFailsWith<CancellationException> {
+                relocator.migrate("/", "/").toList()
+            }
+
+            // Walk halted at the cancelled file — never-reached.txt was not
+            // uploaded. (If the catch block had absorbed the cancellation, the
+            // walk would have continued and uploaded the second file.)
+            assertTrue(
+                target.uploadedPaths.none { it.contains("never-reached") },
+                "walk should halt on cancellation; uploaded=${target.uploadedPaths}",
+            )
+        }
+
+    @Test
+    fun `UD-286 - listChildren CancellationException propagates from targetIndex`() =
+        runTest {
+            source.children["/"] = listOf(cloudItem("/a.txt", size = 10))
+            source.fileContents["/a.txt"] = ByteArray(10)
+            // Target's listChildren is invoked via targetIndex(). If the catch
+            // there absorbed cancellation, migrate() would proceed to upload
+            // the file silently.
+            target.cancellationPaths.add("/")
+
+            val relocator = CloudRelocator(source, target)
+
+            assertFailsWith<CancellationException> {
+                relocator.migrate("/", "/").toList()
+            }
+
+            assertTrue(
+                target.uploadedPaths.isEmpty(),
+                "no upload should happen after cancellation in targetIndex; uploaded=${target.uploadedPaths}",
+            )
+        }
+
+    @Test
+    fun `UD-286 - per-file Error event carries exception class name`() =
+        runTest {
+            source.children["/"] =
+                listOf(cloudItem("/bad.txt", size = 10))
+            source.failPaths.add("/bad.txt")
+
+            val relocator = CloudRelocator(source, target)
+            val events = relocator.migrate("/", "/").toList()
+
+            val errors = events.filterIsInstance<MigrateEvent.Error>()
+            assertEquals(1, errors.size, "expected exactly one Error event")
+            // Pre-UD-286 the message was "Failed to migrate /bad.txt: Simulated …".
+            // Post-fix it includes the exception class name so the user (and
+            // postmortem) can distinguish IOException vs HttpRequestTimeoutException
+            // vs WSAECONNABORTED at a glance.
+            assertTrue(
+                errors[0].message.contains("RuntimeException"),
+                "Error message should include exception class name; was: '${errors[0].message}'",
+            )
+            assertTrue(
+                errors[0].message.contains("/bad.txt"),
+                "Error message should include the failing path; was: '${errors[0].message}'",
+            )
+        }
+
+    @Test
+    fun `UD-286 - per-file failure does not halt the walk (UD-222 contract preserved)`() =
+        runTest {
+            source.children["/"] =
+                listOf(
+                    cloudItem("/good-1.txt", size = 10),
+                    cloudItem("/bad.txt", size = 10),
+                    cloudItem("/good-2.txt", size = 10),
+                )
+            source.fileContents["/good-1.txt"] = ByteArray(10)
+            source.fileContents["/good-2.txt"] = ByteArray(10)
+            source.failPaths.add("/bad.txt")
+
+            val relocator = CloudRelocator(source, target)
+            val events = relocator.migrate("/", "/").toList()
+
+            val completed = events.filterIsInstance<MigrateEvent.Completed>()
+            assertEquals(1, completed.size)
+            assertEquals(2, completed[0].doneFiles, "both good files should migrate")
+            assertEquals(1, completed[0].errorCount)
+            // Both good files reached the target; the bad one didn't halt the walk.
+            assertTrue(
+                target.uploadedPaths.contains("/good-1.txt") &&
+                    target.uploadedPaths.contains("/good-2.txt"),
+                "uploadedPaths=${target.uploadedPaths}",
+            )
+        }
+
     // -- helpers ----------------------------------------------------------------
 
     private fun cloudItem(
@@ -416,6 +529,12 @@ class CloudRelocatorTest {
         val createdFolders = mutableListOf<String>()
         var downloadShouldFail = false
         val failPaths = mutableSetOf<String>()
+
+        // UD-286: paths whose download or listChildren should throw
+        // CancellationException — used by the regression test to verify the
+        // catch blocks in CloudRelocator re-throw cancellation cleanly
+        // instead of absorbing it.
+        val cancellationPaths = mutableSetOf<String>()
         var listChildrenCount = 0
 
         override suspend fun authenticate() {}
@@ -424,6 +543,9 @@ class CloudRelocatorTest {
 
         override suspend fun listChildren(path: String): List<CloudItem> {
             listChildrenCount++
+            if (path in cancellationPaths) {
+                throw CancellationException("Simulated cancellation on listChildren($path)")
+            }
             return children[path] ?: emptyList()
         }
 
@@ -433,6 +555,9 @@ class CloudRelocatorTest {
             remotePath: String,
             destination: Path,
         ): Long {
+            if (remotePath in cancellationPaths) {
+                throw CancellationException("Simulated cancellation on download($remotePath)")
+            }
             if (downloadShouldFail || remotePath in failPaths) {
                 throw RuntimeException("Simulated download failure for $remotePath")
             }
