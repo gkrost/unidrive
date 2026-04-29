@@ -2770,3 +2770,211 @@ streaming gap will surface as the bottleneck on truly large trees.
   binary).
 - UD-289 — sequential relocate; reduces the heap pressure surface
   for now.
+---
+id: UD-293
+title: GraphApiService still buffers byte[] for >2 GB downloads on a non-downloadFile path (UD-329 left this surface)
+category: core
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+opened: 2026-04-29
+---
+**Symptom (from log-feedback-loop-proposal 2026-04-29).** Two
+`Can't create an array of size 2_171_403_393` and `…2_233_659_189`
+WARN lines from `GraphApiService - Graph download failed (attempt
+1/3)`, 16 minutes apart, on two different OneDrive files. Both
+values exceed `Integer.MAX_VALUE` (2,147,483,647) — the JVM cannot
+allocate a Java `byte[]` of that length.
+
+UD-329 fixed this exact symptom for `downloadFile` (the CDN /
+Graph-content-stream path). UD-329's commit message says the fix
+switched to `httpClient.prepareGet(url).execute { response ->
+response.bodyAsChannel() }` for streaming. The proposal's analysis
+indicates **another code path in `GraphApiService.kt` still buffers
+the response body via the non-streaming `httpClient.get(url)` →
+`response.body<ByteReadChannel>()` shape**, which Ktor 3.x exposes
+only after allocating the full body as a `byte[contentLength]`.
+
+The proposal also notes: "Retries papered over it but the second
+attempt also allocates the same array, so the fact that it passed
+on retry is suspicious — verify whether the file was actually
+persisted or silently skipped."
+
+**Investigation needed.** Find the unfixed call site:
+
+```bash
+grep -n 'httpClient\.get\|response\.body<' \
+    core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+```
+
+Likely candidates per the proposal: a non-`downloadFile` Graph
+download path used for thumbnails, attachment children, or
+multi-part metadata? Or `getDelta` retry-on-stream-failure that
+falls back to non-streaming?
+
+**Proposed fix (mirror UD-329's pattern).**
+
+Wherever the buffered shape is found:
+
+```kotlin
+val bytes = httpClient.get(url).body<ByteArray>()  // ← BUG
+```
+
+becomes:
+
+```kotlin
+httpClient.prepareGet(url).execute { response ->
+    response.bodyAsChannel().copyAndClose(destination.toFileWriteChannel())
+}
+```
+
+Or `okio.Sink` / chunked `InputStream` copy straight to disk if a
+file destination is in scope.
+
+**Acceptance.**
+
+- New unit test against a Ktor MockEngine fake response with
+  `Content-Length: 2_300_000_000` (2.3 GB) where the response body is
+  a streaming source — assert the call completes without
+  `OutOfMemoryError: Can't create an array of size N`.
+- Live integration test (UNIDRIVE_INTEGRATION_TESTS=true) against the
+  two specific OneDrive files that triggered today's WARNs (the user
+  has the paths in their unidrive.log:
+  `unidrive.2026-04-29.{0,1,2}.log`) — assert successful download.
+- After fix, `bash scripts/dev/log-watch.sh --json` over the same
+  log set returns `array_of_size_oom: 0` instead of `2`.
+
+**Related.**
+- UD-329 — original fix for the same class of bug. Fix landed for
+  `downloadFile`; this ticket addresses the path UD-329 missed.
+- UD-309 — Ktor "Content-Length mismatch" short-read retry. May need
+  similar treatment on the new streaming path.
+- `docs/dev/log-feedback-loop-proposal.md` — source.
+- `scripts/dev/log-watch.sh` (UD-282-style enhancement landed
+  alongside this ticket): the `array_of_size_oom` counter pins the
+  symptom in CI / regression checks.
+
+**Why now.** Live trigger today: 2 files > 2 GB silently failed
+with retries that *also* failed allocation but somehow recovered
+(or silently skipped — to be verified). User has 16+ min of dead
+time per file, plus possible silent data loss.
+---
+id: UD-294
+title: MDC ?????? on 132k+ log lines — UD-284's fix didn't reach OneDrive download / WebDAV upload paths
+category: core
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-04-29
+---
+**Symptom (from log-feedback-loop-proposal 2026-04-29, quantified
+via `log-watch.sh --summary`).** Across yesterday's rolled
+unidrive.log set:
+
+| File | Lines |
+|---|---|
+| unidrive-mcp.log | 1 |
+| unidrive.2026-04-29.0.log | 48,528 |
+| unidrive.2026-04-29.1.log | 39,986 |
+| unidrive.2026-04-29.2.log | 41,818 |
+| unidrive.log | 2,204 |
+
+| Anomaly counter | count |
+|---|---:|
+| **MDC missing (`[???????]` placeholder)** | **132,066** |
+| WARN | 4 |
+| ERROR | 0 |
+| `Can't create an array of size` | 2 (UD-293) |
+| Connection reset / aborted | 3 |
+
+132,066 lines (≈99% of all DEBUG output) carry `[???????] [*]
+[-------]` instead of `[<sha>] [<profile>] [<scan>]`. Per CLAUDE.md
+§"Before you read unidrive.log", filtering on the profile prefix is
+the primary triage signal. With ~all worker-thread lines missing the
+prefix, that triage path is dead.
+
+UD-284 fixed this for the relocate code path (wrapped
+`runBlocking { migrate(...).collect ... }` in `MDCContext()`). The
+proposal's analysis says **two more code paths still don't propagate
+MDC**:
+
+1. **WebDAV upload path** — every `Upload`, `MKCOL`, `PROPFIND` log
+   line from `DefaultDispatcher-worker-N` threads has the
+   `[???????]` triplet. 94k+ uploads in yesterday's run — that's
+   the bulk of the missing-MDC count.
+2. **OneDrive Graph download path** — `Download` log lines from
+   workers similarly.
+
+Same root cause as UD-284: `runBlocking { ... }` (or `withContext`,
+or `flowOn(Dispatchers.IO)`) without `MDCContext()` in the coroutine
+context. SLF4J MDC is `ThreadLocal`; without explicit propagation,
+DefaultDispatcher / IO worker threads have empty MDC.
+
+**Investigation entry points.**
+
+```bash
+# Find runBlocking sites in providers/sync that DO NOT use MDCContext.
+grep -rn 'runBlocking[^(]' core/providers/ core/app/sync/
+grep -rn 'withContext(Dispatchers' core/providers/ core/app/sync/
+grep -rn 'flowOn(Dispatchers' core/providers/ core/app/sync/
+```
+
+Compare against the post-UD-284 RelocateCommand pattern:
+
+```kotlin
+runBlocking(MDCContext()) { ... }
+withContext(MDCContext() + Dispatchers.IO) { ... }
+flow { ... }.flowOn(Dispatchers.IO)  // requires the upstream collect to use MDCContext
+```
+
+**Proposed fix.** Apply the same MDCContext-wrapping pattern at every
+runBlocking / withContext / flowOn site that crosses the
+`Dispatchers.IO` or `Dispatchers.Default` boundary in the upload /
+download paths. Specifically:
+
+- `core/providers/webdav/src/main/kotlin/.../WebDavApiService.kt` —
+  `download` already wraps `withContext(Dispatchers.IO)`, but the
+  caller's MDCContext doesn't propagate. Use
+  `withContext(Dispatchers.IO + MDCContext())` if MDCContext is in
+  scope at the call site, OR have the caller wrap `runBlocking`
+  with MDCContext.
+- `core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt` —
+  `downloadFile`'s `prepareGet().execute { ... }` block, plus any
+  `runBlocking` in the OAuth refresh path.
+- `core/app/sync/src/main/kotlin/.../SyncEngine.kt` — Pass 2's
+  parallel download loop. (UD-212 partly fixed this, but the
+  proposal's count of 132k missing lines suggests at least one
+  worker-thread path is still unwrapped.)
+
+**Acceptance.**
+
+- Integration test: 10-file localfs → webdav upload run via
+  `unidrive sync --upload-only -p test-profile`. Capture
+  `unidrive.log` to a temp file. Assert
+  `grep -c '\[\?\?\?\?\?\?\?\]' unidrive.log == 0`.
+- Same shape for download: 10-file webdav → localfs.
+- After fix: `bash scripts/dev/log-watch.sh --json` over a fresh
+  sync run reports `mdc_missing: 0` (or near-zero — startup
+  pre-resolveCurrentProfile lines are exempt).
+
+**Related.**
+- UD-212 — original "log/CLI profile context" wiring. UD-284 closed
+  the relocate path; this ticket extends it to upload/download.
+- UD-284 — same fix shape, smaller scope.
+- `docs/dev/lessons/mdc-in-suspend.md` — canonical pattern.
+- `docs/dev/log-feedback-loop-proposal.md` — source of the metric.
+- `scripts/dev/log-watch.sh` — `mdc_missing` counter for CI gating.
+
+**Why now.** Without MDC propagation:
+- Postmortem on a 132k-line log is impossible; can't filter by
+  profile, can't pin the build SHA.
+- The CLAUDE.md §"Before you read unidrive.log" workflow doesn't
+  work.
+- A future CI hook on `log-watch.sh --json mdc_missing > 0` becomes
+  the regression signal once this is closed.

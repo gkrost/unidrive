@@ -5774,3 +5774,102 @@ invoked with an explicit `profile=X` and X doesn't resolve:
   through the same resolver.
 - UD-237 — CLI's "matched by type" auto-selection. The fix above
   proposes that auto-selection is **CLI-only** for safety.
+
+---
+id: UD-292
+title: Gradle :app:cli:deploy + :app:mcp:deploy silently no-op due to task elision + PowerShell taskkill hang
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit f064831. Fixed inline: outputs.upToDateWhen { false } + ProcessHandle.allProcesses() taskkill replacing the hanging PowerShell Get-CimInstance subroutine. Verified live (AppData jar timestamp moved). Build markers added so future silent failures self-document. Both :app:cli:deploy and :app:mcp:deploy got the same fix.
+code_refs:
+  - core/app/cli/build.gradle.kts
+  - core/app/mcp/build.gradle.kts
+opened: 2026-04-29
+---
+**Symptom (verified 2026-04-29).** `./gradlew :app:cli:deploy` and
+`./gradlew :app:mcp:deploy` both exited "successfully" but did not
+copy the freshly-built shadow jar into
+`%LOCALAPPDATA%\unidrive\unidrive-*.jar`. Timestamps and sizes on the
+deployed jars stayed identical to a deploy hours earlier; the build
+output `core/app/cli/build/libs/unidrive-*.jar` was newer.
+
+The user's relocate test was running against a STALE deployed jar
+(missing UD-286/287/288/284/291/285 fixes that were already in the
+build tree). Re-deploys appeared to succeed but the in-flight binary
+on disk never changed.
+
+**Root cause — two compounding bugs:**
+
+1. **Gradle 9 task elision.** The `deploy` task was registered
+   without `outputs.upToDateWhen { false }` and without declared
+   outputs. Gradle 9's task graph optimisation elides such tasks
+   when their `dependsOn` chain (here `tasks.shadowJar`) reports
+   UP-TO-DATE. The `doLast { }` block silently never ran. Symptoms:
+   - No `:app:cli:deploy` line in `--info` task list
+   - No `BUILD SUCCESSFUL` marker
+   - No `Deployed unidrive ...` print
+   - Bash exit code 0
+   - Source jar in `build/libs` newer than target jar in `%LOCALAPPDATA%`
+
+2. **PowerShell `Get-CimInstance` taskkill subroutine hung the
+   gradle daemon.** Even when `--rerun-tasks` forced the task to
+   run, the `run("powershell", "-Command", "Get-CimInstance
+   Win32_Process -Filter ...")` subroutine intermittently hung on
+   Windows under load (WMI / DCOM auth stalls). The hang killed
+   gradle's progress reporting, the daemon eventually exited
+   cleanly without copying, and bash returned to the shell with
+   the stale jar still in place.
+
+The PowerShell hang masked the task-elision bug and vice versa. Each
+deploy attempt looked plausible to the user: gradle exited "OK", the
+file existed at the target path (from a much earlier deploy), so
+"deploy didn't say it failed".
+
+**Fix (landed inline in this commit, not deferred):**
+
+`core/app/cli/build.gradle.kts` and `core/app/mcp/build.gradle.kts`:
+
+1. Added `outputs.upToDateWhen { false }` to both deploy tasks so
+   Gradle 9 always invokes the `doLast { }` block. Deploy is
+   inherently "always run" — there's no input/output relationship to
+   cache against.
+
+2. Replaced the PowerShell `Get-CimInstance` taskkill with
+   `ProcessHandle.allProcesses()` — pure Java since JDK 9, no shell,
+   no WMI, no PowerShell. Filters by `ProcessHandle.info().commandLine()`
+   substring (more reliable than the old WINDOWTITLE filter). 5-second
+   `onExit().get(...)` timeout per killed PID so a stuck process
+   can't deadlock the build.
+
+3. Added explicit `[deploy] starting/complete` markers + per-step
+   logging (kill / copy / launcher / wrapper) so the next time
+   something silently misfires, the build log proves it.
+
+**Verified.** After applying the fix:
+
+```
+> Task :app:cli:deploy
+[deploy] starting — version=0.0.0-greenfield jar=...
+[deploy] no running CLI process to kill — proceeding to copy
+[deploy] copied .../build/libs/...jar -> %LOCALAPPDATA%\unidrive\...jar (44772924 bytes)
+Deployed unidrive 0.0.0-greenfield (Windows):
+[deploy] complete.
+BUILD SUCCESSFUL in 6s
+```
+
+Target jar timestamp moved from `18:00:24` (stale) to `18:14:44`
+(fresh) — first time both jars updated in the same session.
+
+**Acceptance.** The fix is verified live; this ticket is being filed
+retroactively to document the failure mode and resolution. Closes
+when the commit lands. No tests added — the deploy task is
+host-environment-dependent (Windows process management); the
+verification is the AppData jar timestamp / size matching the
+build/libs jar.
+
+**Related.**
+- UD-712 — original taskkill filter that this fix supersedes.
+- ADR-0006 — toolchain (Gradle 9.4.1 in tree).
