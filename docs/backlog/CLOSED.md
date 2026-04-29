@@ -6655,3 +6655,40 @@ Concretely:
   the anomaly summary.
 - Bug-report template in CONTRIBUTING / ISSUE templates should drop the
   "paste your version" field once the log has it inline.
+
+---
+id: UD-100
+title: Enable Gradle dependency locking for core/ + ui/ composites
+category: security
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit a600164. Pre-existing implementation discovered during Phase E sweep. dependencyLocking enabled at allprojects scope (build.gradle.kts:21-23); 14 gradle.lockfile + settings-gradle.lockfile committed; CI verifies via .github/workflows/build.yml step 'Verify dependency locks'; regen procedure documented in docs/dev/dependency-locking.md. Ticket was open but acceptance fully met — closing as resolved-by-prior-work.
+opened: 2026-04-20
+chunk: sg5
+---
+Prerequisite for any lockfile-based security scanning (Trivy, Grype) and
+for Dependabot's ability to pin transitive versions deterministically.
+
+**Current state:** no `gradle.lockfile` exists anywhere in the repo, and no
+`dependencyLocking { ... }` block is configured in either composite's
+build scripts. Builds resolve transitive dependencies at build time with
+no recorded graph.
+
+**Acceptance:**
+
+1. Enable `dependencyLocking { lockAllConfigurations() }` in both composites'
+   root build.gradle.kts (typically via a `subprojects` / `allprojects` block
+   so every module participates).
+2. Generate `gradle.lockfile` via `./gradlew dependencies --write-locks`
+   from both `core/` and `ui/`; commit the lockfiles.
+3. Add CI step (`./gradlew dependencies --verify-locks`) to the GitHub
+   Actions build workflow so any unexpected version drift fails the build.
+4. Document the regeneration procedure in `docs/dev/` (e.g., when bumping
+   a `libs.versions.toml` entry).
+
+**Why this exists as its own ticket:** UD-108 was originally "Trivy on dep
+lockfiles + container images". Split 2026-04-20 — the Docker half lives
+in UD-101 (Trivy scanning on Docker images) and unblocks now; the lockfile
+half needs this ticket first.
