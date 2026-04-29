@@ -6517,3 +6517,38 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **SFTP is not HTTP — audit scope shifts to: SSH connection failure classes (EOF, auth-fail, channel-close), MINA SshException subclass handling, reconnect vs fail-fast policy. Concurrency: 4-8 typical (DSL-limited servers). Crosses into UD-305 territory for host-key handling — keep separate.**
+
+---
+id: UD-319
+title: Internxt HTTP robustness audit
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 7c29da8. Internxt audit doc — dramatically less robust than OneDrive baseline. Headline: checkResponse throws on first non-2xx with no body parsing; retries only on GET-500/503/EOF (every mutating verb is one-shot); Retry-After never read; refresh missing NonCancellable wrap. Encryption-vs-retry boundary in 5-stage upload pipeline is silent-corruption territory — must be designed around when UD-262 retries land. Internxt does NOT use core/app/xtra/.
+opened: 2026-04-20
+chunk: sg5
+---
+**Part of UD-228 split — per-provider HTTP robustness audit.**
+
+**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
+
+1. **Non-2xx body parsing** — does this provider extract structured detail
+   (retry hints, quota info, recoverable-vs-fatal distinction) from error
+   bodies, or just stringify the Ktor exception?
+2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
+   SyncEngine action layer (fatal on non-whitelisted errors)?
+3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
+4. **Idempotency** — is the authenticatedRequest equivalent body-replay
+   safe?
+5. **Concurrency recommendations** — `maxConcurrentTransfers` +
+   `minRequestSpacingMs` based on provider docs + observed behaviour.
+
+**Deliverable:** `docs/providers/internxt-robustness.md`.
+
+**Consumed by:**
+- UD-262 — findings inform `HttpRetryBudget` config surface
+- UD-263 — findings produce concurrency hint values
+
+**Internxt specifics: encrypted-at-rest model, bridge vs drive API distinction, custom error envelope.**
