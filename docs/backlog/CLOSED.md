@@ -6187,3 +6187,93 @@ registration for free. Until then, land #2 as a one-liner
 
 Low priority, XS effort for PS-wrapper fix, S for jpackage path.
 UX polish, not a bug. Worth bundling with any release-prep work.
+
+---
+id: UD-272
+title: ProcessLock error — print holder PID + taskkill/kill hint
+category: core
+priority: low
+effort: XS
+status: closed
+closed: 2026-04-29
+resolved_by: commit 5fc0fcf. Sibling .pid file (Windows blocks reads on FileLock-held file). 6 ProcessLockTest cases. Main prints OS-appropriate kill hint.
+opened: 2026-04-21
+chunk: core
+---
+### Problem
+
+`Main.acquireProfileLock()` at
+`core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:559-573`
+prints:
+
+```
+Another unidrive process is running for profile 'onedrive'.
+Stop it first, or wait for it to finish.
+```
+
+on lock contention. The message is accurate but offers no actionable
+information — the user has to independently hunt down which PID holds
+the lock, via `tasklist | findstr java` / Task Manager / Get-Process.
+
+Observed 2026-04-21 when running a second `unidrive-watch.cmd`
+against a profile where a previous `sync --watch` was already
+running — took ~30 seconds to figure out which `java.exe` was the
+one to kill (there are usually ≥ 3 JVMs on this host: gradle daemon,
+kotlin daemon, unidrive daemon, unrelated tool MCPs).
+
+### Fix
+
+Record the holder's PID inside the lock file on successful
+`tryLock()`, read it back inside the "contended" error path. The
+lock file is already written via `FileChannel.open(…, WRITE)` — we
+just need to `channel.write()` the PID once the exclusive lock is
+acquired.
+
+```kotlin
+// ProcessLock.tryLock() — add after `acquired = true` block:
+val pid = ProcessHandle.current().pid()
+channel!!.truncate(0)
+channel!!.write(java.nio.ByteBuffer.wrap("$pid\n".toByteArray()))
+```
+
+```kotlin
+// Main.acquireProfileLock() — failure path:
+val holderPid = runCatching {
+    Files.readString(lockFile).trim().toLongOrNull()
+}.getOrNull()
+val holderHint = if (holderPid != null) " (PID $holderPid)" else ""
+System.err.println("Another unidrive process$holderHint is running for profile '${profile.name}'.")
+System.err.println("Stop it with `taskkill /PID $holderPid /F`, or wait for it to finish.")
+```
+
+On Windows, adding the `taskkill` hint is tangible help; on Unix,
+fall back to `kill $holderPid` / `kill -9 $holderPid`.
+
+### Edge cases
+
+- Crashed/killed processes: the PID in the lock file is stale but
+  the OS-level FileLock was released, so `tryLock()` succeeds. No
+  issue — the new holder's PID gets written over.
+- PID reuse: in the rare case the OS has recycled the stale PID
+  to an unrelated process, the `taskkill` suggestion would target
+  the wrong one. Mitigation: check `ProcessHandle.of(pid).isPresent`
+  + verify the process is a Java one before suggesting kill. Or
+  just flag the suggestion as "hint — verify first."
+
+### Acceptance
+
+- Contended lock error includes the holder's PID on every platform
+  where `ProcessHandle.current().pid()` is meaningful (Java 9+).
+- A `ProcessLockTest` verifies the PID round-trip (acquire → peek
+  file contents).
+- `taskkill` / `kill` hint printed, guarded by OS check.
+
+### Related
+
+- UD-269 (open) — relocate CTRL-C cleanup. If the held lock is
+  from an aborted relocate, UD-269's tempdir GC plus this ticket's
+  PID hint cover the "clean up after yourself" story together.
+
+### Priority / effort
+
+Low priority, XS effort. 15 lines of code + 1 test.
