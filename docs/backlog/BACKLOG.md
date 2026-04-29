@@ -1779,53 +1779,6 @@ stability problem — a relocate that works on a 10k-file tree may
 OOM on a 100k-file one without warning. Investigation is the bulk
 of the work; fix is usually small (close a resource, bound a queue).
 ---
-id: UD-277
-title: Size-adaptive HTTP request timeout for large WebDAV uploads
-category: core
-priority: high
-effort: S
-status: open
-opened: 2026-04-21
-chunk: core
----
-Surfaced during a ds418play WebDAV relocation (307 GiB, 128 k files, migrated
-from `onedrive-test-local`): large 1080p `.mp4` files (hundreds of MB) fail
-with `Request timeout has expired [request_timeout=600000 ms]` on the first
-PUT. The flat 600 s cap is too short once sustained throughput drops below
-~1.8 MB/s on a flaky local link — and each timeout means the entire file
-is re-uploaded from byte 0 (no resume; see UD-328).
-
-## Scope
-
-WebDAV client request timeout (and by extension any provider that inherits
-the shared HTTP client's per-request deadline when uploading a stream).
-
-## Proposal
-
-Replace the flat `request_timeout` with a size-adaptive policy:
-
-```
-timeout = max(baseTimeoutMs, fileSizeBytes / minThroughputBytesPerMs)
-```
-
-- `baseTimeoutMs` keeps the current 600 s floor.
-- `minThroughputBytesPerMs` is configurable per provider; sensible
-  default for local-LAN WebDAV is ~512 KiB/s.
-
-## Acceptance
-
-1. WebDAV upload of a 2 GiB fixture on a deliberately slow link
-   (tc-netem 1 MB/s) completes instead of timing out.
-2. Unit test: given `fileSize=2 GiB, minThroughput=512 KiB/s`, computed
-   timeout is >= 4096 s.
-3. Config knob documented.
-4. No regression on small-file throughput.
-
-## Related
-
-- UD-278 (retry-on-connection-reset) — complementary.
-- UD-328 (Range/Content-Range resume) — preferable when server supports it.
----
 id: UD-278
 title: Retry on connection-reset / premature EOF via HttpRetryBudget
 category: core
