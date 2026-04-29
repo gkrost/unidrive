@@ -83,6 +83,21 @@ interface CloudProvider {
     suspend fun quota(): QuotaInfo
 
     /**
+     * UD-327: per-file size cap in bytes the target server enforces.
+     *
+     * Returns null when the provider has no documented or configured cap
+     * (default for most providers — files larger than 4 GiB upload fine).
+     * Returns a positive byte count when:
+     *  - the user explicitly configured one in the profile TOML, OR
+     *  - the provider has a documented hard cap (Synology DSM WebDAV defaults
+     *    to 4 GiB unless the admin reconfigured nginx).
+     *
+     * Used by `CloudRelocator.preflightOversized` to surface oversized files
+     * at planner-time, before a wasted PUT runs to its full timeout.
+     */
+    fun maxFileSizeBytes(): Long? = null
+
+    /**
      * Check if a remote item still exists by ID. Default is [Unsupported] —
      * callers that *require* existence verification must check
      * [capabilities] first. This replaces the previous dangerous default of

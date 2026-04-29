@@ -53,6 +53,14 @@ class WebDavProvider internal constructor(
 
     override fun close() = api.close()
 
+    /**
+     * UD-327: surface the configured per-file size cap. Null when no
+     * `max_file_size_bytes` was set in the profile TOML; CloudRelocator's
+     * preflightOversized check is a no-op in that case (matches the pre-fix
+     * behaviour for generic WebDAV servers like Box / Nextcloud).
+     */
+    override fun maxFileSizeBytes(): Long? = config.maxFileSizeBytes
+
     // ── File operations ───────────────────────────────────────────────────────
 
     override suspend fun download(

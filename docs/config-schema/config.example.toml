@@ -239,6 +239,13 @@ trust_all_certs = false                                      # bool | default: f
 upload_floor_timeout_ms   = 600000   # int | default: 600000 (10 min).
 upload_min_throughput_kbps = 50      # int | default: 50.
 
+# UD-327: per-file size cap. When set, `unidrive relocate` warns about files
+# that exceed it BEFORE starting the transfer (instead of failing at minute 10
+# of a wasted 4-GiB PUT). Synology DSM defaults to 4 GiB unless the admin
+# raised the nginx cap in /etc/nginx/app.d/server.webdav.conf. Generic WebDAV
+# (Box, Nextcloud) usually has no per-file cap — leave unset.
+# max_file_size_bytes = 4294967296   # int | default: unset (no pre-flight).
+
 
 # ── HiDrive example ─────────────────────────────────────────────────────────
 [providers.hidrive]

@@ -151,6 +151,30 @@ class RelocateCommand : Runnable {
             return
         }
 
+        // UD-327: warn early about files exceeding the target's per-file size
+        // cap (Synology DSM WebDAV defaults to 4 GiB). Pre-fix, oversized
+        // PUTs failed at minute 10 of a wasted transfer with a 409 / silent
+        // connection reset. The cap surfaces only when the user configured
+        // `max_file_size_bytes` in the profile TOML; generic WebDAV servers
+        // (Box / Nextcloud) without an explicit cap remain unaffected.
+        val oversized = runBlocking(MDCContext()) { relocator.preflightOversized(sourcePath) }
+        if (oversized.isNotEmpty()) {
+            val cap = toProviderObj.maxFileSizeBytes() ?: 0L
+            System.err.println()
+            System.err.println("Warning: ${oversized.size} file(s) exceed target's max file size (${formatSize(cap)}):")
+            for ((path, size) in oversized.take(10)) {
+                System.err.println("  ${formatSize(size).padStart(10)}  $path")
+            }
+            if (oversized.size > 10) {
+                System.err.println("  ... and ${oversized.size - 10} more")
+            }
+            System.err.println(
+                "These files will fail mid-transfer. Raise the server's cap, " +
+                    "use a different provider for these files, or remove them.",
+            )
+            System.err.println()
+        }
+
         println("\nStarting migration...")
         println("  from: $fromProvider:$sourcePath")
         println("  to:   $toProvider:$targetPath")

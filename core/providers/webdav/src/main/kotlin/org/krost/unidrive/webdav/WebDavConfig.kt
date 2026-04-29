@@ -37,6 +37,15 @@ data class WebDavConfig(
     /** UD-277: same shape, applied to GET. */
     val downloadFloorTimeoutMs: Long = 600_000L,
     val downloadMinThroughputBytesPerSecond: Long = 50L * 1024,
+    /**
+     * UD-327: per-file size cap in bytes the target server enforces.
+     * Null = unknown / no cap. Synology DSM defaults to 4 GiB unless the
+     * admin reconfigured `/etc/nginx/app.d/server.webdav.conf` — set this
+     * explicitly via the profile's `max_file_size_bytes` knob to surface
+     * oversized files at relocate-planner time instead of after a 10-minute
+     * wasted PUT.
+     */
+    val maxFileSizeBytes: Long? = null,
 ) {
     companion object {
         fun defaultTokenPath(): Path {

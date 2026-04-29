@@ -70,6 +70,11 @@ class WebDavProviderFactory : ProviderFactory {
             properties["upload_min_throughput_kbps"]?.toLongOrNull()
                 ?: 50L
 
+        // UD-327: per-server max-file-size cap. Null when absent → no
+        // pre-flight oversize check. Synology DSM users should set this
+        // to 4 GiB (4294967296) unless they've raised the nginx cap.
+        val maxFileSizeBytes = properties["max_file_size_bytes"]?.toLongOrNull()
+
         val config =
             WebDavConfig(
                 baseUrl = url,
@@ -79,6 +84,7 @@ class WebDavProviderFactory : ProviderFactory {
                 trustAllCerts = trustAllCerts,
                 uploadFloorTimeoutMs = uploadFloorMs,
                 uploadMinThroughputBytesPerSecond = uploadMinKBps * 1024,
+                maxFileSizeBytes = maxFileSizeBytes,
             )
         return WebDavProvider(config)
     }

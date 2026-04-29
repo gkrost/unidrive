@@ -93,6 +93,40 @@ class CloudRelocator(
     }
 
     /**
+     * UD-327: scan the source tree for files that exceed the target's
+     * per-file size cap. Synology DSM WebDAV defaults to 4 GiB unless the
+     * admin reconfigured `/etc/nginx/app.d/server.webdav.conf`; without
+     * this pre-flight, oversized PUTs fail at minute 10 of a wasted
+     * transfer with a 409 / silent connection reset.
+     *
+     * Returns the list of (path, size) tuples for files exceeding the
+     * cap, in walk order. Empty list when:
+     *  - target.maxFileSizeBytes() returns null (provider has no cap, or
+     *    user didn't configure one) — the check is a no-op.
+     *  - all source files fit within the cap.
+     *
+     * Caller (RelocateCommand) is responsible for surfacing the list to
+     * the user and deciding whether to proceed (warn-only / strict abort
+     * via flag — left to the caller).
+     */
+    suspend fun preflightOversized(sourcePath: String): List<Pair<String, Long>> {
+        val cap = target.maxFileSizeBytes() ?: return emptyList()
+        val oversized = mutableListOf<Pair<String, Long>>()
+
+        suspend fun walk(path: String) {
+            for (item in source.listChildren(path)) {
+                if (item.isFolder) {
+                    walk(item.path)
+                } else if (item.size > cap) {
+                    oversized.add(item.path to item.size)
+                }
+            }
+        }
+        walk(sourcePath)
+        return oversized
+    }
+
+    /**
      * Equivalence check between a source file and a candidate target file.
      * Hash match wins when both sides report a hash (OneDrive ↔ OneDrive,
      * Dropbox ↔ Dropbox). Falls back to size equality when either side has

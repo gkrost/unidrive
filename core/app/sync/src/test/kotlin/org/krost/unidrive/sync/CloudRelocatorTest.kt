@@ -504,6 +504,75 @@ class CloudRelocatorTest {
             )
         }
 
+    // -- UD-327: WebDAV-style per-file size cap pre-flight ---------------------
+
+    @Test
+    fun `UD-327 - preflightOversized returns empty when target has no cap`() =
+        runTest {
+            source.children["/"] =
+                listOf(
+                    cloudItem("/big.mp4", size = 5L * 1024 * 1024 * 1024),
+                )
+            target.fakeMaxFileSizeBytes = null
+            val relocator = CloudRelocator(source, target)
+            assertEquals(emptyList<Pair<String, Long>>(), relocator.preflightOversized("/"))
+        }
+
+    @Test
+    fun `UD-327 - preflightOversized returns files exceeding the cap`() =
+        runTest {
+            val fourGiB = 4L * 1024 * 1024 * 1024
+            source.children["/"] =
+                listOf(
+                    cloudItem("/small.txt", size = 100),
+                    cloudItem("/big.mp4", size = fourGiB + 1),
+                    cloudItem("/giant.mp4", size = 10L * 1024 * 1024 * 1024),
+                )
+            target.fakeMaxFileSizeBytes = fourGiB
+            val relocator = CloudRelocator(source, target)
+            val oversized = relocator.preflightOversized("/")
+            assertEquals(2, oversized.size)
+            assertEquals("/big.mp4", oversized[0].first)
+            assertEquals(fourGiB + 1, oversized[0].second)
+            assertEquals("/giant.mp4", oversized[1].first)
+        }
+
+    @Test
+    fun `UD-327 - preflightOversized recurses into subdirectories`() =
+        runTest {
+            val cap = 1L * 1024 * 1024 // 1 MiB
+            source.children["/"] =
+                listOf(
+                    cloudItem("/sub", isFolder = true),
+                )
+            source.children["/sub"] =
+                listOf(
+                    cloudItem("/sub/big.bin", size = cap + 1),
+                    cloudItem("/sub/ok.bin", size = cap),
+                )
+            target.fakeMaxFileSizeBytes = cap
+            val relocator = CloudRelocator(source, target)
+            val oversized = relocator.preflightOversized("/")
+            assertEquals(1, oversized.size)
+            assertEquals("/sub/big.bin", oversized[0].first)
+        }
+
+    @Test
+    fun `UD-327 - file exactly at cap is NOT oversized`() =
+        runTest {
+            val cap = 1024L
+            source.children["/"] =
+                listOf(
+                    cloudItem("/at-cap.bin", size = cap),
+                    cloudItem("/over.bin", size = cap + 1),
+                )
+            target.fakeMaxFileSizeBytes = cap
+            val relocator = CloudRelocator(source, target)
+            val oversized = relocator.preflightOversized("/")
+            assertEquals(1, oversized.size)
+            assertEquals("/over.bin", oversized[0].first)
+        }
+
     // -- UD-274: per-file failure writes WARN line to slf4j logger -------------
     //
     // Pre-fix: per-file failures emitted MigrateEvent.Error which the CLI
@@ -642,6 +711,10 @@ class CloudRelocatorTest {
         var downloadShouldFail = false
         val failPaths = mutableSetOf<String>()
 
+        // UD-327: per-file size cap for the preflightOversized regression test.
+        // Null mirrors generic WebDAV / OneDrive (no cap configured).
+        var fakeMaxFileSizeBytes: Long? = null
+
         // UD-286: paths whose download or listChildren should throw
         // CancellationException — used by the regression test to verify the
         // catch blocks in CloudRelocator re-throw cancellation cleanly
@@ -658,6 +731,8 @@ class CloudRelocatorTest {
         override suspend fun authenticate() {}
 
         override suspend fun logout() {}
+
+        override fun maxFileSizeBytes(): Long? = fakeMaxFileSizeBytes
 
         override suspend fun listChildren(path: String): List<CloudItem> {
             listChildrenCount++
