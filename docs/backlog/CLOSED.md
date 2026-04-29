@@ -6412,3 +6412,38 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **OneDrive is the reference implementation (UD-207/UD-227 closed). The audit here is a write-down of the existing behaviour in GraphApiService + ThrottleBudget so the other provider audits can compare against a canonical baseline. Expect this to be the smallest audit — mostly docs extraction.**
+
+---
+id: UD-322
+title: S3 HTTP robustness audit
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit ad992e7. S3 audit doc — raw Ktor + manual SigV4 (no AWS SDK). Headline: zero retries, no Retry-After / x-amz-retry-after-millis, no multipart upload (>5 GB hard fail), no preconditions, RequestId/HostId dropped from XML error parse. 8 follow-ups.
+opened: 2026-04-20
+chunk: sg5
+---
+**Part of UD-228 split — per-provider HTTP robustness audit.**
+
+**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
+
+1. **Non-2xx body parsing** — does this provider extract structured detail
+   (retry hints, quota info, recoverable-vs-fatal distinction) from error
+   bodies, or just stringify the Ktor exception?
+2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
+   SyncEngine action layer (fatal on non-whitelisted errors)?
+3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
+4. **Idempotency** — is the authenticatedRequest equivalent body-replay
+   safe?
+5. **Concurrency recommendations** — `maxConcurrentTransfers` +
+   `minRequestSpacingMs` based on provider docs + observed behaviour.
+
+**Deliverable:** `docs/providers/s3-robustness.md`.
+
+**Consumed by:**
+- UD-262 — findings inform `HttpRetryBudget` config surface
+- UD-263 — findings produce concurrency hint values
+
+**S3 specifics: AWS SDK already provides retry policies + backoff — audit whether we use the SDK defaults or override. 503 SlowDown handling, date-formatted Retry-After. Concurrency: S3 handles thousands of parallel requests; likely a soft cap of 64-128 is fine.**
