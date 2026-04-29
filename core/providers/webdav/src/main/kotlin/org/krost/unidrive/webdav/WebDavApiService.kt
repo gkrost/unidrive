@@ -32,7 +32,10 @@ import java.util.Locale
  * PROPFIND uses `Depth: 1` per-directory in a BFS traversal to avoid
  * servers that reject `Depth: infinity` (Nextcloud, SharePoint).
  */
-class WebDavApiService(
+// UD-291: open so tests can inject a throwing override on quota / propfind
+// without a heavyweight HTTP-stub harness. No behaviour change for production
+// callers; the only consumers are WebDavProvider and the in-tree tests.
+open class WebDavApiService(
     private val config: WebDavConfig,
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(WebDavApiService::class.java)
@@ -270,8 +273,17 @@ class WebDavApiService(
         return results
     }
 
-    /** PROPFIND Depth:1 on [remotePath]. Returns all direct children plus the resource itself. */
-    suspend fun propfind(remotePath: String): List<WebDavEntry> {
+    /**
+     * PROPFIND Depth:1 on [remotePath]. Returns all direct children plus the
+     * resource itself.
+     *
+     * UD-291: `open` so tests can override with a no-op fake — used together
+     * with the `quotaPropfind` override to validate the catch behaviour in
+     * [WebDavProvider.quota] without an HTTP-stub harness. (Production calls
+     * propfind from `WebDavProvider.authenticate` to flip `isAuthenticated`
+     * to `true`; the test fake makes that a free no-op.)
+     */
+    open suspend fun propfind(remotePath: String): List<WebDavEntry> {
         log.debug("PROPFIND depth=1: {}", remotePath)
         val url = resourceUrl(remotePath)
         val body = """<?xml version="1.0" encoding="UTF-8"?>
@@ -299,8 +311,11 @@ class WebDavApiService(
      * `quota-available-bytes` and `quota-used-bytes`. Returns null when the
      * server does not advertise these properties (e.g. Synology DSM 7.x,
      * Apache mod_dav).
+     *
+     * UD-291: `open` so tests can override to verify that
+     * [WebDavProvider.quota] logs + propagates cancellation cleanly.
      */
-    suspend fun quotaPropfind(): QuotaInfo? {
+    open suspend fun quotaPropfind(): QuotaInfo? {
         val url = resourceUrl("/")
         val body =
             """<?xml version="1.0" encoding="UTF-8"?>

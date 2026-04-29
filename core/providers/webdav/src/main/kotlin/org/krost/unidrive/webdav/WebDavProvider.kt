@@ -1,5 +1,6 @@
 package org.krost.unidrive.webdav
 
+import kotlinx.coroutines.CancellationException
 import org.krost.unidrive.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
@@ -17,14 +18,20 @@ import java.time.Instant
  * Authentication: HTTP Basic (username + password) via Ktor Auth plugin.
  * No OAuth — credentials live in [WebDavConfig].
  */
-class WebDavProvider(
+class WebDavProvider internal constructor(
     val config: WebDavConfig,
+    api: WebDavApiService,
 ) : CloudProvider {
+    // UD-291: convenience constructor used in production. The internal primary
+    // constructor lets tests inject an override of [WebDavApiService] (for
+    // verifying the catch behaviour in `quota()`) without an HTTP-stub harness.
+    constructor(config: WebDavConfig) : this(config, WebDavApiService(config))
+
     override val id = "webdav"
     override val displayName = "WebDAV"
 
     private val log = LoggerFactory.getLogger(WebDavProvider::class.java)
-    private val api = WebDavApiService(config)
+    private val api: WebDavApiService = api
 
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
 
@@ -181,7 +188,30 @@ class WebDavProvider(
         if (!isAuthenticated) return QuotaInfo(total = 0, used = 0, remaining = 0)
         return try {
             api.quotaPropfind() ?: QuotaInfo(total = 0, used = 0, remaining = 0)
-        } catch (_: Exception) {
+        } catch (e: CancellationException) {
+            // UD-291: never absorb cancellation. Pre-fix this was caught by
+            // the bare `catch (_: Exception)` and degraded to QuotaInfo(0,0,0),
+            // breaking structured concurrency on the caller side.
+            throw e
+        } catch (e: Exception) {
+            // UD-291: log the failure with class + throwable. Pre-fix the
+            // catch was bare (`catch (_: Exception)`) and dropped the
+            // exception entirely — a network failure (timeout, 503, DNS,
+            // TLS) was indistinguishable from "server doesn't expose quota
+            // properties". RelocateCommand's `targetQuota.total > 0` guard
+            // was bypassed in both cases without any signal.
+            //
+            // Continues to return the (0,0,0) sentinel for API compatibility
+            // — every caller already treats `total == 0` as "unknown".
+            // Promoting to a nullable / CapabilityResult signature is a
+            // separate ticket (would touch all 8 providers + tests) once
+            // RelocateCommand grows a `--ignore-quota` flag.
+            log.warn(
+                "WebDAV quota PROPFIND failed: {}: {}",
+                e.javaClass.simpleName,
+                e.message,
+                e,
+            )
             QuotaInfo(total = 0, used = 0, remaining = 0)
         }
     }

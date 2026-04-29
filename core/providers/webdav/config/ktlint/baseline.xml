@@ -10,9 +10,10 @@
         <error line="9" column="1" source="standard:no-wildcard-imports" />
         <error line="10" column="1" source="standard:no-wildcard-imports" />
         <error line="11" column="1" source="standard:no-wildcard-imports" />
+        <error line="35" column="1" source="standard:no-consecutive-comments" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt">
-        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceSslTest.kt">
         <error line="3" column="1" source="standard:no-wildcard-imports" />
@@ -27,7 +28,7 @@
         <error line="6" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt">
-        <error line="5" column="1" source="standard:no-wildcard-imports" />
+        <error line="13" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/webdav/WebDavSnapshotTest.kt">
         <error line="3" column="1" source="standard:no-wildcard-imports" />
