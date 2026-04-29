@@ -4,6 +4,7 @@ import com.akuleshov7.ktoml.Toml
 import com.akuleshov7.ktoml.TomlInputConfig
 import kotlinx.serialization.Serializable
 import org.krost.unidrive.sync.model.ConflictPolicy
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -11,9 +12,133 @@ import java.nio.file.Paths
 // ── ktoml-serializable intermediates ─────────────────────────────────────────
 
 private val ktoml = Toml(inputConfig = TomlInputConfig(ignoreUnknownNames = true))
+private val configLog = LoggerFactory.getLogger("org.krost.unidrive.sync.SyncConfig")
 
 /** Top-level so the @Serializable-generated companion is in scope at the call site. */
 internal fun decodeRawSyncConfig(content: String): RawSyncConfig = ktoml.decodeFromString(RawSyncConfig.serializer(), content)
+
+/**
+ * UD-282: a TOML section header in `config.toml` that doesn't match the
+ * schema (`[general]` or `[providers.X]`). Surfaced via [validateTomlSections]
+ * so users get a loud signal when they typo'd `[profiles.X]` instead of the
+ * silent ktoml drop.
+ */
+data class UnknownTomlSection(
+    val section: String,
+    val lineNumber: Int,
+    /** Suggested correction from the common-typos table or Levenshtein search. */
+    val suggestion: String?,
+)
+
+private val knownTopLevelSections = setOf("general", "providers")
+
+/**
+ * Hand-typed common section-header typos. Higher-precision than Levenshtein
+ * for the patterns we've seen in real config.toml files.
+ */
+private val commonSectionTypos =
+    mapOf(
+        "profiles" to "providers",
+        "profile" to "providers",
+        "provider" to "providers",
+        "general_settings" to "general",
+        "globals" to "general",
+        "global" to "general",
+        "settings" to "general",
+    )
+
+/**
+ * UD-282: scan a config.toml content string for top-level section headers
+ * that don't match the schema. ktoml's [TomlInputConfig.ignoreUnknownNames]
+ * is `true` by default for forward-compat, but it also silently drops
+ * `[profiles.X]` (the most common user typo for `[providers.X]`) without
+ * any signal — the user sees `Unknown profile: X` minutes later from the
+ * resolver, not at config-load time.
+ *
+ * Returns a list of unknown sections with line numbers and "did you mean"
+ * suggestions. Empty list = clean config.
+ *
+ * Pure function — no logging, no side effects. The caller ([parseRaw])
+ * decides whether to log a warning or throw under strict mode.
+ */
+internal fun validateTomlSections(content: String): List<UnknownTomlSection> {
+    val unknowns = mutableListOf<UnknownTomlSection>()
+    val sectionRegex = Regex("""^\s*\[([^\]]+)]\s*(#.*)?$""")
+    content.lines().forEachIndexed { idx, line ->
+        // Skip comments without breaking on inline `#` after the header.
+        if (line.trimStart().startsWith("#")) return@forEachIndexed
+        val m = sectionRegex.matchEntire(line) ?: return@forEachIndexed
+        val section = m.groupValues[1].trim()
+        // Tables-of-tables like `[providers.foo.pin_patterns]` are nested
+        // under the top-level (`providers`), so we only check the prefix.
+        val topLevel = section.substringBefore('.')
+        if (topLevel !in knownTopLevelSections) {
+            unknowns.add(
+                UnknownTomlSection(
+                    section = section,
+                    lineNumber = idx + 1,
+                    suggestion = suggestKnownSection(section, topLevel),
+                ),
+            )
+        }
+    }
+    return unknowns
+}
+
+private fun suggestKnownSection(
+    fullSection: String,
+    topLevel: String,
+): String? {
+    // Common-typo lookup first — beats Levenshtein for the patterns we've seen.
+    commonSectionTypos[topLevel.lowercase()]?.let { fixed ->
+        // Preserve the trailing `.X.Y` segments (e.g. `profiles.foo.pin_patterns`
+        // → `providers.foo.pin_patterns`).
+        val rest = fullSection.substringAfter('.', "")
+        return if (rest.isEmpty()) fixed else "$fixed.$rest"
+    }
+    // Fallback: Levenshtein distance ≤ 3 against the known top-level set.
+    val best =
+        knownTopLevelSections.minByOrNull { levenshteinDistance(topLevel.lowercase(), it.lowercase()) }
+            ?: return null
+    val distance = levenshteinDistance(topLevel.lowercase(), best.lowercase())
+    if (distance > 3) return null
+    val rest = fullSection.substringAfter('.', "")
+    return if (rest.isEmpty()) best else "$best.$rest"
+}
+
+/** Iterative Levenshtein distance — small input sizes; no need for memo optimization. */
+private fun levenshteinDistance(
+    a: String,
+    b: String,
+): Int {
+    if (a == b) return 0
+    if (a.isEmpty()) return b.length
+    if (b.isEmpty()) return a.length
+    var prev = IntArray(b.length + 1) { it }
+    var curr = IntArray(b.length + 1)
+    for (i in 1..a.length) {
+        curr[0] = i
+        for (j in 1..b.length) {
+            val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+            curr[j] = minOf(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+        }
+        val tmp = prev
+        prev = curr
+        curr = tmp
+    }
+    return prev[b.length]
+}
+
+/**
+ * UD-282: opt-in strict mode that turns every unknown TOML section into a
+ * fatal `IllegalArgumentException`. Useful for CI and for users who'd
+ * rather see config typos halt the run than surface as `Unknown profile:`
+ * minutes later.
+ *
+ * Reads `UNIDRIVE_STRICT_CONFIG` env var. Truthy values: `1`, `true`,
+ * `yes` (case-insensitive).
+ */
+internal fun isStrictConfigMode(): Boolean = System.getenv("UNIDRIVE_STRICT_CONFIG")?.lowercase() in setOf("1", "true", "yes")
 
 @Serializable
 data class RawSyncConfig(
@@ -256,7 +381,32 @@ data class SyncConfig(
                 providers = emptyMap(),
             )
 
-        fun parseRaw(content: String): RawSyncConfig = decodeRawSyncConfig(content)
+        fun parseRaw(content: String): RawSyncConfig {
+            // UD-282: surface ignored TOML sections (most commonly the
+            // `[profiles.X]` → `[providers.X]` typo) instead of letting
+            // ktoml drop them silently.
+            val unknowns = validateTomlSections(content)
+            if (unknowns.isNotEmpty()) {
+                val strict = isStrictConfigMode()
+                unknowns.forEach { u ->
+                    val msg =
+                        buildString {
+                            append("config.toml line ${u.lineNumber}: ignored unknown section '[${u.section}]'")
+                            if (u.suggestion != null) {
+                                append(" — did you mean '[${u.suggestion}]'?")
+                            }
+                        }
+                    if (strict) {
+                        throw IllegalArgumentException(
+                            msg + " (UNIDRIVE_STRICT_CONFIG is set; remove the typo or unset the env var)",
+                        )
+                    } else {
+                        configLog.warn(msg)
+                    }
+                }
+            }
+            return decodeRawSyncConfig(content)
+        }
 
         /**
          * UD-252: the single source of truth for "which profile does unidrive use

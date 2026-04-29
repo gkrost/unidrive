@@ -13,7 +13,7 @@
         <error line="4" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt">
-        <error line="207" column="141" source="standard:max-line-length" />
+        <error line="332" column="141" source="standard:max-line-length" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt">
         <error line="3" column="1" source="standard:no-wildcard-imports" />
