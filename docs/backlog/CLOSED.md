@@ -5971,3 +5971,124 @@ Low priority, XS effort. 4 lines of code. High value for anyone
 running long unattended relocates — the difference between a
 post-mortem grep of `unidrive.log` finding all failures vs finding
 none.
+
+---
+id: UD-294
+title: MDC ?????? on 132k+ log lines — UD-284's fix didn't reach OneDrive download / WebDAV upload paths
+category: core
+priority: high
+effort: M
+status: closed
+closed: 2026-04-29
+resolved_by: commit 5ed10d0. Root cause was relocate seeding empty profile/scan MDC, not MDCContext propagation. New shared withRelocateMdc helper in :app:sync used by CLI + MCP relocate paths. Verification deferred to post-JFR deploy+run cycle (deploy task would kill the live JFR process).
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-04-29
+---
+**Symptom (from log-feedback-loop-proposal 2026-04-29, quantified
+via `log-watch.sh --summary`).** Across yesterday's rolled
+unidrive.log set:
+
+| File | Lines |
+|---|---|
+| unidrive-mcp.log | 1 |
+| unidrive.2026-04-29.0.log | 48,528 |
+| unidrive.2026-04-29.1.log | 39,986 |
+| unidrive.2026-04-29.2.log | 41,818 |
+| unidrive.log | 2,204 |
+
+| Anomaly counter | count |
+|---|---:|
+| **MDC missing (`[???????]` placeholder)** | **132,066** |
+| WARN | 4 |
+| ERROR | 0 |
+| `Can't create an array of size` | 2 (UD-293) |
+| Connection reset / aborted | 3 |
+
+132,066 lines (≈99% of all DEBUG output) carry `[???????] [*]
+[-------]` instead of `[<sha>] [<profile>] [<scan>]`. Per CLAUDE.md
+§"Before you read unidrive.log", filtering on the profile prefix is
+the primary triage signal. With ~all worker-thread lines missing the
+prefix, that triage path is dead.
+
+UD-284 fixed this for the relocate code path (wrapped
+`runBlocking { migrate(...).collect ... }` in `MDCContext()`). The
+proposal's analysis says **two more code paths still don't propagate
+MDC**:
+
+1. **WebDAV upload path** — every `Upload`, `MKCOL`, `PROPFIND` log
+   line from `DefaultDispatcher-worker-N` threads has the
+   `[???????]` triplet. 94k+ uploads in yesterday's run — that's
+   the bulk of the missing-MDC count.
+2. **OneDrive Graph download path** — `Download` log lines from
+   workers similarly.
+
+Same root cause as UD-284: `runBlocking { ... }` (or `withContext`,
+or `flowOn(Dispatchers.IO)`) without `MDCContext()` in the coroutine
+context. SLF4J MDC is `ThreadLocal`; without explicit propagation,
+DefaultDispatcher / IO worker threads have empty MDC.
+
+**Investigation entry points.**
+
+```bash
+# Find runBlocking sites in providers/sync that DO NOT use MDCContext.
+grep -rn 'runBlocking[^(]' core/providers/ core/app/sync/
+grep -rn 'withContext(Dispatchers' core/providers/ core/app/sync/
+grep -rn 'flowOn(Dispatchers' core/providers/ core/app/sync/
+```
+
+Compare against the post-UD-284 RelocateCommand pattern:
+
+```kotlin
+runBlocking(MDCContext()) { ... }
+withContext(MDCContext() + Dispatchers.IO) { ... }
+flow { ... }.flowOn(Dispatchers.IO)  // requires the upstream collect to use MDCContext
+```
+
+**Proposed fix.** Apply the same MDCContext-wrapping pattern at every
+runBlocking / withContext / flowOn site that crosses the
+`Dispatchers.IO` or `Dispatchers.Default` boundary in the upload /
+download paths. Specifically:
+
+- `core/providers/webdav/src/main/kotlin/.../WebDavApiService.kt` —
+  `download` already wraps `withContext(Dispatchers.IO)`, but the
+  caller's MDCContext doesn't propagate. Use
+  `withContext(Dispatchers.IO + MDCContext())` if MDCContext is in
+  scope at the call site, OR have the caller wrap `runBlocking`
+  with MDCContext.
+- `core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt` —
+  `downloadFile`'s `prepareGet().execute { ... }` block, plus any
+  `runBlocking` in the OAuth refresh path.
+- `core/app/sync/src/main/kotlin/.../SyncEngine.kt` — Pass 2's
+  parallel download loop. (UD-212 partly fixed this, but the
+  proposal's count of 132k missing lines suggests at least one
+  worker-thread path is still unwrapped.)
+
+**Acceptance.**
+
+- Integration test: 10-file localfs → webdav upload run via
+  `unidrive sync --upload-only -p test-profile`. Capture
+  `unidrive.log` to a temp file. Assert
+  `grep -c '\[\?\?\?\?\?\?\?\]' unidrive.log == 0`.
+- Same shape for download: 10-file webdav → localfs.
+- After fix: `bash scripts/dev/log-watch.sh --json` over a fresh
+  sync run reports `mdc_missing: 0` (or near-zero — startup
+  pre-resolveCurrentProfile lines are exempt).
+
+**Related.**
+- UD-212 — original "log/CLI profile context" wiring. UD-284 closed
+  the relocate path; this ticket extends it to upload/download.
+- UD-284 — same fix shape, smaller scope.
+- `docs/dev/lessons/mdc-in-suspend.md` — canonical pattern.
+- `docs/dev/log-feedback-loop-proposal.md` — source of the metric.
+- `scripts/dev/log-watch.sh` — `mdc_missing` counter for CI gating.
+
+**Why now.** Without MDC propagation:
+- Postmortem on a 132k-line log is impossible; can't filter by
+  profile, can't pin the build SHA.
+- The CLAUDE.md §"Before you read unidrive.log" workflow doesn't
+  work.
+- A future CI hook on `log-watch.sh --json mdc_missing > 0` becomes
+  the regression signal once this is closed.
