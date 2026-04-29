@@ -147,7 +147,7 @@ class StatusCommand : Runnable {
         val profile = parent.resolveCurrentProfile()
         val baseDir = parent.configBaseDir()
         val configDir = baseDir.resolve(profile.name)
-        val row = buildAccountRow(profile, baseDir, configDir)
+        val row = buildAccountRow(profile, baseDir, configDir, fetchQuotaUsedIfSupported(profile, configDir))
         val group = ProviderGroup(profile.type, providerDisplayName(profile.type), listOf(row))
         val ansi = AnsiHelper.isAnsiSupported()
         renderTable(listOf(group), ansi)
@@ -161,7 +161,7 @@ class StatusCommand : Runnable {
 
         for (profile in profiles) {
             val configDir = baseDir.resolve(profile.name)
-            val row = buildAccountRow(profile, baseDir, configDir)
+            val row = buildAccountRow(profile, baseDir, configDir, fetchQuotaUsedIfSupported(profile, configDir))
             accountsByType.getOrPut(profile.type) { mutableListOf() }.add(row)
         }
 
@@ -220,10 +220,43 @@ class StatusCommand : Runnable {
         }
     }
 
+    /**
+     * UD-261: fetch the authoritative quota.used for providers that declare
+     * Capability.QuotaExact. Returns null when the provider doesn't expose a
+     * quota (S3, SFTP, WebDAV-without-RFC-4331), or when authentication /
+     * network fails — caller falls back to the enumerated remoteSize sum.
+     *
+     * Pre-fix `buildAccountRow` summed `entries.filter { !it.isFolder }
+     * .sumOf { it.remoteSize }` which always under-reports OneDrive against
+     * the real quota: enumerated DriveItem sizes don't include revision
+     * history, recycle bin, or OneNote metadata. Field-observed delta on
+     * `onedrive-test`: 164 GB enumerated vs 349 GB real (~46 % shortfall).
+     */
+    private fun fetchQuotaUsedIfSupported(
+        profile: ProfileInfo,
+        configDir: Path,
+    ): Long? =
+        try {
+            val provider = parent.createProviderFor(profile, configDir)
+            if (Capability.QuotaExact !in provider.capabilities()) return null
+            runBlocking {
+                provider.authenticate()
+                if (!provider.isAuthenticated) return@runBlocking null
+                provider.quota().used
+            }
+        } catch (_: Exception) {
+            // Auth-fail / network-fail / provider-not-configured — caller
+            // falls back to enumerated sum which is at least non-null.
+            null
+        }
+
     private fun buildAccountRow(
         profile: ProfileInfo,
         baseDir: Path,
         configDir: Path,
+        // UD-261: pre-fetched authoritative quota.used for QuotaExact providers.
+        // null → fall back to the enumerated remoteSize sum (the pre-fix path).
+        quotaUsed: Long? = null,
     ): AccountRow {
         val stateDbPath = configDir.resolve("state.db")
         val hasDb = Files.exists(stateDbPath)
@@ -274,6 +307,10 @@ class StatusCommand : Runnable {
             val fileCount = entries.count { !it.isFolder }
             val sparseCount = entries.count { !it.isHydrated && !it.isFolder }
             val totalRemoteSize = entries.filter { !it.isFolder }.sumOf { it.remoteSize }
+            // UD-261: prefer the authoritative quota.used over the enumerated
+            // sum for QuotaExact providers. quotaUsed is null when the provider
+            // doesn't support quota or the auth/network call failed.
+            val cloudSizeBytes = quotaUsed ?: totalRemoteSize
             val totalLocalSize = entries.filter { it.isHydrated }.sumOf { it.localSize ?: 0L }
             val lastSyncRaw = db.getSyncState("last_full_scan")
             db.close()
@@ -286,7 +323,7 @@ class StatusCommand : Runnable {
                     statusLabel = GlyphRenderer.authFailLabel(),
                     files = fileCount,
                     sparse = sparseCount,
-                    cloudSize = CliProgressReporter.formatSize(totalRemoteSize),
+                    cloudSize = CliProgressReporter.formatSize(cloudSizeBytes),
                     localSize = CliProgressReporter.formatSize(totalLocalSize),
                     lastSync = lastSyncFormatted,
                 )
@@ -298,7 +335,7 @@ class StatusCommand : Runnable {
                     statusLabel = statusLabel,
                     files = fileCount,
                     sparse = sparseCount,
-                    cloudSize = CliProgressReporter.formatSize(totalRemoteSize),
+                    cloudSize = CliProgressReporter.formatSize(cloudSizeBytes),
                     localSize = CliProgressReporter.formatSize(totalLocalSize),
                     lastSync = lastSyncFormatted,
                 )
