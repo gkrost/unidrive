@@ -9,12 +9,15 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.QuotaInfo
 import org.slf4j.LoggerFactory
+import java.io.IOException
 import java.net.URLEncoder
 import java.nio.file.Files
 import java.nio.file.Path
@@ -143,6 +146,128 @@ open class WebDavApiService(
 
     override fun close() = httpClient.close()
 
+    // ── Retry budget (UD-288) ────────────────────────────────────────────────
+    //
+    // Mirrors the pattern OneDrive's GraphApiService established under
+    // UD-227 / UD-232: retry transient failures (HttpRequestTimeoutException,
+    // selected IOException subclasses, retriable HTTP statuses) up to 5 times
+    // with exponential backoff. CancellationException always propagates
+    // (UD-300 carve-out). Pre-UD-288, WebDAV had **no** retry — one
+    // transient = one permanently failed file in the relocate run.
+    //
+    // The function is `internal` so WebDavApiServiceRetryTest can pin the
+    // contract directly without going through HTTP. `backoffMs` is injectable
+    // so tests can use sub-millisecond delays without slowing the suite.
+
+    /**
+     * UD-288: wrap a WebDAV operation in a 5-attempt retry budget.
+     *
+     * Retries on:
+     *   - [HttpRequestTimeoutException]                — Ktor client timeout
+     *   - retriable [IOException]                      — see [isRetriableIoException]
+     *   - retriable HTTP status (408, 425, 429, 5xx)   — see [isRetriableStatus]
+     *
+     * Honors [HttpHeaders.RetryAfter] when present on a [ResponseException]
+     * (DSM emits it on 503 Service Unavailable). Otherwise falls back to
+     * [backoffMs] (default exponential: 1 s, 2 s, 4 s, 8 s, 16 s).
+     *
+     * Always re-throws [CancellationException] before any retry decision.
+     */
+    internal suspend fun <T> withRetry(
+        op: String,
+        target: String,
+        maxAttempts: Int = 5,
+        backoffMs: (attempt: Int) -> Long = { 1000L * (1L shl it) },
+        block: suspend () -> T,
+    ): T {
+        var lastException: Throwable? = null
+        repeat(maxAttempts) { attempt ->
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: HttpRequestTimeoutException) {
+                lastException = e
+                log.warn(
+                    "WebDAV {} {} timed out (attempt {}/{}): {}",
+                    op,
+                    target,
+                    attempt + 1,
+                    maxAttempts,
+                    e.message,
+                )
+            } catch (e: ResponseException) {
+                if (!isRetriableStatus(e.response.status)) throw e
+                lastException = e
+                log.warn(
+                    "WebDAV {} {} HTTP {} (attempt {}/{})",
+                    op,
+                    target,
+                    e.response.status.value,
+                    attempt + 1,
+                    maxAttempts,
+                )
+            } catch (e: IOException) {
+                if (!isRetriableIoException(e)) throw e
+                lastException = e
+                log.warn(
+                    "WebDAV {} {} I/O error (attempt {}/{}): {}: {}",
+                    op,
+                    target,
+                    attempt + 1,
+                    maxAttempts,
+                    e.javaClass.simpleName,
+                    e.message,
+                )
+            }
+            // Last attempt: don't sleep before throwing.
+            if (attempt + 1 < maxAttempts) {
+                val retryAfterMs =
+                    (lastException as? ResponseException)
+                        ?.response
+                        ?.headers
+                        ?.get(HttpHeaders.RetryAfter)
+                        ?.toLongOrNull()
+                        ?.times(1000L)
+                        ?: backoffMs(attempt)
+                delay(retryAfterMs)
+            }
+        }
+        throw lastException ?: IllegalStateException("withRetry budget exhausted with no captured cause")
+    }
+
+    /**
+     * HTTP statuses where another attempt has a reasonable chance of succeeding.
+     * 408 Request Timeout, 425 Too Early, 429 Too Many Requests, and 5xx
+     * server errors all imply "try again later." Everything else (404, 401,
+     * 403, 409, 410, etc.) is terminal — retrying would mask the real issue.
+     */
+    internal fun isRetriableStatus(status: HttpStatusCode): Boolean = status.value in setOf(408, 425, 429, 500, 502, 503, 504)
+
+    /**
+     * IOException subclasses (or message text) where another attempt is
+     * worth trying. Conservatively narrow to known transient failures —
+     * UnknownHostException / SSL handshake errors signal misconfiguration,
+     * not transient network state, and should NOT be retried.
+     */
+    internal fun isRetriableIoException(e: IOException): Boolean {
+        if (e is java.net.SocketTimeoutException) return true
+        if (e is org.apache.hc.core5.http.ConnectionClosedException) return true
+        // SocketException covers "Connection reset", "Broken pipe", etc.
+        // but UnknownHostException extends IOException too — exclude it.
+        if (e is java.net.UnknownHostException) return false
+        if (e is javax.net.ssl.SSLPeerUnverifiedException) return false
+        if (e is javax.net.ssl.SSLHandshakeException) return false
+        if (e is java.net.SocketException) return true
+        // Windows TCP WSAECONNABORTED / WSAECONNRESET surface as IOException
+        // with localised message text — match by substring as a backstop.
+        val msg = e.message ?: return false
+        return msg.contains("aborted", ignoreCase = true) ||
+            msg.contains("reset", ignoreCase = true) ||
+            // German Windows: "Eine bestehende Verbindung wurde softwaregesteuert"
+            msg.contains("Verbindung wurde", ignoreCase = true)
+    }
+
     // ── Connectivity check ────────────────────────────────────────────────────
 
     /** HEAD request to verify credentials and connectivity. */
@@ -158,33 +283,47 @@ open class WebDavApiService(
     suspend fun download(
         remotePath: String,
         destination: Path,
-    ): Long {
-        log.debug("Download: {}", remotePath)
-        val url = resourceUrl(remotePath)
-        val response = httpClient.get(url)
-        checkResponse(response, url)
-        val channel: ByteReadChannel = response.body()
-        var written = 0L
-        withContext(Dispatchers.IO) {
-            Files.createDirectories(destination.parent)
-            Files.newOutputStream(destination).use { out ->
-                val buf = ByteArray(8192)
-                while (true) {
-                    val n = channel.readAvailable(buf)
-                    if (n <= 0) break
-                    out.write(buf, 0, n)
-                    written += n
+    ): Long =
+        withRetry("download", remotePath) {
+            log.debug("Download: {}", remotePath)
+            val url = resourceUrl(remotePath)
+            val response = httpClient.get(url)
+            checkResponse(response, url)
+            val channel: ByteReadChannel = response.body()
+            // UD-288: re-open the destination on every retry. Files.newOutputStream
+            // defaults to TRUNCATE_EXISTING so partial bytes from a failed prior
+            // attempt are discarded — written counter is local to the lambda
+            // body so it resets cleanly per attempt.
+            var written = 0L
+            withContext(Dispatchers.IO) {
+                Files.createDirectories(destination.parent)
+                Files.newOutputStream(destination).use { out ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = channel.readAvailable(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        written += n
+                    }
                 }
             }
+            written
         }
-        return written
-    }
 
     /** Upload [localPath] as resource at [remotePath]. Returns a [WebDavEntry]. */
     suspend fun upload(
         localPath: Path,
         remotePath: String,
         onProgress: ((Long, Long) -> Unit)? = null,
+    ): WebDavEntry =
+        withRetry("upload", remotePath) {
+            uploadOnce(localPath, remotePath, onProgress)
+        }
+
+    private suspend fun uploadOnce(
+        localPath: Path,
+        remotePath: String,
+        onProgress: ((Long, Long) -> Unit)?,
     ): WebDavEntry {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
         log.debug("Upload: {} ({} bytes)", remotePath, fileSize)
@@ -246,6 +385,17 @@ open class WebDavApiService(
     suspend fun mkcol(remotePath: String) {
         val normalized = normalizeCollectionKey(remotePath)
         if (normalized in knownCollections) return
+        // UD-288: retry around the network call only (the cache check above
+        // is local; no point re-running it after a transient failure).
+        withRetry("mkcol", remotePath) {
+            mkcolOnce(remotePath, normalized)
+        }
+    }
+
+    private suspend fun mkcolOnce(
+        remotePath: String,
+        normalized: String,
+    ) {
         log.debug("MKCOL: {}", remotePath)
         val url = resourceUrl(remotePath)
         val response = httpClient.request(url) { method = HttpMethod("MKCOL") }
@@ -320,10 +470,11 @@ open class WebDavApiService(
      * propfind from `WebDavProvider.authenticate` to flip `isAuthenticated`
      * to `true`; the test fake makes that a free no-op.)
      */
-    open suspend fun propfind(remotePath: String): List<WebDavEntry> {
-        log.debug("PROPFIND depth=1: {}", remotePath)
-        val url = resourceUrl(remotePath)
-        val body = """<?xml version="1.0" encoding="UTF-8"?>
+    open suspend fun propfind(remotePath: String): List<WebDavEntry> =
+        withRetry("propfind", remotePath) {
+            log.debug("PROPFIND depth=1: {}", remotePath)
+            val url = resourceUrl(remotePath)
+            val body = """<?xml version="1.0" encoding="UTF-8"?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>
     <D:resourcetype/>
@@ -332,16 +483,16 @@ open class WebDavApiService(
     <D:getetag/>
   </D:prop>
 </D:propfind>"""
-        val response =
-            httpClient.request(url) {
-                method = HttpMethod("PROPFIND")
-                header("Depth", "1")
-                contentType(ContentType.Application.Xml)
-                setBody(body)
-            }
-        checkResponse(response, url)
-        return parsePropfindResponse(response.bodyAsText(), remotePath)
-    }
+            val response =
+                httpClient.request(url) {
+                    method = HttpMethod("PROPFIND")
+                    header("Depth", "1")
+                    contentType(ContentType.Application.Xml)
+                    setBody(body)
+                }
+            checkResponse(response, url)
+            parsePropfindResponse(response.bodyAsText(), remotePath)
+        }
 
     /**
      * RFC 4331 PROPFIND Depth:0 on the root collection to retrieve
@@ -352,26 +503,27 @@ open class WebDavApiService(
      * UD-291: `open` so tests can override to verify that
      * [WebDavProvider.quota] logs + propagates cancellation cleanly.
      */
-    open suspend fun quotaPropfind(): QuotaInfo? {
-        val url = resourceUrl("/")
-        val body =
-            """<?xml version="1.0" encoding="UTF-8"?>
+    open suspend fun quotaPropfind(): QuotaInfo? =
+        withRetry("quotaPropfind", "/") {
+            val url = resourceUrl("/")
+            val body =
+                """<?xml version="1.0" encoding="UTF-8"?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>
     <D:quota-available-bytes/>
     <D:quota-used-bytes/>
   </D:prop>
 </D:propfind>"""
-        val response =
-            httpClient.request(url) {
-                method = HttpMethod("PROPFIND")
-                header("Depth", "0")
-                contentType(ContentType.Application.Xml)
-                setBody(body)
-            }
-        checkResponse(response, url)
-        return parseQuotaPropfindXml(response.bodyAsText())
-    }
+            val response =
+                httpClient.request(url) {
+                    method = HttpMethod("PROPFIND")
+                    header("Depth", "0")
+                    contentType(ContentType.Application.Xml)
+                    setBody(body)
+                }
+            checkResponse(response, url)
+            parseQuotaPropfindXml(response.bodyAsText())
+        }
 
     internal fun parseQuotaPropfindXml(xml: String): QuotaInfo? {
         val available = xmlValue(xml, "quota-available-bytes")?.toLongOrNull()
