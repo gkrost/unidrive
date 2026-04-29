@@ -33,6 +33,12 @@ class WebDavProviderFactory : ProviderFactory {
             cloudActExposure = false,
             signupUrl = null,
             tier = "Self-hosted",
+            // UD-263: 4 covers Synology DSM (observed 500 above ~4 parallel
+            // uploads) and SharePoint (≤ 2). Nextcloud / ownCloud / mod_dav
+            // tolerate higher (5-8); a per-server-family knob would let
+            // power users raise this. See docs/providers/webdav-robustness.md
+            // §5 for the full server-family matrix.
+            maxConcurrentTransfers = 4,
         )
 
     override fun create(

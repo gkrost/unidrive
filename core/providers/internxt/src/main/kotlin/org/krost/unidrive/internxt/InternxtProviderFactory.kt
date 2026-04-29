@@ -29,6 +29,11 @@ class InternxtProviderFactory : ProviderFactory {
             userRating = 4.3,
             benchmarkGrade = "C",
             affiliateUrl = "https://internxt.com",
+            // UD-263: matches the official Internxt SDK's 2-drive Bottleneck
+            // pacer. The encryption-vs-retry boundary in the 5-stage upload
+            // pipeline (audit §4.3) makes higher concurrency dangerous —
+            // IV-pinning means a parallel-retry race can corrupt files.
+            maxConcurrentTransfers = 2,
         )
 
     override fun create(

@@ -123,6 +123,56 @@ class ProviderMetadataTest {
         assertNull(meta.signupUrl)
     }
 
+    // -- UD-263: per-provider concurrency hints --------------------------------
+
+    @Test
+    fun `UD-263 - maxConcurrentTransfers defaults to 4`() {
+        val meta =
+            ProviderMetadata(
+                id = "default-conc",
+                displayName = "X",
+                description = "d",
+                authType = "a",
+                encryption = "e",
+                jurisdiction = "j",
+                gdprCompliant = true,
+                cloudActExposure = false,
+                signupUrl = null,
+                tier = "Local",
+            )
+        assertEquals(
+            4,
+            meta.maxConcurrentTransfers,
+            "default cap is 4 — conservative for un-audited providers",
+        )
+        assertEquals(
+            0L,
+            meta.minRequestSpacingMs,
+            "default spacing is 0 — most providers don't pace per-request",
+        )
+    }
+
+    @Test
+    fun `UD-263 - maxConcurrentTransfers can be overridden`() {
+        val meta =
+            ProviderMetadata(
+                id = "overrider",
+                displayName = "X",
+                description = "d",
+                authType = "a",
+                encryption = "e",
+                jurisdiction = "j",
+                gdprCompliant = true,
+                cloudActExposure = false,
+                signupUrl = null,
+                tier = "Local",
+                maxConcurrentTransfers = 16,
+                minRequestSpacingMs = 200L,
+            )
+        assertEquals(16, meta.maxConcurrentTransfers)
+        assertEquals(200L, meta.minRequestSpacingMs)
+    }
+
     @Test
     fun `ProviderMetadata data class equality and copy`() {
         val meta1 =

@@ -24,6 +24,11 @@ class HiDriveProviderFactory : ProviderFactory {
             userRating = 4.2,
             benchmarkGrade = "B",
             affiliateUrl = "https://www.ionos.de/office-loesungen/hidrive-cloud-speicher",
+            // UD-263: Confidence Low — vendor docs publish nothing on rate
+            // limits. Anchored against WebDAV/Synology bucket since HiDrive's
+            // own Strato WebDAV façade is in that family. See
+            // docs/providers/hidrive-robustness.md §5.
+            maxConcurrentTransfers = 4,
         )
 
     override fun create(

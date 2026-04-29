@@ -33,6 +33,11 @@ class RcloneProviderFactory : ProviderFactory {
             cloudActExposure = false,
             signupUrl = null,
             tier = "Self-hosted",
+            // UD-263: rclone defaults --transfers to 4. Process-shellout shape
+            // (audit re-frame, see rclone-robustness.md §5) means SyncEngine
+            // delegates per-rclone-call serialization to rclone itself; this
+            // is just the wrapper-level cap on concurrent rclone invocations.
+            maxConcurrentTransfers = 4,
         )
 
     override fun create(

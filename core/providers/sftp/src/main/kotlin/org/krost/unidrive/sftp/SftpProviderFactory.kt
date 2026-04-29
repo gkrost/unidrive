@@ -38,6 +38,11 @@ class SftpProviderFactory : ProviderFactory {
             cloudActExposure = false,
             signupUrl = null,
             tier = "Self-hosted",
+            // UD-263: 4 leaves headroom against OpenSSH's MaxSessions=10
+            // default; matches the in-wrapper Semaphore(4) — see
+            // docs/providers/sftp-robustness.md §5. Concurrency is the
+            // one dimension this provider gets right.
+            maxConcurrentTransfers = 4,
         )
 
     override fun create(

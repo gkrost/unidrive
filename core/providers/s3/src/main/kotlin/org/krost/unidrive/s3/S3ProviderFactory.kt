@@ -36,6 +36,12 @@ class S3ProviderFactory : ProviderFactory {
             cloudActExposure = false,
             signupUrl = null,
             tier = "Global",
+            // UD-263: AWS S3 advertises "thousands of req/s per prefix" so
+            // 16 is conservative; lower-end S3-compatible flavors
+            // (MinIO / R2 / Backblaze / Wasabi / DO Spaces) typically
+            // tolerate 4-8 per their docs. See
+            // docs/providers/s3-robustness.md §5 for the full flavor matrix.
+            maxConcurrentTransfers = 16,
         )
 
     override fun create(

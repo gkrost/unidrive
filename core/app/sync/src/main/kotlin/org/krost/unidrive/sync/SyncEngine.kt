@@ -227,16 +227,25 @@ class SyncEngine(
         }
 
         // Phase 3: Apply
-        val smallSemaphore = kotlinx.coroutines.sync.Semaphore(16) // ≤ 1 MB
-        val mediumSemaphore = kotlinx.coroutines.sync.Semaphore(6) // > 1 MB, ≤ 20 MB
-        val bigSemaphore = kotlinx.coroutines.sync.Semaphore(2) // > 20 MB
-
-        fun semaphoreForSize(bytes: Long) =
-            when {
-                bytes <= 1L * 1024 * 1024 -> smallSemaphore
-                bytes <= 20L * 1024 * 1024 -> mediumSemaphore
-                else -> bigSemaphore
-            }
+        // UD-263: replaced the pre-fix 16/6/2 size-based split with a single
+        // per-provider semaphore sized from ProviderRegistry metadata. The
+        // size-based split was provider-agnostic and routinely overshot the
+        // tighter providers (Synology DSM 500s above ~4, SharePoint heavy
+        // throttling above 2). Per-provider audit values now flow from
+        // docs/providers/<id>-robustness.md §5 → ProviderMetadata →
+        // SyncEngine. Memory-pressure protection on big files is delegated
+        // to the provider's HttpRetryBudget (UD-232) which serialises throttle
+        // responses end-to-end.
+        val perProviderConcurrency =
+            org.krost.unidrive.ProviderRegistry
+                .getMetadata(providerId)
+                ?.maxConcurrentTransfers ?: 4
+        val transferSemaphore = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+        log.info(
+            "Pass 2 transfer semaphore: provider={} maxConcurrentTransfers={}",
+            providerId.ifBlank { "<unknown>" },
+            perProviderConcurrency,
+        )
 
         var consecutiveFailures = 0
         val completedActions = AtomicInteger(0)
@@ -344,9 +353,8 @@ class SyncEngine(
                 for (action in transferActions) {
                     when (action) {
                         is SyncAction.DownloadContent -> {
-                            val sem = semaphoreForSize(action.remoteItem.size)
                             launch {
-                                sem.withPermit {
+                                transferSemaphore.withPermit {
                                     try {
                                         applyDownload(action)
                                         downloaded.incrementAndGet()
@@ -391,11 +399,8 @@ class SyncEngine(
                             }
                         }
                         is SyncAction.Upload -> {
-                            val localPath = placeholder.resolveLocal(action.path)
-                            val size = if (Files.exists(localPath)) Files.size(localPath) else 0L
-                            val sem = semaphoreForSize(size)
                             launch {
-                                sem.withPermit {
+                                transferSemaphore.withPermit {
                                     try {
                                         applyUpload(action)
                                         uploaded.incrementAndGet()
