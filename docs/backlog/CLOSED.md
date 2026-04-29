@@ -5570,3 +5570,88 @@ inside the budget.
   fix.
 - ADR-0006 — toolchain (Ktor 3.x choice). No re-evaluation needed;
   the timeout is a misuse of a healthy API surface, not a Ktor flaw.
+
+---
+id: UD-282
+title: Surface ignored TOML sections / unknown keys in config.toml as warnings
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit cf8a938. Fixed: validateTomlSections pure scanner + parseRaw warning + UNIDRIVE_STRICT_CONFIG fail-fast. Common-typo table (profiles→providers, profile→providers, etc.) + Levenshtein-3 fallback. 10 regression tests. Section-level only; unknown leaf keys inside known sections are out of scope (smaller win).
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt
+  - docs/config-schema/config.example.toml
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** A user editing
+`%APPDATA%\unidrive\config.toml` wrote the section header
+`[profiles.unidrive-localfs-19notte78]` (instead of the schema-correct
+`[providers.unidrive-localfs-19notte78]`). Running
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play`
+returned `Unknown profile: unidrive-localfs-19notte78` — the section
+was silently dropped at parse, the user had no signal that their
+intent was misread.
+
+**Root cause.** `core/app/sync/.../SyncConfig.kt:13` initialises
+ktoml with `TomlInputConfig(ignoreUnknownNames = true)`. The setting
+is load-bearing for forward-compat (we add fields and don't want
+old configs to break), but it also drops sections whose name doesn't
+match the schema — including `[profiles.X]`, `[provider.X]` (singular
+typo), `[profile.X]`, etc. Same root cause for unknown leaf keys
+inside a valid `[providers.X]` block: e.g. the same user wrote
+`local_root = ...` / `remote_root = ...` for a localfs profile, but
+the `RawProvider` schema accepts only `sync_root` or `root_path`
+(SyncConfig.kt:55-57). Silent drop again.
+
+**Proposed fix.** Two-tier diagnostic, no schema change:
+
+1. **Soft warn (default behaviour).** Pre-parse pass: re-run the
+   TOML decoder with `ignoreUnknownNames = false` against an inner
+   `JsonObject`-style tree, collect unrecognised top-level sections
+   and unrecognised keys-inside-known-sections, then print
+   ```
+   warning: ignored TOML section '[profiles.unidrive-localfs-19notte78]'
+            — did you mean '[providers.unidrive-localfs-19notte78]'?
+   warning: ignored key 'local_root' inside '[providers.foo]'
+            — RawProvider accepts: sync_root, root_path, ...
+   ```
+   to stderr, once per parse. Levenshtein distance ≤ 2 against the
+   known names list earns the "did you mean" suggestion.
+
+2. **Strict mode (opt-in).** A `--strict-config` flag (or
+   `UNIDRIVE_STRICT_CONFIG=1` env var) flips the warning to a fatal
+   `IllegalArgumentException` with the same message. Useful for CI
+   and for users who want their typos to halt the run rather than
+   surface as "Unknown profile".
+
+**Out of scope for this ticket.** Auto-aliasing `[profiles.X]` →
+`[providers.X]` (or accepting both) is a larger schema decision and
+should land separately if at all — the warning fix is enough to
+unblock the surprise.
+
+**Acceptance.**
+- New unit test in `SyncConfigTest`: parse a config with
+  `[profiles.foo]` + `[providers.bar]` and assert (a) `bar` is
+  visible, (b) a warning line for `profiles.foo` is emitted on stderr.
+- New unit test: parse `[providers.foo]` with `local_root = "..."`,
+  assert warning lists `local_root` as unknown with the suggestion
+  list including `root_path`.
+- New unit test: under `--strict-config`, both cases throw.
+- Update `docs/config-schema/config.example.toml` header comment
+  to mention the strict-mode flag.
+
+**Why now.** The relocate-v1 spec (forward-looking,
+`docs/specs/relocate-v1.md`) introduces four new ops — every one of
+them takes a profile name as `--from`/`--to`. The
+"silent-drop-then-Unknown-profile" failure mode will keep surfacing
+as relocate gets exercised. Fixing the diagnostic before the spec
+ships saves every future user the same dead-end debug session.
+
+**Live trigger.** 2026-04-29 session, user `gerno` retesting the
+relocate verb. Took ~45 min of CLI-vs-config-vs-state-db spelunking
+(across two config.toml locations and a config.toml.bak swap) before
+the typo surfaced. A one-line stderr warning would have closed it
+in 10 seconds.
