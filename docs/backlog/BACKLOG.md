@@ -1349,38 +1349,6 @@ chunk: sg5
 
 **Internxt specifics: encrypted-at-rest model, bridge vs drive API distinction, custom error envelope.**
 ---
-id: UD-320
-title: OneDrive HTTP robustness audit (reference / baseline)
-category: providers
-priority: high
-effort: S
-status: open
-opened: 2026-04-20
-chunk: sg5
----
-**Part of UD-228 split — per-provider HTTP robustness audit.**
-
-**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
-
-1. **Non-2xx body parsing** — does this provider extract structured detail
-   (retry hints, quota info, recoverable-vs-fatal distinction) from error
-   bodies, or just stringify the Ktor exception?
-2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
-   SyncEngine action layer (fatal on non-whitelisted errors)?
-3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
-4. **Idempotency** — is the authenticatedRequest equivalent body-replay
-   safe?
-5. **Concurrency recommendations** — `maxConcurrentTransfers` +
-   `minRequestSpacingMs` based on provider docs + observed behaviour.
-
-**Deliverable:** `docs/providers/onedrive-robustness.md`.
-
-**Consumed by:**
-- UD-262 — findings inform `HttpRetryBudget` config surface
-- UD-263 — findings produce concurrency hint values
-
-**OneDrive is the reference implementation (UD-207/UD-227 closed). The audit here is a write-down of the existing behaviour in GraphApiService + ThrottleBudget so the other provider audits can compare against a canonical baseline. Expect this to be the smallest audit — mostly docs extraction.**
----
 id: UD-321
 title: Rclone wrapper robustness audit
 category: providers
