@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <baseline version="1.0">
     <file name="build/generated/src/main/kotlin/org/krost/unidrive/cli/BuildInfo.kt">
-        <error line="6" column="5" source="standard:blank-line-before-declaration" />
+        <error line="8" column="5" source="standard:blank-line-before-declaration" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/cli/Main.kt">
         <error line="80" column="17" source="standard:backing-property-naming" />
@@ -18,7 +18,7 @@
         <error line="3" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt">
-        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt">
         <error line="6" column="1" source="standard:no-wildcard-imports" />

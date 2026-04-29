@@ -793,6 +793,19 @@ internal fun renderConfigMissingMessage(
 
 fun main(args: Array<String>) {
     org.slf4j.MDC.put("build", BuildInfo.COMMIT)
+    // UD-733: startup banner gives every captured log a version anchor at
+    // line 1 — operators reading `unidrive.log` see the build SHA without
+    // having to resolve the per-line MDC `[c1dfdf7]` prefix back to a git
+    // commit. WARN if the build was made from a dirty worktree so users
+    // don't file bug reports against transient WIP state.
+    val log = org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.cli.Main")
+    log.info("unidrive {} starting (built {})", BuildInfo.versionString(), BuildInfo.BUILD_INSTANT)
+    if (BuildInfo.DIRTY) {
+        log.warn(
+            "Build was made from a dirty git worktree (uncommitted changes). " +
+                "Bug reports against this build cannot be reproduced from main.",
+        )
+    }
     val mainInstance = Main()
     val cmd = CommandLine(mainInstance)
     cmd.executionExceptionHandler =

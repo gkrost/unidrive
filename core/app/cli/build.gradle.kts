@@ -1,3 +1,4 @@
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 plugins {
@@ -42,6 +43,16 @@ val generateBuildInfo =
                     commandLine("git", "rev-parse", "--short", "HEAD")
                 }.standardOutput.asText
                 .map { it.trim() }
+        // UD-733: GIT_DIRTY surfaces uncommitted-build warnings at startup so
+        // users don't file bug reports against transient WIP state. `git
+        // status --porcelain` is empty iff the worktree is clean; output
+        // length collapses to a single boolean.
+        val gitDirty =
+            providers
+                .exec {
+                    commandLine("git", "status", "--porcelain")
+                }.standardOutput.asText
+                .map { it.trim().isNotEmpty() }
 
         doLast {
             val commit =
@@ -50,6 +61,15 @@ val generateBuildInfo =
                 } catch (_: Exception) {
                     "dev"
                 }
+            val dirty =
+                try {
+                    gitDirty.get()
+                } catch (_: Exception) {
+                    false
+                }
+            val buildInstant = Instant.now().toString()
+            val versionString =
+                if (dirty) "$version ($commit-dirty)" else "$version ($commit)"
             val dir = outputDir.get().asFile.resolve("org/krost/unidrive/cli")
             dir.mkdirs()
             dir.resolve("BuildInfo.kt").writeText(
@@ -59,7 +79,9 @@ val generateBuildInfo =
             |object BuildInfo {
             |    const val VERSION = "$version"
             |    const val COMMIT = "$commit"
-            |    fun versionString(): String = "$version ($commit)"
+            |    const val DIRTY = $dirty
+            |    const val BUILD_INSTANT = "$buildInstant"
+            |    fun versionString(): String = "$versionString"
             |}
                 """.trimMargin() + "\n",
             )

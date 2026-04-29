@@ -7,6 +7,16 @@ fun main(args: Array<String>) {
     // UD-234: surface the short git sha in every log line so end-user copy-paste
     // feedback uniquely identifies which build produced the output.
     org.slf4j.MDC.put("build", BuildInfo.COMMIT)
+    // UD-733: startup banner anchors every captured log to a build SHA + warns
+    // on dirty worktrees so we don't end up debugging WIP state.
+    val log = org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.mcp.Main")
+    log.info("unidrive-mcp {} starting (built {})", BuildInfo.versionString(), BuildInfo.BUILD_INSTANT)
+    if (BuildInfo.DIRTY) {
+        log.warn(
+            "Build was made from a dirty git worktree (uncommitted changes). " +
+                "Bug reports against this build cannot be reproduced from main.",
+        )
+    }
     val parsed = parseArgs(args)
     val configDir = parsed.configDir ?: SyncConfig.defaultConfigDir()
     // UD-252: delegate to the shared resolver so the MCP and CLI agree on what

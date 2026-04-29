@@ -1,3 +1,4 @@
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 plugins {
@@ -38,6 +39,15 @@ val generateBuildInfo =
                     commandLine("git", "rev-parse", "--short", "HEAD")
                 }.standardOutput.asText
                 .map { it.trim() }
+        // UD-733: GIT_DIRTY mirrors :app:cli — uncommitted-build warning at
+        // startup. Same shape, separate generator because each module emits
+        // its own BuildInfo class in its own package.
+        val gitDirty =
+            providers
+                .exec {
+                    commandLine("git", "status", "--porcelain")
+                }.standardOutput.asText
+                .map { it.trim().isNotEmpty() }
 
         doLast {
             val commit =
@@ -46,6 +56,15 @@ val generateBuildInfo =
                 } catch (_: Exception) {
                     "dev"
                 }
+            val dirty =
+                try {
+                    gitDirty.get()
+                } catch (_: Exception) {
+                    false
+                }
+            val buildInstant = Instant.now().toString()
+            val versionString =
+                if (dirty) "$version ($commit-dirty)" else "$version ($commit)"
             val dir = outputDir.get().asFile.resolve("org/krost/unidrive/mcp")
             dir.mkdirs()
             dir.resolve("BuildInfo.kt").writeText(
@@ -55,7 +74,9 @@ val generateBuildInfo =
             |object BuildInfo {
             |    const val VERSION = "$version"
             |    const val COMMIT = "$commit"
-            |    fun versionString(): String = "$version ($commit)"
+            |    const val DIRTY = $dirty
+            |    const val BUILD_INSTANT = "$buildInstant"
+            |    fun versionString(): String = "$versionString"
             |}
                 """.trimMargin() + "\n",
             )
