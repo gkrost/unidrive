@@ -112,11 +112,53 @@ After both land:
 | Metric | 2026-04-29 dual-provider day |
 |---|---|
 | Total lines (all rolled + tail) | 132,536 |
-| DEBUG / INFO / WARN / ERROR | 134,644 / 93 / 4 / 0 |
-| WebDAV Upload | 94,566 |
+| DEBUG / INFO / WARN / ERROR | 132,440 / 93 / 3 / 0 (live tail file separate) |
+| Window | 495.1 min wall-clock |
+| WebDAV Upload | 92,424 |
 | WebDAV PROPFIND / MKCOL | 1,248 / 1,244 |
 | OneDrive Delta / Download | 180 / 9 |
 | `Can't create an array of size` | 2 |
 | `Connection reset` (Graph) | 1 |
 | 4xx/5xx RequestId | 1 (mcp log only) |
-| MDC-missing line share | high; not yet quantified |
+| MDC-missing line share | **132,066 / 132,536 = 99.6 %** |
+| Unmatched Graph `→` requests (no `←`) | 6 (all `my.microsoftpersonalcontent.com`) |
+
+### Throughput / latency snapshot
+
+| Metric | Value |
+|---|---|
+| Total bytes uploaded (WebDAV) | 226.23 GiB |
+| Aggregate wall throughput | 7.80 MiB/s |
+| Per-minute peak throughput | 45.7 MiB/s (16:05) |
+| Upload size p50 / p95 / max | 1.58 MiB / 7.52 MiB / 514.98 MiB |
+| Per-upload duration p50 / p95 (derived from per-thread gap) | 0.37 s / 2.72 s |
+| Per-upload throughput p50 / p95 (derived) | 4.65 MiB/s / 19.62 MiB/s |
+| Concurrency: median / max workers per minute | 14 / 16 |
+| Graph latency p50 / p95 / max (n=114, all 200) | 562 / 1421 / 2477 ms |
+
+### New anomalies (beyond the four WARNs)
+
+- Per-upload throughput collapses to 0.15–0.42 MiB/s on the largest 5
+  files (>250 MiB), against a 45 MiB/s sustained peak on the same wire.
+  Suggests per-PUT-connection bandwidth cap on the WebDAV target;
+  candidate for chunked / multi-connection upload on >100 MiB items.
+- Worker-16 sat for 41 minutes on a 1.4 MiB file (16:43→17:24) with no
+  apparent reason — investigate.
+- Six Graph `→ req=...` events have no matching `← req=...` close in the
+  log, all on the `my.microsoftpersonalcontent.com` content host. Two
+  coincide with the array-allocation WARNs; the other four were clean
+  parallel downloads at 09:44 whose completion was never logged. Means
+  Graph download latency is not observable from the current logger.
+  Add a logger-fix ticket: instrument the body-stream completion path.
+- One zero-byte upload at 16:23 — verify whether the WebDAV path
+  short-circuits when `length == 0`.
+
+### Two new logging changes that would close most of the gaps
+
+1. **`Uploaded` INFO line at WebDAV upload completion** with
+   `(bytes, ms, MiB/s)`. Replaces the per-thread-gap heuristic with
+   measured values, restores observability on the upload-side critical
+   path. Same for Graph downloads.
+2. **`RequestId ←` decoration for Graph content-download responses.**
+   Six unmatched requests in this run mean two failing big-file
+   downloads passed without a single observable response line.
