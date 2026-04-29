@@ -183,10 +183,31 @@ fun deployWindows(
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
+    // UD-270: route the cmd shim through PowerShell. cmd.exe's batch-file
+    // CTRL-C handler intercepts SIGINT and — *after* the JVM has already
+    // died — emits "Terminate batch job (Y/N)?" / "Batchvorgang abbrechen
+    // (J/N)?". Pure noise: the answer has no effect on anything that's
+    // still running. PowerShell exits cleanly back to the parent shell on
+    // CTRL-C with no prompt.
+    val ps1Launcher = file("$libDir\\unidrive.ps1")
+    ps1Launcher.writeText(
+        """
+        |# UD-270: PowerShell launcher. Invoked by ${'$'}binDir\unidrive.cmd
+        |# so CTRL-C from the user's shell exits cleanly without cmd.exe's
+        |# trailing "Terminate batch job?" prompt.
+        |& java -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" @args
+        |exit ${'$'}LASTEXITCODE
+        """.trimMargin() + "\r\n",
+    )
+
     launcher.writeText(
         """
         |@echo off
-        |java -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" %*
+        |REM UD-270: routed through PowerShell to suppress the cmd.exe
+        |REM "Terminate batch job (Y/N)?" prompt on CTRL-C. powershell.exe
+        |REM (Windows PowerShell 5.1) is always present on Windows 10/11;
+        |REM no need for pwsh.
+        |powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1Launcher.absolutePath}" %*
         """.trimMargin() + "\r\n",
     )
 
