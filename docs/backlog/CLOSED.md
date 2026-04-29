@@ -6482,3 +6482,38 @@ chunk: sg5
 - UD-263 — findings produce concurrency hint values
 
 **HiDrive specifics to check: X-RateLimit-* headers, JSON error body conventions, Strato endpoint quirks.**
+
+---
+id: UD-323
+title: SFTP transport robustness audit
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit e0ce03b. SFTP audit re-framed for SSH-channel shape. Headline: zero retries (broken SftpClient discarded not replayed), shallow error parsing (SSH_FX_FAILURE swallowed for mkdir-exists silently loses real errors), UD-305 host-key brittleness, no Retry-After analogue (TCP RST / fail2ban / MaxStartups all opaque), MINA defaults inherited silently. Concurrency is the one dimension done right. 7+ follow-ups.
+opened: 2026-04-20
+chunk: sg5
+---
+**Part of UD-228 split — per-provider HTTP robustness audit.**
+
+**Audit scope (same across UD-318..UD-324 — see UD-228 for full rationale):**
+
+1. **Non-2xx body parsing** — does this provider extract structured detail
+   (retry hints, quota info, recoverable-vs-fatal distinction) from error
+   bodies, or just stringify the Ktor exception?
+2. **Retry placement** — at HTTP layer (transparent to SyncEngine) or at
+   SyncEngine action layer (fatal on non-whitelisted errors)?
+3. **Retry-After source** — header, body, both, or X-RateLimit-* family?
+4. **Idempotency** — is the authenticatedRequest equivalent body-replay
+   safe?
+5. **Concurrency recommendations** — `maxConcurrentTransfers` +
+   `minRequestSpacingMs` based on provider docs + observed behaviour.
+
+**Deliverable:** `docs/providers/sftp-robustness.md`.
+
+**Consumed by:**
+- UD-262 — findings inform `HttpRetryBudget` config surface
+- UD-263 — findings produce concurrency hint values
+
+**SFTP is not HTTP — audit scope shifts to: SSH connection failure classes (EOF, auth-fail, channel-close), MINA SshException subclass handling, reconnect vs fail-fast policy. Concurrency: 4-8 typical (DSL-limited servers). Crosses into UD-305 territory for host-key handling — keep separate.**
