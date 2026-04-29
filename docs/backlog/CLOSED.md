@@ -5873,3 +5873,101 @@ build/libs jar.
 **Related.**
 - UD-712 — original taskkill filter that this fix supersedes.
 - ADR-0006 — toolchain (Gradle 9.4.1 in tree).
+
+---
+id: UD-274
+title: relocate — MigrateEvent.Error goes to stdout only, never reaches unidrive.log
+category: core
+priority: low
+effort: XS
+status: closed
+closed: 2026-04-29
+resolved_by: commit 0b37e96. Production log.warn already in place via UD-286; this test pins the contract — appender captures the WARN line, asserts path + exception class name.
+opened: 2026-04-21
+chunk: core
+---
+### Problem
+
+`CloudRelocator.migrate` emits `MigrateEvent.Error` for per-file
+failures. `RelocateCommand`'s collector prints them to `stderr` /
+`stdout`. **No slf4j logger call is made** — the error never reaches
+`unidrive.log`.
+
+### Reproduction (2026-04-21 field observation)
+
+During `unidrive relocate --from onedrive-test --to ds418play-webdav`
+the user's terminal showed:
+
+```
+Error: Failed to migrate /Pictures/(ArtOfDan) Katya Clover - Sign of Beauty/sign_000042.jpg: Connection closed by peer
+Error: Failed to migrate /Pictures/(ArtOfDan) Katya Clover - Sign of Beauty/sign_000057.jpg: Connection closed by peer
+```
+
+Running `grep -cE "peer|IOException|SocketException" unidrive.log`
+after this returned **0**. The only WARN/ERROR in the log was the
+single 503 throttle from Graph — not the WebDAV peer-closes.
+
+Root cause:
+
+- `CloudRelocator.kt:164-166` emits `MigrateEvent.Error("Failed to migrate $newSource: ${e.message}")`
+- `RelocateCommand.kt:~156` prints `event.message` to stderr
+- No call to `log.warn(...)` or `log.error(...)` anywhere in the
+  error path.
+
+Consequences:
+
+- The post-hoc `log-watch.sh --anomalies` run misses these.
+- `scripts/dev/log-watch.sh --summary` reports 0 errors even when
+  dozens failed.
+- Unattended `nohup unidrive relocate ... > out.log 2>&1 &` users
+  see nothing in `unidrive.log` because the stdout+stderr went to
+  their shell redirect, not to the structured log.
+- Error classification, retry budgets, and aggregate counts are all
+  blind to per-file failures.
+
+### Fix
+
+At the `catch (e: Exception)` block in `CloudRelocator.migrate`'s
+walk (currently `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:164`),
+add a logger call before emitting the Error event:
+
+```kotlin
+private val log = LoggerFactory.getLogger(CloudRelocator::class.java)
+
+// inside catch
+log.warn("Failed to migrate {}: {}", newSource, e.message, e)
+errorCount++
+emit(MigrateEvent.Error("Failed to migrate $newSource: ${e.message}"))
+```
+
+The `e` as final argument captures the stack trace for diagnosis.
+`log.warn` (not `log.error`) because per-file failures don't kill
+the migration — they're individually recoverable and counted in
+`Completed.errorCount`.
+
+### Acceptance
+
+- After a relocate run with per-file failures, `unidrive.log` contains
+  one `WARN` entry per failure with the path and cause.
+- `scripts/dev/log-watch.sh --summary` reports the correct error
+  count.
+- `CloudRelocatorTest.migrate emits Error event on download failure`
+  (existing) gains an assertion that a WARN log line was written
+  via a captured appender.
+
+### Related
+
+- UD-269 (open) — CTRL-C cleanup + abort summary. This ticket
+  covers the *error path* during normal (non-aborted) runs; UD-269
+  covers the abort path.
+- UD-324 (closed) — WebDAV robustness audit called out "Non-2xx
+  body parsing: only status code is surfaced". This ticket is the
+  sibling concern: "non-2xx surfacing happens via Exception but is
+  never logged."
+
+### Priority / effort
+
+Low priority, XS effort. 4 lines of code. High value for anyone
+running long unattended relocates — the difference between a
+post-mortem grep of `unidrive.log` finding all failures vs finding
+none.
