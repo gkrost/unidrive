@@ -504,6 +504,49 @@ class CloudRelocatorTest {
             )
         }
 
+    // -- UD-274: per-file failure writes WARN line to slf4j logger -------------
+    //
+    // Pre-fix: per-file failures emitted MigrateEvent.Error which the CLI
+    // printed to stderr — but no slf4j call ever reached unidrive.log. Field
+    // observation 2026-04-21: a relocate run with dozens of "Connection
+    // closed by peer" stderr messages produced zero matching lines in
+    // unidrive.log. UD-286 added the log.warn at CloudRelocator.kt:249;
+    // this test pins it so a future refactor can't silently drop it.
+
+    @Test
+    fun `UD-274 - per-file failure writes WARN line capturing path and class`() =
+        runTest {
+            source.children["/"] = listOf(cloudItem("/bad.txt", size = 10))
+            source.failPaths.add("/bad.txt")
+
+            val logger = LoggerFactory.getLogger(CloudRelocator::class.java) as Logger
+            val appender = ListAppender<ILoggingEvent>().apply { start() }
+            logger.addAppender(appender)
+
+            try {
+                val relocator = CloudRelocator(source, target)
+                relocator.migrate("/", "/").toList()
+            } finally {
+                logger.detachAppender(appender)
+            }
+
+            val warns = appender.list.filter { it.level == Level.WARN }
+            assertTrue(
+                warns.isNotEmpty(),
+                "expected at least one WARN line for the per-file failure; got=${appender.list.size} events",
+            )
+            val msg = warns.first().formattedMessage
+            assertTrue(
+                msg.contains("/bad.txt"),
+                "WARN line must include the failing path; was: '$msg'",
+            )
+            assertTrue(
+                msg.contains("RuntimeException"),
+                "WARN line must include the exception class so postmortem can " +
+                    "distinguish IOException vs HttpRequestTimeoutException; was: '$msg'",
+            )
+        }
+
     // -- UD-284: MDC propagation into flow log lines ---------------------------
     //
     // Pre-fix: RelocateCommand's `runBlocking { migrate().collect { ... } }`
