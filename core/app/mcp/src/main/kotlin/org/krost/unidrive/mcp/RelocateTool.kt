@@ -2,9 +2,11 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.serialization.json.*
 import org.krost.unidrive.sync.CloudRelocator
 import org.krost.unidrive.sync.MigrateEvent
+import org.krost.unidrive.sync.RelocateMdc
 
 val relocateTool =
     ToolDef(
@@ -52,18 +54,25 @@ private fun handleRelocate(
             return buildToolResult("Failed to create target provider '$toProfile': ${e.message}", isError = true)
         }
 
-    runBlocking {
-        source.authenticate()
-        target.authenticate()
-    }
-
-    val relocator = CloudRelocator(source, target, bufferMb.toLong() * 1024 * 1024)
+    // UD-294: seed `profile` + `scan` MDC and propagate via MDCContext into
+    // the runBlockings below so worker-thread log lines from CloudRelocator,
+    // WebDavApiService.upload, GraphApiService.downloadFile, etc. render
+    // [<sha>] [<from>+<to>] [<migId>] instead of [<sha>] [*] [-------].
+    val migId = RelocateMdc.newMigId()
     var result: MigrateEvent.Completed? = null
+    RelocateMdc.withRelocateMdc(fromProfile, toProfile, migId) {
+        runBlocking(MDCContext()) {
+            source.authenticate()
+            target.authenticate()
+        }
 
-    runBlocking {
-        relocator.migrate(sourcePath, targetPath).collect { event ->
-            if (event is MigrateEvent.Completed) {
-                result = event
+        val relocator = CloudRelocator(source, target, bufferMb.toLong() * 1024 * 1024)
+
+        runBlocking(MDCContext()) {
+            relocator.migrate(sourcePath, targetPath).collect { event ->
+                if (event is MigrateEvent.Completed) {
+                    result = event
+                }
             }
         }
     }

@@ -6,6 +6,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.sync.CloudRelocator
 import org.krost.unidrive.sync.MigrateEvent
+import org.krost.unidrive.sync.RelocateMdc
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
@@ -50,6 +51,19 @@ class RelocateCommand : Runnable {
             throw IllegalArgumentException("Same provider for source and target")
         }
 
+        // UD-294: relocate touches TWO profiles, so Main.resolveCurrentProfile (sync's
+        // profile-MDC anchor) doesn't apply here. Seed the `profile` and `scan` MDC keys
+        // explicitly so the runBlocking(MDCContext()) snapshots below capture a meaningful
+        // [<sha>] [<from>+<to>] [<migId>] triplet. Without this every relocate log line
+        // rendered [<sha>] [*] [-------] (132 k unfilterable lines on 2026-04-29 — see
+        // docs/dev/log-feedback-loop-proposal.md). UD-284 fixed the relocate flow's
+        // MDCContext propagation; this fills in the snapshot it propagates.
+        RelocateMdc.withRelocateMdc(fromProvider, toProvider, RelocateMdc.newMigId()) {
+            runRelocate()
+        }
+    }
+
+    private fun runRelocate() {
         val fromProfile =
             parent.resolveProfile(fromProvider)
                 ?: throw IllegalArgumentException("Unknown source provider: $fromProvider")

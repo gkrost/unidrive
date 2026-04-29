@@ -214,6 +214,7 @@ dependencies {
     implementation(project(":app:xtra"))
 
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.slf4j) // UD-294: MDCContext for relocate-tool MDC propagation
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.logback.classic)
 
