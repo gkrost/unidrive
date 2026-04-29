@@ -6092,3 +6092,98 @@ download paths. Specifically:
   work.
 - A future CI hook on `log-watch.sh --json mdc_missing > 0` becomes
   the regression signal once this is closed.
+
+---
+id: UD-270
+title: Windows launcher — drop cmd.exe 'Terminate batch job' prompt on CTRL-C
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-04-29
+resolved_by: commit 827079d. PowerShell wrapper added to deployWindows(). Verification deferred to next deploy+run cycle.
+opened: 2026-04-21
+chunk: xpb
+---
+### Problem
+
+The Windows launcher at `C:\Users\gerno\.local\bin\unidrive.cmd` and
+its sibling `%LOCALAPPDATA%\unidrive\unidrive.cmd` are plain `.cmd`
+batch files that invoke `java -jar`. When the user presses CTRL-C
+inside a long-running command (e.g. `unidrive relocate`), `cmd.exe`
+intercepts the signal and — after the JVM has already died — prompts:
+
+```
+Batchvorgang abbrechen (J/N)? j   (German)
+Terminate batch job (Y/N)? y       (English)
+```
+
+This is **pure noise**: the operation has already ended, the JVM is
+gone, and the answer to the question has no effect on anything the
+user cares about. But it forces an extra keystroke and confuses
+first-time users who wonder whether they're being asked to retry.
+
+Root cause: `cmd.exe` installs a console control handler that
+intercepts CTRL-C inside batch files. Answering "N" doesn't resume
+the JVM (it's already dead); "Y" just exits the batch. The prompt
+exists because cmd doesn't know whether the batch file has more
+commands to execute after the Java call. Observed today during an
+aborted `unidrive relocate --from onedrive-test-local --to
+ds418play-webdav`.
+
+### Fix options
+
+Four viable paths, ranked cleanest first:
+
+1. **Native launcher (jpackage).** `jpackage --type app-image
+   --name unidrive --main-jar unidrive-0.0.0-greenfield.jar` produces
+   an `unidrive.exe` that has no batch-file intermediary. CTRL-C
+   propagates cleanly to the JVM and exits. Requires adding a
+   jpackage task to the gradle distribution. Also gives us a proper
+   Windows icon and version-info resource for free. **Best
+   long-term.**
+
+2. **PowerShell wrapper (`unidrive.ps1`).** PowerShell's CTRL-C
+   behaviour doesn't emit the abort-prompt for started exes. Simple
+   content: `& java -jar "$PSScriptRoot\unidrive-0.0.0-greenfield.jar" @args`.
+   Install as `unidrive.ps1` + `unidrive.cmd` shim that calls
+   `pwsh -NoProfile -File %~dp0unidrive.ps1 %*`. Slightly more
+   indirection than #1 but zero build-tool changes.
+
+3. **cmd wrapper with `CHOICE` dance.** Eat the CTRL-C by setting
+   `Ctrl-C` via `setlocal EnableExtensions` + reading via `set
+   /p`. Works but fragile; breaks if Java outputs to stdin.
+
+4. **Start the JVM with `start /B /WAIT`.** Moves the JVM to a child
+   process group that cmd doesn't intercept. Simpler than #3.
+   Drawback: changes how the JVM inherits stdio (can affect the
+   `\r`-overwrite progress line from UD-267).
+
+### Proposed
+
+Ship #1 (jpackage) when the gradle distribution layer is next
+touched — it subsumes this ticket + gives us Windows Start-menu
+registration for free. Until then, land #2 as a one-liner
+`.ps1` + shim `.cmd` in the existing deploy target.
+
+### Related
+
+- UD-269 (open) — relocate CTRL-C cleanup. Complementary: UD-269
+  fixes what happens *inside* the JVM on abort; this ticket fixes
+  what cmd.exe does *around* the JVM.
+- Windows-only. Unix `.sh` launchers exec the JVM directly and
+  don't exhibit this wart.
+
+### Acceptance
+
+- CTRL-C during `unidrive relocate` returns the user straight to
+  the PowerShell prompt with no "Batchvorgang abbrechen" / "Terminate
+  batch job" question.
+- Exit code is propagated from the JVM (not the batch file).
+- Works identically in PowerShell 7, Windows Terminal, and the
+  legacy `cmd.exe` console.
+
+### Priority / effort
+
+Low priority, XS effort for PS-wrapper fix, S for jpackage path.
+UX polish, not a bug. Worth bundling with any release-prep work.
