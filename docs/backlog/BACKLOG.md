@@ -2531,3 +2531,399 @@ speaking the standard JSON-RPC surface and exposing:
 - The `unidrive-msix-identity` MCP in UD-720 is the natural sibling: both
   are Windows-dev-inner-loop MCPs. If UD-720 lands first, share a monorepo
   MCP layout.
+---
+id: UD-282
+title: Surface ignored TOML sections / unknown keys in config.toml as warnings
+category: core
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt
+  - docs/config-schema/config.example.toml
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** A user editing
+`%APPDATA%\unidrive\config.toml` wrote the section header
+`[profiles.unidrive-localfs-19notte78]` (instead of the schema-correct
+`[providers.unidrive-localfs-19notte78]`). Running
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play`
+returned `Unknown profile: unidrive-localfs-19notte78` — the section
+was silently dropped at parse, the user had no signal that their
+intent was misread.
+
+**Root cause.** `core/app/sync/.../SyncConfig.kt:13` initialises
+ktoml with `TomlInputConfig(ignoreUnknownNames = true)`. The setting
+is load-bearing for forward-compat (we add fields and don't want
+old configs to break), but it also drops sections whose name doesn't
+match the schema — including `[profiles.X]`, `[provider.X]` (singular
+typo), `[profile.X]`, etc. Same root cause for unknown leaf keys
+inside a valid `[providers.X]` block: e.g. the same user wrote
+`local_root = ...` / `remote_root = ...` for a localfs profile, but
+the `RawProvider` schema accepts only `sync_root` or `root_path`
+(SyncConfig.kt:55-57). Silent drop again.
+
+**Proposed fix.** Two-tier diagnostic, no schema change:
+
+1. **Soft warn (default behaviour).** Pre-parse pass: re-run the
+   TOML decoder with `ignoreUnknownNames = false` against an inner
+   `JsonObject`-style tree, collect unrecognised top-level sections
+   and unrecognised keys-inside-known-sections, then print
+   ```
+   warning: ignored TOML section '[profiles.unidrive-localfs-19notte78]'
+            — did you mean '[providers.unidrive-localfs-19notte78]'?
+   warning: ignored key 'local_root' inside '[providers.foo]'
+            — RawProvider accepts: sync_root, root_path, ...
+   ```
+   to stderr, once per parse. Levenshtein distance ≤ 2 against the
+   known names list earns the "did you mean" suggestion.
+
+2. **Strict mode (opt-in).** A `--strict-config` flag (or
+   `UNIDRIVE_STRICT_CONFIG=1` env var) flips the warning to a fatal
+   `IllegalArgumentException` with the same message. Useful for CI
+   and for users who want their typos to halt the run rather than
+   surface as "Unknown profile".
+
+**Out of scope for this ticket.** Auto-aliasing `[profiles.X]` →
+`[providers.X]` (or accepting both) is a larger schema decision and
+should land separately if at all — the warning fix is enough to
+unblock the surprise.
+
+**Acceptance.**
+- New unit test in `SyncConfigTest`: parse a config with
+  `[profiles.foo]` + `[providers.bar]` and assert (a) `bar` is
+  visible, (b) a warning line for `profiles.foo` is emitted on stderr.
+- New unit test: parse `[providers.foo]` with `local_root = "..."`,
+  assert warning lists `local_root` as unknown with the suggestion
+  list including `root_path`.
+- New unit test: under `--strict-config`, both cases throw.
+- Update `docs/config-schema/config.example.toml` header comment
+  to mention the strict-mode flag.
+
+**Why now.** The relocate-v1 spec (forward-looking,
+`docs/specs/relocate-v1.md`) introduces four new ops — every one of
+them takes a profile name as `--from`/`--to`. The
+"silent-drop-then-Unknown-profile" failure mode will keep surfacing
+as relocate gets exercised. Fixing the diagnostic before the spec
+ships saves every future user the same dead-end debug session.
+
+**Live trigger.** 2026-04-29 session, user `gerno` retesting the
+relocate verb. Took ~45 min of CLI-vs-config-vs-state-db spelunking
+(across two config.toml locations and a config.toml.bak swap) before
+the typo surfaced. A one-line stderr warning would have closed it
+in 10 seconds.
+---
+id: UD-283
+title: MCP silently routes to default profile on unknown profile name (more permissive than CLI)
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** When invoking an MCP tool with
+`profile=<name-not-in-config>`, the MCP **silently falls back to the
+default profile** instead of erroring. The caller (LLM, in practice)
+never knows their requested profile was misrouted; the response
+returns data for a *different* target.
+
+Reproduced against the deployed v0.0.0-greenfield (ea60e1e) MCP via
+JSON-RPC over stdio:
+
+| Tool call | Configured profiles | Behaviour |
+|---|---|---|
+| `unidrive_status` `{profile: "onedrive-test"}` | onedrive-test absent; onedrive present | returned data for `onedrive` (response `"profile":"onedrive"`) |
+| `unidrive_ls` `{profile: "ssh-local", path: "/", limit: 10}` | ssh-local absent | returned 14 entries **byte-identical** to `profile=onedrive` (same paths, same modified timestamps, same hydration flags) |
+| `unidrive_quota` `{profile: "onedrive-test"}` | onedrive-test absent | returned default profile's quota |
+
+**Compare with CLI:** `unidrive -p onedrive-test status` produces:
+```
+Error: Unknown profile: onedrive-test
+Configured profiles: ds418play, ds418play-webdav, ...
+Supported provider types: hidrive, internxt, localfs, ...
+```
+The MCP is **more permissive than the CLI** for the same input.
+
+**Why this is worse than UD-282.** UD-282 covers the silent drop on
+parse — `[profiles.X]` typos that ktoml ignores. UD-283 is the same
+class of failure mode (silent drop of unknown input) but at the
+tool-invocation surface, where the caller is an **LLM, not a
+human**. Three reasons that's worse:
+
+1. The LLM has no `Configured profiles:` listing in its context — it
+   can't course-correct by re-reading the error.
+2. Tool calls that mutate (`unidrive_sync`, `unidrive_pin`,
+   `unidrive_relocate`, `unidrive_profile_remove`) could operate on
+   the wrong target without any signal. `unidrive_relocate
+   --from typo --to real` could relocate the *default* profile if
+   the typo isn't caught.
+3. The LLM trusts the response. A "200 OK with data" response that's
+   actually for a different profile is harder to detect than a
+   missing profile (which would be a clear "X tool returned no
+   data" signal).
+
+**Root cause hypothesis.** Probably in the MCP tool dispatch layer,
+profile resolution falls through to `resolveDefaultProfile()` when
+`SyncConfig.resolveProfile(name, raw)` throws `IllegalArgumentException`,
+instead of propagating the exception to a JSON-RPC `error` object.
+`core/app/mcp/.../McpServer.kt` and the per-tool handler classes are
+the likely sites; the CLI in `Main.kt:118-142` does the right thing
+(prints error, calls `System.exit(1)`).
+
+**Proposed fix.** Mirror the CLI behaviour exactly. When a tool is
+invoked with an explicit `profile=X` and X doesn't resolve:
+
+1. Return a JSON-RPC error response with the same wording the CLI
+   produces:
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": <id>,
+     "error": {
+       "code": -32602,
+       "message": "Unknown profile: X",
+       "data": {
+         "configuredProfiles": ["ds418play", "ds418play-webdav", ...],
+         "supportedProviderTypes": ["hidrive", "internxt", ...]
+       }
+     }
+   }
+   ```
+   (`-32602` = JSON-RPC "Invalid params". The configured-profiles
+   list goes into `error.data` so an LLM client can present it in
+   tool-call retry context.)
+
+2. Same handling for the UD-237 type-fallback: if `profile=X` matches
+   no name **and** matches no provider type **and** there's exactly
+   one configured profile of a similar type, surface a structured
+   suggestion in `error.data` rather than silently selecting it.
+   Mutation tools (`*_sync`, `*_pin`, `*_relocate`, `*_profile_*`)
+   should never auto-resolve by type even when there's exactly one
+   match — the safety floor is "explicit name or fail".
+
+3. Where profile is **omitted**, current behaviour (use
+   `resolveDefaultProfile`) is fine and stays.
+
+**Acceptance.**
+- New `McpServer` integration test: invoke each tool that takes a
+  `profile` arg with `profile="does-not-exist"`, assert each returns
+  a JSON-RPC error (not a result), and `error.data.configuredProfiles`
+  is populated.
+- New unit test: with two profiles `foo-A` (sftp) and `foo-B` (sftp),
+  invoke `unidrive_sync` `{profile: "sftp"}` and assert it errors
+  with multiple-matches feedback rather than silently picking one.
+- Manual: `python scripts/dev/oauth-mcp/...` smoke check passes (no
+  regression on `profile=` omission path).
+
+**Related.**
+- UD-282 — same failure-mode class, different surface (TOML parse vs
+  tool call). Both should land in the same release; UD-283 is higher
+  priority because LLM-in-the-loop has no recovery path.
+- UD-218 — `status --all` collapses by provider type. UD-283 fix may
+  inadvertently surface UD-218 too if the `--all` MCP path goes
+  through the same resolver.
+- UD-237 — CLI's "matched by type" auto-selection. The fix above
+  proposes that auto-selection is **CLI-only** for safety.
+---
+id: UD-284
+title: MDC profile field renders as '[???????]' in relocate's coroutine workers
+category: core
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/app/cli/src/main/resources/logback.xml
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a long-running
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play-webdav`,
+every log line produced by `DefaultDispatcher-worker-N` threads renders
+the MDC profile field as **`[???????]`** (seven question marks)
+instead of the active profile name:
+
+```
+2026-04-29 15:25:37.414 DEBUG [???????] [*] [-------] [DefaultDispatcher-worker-1] o.k.unidrive.webdav.WebDavApiService - Upload: ...
+2026-04-29 15:05:36.630 DEBUG [???????] [*] [-------] [DefaultDispatcher-worker-3] o.krost.unidrive.sync.CloudRelocator - skip-check ...
+```
+
+Affects every relocate worker thread observed (1, 3, 7, 11). Logback
+pattern is `%X{profile:-*}` so the `*` fallback shows when MDC is
+empty; instead we see `???????`, which suggests something is putting
+literal `???????` into MDC, OR the renderer is treating an
+encoding-mangled profile name as `???????` (cp1252 → UTF-8?).
+
+**Why this matters.** Per
+[CLAUDE.md](../../CLAUDE.md#before-you-read-unidrivelog) §"Before
+you read unidrive.log", the profile prefix is the primary triage
+signal when reading a 10+ MB log with multiple sync runs commingled.
+A `[???????]` prefix is worse than `[*]` — it looks like a real
+value, so you can't filter on it (`grep -v '\[\*\]'` works; there's
+no clean filter for the literal question-mark string), and it makes
+log lines from concurrent profile runs indistinguishable.
+
+**Probable root cause.** UD-212 wired `MDC.put("profile", _profile.name)`
+in `Main.resolveCurrentProfile`, with `runBlocking(MDCContext())`
+expected to propagate the value into coroutine workers. The
+relocate path likely:
+- Either spawns its `DefaultDispatcher` work without the
+  `MDCContext()` wrapper (so MDC inheritance breaks), and the empty
+  string is being rendered as `???????` by some downstream encoder, **or**
+- The profile name actually being put into MDC is itself
+  cp1252-mangled UTF-8 from a launcher / env var, and what's
+  rendered is the visible damage. The CLI has UD-258
+  (`-Dstdout.encoding=UTF-8`) but this is an **MDC value**, not a
+  stdout write — different code path.
+
+**Investigation steps.**
+1. Find the relocate's coroutine launch site
+   (`CloudRelocator.kt`?). Confirm whether it wraps in
+   `runBlocking(MDCContext())` or just `runBlocking`.
+2. Add a one-shot log line at the relocate entry: `log.debug("MDC at
+   relocate entry: {}", MDC.getCopyOfContextMap())` to see the
+   actual map contents (vs the rendered output).
+3. Verify on a small relocate (10 files) whether the same `???????`
+   appears in non-relocate log lines from this profile (i.e.,
+   `[???????]` in CLI startup messages too) — that would prove it's
+   the MDC value, not coroutine inheritance.
+
+**Proposed fix.** Whatever the investigation shows — either:
+- (a) Wrap the relocate's `runBlocking` in `MDCContext()` (matches
+  the pattern UD-212 established for sync/Pass 2), or
+- (b) UTF-8-clean the MDC value at insert time. `_profile.name`
+  comes from a TOML key that's already UTF-8 — mangling would have
+  to happen at logback render. Pin
+  `<encoder>...<charset>UTF-8</charset></encoder>` in `logback.xml`.
+
+**Acceptance.**
+- New `RelocateCommandTest` regression: invoke a 10-file relocate,
+  assert no log line contains the literal substring `[???????]`.
+- Manual: drive a relocate end-to-end, verify the active profile
+  name appears in every worker thread's log line.
+
+**Related.**
+- UD-212 — original "log/CLI profile context" wiring.
+- UD-258 — UTF-8 stdout encoding (a different surface).
+- CLAUDE.md §"Before you read unidrive.log" calls out that
+  filtering on profile is the first triage action; this regression
+  silently breaks that workflow.
+---
+id: UD-285
+title: REQUEST_TIMEOUT_MS=600s is a global wall-clock cap; aborts large uploads against slow targets
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/HttpDefaults.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt
+  - core/providers/hidrive/src/main/kotlin/org/krost/unidrive/hidrive/HiDriveApiService.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play-webdav`
+against a Synology DS418play WebDAV target, a 371 MB MP4 upload
+(`Eternal_Tea-party_Eternal-1080p.mp4`) exceeded the 10-minute Ktor
+client-side request timeout and aborted:
+
+```
+Request timeout has expired
+[url=https://ds418play.local:5006/home/Pictures/ED Zelda B Photo Video Pack 2013 2017/Eternal_Tea-party_Eternal-1080p.mp4,
+ request_timeout=600000 ms
+```
+
+The 600,000 ms is OUR timeout, not the server's. The DS418play
+(Apache `mod_dav` under DSM) has a 3,600 s default — it would have
+kept accepting bytes for another 50 minutes. The relocate moved on
+to the next file (`Eternal_TUNES_…`) without retrying or completing
+the partial upload.
+
+**Root cause.** [`HttpDefaults.kt:7`](../../core/app/core/src/main/kotlin/org/krost/unidrive/HttpDefaults.kt)
+sets `REQUEST_TIMEOUT_MS = 600_000` as a global wall-clock cap on
+every HTTP request, applied uniformly across all Ktor providers
+(WebDAV, OneDrive, HiDrive, Internxt, S3). At 0.6 MB/s effective
+upload throughput (TLS overhead on the DS418play's Realtek RTD1296
++ Btrfs-on-spinners write path), 371 MB doesn't fit inside 10
+minutes. Larger uploads — multi-GB files, slower targets, or any
+backend that's CPU-bound on TLS — will hit this regularly.
+
+**Why a global wall-clock cap is wrong for upload paths.** A
+request timeout makes sense for *responses* (server is hung, give
+up). For uploads the right safety property is "the connection is
+dead" — i.e., **no bytes flowing for N seconds**. That's
+`socketTimeoutMillis`, which is already set to 60 s on the same
+client. The 60 s socket watchdog correctly catches stuck
+connections; the 600 s wall-clock makes correctness depend on
+upload speed, which is wrong.
+
+**Comparable practice.**
+- aws-sdk: defaults to no request timeout for `PutObject`; relies
+  on socket timeout.
+- rclone: no global request timeout; per-chunk timeout only on
+  multipart paths.
+- httpclient (Apache): explicit "no request timeout" recommendation
+  for streaming uploads in their migration guide.
+
+**Proposed fix (preferred).** **Drop `requestTimeoutMillis`
+entirely for upload paths.** Keep it on metadata reads (PROPFIND,
+PUT-without-body, listChildren, etc.) where 10 minutes is generous.
+Concretely: split `HttpDefaults` into two configs —
+`HttpDefaults.metadata { ... requestTimeoutMillis = 600_000 }` and
+`HttpDefaults.upload { ... /* no requestTimeoutMillis */ }` — and
+have each adapter use the right one for the verb being executed.
+The socket timeout (60 s no-bytes) is the actual safety property.
+
+**Alternative fix (simpler, less surgical).** Compute a per-request
+timeout from `Content-Length`:
+
+```kotlin
+const val MIN_THROUGHPUT_BYTES_PER_MS: Long = 100  // 100 KB/s minimum
+fun timeoutForBytes(bytes: Long): Long =
+    maxOf(120_000, bytes / MIN_THROUGHPUT_BYTES_PER_MS)
+// 100 MB → 1000 s, 1 GB → 10000 s = ~3 hours
+```
+
+Wire into each provider's upload path (WebDAV `putFile`, S3 `putObject`,
+OneDrive `uploadSession`, HiDrive `upload`, Internxt). Slightly more
+code but covers the pathological "20 GB ISO at 50 KB/s" case
+without an unbounded wait.
+
+**Alternative fix (config knob).** Add per-profile
+`request_timeout_ms` override to `RawProvider`. Lowest-effort,
+highest foot-gun (users have to know to set it; default behaviour
+unchanged).
+
+**Acceptance.**
+- Existing WebDAV unit tests pass.
+- New regression test in `WebDavApiServiceTest`: stub a slow
+  chunked-upload server that emits one byte every 200 ms for a 64 MB
+  body, assert the upload completes (would currently fail at 10 min).
+- Manual: re-run the same relocate (`Eternal_Tea-party-…1080p.mp4`)
+  and confirm completion.
+- Document the change in `docs/providers/webdav-client-notes.md`
+  and `docs/providers/webdav-robustness.md`.
+
+**Operator workaround until fix lands.** Per-file size is the
+predictor — anything > ~250 MB on a slow target risks the 10-min
+wall-clock. Pre-staging large files via a one-shot tool (rclone,
+curl, or a manual scp) keeps the relocate's per-request load
+inside the budget.
+
+**Related.**
+- UD-227 — OneDrive download retries already cover the
+  `requestTimeoutMillis` failure mode by parsing
+  `retryAfterSeconds`. Upload paths don't have an equivalent.
+- UD-309 — `downloadFile` retries on Ktor "Content-Length mismatch"
+  short reads. Same retry-budget approach could front the upload
+  fix.
+- ADR-0006 — toolchain (Ktor 3.x choice). No re-evaluation needed;
+  the timeout is a misuse of a healthy API surface, not a Ktor flaw.
