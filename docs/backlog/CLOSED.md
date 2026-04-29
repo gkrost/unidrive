@@ -5021,3 +5021,113 @@ this first; the remaining tickets become tractable.
   helps diagnose.
 - UD-287, UD-288, UD-289, UD-290, UD-291 — the rest of the audit
   cluster.
+
+---
+id: UD-291
+title: WebDavProvider.quota() swallows all exceptions to QuotaInfo(0,0,0); pre-flight relocate guard never sees failure
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 606f576. Fixed: catch now re-throws CancellationException + logs class/message/throwable. Returns zero sentinel (API compat). 2 regression tests via logback ListAppender. :providers:webdav:check passes.
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-04-29
+---
+**Symptom (audited, 2026-04-29).** A failing PROPFIND quota query
+against a WebDAV target returns `QuotaInfo(total = 0, used = 0,
+remaining = 0)` instead of an error. Pre-flight insufficient-quota
+guard in `RelocateCommand.kt:103` interprets the all-zero result as
+"unknown / can't tell" and proceeds with the relocate. A target
+with **no free space** is indistinguishable from a target whose
+quota query failed for transient reasons.
+
+**Root cause.** `core/providers/webdav/.../WebDavProvider.kt:184-186`:
+
+```kotlin
+override suspend fun quota(): QuotaInfo {
+    return try {
+        ...quota PROPFIND...
+    } catch (_: Exception) {
+        QuotaInfo(total = 0, used = 0, remaining = 0)
+    }
+}
+```
+
+Three problems in three lines:
+
+1. **Catch-all `Exception` swallows everything**, including
+   `CancellationException`. Same UD-300 anti-pattern as UD-286.
+2. **No log line.** A network failure to the quota endpoint
+   silently degrades to "we don't know."
+3. **Returning a magic-zero record** conflates "quota is zero" (a
+   valid answer for a full disk) with "we couldn't get quota" (a
+   different problem). Caller has no way to distinguish.
+
+**Compare with the spec.** `QuotaInfo` in
+`core/app/core/.../QuotaInfo.kt` represents a successful quota
+fetch. It has no "unknown" sentinel. The expected shape for "we
+couldn't find out" is either:
+- `null` return (Kotlin `suspend fun quota(): QuotaInfo?`), or
+- `Result<QuotaInfo>` (kotlin.Result), or
+- a sealed class `QuotaResult { Success(QuotaInfo); Unknown(reason); Unsupported }`
+  matching the ADR-0005 capability-contract pattern.
+
+**Proposed fix.** Smallest change that correctly propagates the
+information:
+
+1. Change the catch to:
+   ```kotlin
+   } catch (e: CancellationException) {
+       throw e
+   } catch (e: Exception) {
+       log.warn("WebDAV quota PROPFIND failed: {}: {}",
+           e.javaClass.simpleName, e.message, e)
+       throw e  // or: return null if signature changes
+   }
+   ```
+   At minimum: log + propagate. Don't fabricate a success record.
+
+2. Change the signature to `suspend fun quota(): QuotaInfo?` (or
+   `CapabilityResult<QuotaInfo>` per ADR-0005). Update the contract
+   in `CloudProvider.kt`.
+
+3. Update `RelocateCommand.kt:103` to handle the null/unknown case
+   explicitly. If quota is unknown:
+   - Default behaviour: **abort the relocate** with a clear error
+     ("Cannot determine target quota; pass `--ignore-quota` to
+     proceed").
+   - Override: `--ignore-quota` flag for the user to accept the
+     risk.
+
+**Acceptance.**
+- New `WebDavProviderQuotaTest`: stub server returns 503 on the
+  quota PROPFIND; assert `quota()` throws (not returns zero).
+- New: `RelocateCommand` integration test — quota fails, no
+  `--ignore-quota` flag → relocate aborts with the new error
+  message.
+- New: with `--ignore-quota`, the same scenario → relocate proceeds.
+- Update `docs/providers/webdav-client-notes.md` to document the
+  quota behaviour.
+
+**Audit other providers.** The same anti-pattern likely exists in:
+- `S3Provider` — S3 doesn't expose quota; current behaviour may
+  already be a sentinel zero (which is *correct* for S3 since the
+  bucket has no quota concept). Verify and document.
+- `HiDriveProvider`, `InternxtProvider` — likely the same shape.
+  File follow-up tickets if they audit similarly.
+
+**Related.**
+- UD-286 — same swallow pattern in CloudRelocator.
+- UD-301 — `CapabilityResult` infrastructure (could host the
+  "quota unsupported" return shape).
+- ADR-0005 — capability contract.
+
+**Priority.** Medium. The current behaviour "fails open" — on a
+target that's full but where quota fetch succeeds, the relocate
+will fail mid-way once the disk fills. Bad UX (lots of mid-relocate
+errors) but not data-loss. On the audit's symptom path, this is
+not blocking; on production reliability it's a real gap.
