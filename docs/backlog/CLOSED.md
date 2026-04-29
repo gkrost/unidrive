@@ -5655,3 +5655,122 @@ relocate verb. Took ~45 min of CLI-vs-config-vs-state-db spelunking
 (across two config.toml locations and a config.toml.bak swap) before
 the typo surfaced. A one-line stderr warning would have closed it
 in 10 seconds.
+
+---
+id: UD-283
+title: MCP silently routes to default profile on unknown profile name (more permissive than CLI)
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 229acba. Fixed: profileMismatchError validator at McpServer dispatch layer + JSON-RPC -32602 with error.data recovery context. 7 regression tests covering pass-through, configured-but-inactive (restart hint), unknown-profile (CLI-style error), error.data shape, JSON-RPC envelope structure. :app:mcp:check passes.
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** When invoking an MCP tool with
+`profile=<name-not-in-config>`, the MCP **silently falls back to the
+default profile** instead of erroring. The caller (LLM, in practice)
+never knows their requested profile was misrouted; the response
+returns data for a *different* target.
+
+Reproduced against the deployed v0.0.0-greenfield (ea60e1e) MCP via
+JSON-RPC over stdio:
+
+| Tool call | Configured profiles | Behaviour |
+|---|---|---|
+| `unidrive_status` `{profile: "onedrive-test"}` | onedrive-test absent; onedrive present | returned data for `onedrive` (response `"profile":"onedrive"`) |
+| `unidrive_ls` `{profile: "ssh-local", path: "/", limit: 10}` | ssh-local absent | returned 14 entries **byte-identical** to `profile=onedrive` (same paths, same modified timestamps, same hydration flags) |
+| `unidrive_quota` `{profile: "onedrive-test"}` | onedrive-test absent | returned default profile's quota |
+
+**Compare with CLI:** `unidrive -p onedrive-test status` produces:
+```
+Error: Unknown profile: onedrive-test
+Configured profiles: ds418play, ds418play-webdav, ...
+Supported provider types: hidrive, internxt, localfs, ...
+```
+The MCP is **more permissive than the CLI** for the same input.
+
+**Why this is worse than UD-282.** UD-282 covers the silent drop on
+parse — `[profiles.X]` typos that ktoml ignores. UD-283 is the same
+class of failure mode (silent drop of unknown input) but at the
+tool-invocation surface, where the caller is an **LLM, not a
+human**. Three reasons that's worse:
+
+1. The LLM has no `Configured profiles:` listing in its context — it
+   can't course-correct by re-reading the error.
+2. Tool calls that mutate (`unidrive_sync`, `unidrive_pin`,
+   `unidrive_relocate`, `unidrive_profile_remove`) could operate on
+   the wrong target without any signal. `unidrive_relocate
+   --from typo --to real` could relocate the *default* profile if
+   the typo isn't caught.
+3. The LLM trusts the response. A "200 OK with data" response that's
+   actually for a different profile is harder to detect than a
+   missing profile (which would be a clear "X tool returned no
+   data" signal).
+
+**Root cause hypothesis.** Probably in the MCP tool dispatch layer,
+profile resolution falls through to `resolveDefaultProfile()` when
+`SyncConfig.resolveProfile(name, raw)` throws `IllegalArgumentException`,
+instead of propagating the exception to a JSON-RPC `error` object.
+`core/app/mcp/.../McpServer.kt` and the per-tool handler classes are
+the likely sites; the CLI in `Main.kt:118-142` does the right thing
+(prints error, calls `System.exit(1)`).
+
+**Proposed fix.** Mirror the CLI behaviour exactly. When a tool is
+invoked with an explicit `profile=X` and X doesn't resolve:
+
+1. Return a JSON-RPC error response with the same wording the CLI
+   produces:
+   ```json
+   {
+     "jsonrpc": "2.0",
+     "id": <id>,
+     "error": {
+       "code": -32602,
+       "message": "Unknown profile: X",
+       "data": {
+         "configuredProfiles": ["ds418play", "ds418play-webdav", ...],
+         "supportedProviderTypes": ["hidrive", "internxt", ...]
+       }
+     }
+   }
+   ```
+   (`-32602` = JSON-RPC "Invalid params". The configured-profiles
+   list goes into `error.data` so an LLM client can present it in
+   tool-call retry context.)
+
+2. Same handling for the UD-237 type-fallback: if `profile=X` matches
+   no name **and** matches no provider type **and** there's exactly
+   one configured profile of a similar type, surface a structured
+   suggestion in `error.data` rather than silently selecting it.
+   Mutation tools (`*_sync`, `*_pin`, `*_relocate`, `*_profile_*`)
+   should never auto-resolve by type even when there's exactly one
+   match — the safety floor is "explicit name or fail".
+
+3. Where profile is **omitted**, current behaviour (use
+   `resolveDefaultProfile`) is fine and stays.
+
+**Acceptance.**
+- New `McpServer` integration test: invoke each tool that takes a
+  `profile` arg with `profile="does-not-exist"`, assert each returns
+  a JSON-RPC error (not a result), and `error.data.configuredProfiles`
+  is populated.
+- New unit test: with two profiles `foo-A` (sftp) and `foo-B` (sftp),
+  invoke `unidrive_sync` `{profile: "sftp"}` and assert it errors
+  with multiple-matches feedback rather than silently picking one.
+- Manual: `python scripts/dev/oauth-mcp/...` smoke check passes (no
+  regression on `profile=` omission path).
+
+**Related.**
+- UD-282 — same failure-mode class, different surface (TOML parse vs
+  tool call). Both should land in the same release; UD-283 is higher
+  priority because LLM-in-the-loop has no recovery path.
+- UD-218 — `status --all` collapses by provider type. UD-283 fix may
+  inadvertently surface UD-218 too if the `--all` MCP path goes
+  through the same resolver.
+- UD-237 — CLI's "matched by type" auto-selection. The fix above
+  proposes that auto-selection is **CLI-only** for safety.
