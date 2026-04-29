@@ -5333,3 +5333,123 @@ on a current version. No external API change; behavior change is
 - UD-286 — silent-swallow that hides this from the log.
 - UD-288 — no retry on transient WebDAV failures.
 - ADR-0006 — toolchain (Ktor + Apache5 choice).
+
+---
+id: UD-288
+title: WebDAV provider has no retry logic on transient HTTP failures (timeout, WSAECONNABORTED, 5xx)
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit b0955cf. Fixed: withRetry helper added; wraps download/upload/mkcol/propfind/quotaPropfind. 5 attempts, exponential backoff (1s/2s/4s/8s/16s), Retry-After honored, CancellationException carve-out. 15 regression tests covering retry success, exhaustion, terminal exceptions (UnknownHost, SSL), Windows WSAECONNABORTED text matching (English + German), HTTP-status classification. :providers:webdav:check passes.
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, **one transient HTTP
+failure = one permanently failed file** in this run. The relocate
+moves on to the next file without ever retrying. The user sees a
+list of `Failed to migrate /Pictures/...` errors that are mostly
+single-shot recoverable conditions (UD-285 timeout, UD-287 connection
+abort).
+
+**Root cause.** Grepped `core/providers/webdav/` for
+`retry|retryOn|HttpRequestTimeoutException|backoff` — **zero
+matches.** `WebDavApiService.upload`, `download`, `propfind`,
+`mkcol`, `delete` all do a single Ktor request and propagate the
+exception unmodified. Compare with OneDrive:
+
+- `GraphApiService.kt` has `HttpRetryBudget` (UD-232).
+- `authenticatedRequest` retries on 401 (UD-310), 429/503 (UD-207),
+  `SerializationException` (UD-308), `IOException` short reads
+  (UD-309), CDN download failures (UD-227).
+- 5 attempts, exponential backoff with `Retry-After` honoring,
+  cumulative budget caps.
+
+WebDAV gets none of this. Yet WebDAV is served from heterogeneous
+backends (DSM Apache, nginx-dav, Nextcloud, Box, ownCloud, IIS
+WebDAV) — each with its own transient-failure profile. WebDAV needs
+retry **at least as much** as Graph does.
+
+**Proposed fix.** Mirror the OneDrive shape, scaled to WebDAV's
+narrower error vocabulary:
+
+```kotlin
+private suspend fun <T> withRetry(
+    op: String,
+    path: String,
+    block: suspend () -> T,
+): T {
+    val maxAttempts = 5
+    var lastException: Throwable? = null
+    repeat(maxAttempts) { attempt ->
+        try {
+            return block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpRequestTimeoutException) {
+            lastException = e
+            log.warn("WebDAV {} {} timed out (attempt {}/{}): {}",
+                op, path, attempt + 1, maxAttempts, e.message)
+        } catch (e: IOException) {
+            // WSAECONNABORTED, ConnectionClosedException, etc.
+            if (!isRetriable(e)) throw e
+            lastException = e
+            log.warn("WebDAV {} {} I/O error (attempt {}/{}): {}: {}",
+                op, path, attempt + 1, maxAttempts,
+                e.javaClass.simpleName, e.message)
+        } catch (e: ResponseException) {
+            // 5xx retriable, 4xx (except 408/425/429) terminal
+            if (!isRetriable(e.response.status)) throw e
+            lastException = e
+            log.warn("WebDAV {} {} HTTP {} (attempt {}/{}): {}",
+                op, path, e.response.status.value,
+                attempt + 1, maxAttempts, e.message)
+        }
+        delay(backoffMs(attempt))  // exponential: 1s, 2s, 4s, 8s, 16s
+    }
+    throw lastException ?: IllegalStateException("retry budget exhausted")
+}
+```
+
+Wrap `upload`, `download`, `propfind`, `mkcol`, `delete` in
+`withRetry`. Honor `Retry-After` header where present (DSM emits
+it on 503 Service Unavailable).
+
+**`isRetriable` policy.**
+- HTTP status: retry 408, 425, 429, 500, 502, 503, 504. Terminal:
+  401, 403, 404, 409, 410, other 4xx.
+- IOException: retry `WSAECONNABORTED`, `WSAECONNRESET`,
+  `SocketTimeoutException`, `ConnectionClosedException`. Terminal:
+  `UnknownHostException`, `SSLPeerUnverifiedException`,
+  `SSLHandshakeException` (these signal misconfig, not transient).
+
+**Acceptance.**
+- New `WebDavApiServiceRetryTest`: stub server that fails twice
+  with 503 then succeeds; assert the call returns ok.
+- New: stub fails with `IOException("WSAECONNABORTED")` 4 times
+  then succeeds; assert ok.
+- New: stub returns 404 (terminal); assert no retry, immediate
+  throw.
+- New: outstanding `delay(backoffMs)` is cancellable —
+  `CancellationException` aborts the retry loop fast.
+- Manual: re-run the 345 GB relocate; the file count that previously
+  failed terminally should now mostly succeed on attempt 2 or 3.
+
+**Implementation note.** Place `HttpRetryBudget` (or a WebDAV-shaped
+twin) at the `WebDavApiService` level, not per-call. Per-call
+budget burns through the retry allowance independently for adjacent
+files; per-service budget shares the signal across the whole
+relocate.
+
+**Related.**
+- UD-285 — REQUEST_TIMEOUT_MS too short; UD-287 — pool
+  poisoning. **Both currently surface as permanent failures
+  because of this ticket.** Fix this and they become invisible to
+  the user (modulo the log line) until they exhaust the budget.
+- UD-232 — OneDrive `ThrottleBudget` for 429 storms; reusable
+  pattern.
+- UD-227 — OneDrive download retry logic (template).
