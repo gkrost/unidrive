@@ -5218,3 +5218,118 @@ relocate path likely:
 - CLAUDE.md §"Before you read unidrive.log" calls out that
   filtering on profile is the first triage action; this regression
   silently breaks that workflow.
+
+---
+id: UD-287
+title: WebDAV Apache5 connection pool reuses half-closed sockets after timeout (WSAECONNABORTED cascade)
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit 70b2fc6. Fixed: validateAfterInactivity=2s + evictExpiredConnections + evictIdleConnections=30s on Apache5 pool, and flushAndClose now runs in finally with runCatching. No new unit test (needs live integration harness); UD-288 will add upload-failure-path tests that indirectly validate the close-in-finally. :providers:webdav:check passes.
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, every Ktor
+`requestTimeoutMillis` (UD-285, 600 s) failure is immediately followed
+by 1–N **`Eine bestehende Verbindung wurde softwaregesteuert durch
+den Hostcomputer abgebrochen`** errors (Windows TCP
+`WSAECONNABORTED 10053`) on subsequent unrelated PUTs, before the
+relocate self-recovers.
+
+**Root cause.** `core/providers/webdav/.../WebDavApiService.kt:107-114`
+builds an Apache5 `PoolingAsyncClientConnectionManagerBuilder` with
+**default settings**:
+
+- No `setValidateAfterInactivity(...)` — connections aren't probed
+  before reuse.
+- No `evictExpiredConnections()` / `evictIdleConnections(...)` —
+  expired sockets stay in the pool.
+- No idle-timeout config — DSM (Synology Apache `mod_dav`) closes
+  keep-alive at ~5 minutes; the next reuse hits a half-closed
+  socket.
+
+When `requestTimeoutMillis` fires, Ktor cancels the in-flight write
+but Apache5 returns the connection to the pool **half-closed at
+the OS level**. The next PUT that picks it up gets WSAECONNABORTED
+from Windows TCP — which propagates as a "permanent" failure for
+that file (no retry, see UD-288).
+
+**Companion bug — `flushAndClose()` outside `withContext`.**
+`WebDavApiService.kt:175-186`:
+```kotlin
+override suspend fun writeTo(channel: ByteWriteChannel) {
+    withContext(Dispatchers.IO) {
+        Files.newInputStream(localPath).use { input ->
+            val buf = ByteArray(65536)
+            while (input.read(buf).also { n = it } != -1) {
+                channel.writeFully(buf, 0, n)
+            }
+        }
+    }
+    channel.flushAndClose()  // ← outside the IO block
+}
+```
+If the IO block throws (cancellation, file-read error, partial
+write), `flushAndClose()` is skipped → the PUT never gets its
+terminating chunk frame → server drops the connection → that
+connection still goes back to the pool → cascading WSAECONNABORTED.
+**This is the bug that *creates* the bad pool entries** the
+eviction-policy fix above cleans up. Fix one without the other and
+the pool fills up faster than eviction empties it.
+
+**Proposed fix.**
+
+1. Connection pool eviction (covers reuse hygiene):
+   ```kotlin
+   PoolingAsyncClientConnectionManagerBuilder.create()
+     .setValidateAfterInactivity(TimeValue.of(2, SECONDS))
+     .setMaxConnTotal(50)
+     .setMaxConnPerRoute(8)
+     .build()
+   // plus on the HttpAsyncClient:
+   //   .evictExpiredConnections()
+   //   .evictIdleConnections(TimeValue.of(30, SECONDS))
+   ```
+   Synology DSM keep-alive is ~5 min; 30 s idle eviction is well
+   inside that. `setValidateAfterInactivity(2s)` adds a cheap
+   probe before any second-or-later reuse.
+
+2. Move `flushAndClose()` inside the `withContext(Dispatchers.IO)`
+   block (or drop the `withContext` entirely — Ktor's engine already
+   runs `writeTo` on its own IO selector). On exception path,
+   ensure the channel is closed with the failure cause:
+   ```kotlin
+   try { ... } catch (e: Throwable) {
+       channel.cancel(e)  // half-close with cause; pool drops it
+       throw e
+   }
+   ```
+
+3. Same review of all other Ktor PUT paths in the WebDAV adapter
+   (download, propfind, mkcol) for the same `flushAndClose`
+   placement.
+
+**Acceptance.**
+- New `WebDavApiServiceConnectionPoolTest`: stub a server that
+  drops the connection mid-PUT after N bytes; assert subsequent
+  PUTs succeed (currently fail with WSAECONNABORTED).
+- New unit test: simulate `withContext` block throwing; assert
+  `channel.cancel` is called and the pooled connection is invalidated.
+- Manual: re-run the same 345 GB relocate after fix; verify zero
+  WSAECONNABORTED in `unidrive.log` (the WARN lines from UD-286
+  are the source of truth).
+
+**Compatibility.** Apache5 `evictExpiredConnections` /
+`setValidateAfterInactivity` are stable since httpclient5 5.0; we're
+on a current version. No external API change; behavior change is
+"fewer transient failures."
+
+**Related.**
+- UD-285 — `requestTimeoutMillis` cap that triggers the cascade.
+- UD-286 — silent-swallow that hides this from the log.
+- UD-288 — no retry on transient WebDAV failures.
+- ADR-0006 — toolchain (Ktor + Apache5 choice).
