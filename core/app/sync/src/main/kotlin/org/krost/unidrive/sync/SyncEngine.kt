@@ -1,0 +1,1074 @@
+package org.krost.unidrive.sync
+
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.withPermit
+import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.Capability
+import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.CloudItem
+import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.ProviderException
+import org.krost.unidrive.sync.model.*
+import org.slf4j.LoggerFactory
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.PatternSyntaxException
+
+class SyncEngine(
+    private val provider: CloudProvider,
+    private val db: StateDatabase,
+    private val syncRoot: Path,
+    private val conflictPolicy: ConflictPolicy = ConflictPolicy.KEEP_BOTH,
+    private val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
+    private val excludePatterns: List<String> = emptyList(),
+    private val reporter: ProgressReporter = ProgressReporter.Silent,
+    private val failureLogPath: Path? = null,
+    private val conflictLog: ConflictLog? = null,
+    private val syncPath: String? = null,
+    private val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
+    private val maxDeletePercentage: Int = 50,
+    private val verifyIntegrity: Boolean = false,
+    private val providerId: String = "",
+    private val useTrash: Boolean = true,
+    private val includeShared: Boolean = false,
+    private val echoSuppress: ((String) -> Unit)? = null,
+    private val echoUnsuppress: ((String) -> Unit)? = null,
+    private val placeholder: PlaceholderManager = PlaceholderManager(syncRoot),
+    private val trashManager: TrashManager? = null,
+    private val trashRetentionDays: Int = 30,
+    private val versionManager: VersionManager? = null,
+    private val maxVersions: Int = 5,
+    private val versionRetentionDays: Int = 90,
+    private val fastBootstrap: Boolean = false,
+) {
+    private val log = LoggerFactory.getLogger(SyncEngine::class.java)
+    private val effectiveExcludePatterns =
+        validateExcludePatterns(
+            excludePatterns + listOf("/.unidrive-trash/**", "/.unidrive-versions/**"),
+        )
+    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
+    private val reconciler = Reconciler(db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns)
+
+    /** Suppress watcher events for [path] during [block], then unsuppress. */
+    private inline fun <T> withEchoSuppression(
+        path: String,
+        block: () -> T,
+    ): T {
+        echoSuppress?.invoke(path)
+        try {
+            return block()
+        } finally {
+            echoUnsuppress?.invoke(path)
+        }
+    }
+
+    suspend fun syncOnce(
+        dryRun: Boolean = false,
+        forceDelete: Boolean = false,
+        // UD-254: classifies WHY a sync pass started so post-incident log review
+        // can separate a normal watch poll from e.g. a rescan-after-retry burst.
+        reason: SyncReason = SyncReason.MANUAL,
+    ) {
+        // UD-254: short random scan id pushed into MDC so every DEBUG/WARN line
+        // emitted inside this pass inherits it (e.g. InternxtProvider's
+        // "Scanning files: N"). A single grep "scan=<id>" gives the slice
+        // belonging to one sync pass.
+        val scanId =
+            java.util.UUID
+                .randomUUID()
+                .toString()
+                .substring(0, 8)
+        val priorScanMdc = org.slf4j.MDC.get("scan")
+        org.slf4j.MDC.put("scan", scanId)
+        val startTime = System.currentTimeMillis()
+        log.info("Scan started scan={} reason={} dryRun={}", scanId, reason, dryRun)
+        try {
+            doSyncOnce(dryRun, forceDelete, scanId, reason, startTime)
+        } finally {
+            val duration = System.currentTimeMillis() - startTime
+            log.info("Scan ended scan={} reason={} duration={}ms", scanId, reason, duration)
+            if (priorScanMdc == null) {
+                org.slf4j.MDC.remove("scan")
+            } else {
+                org.slf4j.MDC.put("scan", priorScanMdc)
+            }
+        }
+    }
+
+    private suspend fun doSyncOnce(
+        dryRun: Boolean,
+        forceDelete: Boolean,
+        @Suppress("UNUSED_PARAMETER") scanId: String,
+        @Suppress("UNUSED_PARAMETER") reason: SyncReason,
+        startTime: Long,
+    ) {
+        val downloaded = AtomicInteger(0)
+        val uploaded = AtomicInteger(0)
+        val conflicts = AtomicInteger(0)
+
+        // Auto-purge expired trash entries
+        trashManager?.purge(trashRetentionDays)
+        versionManager?.pruneByAge(versionRetentionDays)
+
+        // Phase 1: Gather changes
+        reporter.onScanProgress("remote", 0)
+        val allRemoteChanges = gatherRemoteChanges()
+
+        val remoteChanges =
+            if (syncPath != null) {
+                allRemoteChanges.filterKeys { it.startsWith(syncPath) || it == syncPath }
+            } else {
+                allRemoteChanges
+            }
+        reporter.onScanProgress("remote", remoteChanges.size)
+
+        reporter.onScanProgress("local", 0)
+        val allLocalChanges = scanner.scan()
+        val localChanges =
+            if (syncPath != null) {
+                val ancestors = syncPathAncestors(syncPath)
+                allLocalChanges.filterKeys { it.startsWith(syncPath) || it == syncPath || it in ancestors }
+            } else {
+                allLocalChanges
+            }
+        reporter.onScanProgress("local", localChanges.size)
+
+        // Phase 2: Reconcile
+        val allActions = reconciler.reconcile(remoteChanges, localChanges)
+
+        // Persist remote metadata for reuse in subsequent runs (UD-260)
+        db.batch {
+            updateRemoteEntries(allRemoteChanges)
+        }
+
+        // Phase 2a: Direction filter
+        val actions =
+            when (syncDirection) {
+                SyncDirection.UPLOAD ->
+                    allActions.filter {
+                        it is SyncAction.Upload ||
+                            it is SyncAction.DeleteRemote ||
+                            it is SyncAction.CreateRemoteFolder ||
+                            it is SyncAction.MoveRemote ||
+                            it is SyncAction.Conflict ||
+                            it is SyncAction.RemoveEntry
+                    }
+                SyncDirection.DOWNLOAD ->
+                    allActions.filter {
+                        it is SyncAction.CreatePlaceholder ||
+                            it is SyncAction.UpdatePlaceholder ||
+                            it is SyncAction.DownloadContent ||
+                            it is SyncAction.DeleteLocal ||
+                            it is SyncAction.MoveLocal ||
+                            it is SyncAction.Conflict ||
+                            it is SyncAction.RemoveEntry
+                    }
+                SyncDirection.BIDIRECTIONAL -> allActions
+            }
+
+        reporter.onActionCount(actions.size)
+
+        if (actions.isEmpty()) {
+            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
+            val pendingCursor = db.getSyncState("pending_cursor")
+            if (pendingCursor != null) {
+                db.setSyncState("delta_cursor", pendingCursor)
+                db.setSyncState("last_full_scan", Instant.now().toString())
+            }
+            val duration = System.currentTimeMillis() - startTime
+            reporter.onSyncComplete(0, 0, 0, duration)
+            return
+        }
+
+        // Phase 2b: Deletion safeguard
+        if (!dryRun && !forceDelete && maxDeletePercentage in 1..99) {
+            val deleteCount = actions.count { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
+            val totalEntries = db.getEntryCount()
+            if (totalEntries > 0 && deleteCount > 10) {
+                val pct = deleteCount * 100 / totalEntries
+                if (pct > maxDeletePercentage) {
+                    throw IllegalStateException(
+                        "Deletion safeguard: $deleteCount of $totalEntries files ($pct%) would be deleted, " +
+                            "exceeding max_delete_percentage=$maxDeletePercentage%. " +
+                            "Use --force-delete to override.",
+                    )
+                }
+            }
+        }
+
+        if (dryRun) {
+            val counts = mutableMapOf<String, Int>()
+            actions.forEachIndexed { index, action ->
+                val label = actionLabel(action)
+                reporter.onActionProgress(index + 1, actions.size, label, action.path)
+                counts[label] = (counts[label] ?: 0) + 1
+                when (action) {
+                    is SyncAction.DownloadContent -> downloaded.incrementAndGet()
+                    is SyncAction.CreatePlaceholder -> if (action.shouldHydrate) downloaded.incrementAndGet()
+                    is SyncAction.UpdatePlaceholder -> if (action.wasHydrated) downloaded.incrementAndGet()
+                    is SyncAction.Upload -> uploaded.incrementAndGet()
+                    is SyncAction.Conflict -> conflicts.incrementAndGet()
+                    else -> {}
+                }
+            }
+            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
+            val pendingCursor = db.getSyncState("pending_cursor")
+            if (pendingCursor != null) {
+                db.setSyncState("delta_cursor", pendingCursor)
+                db.setSyncState("last_full_scan", Instant.now().toString())
+            }
+            val duration = System.currentTimeMillis() - startTime
+            reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration, counts)
+            return
+        }
+
+        // Phase 3: Apply
+        val smallSemaphore = kotlinx.coroutines.sync.Semaphore(16) // ≤ 1 MB
+        val mediumSemaphore = kotlinx.coroutines.sync.Semaphore(6) // > 1 MB, ≤ 20 MB
+        val bigSemaphore = kotlinx.coroutines.sync.Semaphore(2) // > 20 MB
+
+        fun semaphoreForSize(bytes: Long) =
+            when {
+                bytes <= 1L * 1024 * 1024 -> smallSemaphore
+                bytes <= 20L * 1024 * 1024 -> mediumSemaphore
+                else -> bigSemaphore
+            }
+
+        var consecutiveFailures = 0
+        val completedActions = AtomicInteger(0)
+
+        // Pass 1: sequential actions (placeholder ops, deletes, moves, conflicts, remote folder creates)
+        // Batched into one SQLite transaction — avoids one fsync per action.
+        val sequentialActions =
+            actions.filter {
+                it !is SyncAction.DownloadContent && it !is SyncAction.Upload
+            }
+        db.beginBatch()
+        try {
+            for (action in sequentialActions) {
+                try {
+                    when (action) {
+                        is SyncAction.CreatePlaceholder -> {
+                            applyCreatePlaceholder(action)
+                            if (action.shouldHydrate) downloaded.incrementAndGet()
+                        }
+                        is SyncAction.UpdatePlaceholder -> {
+                            applyUpdatePlaceholder(action)
+                            if (action.wasHydrated) downloaded.incrementAndGet()
+                        }
+                        is SyncAction.MoveRemote -> applyMoveRemote(action)
+                        is SyncAction.MoveLocal -> applyMoveLocal(action)
+                        is SyncAction.DeleteLocal -> applyDeleteLocal(action)
+                        is SyncAction.DeleteRemote -> applyDeleteRemote(action)
+                        is SyncAction.CreateRemoteFolder -> applyCreateRemoteFolder(action)
+                        is SyncAction.Conflict -> {
+                            applyConflict(action)
+                            conflicts.incrementAndGet()
+                        }
+                        is SyncAction.RemoveEntry -> db.deleteEntry(action.path)
+                        else -> {}
+                    }
+                    consecutiveFailures = 0
+                } catch (e: AuthenticationException) {
+                    // UD-253: include exception class + full stack for auth failures.
+                    log.error("Authentication failed, stopping sync: {}: {}", e.javaClass.simpleName, e.message, e)
+                    throw e
+                } catch (e: Exception) {
+                    consecutiveFailures++
+                    // UD-253: class name + throwable (SLF4J renders stack trace when the
+                    // last arg is a Throwable) so WARNs are self-diagnosing in the log.
+                    log.warn(
+                        "Action failed for {} ({} consecutive): {}: {}",
+                        action.path,
+                        consecutiveFailures,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                    logFailure(action, e)
+                    // UD-248: previously, hitting 3 consecutive action failures
+                    // threw ProviderException which tore down the whole pass and
+                    // made the watch loop restart syncOnce (re-enumerating the
+                    // entire remote tree — expensive for 22k-file profiles).
+                    // Now we skip the failing action and continue with the rest.
+                    // The watch loop's own cycle-failure backoff handles the
+                    // truly-broken case (every action fails → next cycle delays
+                    // longer). Catastrophic outage still trips at
+                    // CONSECUTIVE_SYNC_FAILURE_HARD_CAP, far above the 3-in-a-row
+                    // threshold that was firing on transient provider 500s.
+                    if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
+                        log.error(
+                            "Stopping sync pass: {} consecutive action failures " +
+                                "(last: {} on {}) — treating as upstream outage",
+                            consecutiveFailures,
+                            e.javaClass.simpleName,
+                            action.path,
+                        )
+                        throw ProviderException(
+                            "Stopping sync after $consecutiveFailures consecutive failures",
+                            e,
+                        )
+                    }
+                    // Exponential backoff capped at 10s so the pass doesn't
+                    // stall indefinitely on a failure cluster.
+                    delay(minOf(2_000L * consecutiveFailures, 10_000L))
+                }
+                reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), action.path)
+            }
+            db.commitBatch()
+        } catch (e: Exception) {
+            db.rollbackBatch()
+            throw e
+        }
+
+        // Pass 2: concurrent transfers (downloads and uploads)
+        // UD-222: Pass 2 now carries all hydration for new/modified remote files. Failures are
+        // tracked so we (a) rethrow AuthenticationException after the scope exits cleanly, and
+        // (b) skip cursor promotion when any transfer failed — otherwise Graph's delta would
+        // advance past the failed items and they'd never retry.
+        val transferActions =
+            actions.filter {
+                it is SyncAction.DownloadContent || it is SyncAction.Upload
+            }
+        val transferFailures = AtomicInteger(0)
+        val authFailure =
+            java.util.concurrent.atomic
+                .AtomicReference<AuthenticationException?>(null)
+        try {
+            coroutineScope {
+                for (action in transferActions) {
+                    when (action) {
+                        is SyncAction.DownloadContent -> {
+                            val sem = semaphoreForSize(action.remoteItem.size)
+                            launch {
+                                sem.withPermit {
+                                    try {
+                                        applyDownload(action)
+                                        downloaded.incrementAndGet()
+                                    } catch (e: AuthenticationException) {
+                                        // UD-253: include exception class + full stack.
+                                        log.error(
+                                            "Authentication failed during download of {}: {}: {}",
+                                            action.path,
+                                            e.javaClass.simpleName,
+                                            e.message,
+                                            e,
+                                        )
+                                        restoreToPlaceholder(action.path, action.remoteItem)
+                                        transferFailures.incrementAndGet()
+                                        authFailure.compareAndSet(null, e)
+                                        this@coroutineScope.cancel()
+                                    } catch (e: CancellationException) {
+                                        restoreToPlaceholder(action.path, action.remoteItem)
+                                        throw e
+                                    } catch (e: Exception) {
+                                        // UD-253: class name + throwable (SLF4J stack trace).
+                                        log.warn(
+                                            "Download failed for {}: {}: {}",
+                                            action.path,
+                                            e.javaClass.simpleName,
+                                            e.message,
+                                            e,
+                                        )
+                                        reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                                        logFailure(action, e)
+                                        restoreToPlaceholder(action.path, action.remoteItem)
+                                        transferFailures.incrementAndGet()
+                                    } finally {
+                                        reporter.onActionProgress(
+                                            completedActions.incrementAndGet(),
+                                            actions.size,
+                                            actionLabel(action),
+                                            action.path,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        is SyncAction.Upload -> {
+                            val localPath = placeholder.resolveLocal(action.path)
+                            val size = if (Files.exists(localPath)) Files.size(localPath) else 0L
+                            val sem = semaphoreForSize(size)
+                            launch {
+                                sem.withPermit {
+                                    try {
+                                        applyUpload(action)
+                                        uploaded.incrementAndGet()
+                                    } catch (e: AuthenticationException) {
+                                        // UD-253: include exception class + full stack.
+                                        log.error(
+                                            "Authentication failed during upload of {}: {}: {}",
+                                            action.path,
+                                            e.javaClass.simpleName,
+                                            e.message,
+                                            e,
+                                        )
+                                        transferFailures.incrementAndGet()
+                                        authFailure.compareAndSet(null, e)
+                                        this@coroutineScope.cancel()
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        // UD-253: class name + throwable (SLF4J stack trace).
+                                        log.warn(
+                                            "Upload failed for {}: {}: {}",
+                                            action.path,
+                                            e.javaClass.simpleName,
+                                            e.message,
+                                            e,
+                                        )
+                                        reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                                        logFailure(action, e)
+                                        transferFailures.incrementAndGet()
+                                    } finally {
+                                        reporter.onActionProgress(
+                                            completedActions.incrementAndGet(),
+                                            actions.size,
+                                            actionLabel(action),
+                                            action.path,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        else -> {}
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            // Scope cancelled by an AuthenticationException in a child job — the rethrow happens
+            // just below so callers see the auth failure, not the cancellation.
+            if (authFailure.get() == null) throw e
+        }
+
+        // UD-222: AuthenticationException trumps everything — surface it to the caller so token
+        // refresh / re-auth flows trigger instead of a silent "0 downloaded, many failed" result.
+        authFailure.get()?.let { throw it }
+
+        // Persist cursor only if every transfer succeeded. A single failed download would
+        // otherwise be lost forever: the server-side delta cursor advances past it and future
+        // syncs would not re-see it as "new". Failed items keep pending_cursor → next sync redoes
+        // the delta from the previous promoted cursor.
+        val cursor = db.getSyncState("pending_cursor")
+        if (cursor != null && transferFailures.get() == 0) {
+            db.setSyncState("delta_cursor", cursor)
+            db.setSyncState("last_full_scan", Instant.now().toString())
+        }
+
+        val duration = System.currentTimeMillis() - startTime
+        reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration)
+    }
+
+    private suspend fun gatherRemoteChanges(): Map<String, CloudItem> {
+        val storedCursor = db.getSyncState("delta_cursor")
+        val cursor = storedCursor?.ifEmpty { null }
+        val isFullSync = cursor == null
+        val changes = mutableMapOf<String, CloudItem>()
+
+        // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
+        // cursor without enumerating. Provider must declare FastBootstrap; otherwise
+        // log a warning and fall through. On success, the subsequent full-sync
+        // deletion sweep (detectMissingAfterFullSync) is skipped — no enumeration
+        // means no authoritative item set to diff against, so we must NOT treat
+        // absence as deletion.
+        if (fastBootstrap && isFullSync) {
+            if (Capability.FastBootstrap in provider.capabilities()) {
+                when (val result = provider.deltaFromLatest()) {
+                    is CapabilityResult.Success -> {
+                        val page = result.value
+                        for (item in page.items) {
+                            val resolved = resolveItemPath(item) ?: continue
+                            changes[resolved.path] = resolved
+                        }
+                        // UD-223: promote the cursor directly. Bootstrap guarantees no transfers
+                        // fire on this run (the action list is empty by construction), so the
+                        // usual "pending → delta after zero failures" dance is skipped —
+                        // otherwise syncOnce's `if (actions.isEmpty()) return` short-circuits
+                        // the promotion and the next run re-bootstraps forever.
+                        db.setSyncState("delta_cursor", page.cursor)
+                        db.setSyncState("last_full_scan", Instant.now().toString())
+                        val stamp = Instant.now().toString()
+                        val msg =
+                            "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
+                                "Items that already exist on the remote will stay invisible until they next mutate. " +
+                                "Upload-direction sync is unaffected."
+                        log.warn(msg)
+                        reporter.onWarning(msg)
+                        return changes
+                    }
+                    is CapabilityResult.Unsupported -> {
+                        log.warn(
+                            "UD-223 fast-bootstrap requested but provider '{}' does not support it ({}). " +
+                                "Falling back to full first-sync enumeration.",
+                            providerId,
+                            result.reason,
+                        )
+                    }
+                }
+            } else {
+                log.warn(
+                    "UD-223 fast-bootstrap requested but provider '{}' does not declare the capability. " +
+                        "Falling back to full first-sync enumeration.",
+                    providerId,
+                )
+            }
+        }
+
+        // If includeShared is requested but the provider doesn't actually support
+        // delta-with-shared, silently fall back to plain delta — this is the
+        // long-standing behaviour preserved across the UD-301 refactor.
+        val useShared =
+            includeShared &&
+                Capability.DeltaShared in provider.capabilities()
+
+        suspend fun nextPage(c: String?) =
+            if (useShared) {
+                when (val r = provider.deltaWithShared(c)) {
+                    is CapabilityResult.Success -> r.value
+                    is CapabilityResult.Unsupported -> provider.delta(c)
+                }
+            } else {
+                provider.delta(c)
+            }
+
+        var page = nextPage(cursor)
+        for (item in page.items) {
+            val resolved = resolveItemPath(item) ?: continue
+            changes[resolved.path] = resolved
+        }
+        db.setSyncState("pending_cursor", page.cursor)
+
+        while (page.hasMore) {
+            page = nextPage(page.cursor)
+            for (item in page.items) {
+                val resolved = resolveItemPath(item) ?: continue
+                changes[resolved.path] = resolved
+            }
+            db.setSyncState("pending_cursor", page.cursor)
+        }
+
+        if (isFullSync) {
+            detectMissingAfterFullSync(changes)
+        }
+        return changes
+    }
+
+    /**
+     * Deleted items from OneDrive personal have no name/parentReference.path,
+     * so toCloudItem() produces path="/". Recover the real path from the DB by remoteId.
+     * Returns null for items that should be skipped (drive root, unknown deleted items).
+     */
+    private fun resolveItemPath(item: CloudItem): CloudItem? {
+        if (item.path != "/" && item.path.isNotEmpty()) return item
+        if (!item.deleted) return null // non-deleted root item, skip
+        val entry = db.getEntryByRemoteId(item.id) ?: return null
+        log.debug("Resolved deleted item id={} to path={}", item.id, entry.path)
+        return item.copy(path = entry.path, name = entry.path.substringAfterLast("/"))
+    }
+
+    /**
+     * After a full delta (cursor was null), the response contains ALL items in the drive.
+     * Any DB entry whose remoteId is NOT in the full set must have been deleted.
+     * This is a pure set comparison — zero extra API calls.
+     */
+    private fun detectMissingAfterFullSync(remoteChanges: MutableMap<String, CloudItem>) {
+        val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
+
+        for (entry in db.getAllEntries()) {
+            if (entry.remoteId == null) continue
+            if (entry.remoteId in seenRemoteIds) continue
+            if (entry.path in remoteChanges) continue
+
+            log.debug("Full sync: DB entry {} (remoteId={}) not in delta, marking deleted", entry.path, entry.remoteId)
+            remoteChanges[entry.path] =
+                CloudItem(
+                    id = entry.remoteId,
+                    name = entry.path.substringAfterLast("/"),
+                    path = entry.path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
+                )
+        }
+    }
+
+    private suspend fun applyCreatePlaceholder(action: SyncAction.CreatePlaceholder) {
+        // UD-222: under the new routing (Reconciler), CreatePlaceholder is only emitted for
+        //   - folders (mkdir)
+        //   - "both new" adopt (local file already matches remote size)
+        //   - conflict-resolution internal invocations that want a downloaded file
+        // Non-folder remote-new/remote-modified goes through DownloadContent in Pass 2. The
+        // `shouldHydrate` field is vestigial — download now triggers whenever the local side
+        // lacks real content, so that sparse leftovers from an interrupted sync get re-hydrated
+        // instead of silently adopted as NUL bytes.
+        val item = action.remoteItem
+        val localPath = placeholder.resolveLocal(action.path)
+        val sizeMatch = !item.isFolder && Files.isRegularFile(localPath) && Files.size(localPath) == item.size
+        val hasRealContent = sizeMatch && !placeholder.isSparse(localPath, item.size)
+        val shouldDownload = !item.isFolder && item.size > 0 && !hasRealContent
+
+        withEchoSuppression(action.path) {
+            if (item.isFolder) {
+                placeholder.createFolder(action.path, item.modified)
+            } else if (!sizeMatch) {
+                placeholder.createPlaceholder(action.path, item.size, item.modified)
+            }
+
+            if (shouldDownload) {
+                provider.download(action.path, localPath)
+                placeholder.restoreMtime(action.path, item.modified)
+            }
+        }
+
+        val isHydrated = hasRealContent || item.size == 0L || shouldDownload
+        db.upsertEntry(entryFromCloudItem(item, action.path, isHydrated))
+    }
+
+    private suspend fun applyUpdatePlaceholder(action: SyncAction.UpdatePlaceholder) {
+        val item = action.remoteItem
+        if (versionManager != null && action.wasHydrated && !item.isFolder) {
+            val localPath = placeholder.resolveLocal(action.path)
+            if (Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
+                versionManager.snapshot(action.path)
+                versionManager.pruneByCount(action.path, maxVersions)
+            }
+        }
+        withEchoSuppression(action.path) {
+            if (action.wasHydrated && !item.isFolder) {
+                try {
+                    provider.download(action.path, placeholder.resolveLocal(action.path))
+                    placeholder.restoreMtime(action.path, item.modified)
+                } catch (e: Exception) {
+                    restoreToPlaceholder(action.path, item)
+                    throw e
+                }
+            } else if (!item.isFolder) {
+                placeholder.updatePlaceholderMetadata(action.path, item.size, item.modified)
+            }
+        }
+
+        db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
+    }
+
+    private suspend fun applyDownload(action: SyncAction.DownloadContent) {
+        val localPath = placeholder.resolveLocal(action.path)
+        if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
+            versionManager.snapshot(action.path)
+            versionManager.pruneByCount(action.path, maxVersions)
+        }
+        withEchoSuppression(action.path) {
+            provider.download(action.path, localPath)
+            placeholder.restoreMtime(action.path, action.remoteItem.modified)
+        }
+
+        if (verifyIntegrity) {
+            val verified = HashVerifier.verify(localPath, action.remoteItem.hash, providerId)
+            if (!verified) {
+                reporter.onWarning("Integrity check failed: ${action.path}")
+            }
+        }
+
+        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+    }
+
+    private suspend fun applyUpload(action: SyncAction.Upload) {
+        val localPath = placeholder.resolveLocal(action.path)
+        val result =
+            provider.upload(localPath, action.path) { transferred, total ->
+                reporter.onTransferProgress(action.path, transferred, total)
+            }
+        val mtime = Files.getLastModifiedTime(localPath).toMillis()
+        val size = Files.size(localPath)
+        db.upsertEntry(
+            SyncEntry(
+                path = action.path,
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
+
+    private suspend fun applyMoveRemote(action: SyncAction.MoveRemote) {
+        val oldEntry = db.getEntry(action.fromPath)
+        val isFolder = oldEntry?.isFolder ?: false
+        val result = provider.move(action.fromPath, action.path)
+        val localPath = placeholder.resolveLocal(action.path)
+        val mtime = if (Files.exists(localPath)) Files.getLastModifiedTime(localPath).toMillis() else 0L
+        val size =
+            if (isFolder) {
+                0L
+            } else if (Files.exists(localPath)) {
+                Files.size(localPath)
+            } else {
+                oldEntry?.remoteSize ?: 0L
+            }
+        db.deleteEntry(action.fromPath)
+        db.upsertEntry(
+            SyncEntry(
+                path = action.path,
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = oldEntry?.remoteSize ?: result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = isFolder,
+                isPinned = false,
+                isHydrated = oldEntry?.isHydrated ?: true,
+                lastSynced = Instant.now(),
+            ),
+        )
+        if (isFolder) {
+            db.renamePrefix(action.fromPath, action.path)
+        }
+    }
+
+    private fun applyMoveLocal(action: SyncAction.MoveLocal) {
+        val oldLocal = placeholder.resolveLocal(action.fromPath)
+        val newLocal = placeholder.resolveLocal(action.path)
+        val oldEntry = db.getEntry(action.fromPath)
+        val isFolder = action.remoteItem.isFolder
+
+        // Suppress both old and new paths to avoid echo events from the move
+        withEchoSuppression(action.fromPath) {
+            withEchoSuppression(action.path) {
+                Files.createDirectories(newLocal.parent)
+                if (Files.exists(oldLocal)) {
+                    Files.move(oldLocal, newLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } else if (!isFolder) {
+                    placeholder.createPlaceholder(action.path, action.remoteItem.size, action.remoteItem.modified)
+                } else {
+                    Files.createDirectories(newLocal)
+                }
+            }
+        }
+
+        db.deleteEntry(action.fromPath)
+        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
+        if (isFolder) {
+            db.renamePrefix(action.fromPath, action.path)
+        }
+    }
+
+    private fun applyDeleteLocal(action: SyncAction.DeleteLocal) {
+        withEchoSuppression(action.path) {
+            if (trashManager != null) {
+                trashManager.trash(action.path)
+            } else if (useTrash) {
+                Trash.trash(placeholder.resolveLocal(action.path))
+            } else {
+                placeholder.deleteLocal(action.path)
+            }
+        }
+        db.deleteEntry(action.path)
+    }
+
+    private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
+        try {
+            provider.delete(action.path)
+        } catch (e: ProviderException) {
+            log.debug("DeleteRemote skipped for ${action.path}: ${e.message}")
+        }
+        db.deleteEntry(action.path)
+    }
+
+    private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
+        val result = provider.createFolder(action.path)
+        db.upsertEntry(
+            SyncEntry(
+                path = action.path,
+                remoteId = result.id,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = result.modified,
+                localMtime = Files.getLastModifiedTime(placeholder.resolveLocal(action.path)).toMillis(),
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
+
+    private suspend fun applyConflict(action: SyncAction.Conflict) {
+        log.warn("Conflict on ${action.path}: local=${action.localState}, remote=${action.remoteState}")
+
+        when (action.policy) {
+            ConflictPolicy.KEEP_BOTH -> {
+                applyKeepBoth(action)
+                conflictLog?.record(
+                    path = action.path,
+                    localState = action.localState.name,
+                    remoteState = action.remoteState.name,
+                    policy = "KEEP_BOTH",
+                    loserFile = null,
+                )
+            }
+            ConflictPolicy.LAST_WRITER_WINS -> applyLastWriterWins(action)
+        }
+    }
+
+    private suspend fun applyKeepBoth(action: SyncAction.Conflict) {
+        val timestamp =
+            java.time.format.DateTimeFormatter
+                .ofPattern("yyyyMMdd'T'HHmm")
+                .withZone(java.time.ZoneId.systemDefault())
+                .format(Instant.now())
+
+        val localPath = placeholder.resolveLocal(action.path)
+        val ext = action.path.substringAfterLast(".", "")
+        val base = action.path.substringBeforeLast(".")
+        val conflictSuffix =
+            if (ext.isNotEmpty()) {
+                ".conflict-remote-$timestamp.$ext"
+            } else {
+                ".conflict-remote-$timestamp"
+            }
+
+        if (action.remoteItem != null && !action.remoteItem.deleted) {
+            val conflictPath = "$base$conflictSuffix"
+            val conflictLocal = placeholder.resolveLocal(conflictPath)
+            withEchoSuppression(conflictPath) {
+                provider.download(action.remoteItem.path, conflictLocal)
+            }
+            if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
+                if (Files.exists(localPath)) {
+                    val result =
+                        provider.upload(localPath, action.path) { transferred, total ->
+                            reporter.onTransferProgress(action.path, transferred, total)
+                        }
+                    val mtime = Files.getLastModifiedTime(localPath).toMillis()
+                    db.upsertEntry(
+                        SyncEntry(
+                            path = action.path,
+                            remoteId = result.id,
+                            remoteHash = result.hash,
+                            remoteSize = result.size,
+                            remoteModified = result.modified,
+                            localMtime = mtime,
+                            localSize = Files.size(localPath),
+                            isFolder = false,
+                            isPinned = false,
+                            isHydrated = true,
+                            lastSynced = Instant.now(),
+                        ),
+                    )
+                }
+            }
+        } else if (action.localState == ChangeState.DELETED && action.remoteItem != null) {
+            // UD-222: remote wins the conflict — download real bytes, not a NUL stub.
+            applyCreatePlaceholder(
+                SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
+            )
+        } else if (action.remoteState == ChangeState.DELETED && Files.exists(localPath)) {
+            val result =
+                provider.upload(localPath, action.path) { transferred, total ->
+                    reporter.onTransferProgress(action.path, transferred, total)
+                }
+            val mtime = Files.getLastModifiedTime(localPath).toMillis()
+            db.upsertEntry(
+                SyncEntry(
+                    path = action.path,
+                    remoteId = result.id,
+                    remoteHash = result.hash,
+                    remoteSize = result.size,
+                    remoteModified = result.modified,
+                    localMtime = mtime,
+                    localSize = Files.size(localPath),
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+    }
+
+    private suspend fun applyLastWriterWins(action: SyncAction.Conflict) {
+        val localPath = placeholder.resolveLocal(action.path)
+        val localMtime = if (Files.exists(localPath)) Files.getLastModifiedTime(localPath).toInstant() else null
+        val remoteMtime = action.remoteItem?.modified
+
+        val remoteWins =
+            when {
+                localMtime == null -> true
+                remoteMtime == null -> false
+                else -> remoteMtime.isAfter(localMtime)
+            }
+
+        val loserFile = if (remoteWins && Files.exists(localPath)) localPath else null
+        conflictLog?.record(
+            path = action.path,
+            localState = action.localState.name,
+            remoteState = action.remoteState.name,
+            policy = "LAST_WRITER_WINS",
+            loserFile = loserFile,
+        )
+
+        if (remoteWins && action.remoteItem != null && !action.remoteItem.deleted) {
+            applyCreatePlaceholder(SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = true))
+        } else if (!remoteWins && Files.exists(localPath)) {
+            applyUpload(SyncAction.Upload(action.path))
+        }
+    }
+
+    private fun entryFromCloudItem(
+        item: CloudItem,
+        path: String,
+        isHydrated: Boolean,
+    ) = SyncEntry(
+        path = path,
+        remoteId = item.id,
+        remoteHash = item.hash,
+        remoteSize = item.size,
+        remoteModified = item.modified,
+        localMtime = placeholder.localMtime(path),
+        localSize = placeholder.localSize(path),
+        isFolder = item.isFolder,
+        isPinned = false,
+        isHydrated = isHydrated,
+        lastSynced = Instant.now(),
+    )
+
+    private fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>) {
+        for ((path, item) in remoteChanges) {
+            if (item.deleted) continue // skip deleted items
+            val existing = db.getEntry(path)
+            val merged =
+                existing?.copy(
+                    remoteId = item.id,
+                    remoteHash = item.hash,
+                    remoteSize = item.size,
+                    remoteModified = item.modified,
+                    lastSynced = Instant.now(),
+                    // preserve localMtime, localSize, isHydrated, isFolder
+                ) ?: SyncEntry(
+                    path = path,
+                    remoteId = item.id,
+                    remoteHash = item.hash,
+                    remoteSize = item.size,
+                    remoteModified = item.modified,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = item.isFolder,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                )
+            db.upsertEntry(merged)
+        }
+    }
+
+    private fun actionLabel(action: SyncAction): String =
+        when (action) {
+            is SyncAction.CreatePlaceholder ->
+                when {
+                    action.remoteItem.isFolder -> "mkdir"
+                    Files.isRegularFile(placeholder.resolveLocal(action.path)) &&
+                        Files.size(placeholder.resolveLocal(action.path)) == action.remoteItem.size -> "adopt"
+                    else -> "placeholder"
+                }
+            is SyncAction.UpdatePlaceholder -> "update"
+            is SyncAction.DownloadContent -> "down"
+            is SyncAction.MoveRemote -> "move"
+            is SyncAction.MoveLocal -> "move"
+            is SyncAction.Upload -> "up"
+            is SyncAction.DeleteLocal -> "del-local"
+            is SyncAction.DeleteRemote -> "del-remote"
+            is SyncAction.CreateRemoteFolder -> "mkdir-remote"
+            is SyncAction.Conflict -> "CONFLICT"
+            is SyncAction.RemoveEntry -> "cleanup"
+        }
+
+    private fun restoreToPlaceholder(
+        remotePath: String,
+        item: CloudItem,
+    ) {
+        try {
+            withEchoSuppression(remotePath) {
+                placeholder.createPlaceholder(remotePath, item.size, item.modified)
+            }
+            // UD-222: if no prior DB entry existed (first-time download that failed), create one
+            // marked non-hydrated so the next sync re-attempts. Without this, a failed first-time
+            // download left zero trace in the DB and the cursor-promotion guard was the only
+            // safety net.
+            val entry = db.getEntry(remotePath)
+            val next =
+                entry?.copy(isHydrated = false, remoteSize = item.size, remoteModified = item.modified)
+                    ?: entryFromCloudItem(item, remotePath, isHydrated = false)
+            db.upsertEntry(next)
+        } catch (e: Exception) {
+            // UD-253: class name + throwable for diagnostics.
+            log.warn(
+                "Could not restore placeholder for {} after cancel: {}: {}",
+                remotePath,
+                e.javaClass.simpleName,
+                e.message,
+                e,
+            )
+        }
+    }
+
+    private fun syncPathAncestors(path: String): Set<String> {
+        val parts = path.trimStart('/').split('/')
+        val ancestors = mutableSetOf<String>()
+        for (i in 1 until parts.size) {
+            ancestors.add("/" + parts.subList(0, i).joinToString("/"))
+        }
+        return ancestors
+    }
+
+    private fun logFailure(
+        action: SyncAction,
+        error: Exception,
+    ) {
+        val path = failureLogPath ?: return
+        val kind = actionLabel(action)
+        val msg = (error.message ?: error.javaClass.simpleName).replace("\"", "\\\"")
+        val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}","error":"$msg"}"""
+        Files.createDirectories(path.parent)
+        Files.writeString(path, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+    }
+
+    private fun validateExcludePatterns(patterns: List<String>): List<String> {
+        val valid = mutableListOf<String>()
+        for (pattern in patterns) {
+            try {
+                FileSystems.getDefault().getPathMatcher("glob:$pattern")
+                valid.add(pattern)
+            } catch (e: PatternSyntaxException) {
+                log.warn("Invalid exclude pattern '{}', skipping: {}", pattern, e.message)
+            }
+        }
+        return valid
+    }
+
+    companion object {
+        /**
+         * UD-248: catastrophic-failure threshold for the sequential-action
+         * pass. Below this count, failing actions are skipped and the pass
+         * continues (no more 3-in-a-row-equals-tear-down-and-rescan
+         * behaviour). Above this count, we treat the run as an upstream
+         * outage and stop the pass so the watch loop can back off.
+         */
+        const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+    }
+}

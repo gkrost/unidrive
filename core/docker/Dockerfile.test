@@ -1,0 +1,74 @@
+# UD-707: integration test image for the localfs profile suite.
+#
+# Build context is `core/` (set in docker-compose.test.yml). The image runs
+# core/docker/test-matrix.sh inside a JRE 21 container with no host mounts.
+#
+# Two stages:
+#   1. builder — JDK 21, builds :app:cli:shadowJar.
+#   2. runtime — JRE 21, ships only the fat jar + test script. Non-root.
+
+# ── stage 1: build ─────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk AS builder
+
+WORKDIR /build
+
+# Copy wrapper + version catalogs first so Gradle's layer caches the
+# dependency download across iterative source changes.
+COPY gradlew settings.gradle.kts build.gradle.kts ./
+COPY gradle ./gradle
+
+# Now the rest of the source tree.
+COPY app ./app
+COPY providers ./providers
+
+# Strip Windows CRLF that may be on the wrapper if checked out on Windows,
+# then build the CLI fat jar.
+RUN sed -i 's/\r$//' gradlew \
+ && chmod +x gradlew \
+ && ./gradlew :app:cli:shadowJar :app:mcp:shadowJar --no-daemon -q
+
+# ── stage 2: runtime ───────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jre
+
+# Tooling for the provider harness (test-providers.sh):
+#   - openssh-client (ssh-keyscan, sftp) — UD-711 host-key seeding + UD-712
+#     SFTP round-trip verification
+#   - sshpass — non-interactive password auth for sftp verify step
+#   - curl + ca-certificates — WebDAV verify step + mc download
+#   - rclone — UD-712 rclone adapter end-to-end test
+#   - mc — UD-712 S3 round-trip verification (MinIO CLI)
+#
+# Tooling for the MCP harness (test-mcp.sh):
+#   - jq — JSON-RPC request framing + response assertions (UD-815)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openssh-client \
+      sshpass \
+      curl \
+      ca-certificates \
+      rclone \
+      jq \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc \
+      -o /usr/local/bin/mc \
+ && chmod +x /usr/local/bin/mc
+
+# Pulls the produced fat jar (filename includes the project version, so glob).
+COPY --from=builder /build/app/cli/build/libs/unidrive-*.jar /opt/unidrive/unidrive.jar
+# UD-815: MCP shadow jar, used by test-mcp.sh. The filename embeds the
+# project version (`unidrive-mcp-<version>.jar`) and the harness globs it
+# at runtime, so the exact version string does not need to be hard-coded.
+COPY --from=builder /build/app/mcp/build/libs/unidrive-mcp-*.jar /opt/unidrive/
+COPY docker/test-matrix.sh /opt/unidrive/test-matrix.sh
+# UD-711: provider contract harness. Shares the same image; compose file
+# overrides ENTRYPOINT to pick it up.
+COPY docker/test-providers.sh /opt/unidrive/test-providers.sh
+# UD-815: MCP JSON-RPC harness. Same override-ENTRYPOINT pattern.
+COPY docker/test-mcp.sh /opt/unidrive/test-mcp.sh
+
+RUN sed -i 's/\r$//' /opt/unidrive/test-matrix.sh /opt/unidrive/test-providers.sh /opt/unidrive/test-mcp.sh \
+ && chmod +x /opt/unidrive/test-matrix.sh /opt/unidrive/test-providers.sh /opt/unidrive/test-mcp.sh \
+ && useradd -m testuser
+
+USER testuser
+ENTRYPOINT ["/opt/unidrive/test-matrix.sh"]

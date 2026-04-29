@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="src/test/kotlin/org/krost/unidrive/rclone/RcloneDeltaTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/rclone/RcloneEntryParsingTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/rclone/RcloneSnapshotTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+</baseline>

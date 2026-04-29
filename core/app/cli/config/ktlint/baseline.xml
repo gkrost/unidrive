@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="build/generated/src/main/kotlin/org/krost/unidrive/cli/BuildInfo.kt">
+        <error line="6" column="5" source="standard:blank-line-before-declaration" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/cli/Main.kt">
+        <error line="80" column="17" source="standard:backing-property-naming" />
+        <error line="81" column="17" source="standard:backing-property-naming" />
+        <error line="629" column="1" source="standard:no-consecutive-comments" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/AnsiHelperTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt">
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/CliSmokeTest.kt">
+        <error line="3" column="1" source="standard:import-ordering" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/StatusAuditTest.kt">
+        <error line="12" column="17" source="standard:property-naming" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt">
+        <error line="11" column="1" source="standard:no-wildcard-imports" />
+    </file>
+</baseline>

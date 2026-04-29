@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="build/generated/src/main/kotlin/org/krost/unidrive/mcp/BuildInfo.kt">
+        <error line="6" column="5" source="standard:blank-line-before-declaration" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/BackupTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ConfigTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ConflictsTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="10" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/EventBuffer.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/FreeTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="11" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/GetTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/IdentityTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/LogoutTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/LsTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="10" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/PinTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="8" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ProfileContext.kt">
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ProfileTools.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/QuotaTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/RelocateTool.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+        <error line="12" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ShareTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/StatusTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/ToolDef.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/TrashTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/VersionsTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/mcp/WatchEventsTool.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="8" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/mcp/AdminToolsTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="10" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/mcp/JsonRpcTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/mcp/McpRoundtripIntegrationTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/mcp/McpServerTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="11" column="1" source="standard:no-wildcard-imports" />
+    </file>
+</baseline>

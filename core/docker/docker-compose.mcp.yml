@@ -1,0 +1,44 @@
+# UD-815: MCP JSON-RPC end-to-end harness.
+#
+# Boots the deployed MCP shadow jar (`unidrive-mcp-<version>.jar`) as a
+# subprocess, speaks JSON-RPC over stdio, and asserts the core tool
+# surface against a seeded localfs profile. No external services — the
+# MCP-localfs combination is fully self-contained.
+#
+# Usage: docker compose -f docker/docker-compose.mcp.yml run --rm unidrive-mcp-test
+
+services:
+  unidrive-mcp-test:
+    build:
+      # Build context is the Gradle root (core/); compose lives at core/docker/.
+      context: ..
+      dockerfile: docker/Dockerfile.test
+    entrypoint: ["/opt/unidrive/test-mcp.sh"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,exec
+      - /tmp/source:size=16m,exec
+      - /tmp/unidrive-config:size=16m
+      - /home/testuser/.config:size=16m
+      - /home/testuser/.local/share/unidrive:size=32m,exec
+    environment:
+      - HOME=/home/testuser
+      - XDG_DATA_HOME=/home/testuser/.local/share
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "2.0"
+          pids: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

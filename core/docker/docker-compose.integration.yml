@@ -1,0 +1,100 @@
+# UniDrive Integration Test Stack
+# Provides local SFTP, WebDAV, SSH for testing
+# Usage: docker compose -f docker-compose.integration.yml up -d
+
+services:
+  # SFTP Server (atmoz/sftp)
+  # Credentials: user=testuser / password=testpass
+  # Files at: /home/testuser
+  sftp:
+    image: atmoz/sftp:latest
+    container_name: unidrive-test-sftp
+    ports:
+      - "2222:22"
+    volumes:
+      - sftp-data:/home/testuser
+    command: testuser:testpass:1000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "echo", "ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # WebDAV Server (bytemark/webdav)
+  # Credentials: user=testuser / password=testpass
+  # URL: http://localhost:8080/ (NOT /webdav/ — bytemark Alias defaults to "/")
+  webdav:
+    image: bytemark/webdav:latest
+    container_name: unidrive-test-webdav
+    ports:
+      - "8080:80"
+    environment:
+      # bytemark/webdav honours USERNAME/PASSWORD (not AUTHUSER/AUTHPASS —
+      # which was a copy-paste bug in this file and broke every auth request).
+      - USERNAME=testuser
+      - PASSWORD=testpass
+      - AUTH_TYPE=Basic
+    volumes:
+      - webdav-data:/var/webdav
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # SSH Server (for key-based auth testing)
+  # Credentials: user=testuser / password=testpass
+  # Runs OpenSSH with SFTP subsystem
+  ssh:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: unidrive-test-ssh
+    ports:
+      - "2223:22"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Berlin
+      - PASSWORD=testpass
+      - SUDO_ACCESS=false
+    volumes:
+      - ssh-data:/config
+      - /tmp/unidrive-ssh-keys:/keys:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "echo", "ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  sftp-data:
+  webdav-data:
+  ssh-data:
+
+# Test profiles to use with these services:
+#
+# [providers.sftp-local]
+# type = "sftp"
+# sync_root = "~/SFTP-Local"
+# host = "localhost"
+# port = 2222
+# user = "testuser"
+# password = "testpass"
+# remote_path = "/"
+#
+# [providers.webdav-local]
+# type = "webdav"
+# sync_root = "~/WebDAV-Local"
+# url = "http://localhost:8080/"
+# user = "testuser"
+# password = "testpass"
+#
+# [providers.ssh-local]
+# type = "sftp"
+# sync_root = "~/SSH-Local"
+# host = "localhost"
+# port = 2223
+# user = "testuser"
+# password = "testpass"

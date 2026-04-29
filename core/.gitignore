@@ -1,0 +1,35 @@
+.gradle/
+build/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.tar
+*.zip
+local.properties
+.claude/
+.superpowers/
+.idea/
+.kotlin/
+venv/
+
+# Private docs (preserved at pre-split-archive tag, moved out of this repo)
+docs/superpowers/
+docs/session-plans/
+docs/gap-analysis/
+docs/BACKLOG.md
+docs/ROADMAP.md
+docs/BENCHMARK_HANDOVER.md
+docs/INTERNXT_API.md
+docs/CLOUD_PROVIDERS_DATABASE.md
+docs/EPIC-release-repo-split.md
+docs/BRAINSTORM-hosting-and-business.md
+docs/handover.md
+docs/plans/
+
+# Build artifacts
+*.log
+NOTICE
+REVIEW_PROMPT.md
+claude_sessions.txt
+gradle.properties
+__pycache__/

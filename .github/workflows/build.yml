@@ -1,0 +1,145 @@
+# UD-705: host-neutral CI workflow.
+#
+# Mirrors the host-neutral fragments under scripts/ci/ (see
+# scripts/ci/README.md) so this file can be ported to GitLab / Woodpecker /
+# etc. by translating each `run:` block 1:1. UD-701 will eventually pick a
+# host; until then this workflow activates the moment the repo lives on
+# GitHub, with zero edits required.
+#
+# Layers:
+#   - core/   — Kotlin/JVM, builds + tests on Linux + Windows.
+#   - docker-integration — localfs CLI round-trip in a container.
+#   - gitleaks — secrets scan, Linux runner.
+#
+# Pipelines that exist as scripts but are not yet wired (per
+# scripts/ci/README.md): build-ui (v0.2.0 scope), trivy/semgrep
+# (UD-108/UD-109).
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Verify dependency locks
+        working-directory: core
+        shell: bash
+        run: ./gradlew dependencies -q
+
+      - name: Semgrep security scan
+        if: matrix.os == 'ubuntu-latest'
+        run: pip install semgrep && semgrep scan --config .semgrep.yml --error
+
+      - name: Gradle build + test + coverage
+        working-directory: core
+        shell: bash
+        run: ./gradlew build test jacocoMergedReport --no-daemon --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-test-reports-${{ matrix.os }}
+          path: |
+            core/**/build/reports/tests/**
+            core/**/build/test-results/**
+          if-no-files-found: ignore
+
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-jacoco-merged
+          path: core/build/reports/jacoco/jacocoMergedReport
+          if-no-files-found: ignore
+
+  docker-integration:
+    # UD-708: localfs CLI round-trip inside the harness under core/docker/.
+    # No provider credentials needed — tmpfs workspace only. See UD-707 for
+    # the harness rewrite that made this jobs runnable.
+    name: docker-integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build test image
+        working-directory: core
+        run: docker compose -f docker/docker-compose.test.yml build
+
+      - name: Trivy security scan
+        working-directory: core
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y trivy
+          trivy image --severity HIGH,CRITICAL --exit-code 1 --ignorefile ../.trivyignore unidrive-test
+
+      - name: Run test matrix
+        working-directory: core
+        run: docker compose -f docker/docker-compose.test.yml run --rm unidrive-test
+
+  docker-provider-integration:
+    # UD-711: provider contract harness — SFTP / WebDAV / S3 (MinIO)
+    # adapters talking to live containers. Closes the "adapters only
+    # unit-tested with mocks" coverage gap flagged in the backlog D-3
+    # follow-up. No OAuth credentials required; containers are ephemeral.
+    name: docker-provider-integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build provider test image
+        working-directory: core
+        run: docker compose -f docker/docker-compose.providers.yml build unidrive-providers-test
+
+      - name: Trivy security scan
+        working-directory: core
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y trivy
+          trivy image --severity HIGH,CRITICAL --exit-code 1 --ignorefile ../.trivyignore unidrive-providers-test
+
+      - name: Run provider contract harness
+        working-directory: core
+        run: docker compose -f docker/docker-compose.providers.yml run --rm unidrive-providers-test
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+
+      - name: Run gitleaks
+        run: bash scripts/ci/gitleaks.sh

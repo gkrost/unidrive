@@ -1,0 +1,57 @@
+# Build outputs
+build/
+out/
+dist/
+**/build/
+**/.gradle/
+.gradle/
+**/.kotlin/
+.kotlin/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+**/CMakeUserPresets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
+*~
+
+# Local secrets / env
+.env
+.env.local
+*.local
+
+# Local Claude Code harness settings (per-developer)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Superpowers brainstorming session artifacts
+.superpowers/
+
+# Maintainer's local doc-reference cache (not part of the OSS contract)
+_recovered/
+
+# Internal-only docs (competitive briefs, financial planning, NOT for public)
+docs/internal/
+
+# Python tooling artifacts (scripts/dev/ MCPs and helpers)
+**/__pycache__/
+**/.venv-mcps/
+**/.venv/
+

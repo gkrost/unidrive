@@ -1,0 +1,110 @@
+# UD-711: provider contract test stack.
+#
+# Spins up SFTP + WebDAV + MinIO (S3-compatible) services, then runs the
+# same JRE 21 unidrive image (Dockerfile.test) with test-providers.sh as
+# the entrypoint. Exits 0 when every adapter authenticates and reaches
+# the live server.
+#
+# Usage: docker compose -f docker/docker-compose.providers.yml run --rm unidrive-providers-test
+
+services:
+  sftp:
+    image: atmoz/sftp:latest
+    # testuser:testpass uid=1000; /upload is a writable drop dir.
+    command: testuser:testpass:1000:100:upload
+    # No healthcheck — the atmoz/sftp image lacks `ss`/`nc`/`curl`, so
+    # reliable in-container readiness probes are awkward. Port readiness
+    # is polled from test-providers.sh via bash /dev/tcp instead.
+
+  webdav:
+    image: bytemark/webdav:latest
+    environment:
+      # bytemark/webdav uses USERNAME/PASSWORD, not AUTHUSER/AUTHPASS — the
+      # integration.yml sibling has wrong keys; don't copy from it.
+      USERNAME: testuser
+      PASSWORD: testpass
+      AUTH_TYPE: Basic
+    # No healthcheck — see note on sftp. test-providers.sh polls port 80.
+
+  # MinIO in single-node mode; bucket is auto-created by a one-shot init
+  # sidecar below (native MinIO does NOT auto-create buckets on start).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: testuser
+      MINIO_ROOT_PASSWORD: testpass123
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Creates both buckets (native-s3 adapter + rclone adapter) then exits.
+  # Gates unidrive-providers-test.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 testuser testpass123 &&
+      mc mb --ignore-existing local/unidrive-test &&
+      mc mb --ignore-existing local/unidrive-test-rclone &&
+      echo 'buckets ready'"
+
+  unidrive-providers-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.test
+    entrypoint: ["/opt/unidrive/test-providers.sh"]
+    depends_on:
+      sftp:
+        condition: service_started
+      webdav:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,exec
+      - /tmp/unidrive-config:size=16m
+      - /home/testuser/.config:size=16m
+      - /home/testuser/.local/share/unidrive:size=32m,exec
+      - /home/testuser/.ssh:size=4m
+      - /home/testuser/sftp-local:size=16m,exec
+      - /home/testuser/webdav-local:size=16m,exec
+      - /home/testuser/s3-local:size=16m,exec
+      - /home/testuser/rclone-local:size=16m,exec
+    environment:
+      HOME: /home/testuser
+      XDG_DATA_HOME: /home/testuser/.local/share
+      SFTP_HOST: sftp
+      SFTP_PORT: "22"
+      SFTP_USER: testuser
+      SFTP_PASS: testpass
+      # bytemark/webdav's Alias defaults to "/". Don't append /webdav/.
+      WEBDAV_URL: http://webdav/
+      WEBDAV_USER: testuser
+      WEBDAV_PASS: testpass
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: unidrive-test
+      S3_ACCESS_KEY: testuser
+      S3_SECRET_KEY: testpass123
+      S3_REGION: us-east-1
+      # UD-712: rclone adapter re-uses the MinIO service via rclone's
+      # native s3 backend; bucket is provisioned by minio-init alongside
+      # the native-s3 bucket so both providers run against live storage.
+      RCLONE_REMOTE: minio
+      RCLONE_BUCKET: unidrive-test-rclone
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "2.0"
+          pids: 128

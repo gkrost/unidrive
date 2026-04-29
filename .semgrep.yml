@@ -1,0 +1,52 @@
+rules:
+  # Custom Kotlin rules
+  - id: command-injection-unsafe-processbuilder
+    languages:
+      - kotlin
+    message: Unsafe ProcessBuilder usage with single string argument (potential shell injection). Use array form or list of arguments.
+    severity: ERROR
+    patterns:
+      - pattern: ProcessBuilder($CMD)
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: '".*\\s+.*"'
+      - pattern-not: ProcessBuilder(*$ARGS)
+      - pattern-not: ProcessBuilder($ARG1, $ARG2, ...)
+    fix: ProcessBuilder(*$CMD.split("\\s+"))
+
+  - id: command-injection-runtime-exec
+    languages:
+      - kotlin
+    message: Unsafe Runtime.exec usage with single string argument (potential shell injection). Use array form.
+    severity: ERROR
+    patterns:
+      - pattern: Runtime.getRuntime().exec($CMD)
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: '".*\\s+.*"'
+      - pattern-not: Runtime.getRuntime().exec(arrayOf(...))
+      - pattern-not: Runtime.getRuntime().exec($ARG1, $ARG2, ...)
+      - pattern-not: Runtime.getRuntime().exec($ENV, $ARG1, $ARG2, ...)
+    fix: Runtime.getRuntime().exec($CMD.split("\\s+"))
+
+  - id: path-traversal-literal-dotdot
+    languages:
+      - kotlin
+    message: Path literal contains '..' which may indicate path traversal attempt.
+    severity: WARNING
+    patterns:
+      - pattern: Paths.get($PATH)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: '.*\.\..*'
+
+  - id: path-traversal-file-constructor
+    languages:
+      - kotlin
+    message: File constructor with user input may allow path traversal.
+    severity: WARNING
+    patterns:
+      - pattern: File($PATH)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: '.*\.\..*'

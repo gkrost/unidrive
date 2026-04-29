@@ -1,0 +1,217 @@
+package org.krost.unidrive.webdav
+
+import org.krost.unidrive.*
+import org.slf4j.LoggerFactory
+import java.nio.file.Path
+import java.time.Instant
+
+/**
+ * CloudProvider implementation for WebDAV servers (Nextcloud, ownCloud, Synology DSM, QNAP, etc.).
+ *
+ * Delta strategy: full recursive PROPFIND listing → compare ETag + size + lastModified
+ * against the previous snapshot stored as a Base64-encoded JSON cursor (same pattern as
+ * HiDrive, S3, and SFTP).  [DeltaPage.hasMore] is always false — one full listing per cycle.
+ *
+ * Move: WebDAV MOVE header — server-side, preserves content without re-uploading.
+ *
+ * Authentication: HTTP Basic (username + password) via Ktor Auth plugin.
+ * No OAuth — credentials live in [WebDavConfig].
+ */
+class WebDavProvider(
+    val config: WebDavConfig,
+) : CloudProvider {
+    override val id = "webdav"
+    override val displayName = "WebDAV"
+
+    private val log = LoggerFactory.getLogger(WebDavProvider::class.java)
+    private val api = WebDavApiService(config)
+
+    override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
+
+    override var isAuthenticated: Boolean = false
+        private set
+    override val canAuthenticate: Boolean get() =
+        config.baseUrl.isNotBlank() && config.username.isNotBlank() && config.password.isNotBlank()
+
+    override suspend fun authenticate() {
+        // Validate by doing a PROPFIND on the root
+        api.propfind("")
+        isAuthenticated = true
+        log.debug("Auth: {}", config.baseUrl)
+    }
+
+    override suspend fun logout() {
+        isAuthenticated = false
+    }
+
+    override fun close() = api.close()
+
+    // ── File operations ───────────────────────────────────────────────────────
+
+    override suspend fun download(
+        remotePath: String,
+        destination: Path,
+    ): Long = api.download(remotePath, destination)
+
+    override suspend fun upload(
+        localPath: Path,
+        remotePath: String,
+        onProgress: ((Long, Long) -> Unit)?,
+    ): CloudItem {
+        val entry = api.upload(localPath, remotePath, onProgress)
+        return entry.toCloudItem()
+    }
+
+    override suspend fun delete(remotePath: String) = api.delete(remotePath)
+
+    override suspend fun createFolder(path: String): CloudItem {
+        api.mkcol(path)
+        val now = Instant.now()
+        return CloudItem(
+            id = path,
+            name = path.substringAfterLast("/"),
+            path = path,
+            size = 0,
+            isFolder = true,
+            modified = now,
+            created = now,
+            hash = null,
+            mimeType = null,
+        )
+    }
+
+    override suspend fun move(
+        fromPath: String,
+        toPath: String,
+    ): CloudItem {
+        api.move(fromPath, toPath)
+        val now = Instant.now()
+        return CloudItem(
+            id = toPath,
+            name = toPath.substringAfterLast("/"),
+            path = toPath,
+            size = 0,
+            isFolder = false,
+            modified = now,
+            created = now,
+            hash = null,
+            mimeType = null,
+        )
+    }
+
+    // ── Metadata ──────────────────────────────────────────────────────────────
+
+    override suspend fun listChildren(path: String): List<CloudItem> {
+        val raw = api.propfind(path)
+        // Normalise to "/foo/bar" form for the self-entry filter.
+        // path.trimEnd('/') on "/" yields "", so guard with ifEmpty.
+        val selfPath = path.trimEnd('/').ifEmpty { "/" }
+        val filtered = raw.filter { it.path != selfPath && it.path != "$selfPath/" }
+        return filtered.map { it.toCloudItem() }
+    }
+
+    override suspend fun getMetadata(path: String): CloudItem {
+        val entries = api.propfind(path)
+        return entries.firstOrNull { it.path == path || it.path == path.trimEnd('/') }?.toCloudItem()
+            ?: throw WebDavException("WebDAV resource not found: $path", 404)
+    }
+
+    // ── Delta ─────────────────────────────────────────────────────────────────
+
+    override suspend fun delta(cursor: String?): DeltaPage {
+        val currentEntries = api.listAll()
+        log.debug("Delta: {} items", currentEntries.size)
+        val currentSnapshot = buildSnapshot(currentEntries)
+
+        if (cursor == null) {
+            return DeltaPage(
+                items = currentEntries.map { it.toCloudItem() },
+                cursor = currentSnapshot.encode(),
+                hasMore = false,
+            )
+        }
+
+        val previousSnapshot = WebDavSnapshot.decode(cursor)
+        val changes = mutableListOf<CloudItem>()
+
+        // New and modified entries
+        for ((path, entry) in currentSnapshot.entries) {
+            val prev = previousSnapshot.entries[path]
+            val changed =
+                prev == null ||
+                    prev.size != entry.size ||
+                    (entry.etag != null && prev.etag != entry.etag) ||
+                    (entry.etag == null && prev.lastModified != entry.lastModified)
+            if (changed) {
+                val found = currentEntries.firstOrNull { it.path == path }
+                if (found != null) changes.add(found.toCloudItem())
+            }
+        }
+
+        // Deleted entries
+        for ((path, entry) in previousSnapshot.entries) {
+            if (path !in currentSnapshot.entries) {
+                changes.add(
+                    CloudItem(
+                        id = path,
+                        name = path.substringAfterLast("/"),
+                        path = path,
+                        size = 0,
+                        isFolder = entry.isFolder,
+                        modified = null,
+                        created = null,
+                        hash = null,
+                        mimeType = null,
+                        deleted = true,
+                    ),
+                )
+            }
+        }
+
+        return DeltaPage(
+            items = changes,
+            cursor = currentSnapshot.encode(),
+            hasMore = false,
+        )
+    }
+
+    // ── Quota ─────────────────────────────────────────────────────────────────
+
+    override suspend fun quota(): QuotaInfo {
+        if (!isAuthenticated) return QuotaInfo(total = 0, used = 0, remaining = 0)
+        return try {
+            api.quotaPropfind() ?: QuotaInfo(total = 0, used = 0, remaining = 0)
+        } catch (_: Exception) {
+            QuotaInfo(total = 0, used = 0, remaining = 0)
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun buildSnapshot(entries: List<WebDavEntry>): WebDavSnapshot {
+        val map =
+            entries.associate { entry ->
+                entry.path to
+                    WebDavSnapshotEntry(
+                        size = entry.size,
+                        lastModified = entry.lastModified?.toString(),
+                        etag = entry.etag,
+                        isFolder = entry.isFolder,
+                    )
+            }
+        return WebDavSnapshot(entries = map)
+    }
+
+    private fun WebDavEntry.toCloudItem(): CloudItem =
+        CloudItem(
+            id = path,
+            name = path.substringAfterLast("/"),
+            path = path.ifEmpty { "/" },
+            size = size,
+            isFolder = isFolder,
+            modified = lastModified,
+            created = lastModified,
+            hash = etag,
+            mimeType = if (isFolder) null else "application/octet-stream",
+        )
+}

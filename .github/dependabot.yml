@@ -1,0 +1,43 @@
+# UD-110: Dependabot configuration.
+#
+# Scope (per ADR-0009 — GitHub Actions is the committed CI host):
+#   - Gradle ecosystem for the single live composite (core/). Dependabot
+#     auto-discovers the version catalog at core/gradle/libs.versions.toml
+#     from the /core entry. The previously-imported `ui/` composite was
+#     removed in ADR-0013.
+#   - GitHub Actions ecosystem for action pin updates across
+#     .github/workflows/.
+#
+# Out of scope (separate ticket):
+#   - shell-win/ CMake FetchContent (not supported by Dependabot natively).
+
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: /core
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore(ci)
+      include: scope

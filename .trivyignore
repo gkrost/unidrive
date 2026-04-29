@@ -1,0 +1,6 @@
+# Trivy ignore list for accepted vulnerabilities
+# Add entries in the format:
+# CVE-YYYY-NNNN
+# or
+# # vendor:product
+# # See https://aquasecurity.github.io/trivy/v0.19/docs/references/filter/

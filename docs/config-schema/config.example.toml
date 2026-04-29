@@ -1,0 +1,273 @@
+# =============================================================================
+# unidrive — canonical annotated config.toml
+# =============================================================================
+#
+# Location:
+#   POSIX:   ~/.config/unidrive/config.toml
+#   Windows: %APPDATA%\unidrive\config.toml
+#
+# Source of truth: core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+# (RawSyncConfig / RawGeneral / RawProvider / RawPinPatterns).
+# Unknown keys are silently ignored (ktoml is configured with ignoreUnknownNames = true).
+# All keys are TOML snake_case; the JSON schema in config.schema.json mirrors this 1:1.
+#
+# Secrets note: credential fields (access_key_id, secret_access_key, password,
+# client_id, client_secret) may be omitted here and supplied instead from the
+# encrypted vault at `{profile-dir}/vault.enc`, unlocked with the passphrase in
+# env var UNIDRIVE_VAULT_PASS (see docs/SECURITY.md A1). Values present in this
+# file win over vault values (see Main.kt:mergeVaultCreds).
+# =============================================================================
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [general] — daemon-wide defaults (RawGeneral → SyncConfig top-level fields).
+# All keys are optional; omitted keys fall back to the defaults noted per line.
+# ─────────────────────────────────────────────────────────────────────────────
+[general]
+
+# string | default: "onedrive".
+# Which profile the CLI and the MCP jar use when invoked without `-p <name>`.
+# UD-252: before this key existed the MCP returned the alphabetically-first
+# provider key while the CLI hardcoded "onedrive", so the two jars disagreed
+# on "the default" in any multi-profile config. Set this explicitly once you
+# have more than one profile to pin the behaviour. When unset, both jars fall
+# back to "onedrive".
+# default_profile = "ds418play"
+
+# string | default: $HOME/<ProviderType capitalized> (e.g. ~/OneDrive).
+# Root directory of the local mirror. Tilde `~` is expanded. Per-profile
+# `[providers.<name>].sync_root` overrides this for that profile.
+sync_root = "~/Cloud"
+
+# int (seconds) | default: 60.
+# Nominal poll cadence when no local/remote change signals are in play.
+# Also the ceiling for `min_poll_interval` (it is coerced into [5, poll_interval]).
+poll_interval = 60
+
+# int (seconds) | default: 10 | coerced into [5, poll_interval].
+# ACTIVE-state interval when AdaptiveInterval detects < 3 idle cycles.
+# See AdaptiveInterval.kt + SPECS.md §4.1 "Adaptive polling".
+min_poll_interval = 10
+
+# int (seconds) | default: 300 | coerced to ≥ poll_interval.
+# IDLE-state interval once idle-cycle count exceeds the NORMAL threshold.
+max_poll_interval = 300
+
+# "keep_both" | "last_writer_wins" | default: "keep_both".
+# Unknown values fall through to "keep_both" (see parsePolicy()).
+# keep_both → remote variant is saved as `file.conflict-remote-<TIMESTAMP>.ext`.
+conflict_policy = "keep_both"
+
+# string (path) | default: null (no file logging).
+# Tilde `~` is expanded. When null, logs only go to stderr/journal.
+log_file = "~/.local/state/unidrive/unidrive.log"
+
+# int (KiB/s) | default: null (unlimited).
+# Global upload+download bandwidth ceiling applied via ThrottledProvider/TokenBucket.
+max_bandwidth_kbps = 0
+
+# int (0..100) | default: 50 | coerced into [0, 100].
+# Abort a sync run if it would delete more than this percentage of tracked files.
+# CLI `--force-delete` bypasses. See SPECS.md §4.2 "Deletion safeguards".
+max_delete_percentage = 50
+
+# "bidirectional" | "upload" | "download" | default: "bidirectional".
+# Unknown values fall through to "bidirectional" (parseDirection()).
+sync_direction = "bidirectional"
+
+# string | default: null. Free-form tag (e.g. "home", "office") consumed by
+# client-aware logic in higher layers; SyncConfig only stores/forwards it.
+client_location = "home"
+
+# string | default: null. Free-form tag (e.g. "wifi", "ethernet", "mobile").
+client_network = "wifi"
+
+# array<string> (glob) | default: [].
+# Paths matching any glob are skipped during reconciliation. Merged with
+# per-profile `exclude_patterns` (global ∪ profile). SPECS.md §4.1 "Selective sync".
+exclude_patterns = [
+    ".DS_Store",
+    "Thumbs.db",
+    "*.tmp",
+    "~$*",
+]
+
+# bool | default: false. Emit desktop notifications on sync events.
+desktop_notifications = false
+
+# bool | default: false. Verify file content hash after transfer
+# (HashVerifier). Slower but catches silent corruption.
+verify_integrity = false
+
+# bool | default: true. Route local deletes through the OS trash/recycle bin
+# rather than unlinking immediately.
+use_trash = true
+
+# bool | default: false. When the OS trash is unavailable (headless, some
+# Windows paths), emulate it under `{profile-dir}/.trash/`.
+trash_emulation = false
+
+# int (days, ≥1) | default: 30 | coerced to ≥ 1.
+# Retention window for emulated trash; purged by TrashManager.
+trash_retention_days = 30
+
+# bool | default: false. Keep prior revisions on overwrite (VersionManager).
+file_versioning = false
+
+# int (≥1) | default: 5 | coerced to ≥ 1. Max versions retained per file.
+max_versions = 5
+
+# int (days, ≥1) | default: 90 | coerced to ≥ 1. Age limit for retained versions.
+version_retention_days = 90
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [providers.<name>] — one section per profile (RawProvider).
+# <name> is the profile id used as `unidrive -p <name> ...`. If <name> matches a
+# known provider type (onedrive / s3 / sftp / webdav / rclone / localfs / hidrive
+# / internxt) and `type` is omitted, the profile name doubles as the type.
+# Unknown `type` values cause config load to fail (resolveProfile()).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── OneDrive example ────────────────────────────────────────────────────────
+[providers.onedrive]
+# string | default: <profile name>. Provider implementation to use.
+# Known: onedrive, s3, sftp, webdav, rclone, localfs, hidrive, internxt.
+type = "onedrive"
+
+# string | default: falls back to [general].sync_root, then $HOME/OneDrive.
+# Tilde `~` is expanded. MUST be unique across profiles (duplicate detection
+# is enforced by detectDuplicateSyncRoots()).
+sync_root = "~/OneDrive"
+
+# array<string> (glob) | default: []. Additive with [general].exclude_patterns.
+exclude_patterns = ["*.bak"]
+
+# OAuth 2.0 / MSAL.
+# string | default: null. AAD tenant authority URL. Null → MSAL default
+# ("https://login.microsoftonline.com/common").
+authority_url = "https://login.microsoftonline.com/common"
+
+# bool | default: false. Include /me/drive/sharedWithMe items in delta.
+include_shared = false
+
+# bool | default: false. Register a Graph webhook subscription instead of
+# polling alone. Subscription lifecycle is in SubscriptionStore. See UD-303.
+webhook = false
+
+# string | default: null. Public HTTPS URL the Graph webhook will POST to.
+webhook_url = "https://example.com/unidrive/webhook"
+
+# int | default: null.
+# TODO: declared in RawProvider but not currently consumed anywhere (see
+# UD-203 notes). Keep absent until a caller is wired; remove key if still
+# dead at v0.1.0.
+# webhook_port = 8443
+
+# Pin rules — globs that force eager hydration (download) of matches,
+# or pin-as-placeholder for `exclude`. Both lists default to [].
+[providers.onedrive.pin_patterns]
+include = ["Docs/**", "*.kdbx"]
+exclude = ["Archive/**"]
+
+# Map<glob, "keep_both"|"last_writer_wins">.
+# Per-path conflict override. Keys may be quoted to allow special chars; the
+# parser strips surrounding double quotes.
+[providers.onedrive.conflict_overrides]
+"Docs/**" = "last_writer_wins"
+"Photos/**" = "keep_both"
+
+
+# ── S3 / S3-compatible example ──────────────────────────────────────────────
+[providers.s3-backup]
+type = "s3"
+sync_root = "~/s3-backup"
+
+bucket     = "my-bucket"           # string | required for s3.
+region     = "us-east-1"           # string | default: null.
+endpoint   = "https://s3.example"  # string | default: null (AWS default).
+
+# Credentials — may be omitted and supplied via vault.enc (see header note).
+# string | default: null.
+access_key_id     = "AKIAxxxxxxxx"
+# string | default: null. Secret — vault strongly preferred.
+secret_access_key = "changeme"
+
+# bool | default: false. Skip TLS cert validation (dev/self-signed endpoints only).
+trust_all_certs = false
+
+# bool | default: false. Transparent client-side AES-GCM encryption
+# (XtraKeyManager). Requires the vault to hold the xtra key material.
+xtra_encryption = false
+
+
+# ── SFTP example ────────────────────────────────────────────────────────────
+[providers.sftp-box]
+type = "sftp"
+sync_root = "~/sftp-box"
+
+host        = "sftp.example.com"   # string | required.
+port        = 22                    # int   | default: 22 (provider default).
+user        = "alice"               # string | required.
+remote_path = "/home/alice/data"    # string | required.
+
+# string | default: null. Absolute path to a private key file
+# (e.g. ~/.ssh/id_ed25519). If null, password auth is attempted.
+identity = "~/.ssh/id_ed25519"
+
+# string | default: null. Password or key passphrase — vault strongly preferred.
+password = ""
+
+
+# ── WebDAV example ──────────────────────────────────────────────────────────
+[providers.webdav-box]
+type = "webdav"
+sync_root = "~/webdav-box"
+
+url             = "https://dav.example.com/remote.php/dav"  # required.
+user            = "alice"                                    # string.
+password        = ""                                         # vault preferred.
+trust_all_certs = false                                      # bool | default: false.
+
+
+# ── HiDrive example ─────────────────────────────────────────────────────────
+[providers.hidrive]
+type = "hidrive"
+sync_root = "~/hidrive"
+
+client_id     = ""   # OAuth app id    — vault preferred.
+client_secret = ""   # OAuth app secret — vault preferred.
+
+
+# ── Internxt example ────────────────────────────────────────────────────────
+[providers.internxt]
+type = "internxt"
+sync_root = "~/internxt"
+
+user     = "alice@example.com"
+password = ""        # vault preferred.
+
+
+# ── LocalFS example ─────────────────────────────────────────────────────────
+[providers.localfs-mirror]
+type = "localfs"
+
+# LocalFS accepts EITHER `sync_root` (unified name) OR `root_path` (legacy
+# alternative) as the target directory. Main.kt prefers sync_root.
+sync_root = "~/Mirror"
+# root_path = "~/Mirror"  # legacy alias; prefer sync_root.
+
+
+# ── Rclone example ──────────────────────────────────────────────────────────
+[providers.rclone-gdrive]
+type = "rclone"
+sync_root = "~/gdrive"
+
+# string | required. `<remote>:<path>` style, matches rclone CLI semantics.
+rclone_remote = "gdrive:"
+# string | default: "" (root of the remote).
+rclone_path   = "Documents"
+# string | default: null → resolves `rclone` from PATH.
+rclone_binary = "/usr/bin/rclone"
+# string | default: null → rclone's own default (~/.config/rclone/rclone.conf).
+rclone_config = "~/.config/rclone/rclone.conf"

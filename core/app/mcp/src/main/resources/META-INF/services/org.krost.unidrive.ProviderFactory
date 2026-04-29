@@ -1,0 +1,8 @@
+org.krost.unidrive.hidrive.HiDriveProviderFactory
+org.krost.unidrive.internxt.InternxtProviderFactory
+org.krost.unidrive.localfs.LocalFsProviderFactory
+org.krost.unidrive.onedrive.OneDriveProviderFactory
+org.krost.unidrive.rclone.RcloneProviderFactory
+org.krost.unidrive.s3.S3ProviderFactory
+org.krost.unidrive.sftp.SftpProviderFactory
+org.krost.unidrive.webdav.WebDavProviderFactory

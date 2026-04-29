@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://krost.org/unidrive/config.schema.json",
+  "title": "unidrive config.toml",
+  "description": "Schema for unidrive's config.toml. Derived from RawSyncConfig / RawGeneral / RawProvider in core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt. Keys mirror the TOML (snake_case) exactly. Unknown keys are ignored by the loader (ktoml ignoreUnknownNames=true); this schema marks `additionalProperties: false` for the shapes that are fully known, so strict validators will flag typos.",
+  "type": "object",
+  "properties": {
+    "general": { "$ref": "#/$defs/General" },
+    "providers": {
+      "type": "object",
+      "description": "Map of profile id → provider config. Profile id is used as `unidrive -p <id> ...`. If the id matches a known provider type, `type` may be omitted.",
+      "additionalProperties": { "$ref": "#/$defs/Provider" }
+    }
+  },
+  "additionalProperties": false,
+  "$comment": "Top-level `required` is empty: a missing config.toml yields SyncConfig.defaults() (see SyncConfig.load()). Both [general] and [providers] default to empty.",
+
+  "$defs": {
+    "SyncDirection": {
+      "type": "string",
+      "enum": ["bidirectional", "upload", "download"],
+      "$comment": "parseDirection() is case-insensitive and falls back to 'bidirectional' for unknown values; this schema enforces the canonical lowercase spellings."
+    },
+    "ConflictPolicy": {
+      "type": "string",
+      "enum": ["keep_both", "last_writer_wins"],
+      "$comment": "parsePolicy() is case-insensitive and falls back to 'keep_both' for unknown values."
+    },
+    "ProviderType": {
+      "type": "string",
+      "enum": [
+        "onedrive",
+        "s3",
+        "sftp",
+        "webdav",
+        "rclone",
+        "localfs",
+        "hidrive",
+        "internxt"
+      ],
+      "$comment": "Sourced from ProviderRegistry.knownTypes (SPI-discovered). Unknown values cause resolveProfile() to throw IllegalArgumentException."
+    },
+
+    "General": {
+      "type": "object",
+      "description": "RawGeneral → top-level fields on SyncConfig. Every field is optional; omitted fields use the defaults below (as applied by RawSyncConfig.toSyncConfig()).",
+      "properties": {
+        "default_profile": {
+          "type": "string",
+          "description": "UD-252: profile used when the CLI or MCP jar is invoked without `-p <name>`. Resolved by SyncConfig.resolveDefaultProfile(configDir). When unset, both jars fall back to \"onedrive\"."
+        },
+        "sync_root": {
+          "type": "string",
+          "description": "Root directory of the local mirror. Tilde `~` is expanded. Defaults to $HOME/<ProviderType capitalized> for the active profile."
+        },
+        "poll_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "Nominal poll cadence in seconds."
+        },
+        "min_poll_interval": {
+          "type": "integer",
+          "minimum": 5,
+          "default": 10,
+          "description": "ACTIVE-state poll interval (seconds). Loader coerces into [5, poll_interval]."
+        },
+        "max_poll_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300,
+          "description": "IDLE-state poll interval (seconds). Loader coerces to ≥ poll_interval."
+        },
+        "conflict_policy": {
+          "$ref": "#/$defs/ConflictPolicy",
+          "default": "keep_both"
+        },
+        "log_file": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Optional path to a log file. Tilde `~` is expanded."
+        },
+        "max_bandwidth_kbps": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "default": null,
+          "description": "Global bandwidth ceiling in KiB/s. Null = unlimited."
+        },
+        "max_delete_percentage": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 50,
+          "description": "Deletion safeguard: abort if a run would delete more than this % of tracked files. Coerced into [0, 100] by the loader."
+        },
+        "sync_direction": {
+          "$ref": "#/$defs/SyncDirection",
+          "default": "bidirectional"
+        },
+        "client_location": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Free-form client-location tag (e.g. 'home')."
+        },
+        "client_network": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Free-form client-network tag (e.g. 'wifi')."
+        },
+        "exclude_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Globs skipped during reconciliation. Merged with per-profile exclude_patterns."
+        },
+        "desktop_notifications": {
+          "type": "boolean",
+          "default": false
+        },
+        "verify_integrity": {
+          "type": "boolean",
+          "default": false,
+          "description": "Verify content hash after transfer."
+        },
+        "use_trash": {
+          "type": "boolean",
+          "default": true
+        },
+        "trash_emulation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Emulate trash under {profile-dir}/.trash when OS trash is unavailable."
+        },
+        "trash_retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30,
+          "description": "Coerced to ≥ 1 by the loader."
+        },
+        "file_versioning": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_versions": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5,
+          "description": "Coerced to ≥ 1 by the loader."
+        },
+        "version_retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 90,
+          "description": "Coerced to ≥ 1 by the loader."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "PinPatterns": {
+      "type": "object",
+      "description": "RawPinPatterns: glob-based hydration rules.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Globs forced to eager hydration."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Globs pinned as dehydrated placeholders."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Provider": {
+      "type": "object",
+      "description": "RawProvider — one profile. All fields are optional at the schema level; which subset is mandatory depends on the `type` and is enforced at runtime by each ProviderFactory. The conditional blocks below encode the common cases.",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/ProviderType",
+          "$comment": "Optional only when the profile id IS one of ProviderType (in which case the id doubles as the type)."
+        },
+        "sync_root": {
+          "type": "string",
+          "description": "Per-profile local root. Tilde `~` is expanded. Must be unique across profiles (detectDuplicateSyncRoots()). Falls back to [general].sync_root, then $HOME/<Type>."
+        },
+        "root_path": {
+          "type": "string",
+          "description": "Legacy alias for sync_root, accepted only by localfs. Prefer sync_root."
+        },
+
+        "pin_patterns": { "$ref": "#/$defs/PinPatterns" },
+        "conflict_overrides": {
+          "type": "object",
+          "description": "Map<glob, ConflictPolicy>. Keys with surrounding double quotes have them stripped by the loader.",
+          "additionalProperties": { "$ref": "#/$defs/ConflictPolicy" }
+        },
+        "exclude_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Per-profile globs; unioned with [general].exclude_patterns."
+        },
+
+        "bucket":            { "type": "string", "description": "S3 bucket name." },
+        "region":            { "type": "string", "description": "S3 region." },
+        "endpoint":          { "type": "string", "description": "S3 endpoint URL (for S3-compatible services)." },
+        "access_key_id":     { "type": "string", "description": "S3 access key id. May be supplied via vault.enc instead." },
+        "secret_access_key": { "type": "string", "description": "S3 secret. Vault preferred." },
+
+        "host":        { "type": "string", "description": "SFTP host." },
+        "port":        { "type": "integer", "minimum": 1, "maximum": 65535, "description": "SFTP port; provider default is 22." },
+        "user":        { "type": "string", "description": "Username (SFTP / WebDAV / Internxt)." },
+        "remote_path": { "type": "string", "description": "SFTP remote base path." },
+        "identity":    { "type": "string", "description": "Absolute path to SSH private key." },
+        "password":    { "type": "string", "description": "Password or key passphrase. Vault preferred." },
+
+        "url": { "type": "string", "description": "WebDAV base URL." },
+
+        "client_id":     { "type": "string", "description": "OAuth client id (HiDrive). Vault preferred." },
+        "client_secret": { "type": "string", "description": "OAuth client secret (HiDrive). Vault preferred." },
+
+        "authority_url": {
+          "type": "string",
+          "description": "OneDrive/MSAL authority URL. Null → MSAL default (login.microsoftonline.com/common)."
+        },
+        "include_shared": {
+          "type": "boolean",
+          "default": false,
+          "description": "OneDrive: include sharedWithMe items in delta."
+        },
+        "webhook": {
+          "type": "boolean",
+          "default": false,
+          "description": "OneDrive: register a Graph webhook subscription alongside polling."
+        },
+        "webhook_url": {
+          "type": "string",
+          "description": "OneDrive: public HTTPS URL the webhook will POST to."
+        },
+        "webhook_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "$comment": "TODO: declared in RawProvider but not currently read by any caller (verified 2026-04-18). Kept in schema for parity with the data class; remove if still dead at v0.1.0."
+        },
+
+        "xtra_encryption": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable client-side AES-GCM encryption via XtraKeyManager. Requires vault-held key material."
+        },
+        "trust_all_certs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip TLS cert validation (dev only)."
+        },
+
+        "rclone_remote": { "type": "string", "description": "rclone remote name, e.g. 'gdrive:'." },
+        "rclone_path":   { "type": "string", "description": "Path under the rclone remote." },
+        "rclone_binary": { "type": "string", "description": "Path to rclone binary; null → PATH lookup." },
+        "rclone_config": { "type": "string", "description": "Path to rclone.conf; null → rclone default." }
+      },
+      "additionalProperties": false,
+
+      "allOf": [
+        {
+          "if":   { "properties": { "type": { "const": "s3" } },     "required": ["type"] },
+          "then": { "required": ["bucket"] }
+        },
+        {
+          "if":   { "properties": { "type": { "const": "sftp" } },   "required": ["type"] },
+          "then": { "required": ["host", "user", "remote_path"] }
+        },
+        {
+          "if":   { "properties": { "type": { "const": "webdav" } }, "required": ["type"] },
+          "then": { "required": ["url"] }
+        },
+        {
+          "if":   { "properties": { "type": { "const": "rclone" } }, "required": ["type"] },
+          "then": { "required": ["rclone_remote"] }
+        },
+        {
+          "if":   {
+            "properties": { "type": { "const": "localfs" } },
+            "required": ["type"]
+          },
+          "then": {
+            "anyOf": [
+              { "required": ["sync_root"] },
+              { "required": ["root_path"] }
+            ],
+            "$comment": "localfs accepts either sync_root (preferred) or root_path (legacy) as the target directory."
+          }
+        },
+        {
+          "if":   {
+            "properties": {
+              "type":        { "const": "onedrive" },
+              "webhook":     { "const": true }
+            },
+            "required": ["type", "webhook"]
+          },
+          "then": {
+            "required": ["webhook_url"],
+            "$comment": "OneDrive webhook=true requires a reachable webhook_url for Graph to POST to."
+          }
+        }
+      ]
+    }
+  }
+}

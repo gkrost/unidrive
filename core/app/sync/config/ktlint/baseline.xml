@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/LocalWatcher.kt">
+        <error line="7" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/NamedPipeServer.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/NdjsonValidator.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/ProfileConfigEditor.kt">
+        <error line="18" column="1" source="standard:no-consecutive-comments" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt">
+        <error line="207" column="141" source="standard:max-line-length" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="11" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/TrashManager.kt">
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/main/kotlin/org/krost/unidrive/sync/VersionManager.kt">
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/AdaptiveIntervalTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/BugRegressionTest.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+        <error line="11" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/HashVerifierTest.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/IpcProgressReporterTest.kt">
+        <error line="16" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt">
+        <error line="14" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt">
+        <error line="8" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/LocalWatcherTest.kt">
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/NamedPipeServerDispatchTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/NdjsonValidatorTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/NotifyProgressReporterTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/PlaceholderManagerTest.kt">
+        <error line="7" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/ProtocolContractTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/ReconcilerTest.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+        <error line="8" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/StateDatabaseTest.kt">
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/SubscriptionStoreTest.kt">
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt">
+        <error line="7" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/SyncCornerCaseTest.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+        <error line="12" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt">
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/ThrottledProviderTest.kt">
+        <error line="11" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/TokenBucketTest.kt">
+        <error line="3" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/TrashManagerTest.kt">
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+        <error line="10" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/TrashTest.kt">
+        <error line="5" column="1" source="standard:no-wildcard-imports" />
+    </file>
+    <file name="src/test/kotlin/org/krost/unidrive/sync/VersionManagerTest.kt">
+        <error line="9" column="1" source="standard:no-wildcard-imports" />
+        <error line="10" column="1" source="standard:no-wildcard-imports" />
+    </file>
+</baseline>

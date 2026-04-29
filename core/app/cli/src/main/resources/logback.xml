@@ -1,0 +1,42 @@
+<configuration>
+    <!-- Platform-aware log directory: LOCALAPPDATA on Windows, ~/.local/share on Linux -->
+    <property name="LOG_DIR" value="${LOCALAPPDATA:-${user.home}/.local/share}/unidrive"/>
+
+    <!-- UD-212: %X{profile:-*} renders the MDC `profile` key, with `*` as the fallback when
+         no profile is active (e.g. startup, before resolveCurrentProfile() runs).
+         UD-234: %X{build:-???????} renders the short git sha captured at build time
+         (populated from BuildInfo.COMMIT in Main.main). Lets end-users copy a log snippet
+         and know which build produced it. -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/unidrive.log</file>
+        <!-- UD-251: no ThresholdFilter here. `org.krost.unidrive` logger is set
+             to DEBUG below so scan-progress and similar DEBUG events still
+             reach disk; a threshold of INFO would silently drop them. -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/unidrive.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>5</maxHistory>
+            <totalSizeCap>50MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="org.krost.unidrive" level="DEBUG"/>
+    <logger name="io.ktor" level="WARN"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>
