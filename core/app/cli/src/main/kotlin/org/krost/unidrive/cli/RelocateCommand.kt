@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.slf4j.MDCContext
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.sync.CloudRelocator
@@ -63,8 +64,15 @@ class RelocateCommand : Runnable {
         val toProviderObj = parent.createProviderFor(toProfile, toConfigDir)
 
         // Authenticate both providers unconditionally
-        runBlocking { fromProviderObj.authenticate() }
-        runBlocking { toProviderObj.authenticate() }
+        // UD-284: every runBlocking in this command propagates MDC via
+        // MDCContext() so that the `build`, `profile`, and `scan` MDC keys
+        // set by `Main.main` / `Main.resolveCurrentProfile` reach the
+        // DefaultDispatcher / IO worker threads. Without it, log lines from
+        // CloudRelocator's coroutines render as `[???????] [*] [-------]`
+        // (the logback fallback values from logback.xml line 31), making
+        // postmortem against unidrive.log impossible.
+        runBlocking(MDCContext()) { fromProviderObj.authenticate() }
+        runBlocking(MDCContext()) { toProviderObj.authenticate() }
 
         if (!fromProviderObj.isAuthenticated) {
             System.err.println("Error: source provider '$fromProvider' not authenticated")
@@ -85,12 +93,12 @@ class RelocateCommand : Runnable {
 
         println("Pre-flight checks...")
 
-        val sourceQuota: QuotaInfo = runBlocking { fromProviderObj.quota() }
+        val sourceQuota: QuotaInfo = runBlocking(MDCContext()) { fromProviderObj.quota() }
 
         print("Scanning source".padEnd(72))
         System.out.flush()
         val (sourceSize, sourceCount) =
-            runBlocking {
+            runBlocking(MDCContext()) {
                 relocator.preFlightCheck(sourcePath) { count, path ->
                     val short = if (path.length > 45) "…${path.takeLast(44)}" else path
                     val countFmt = String.format(Locale.ROOT, "%,d", count).replace(',', ' ')
@@ -100,7 +108,7 @@ class RelocateCommand : Runnable {
             }
         println()
 
-        val targetQuota: QuotaInfo = runBlocking { toProviderObj.quota() }
+        val targetQuota: QuotaInfo = runBlocking(MDCContext()) { toProviderObj.quota() }
 
         // Guard: fail fast when target quota is known and insufficient
         if (targetQuota.total > 0 && targetQuota.remaining < sourceSize) {
@@ -135,7 +143,7 @@ class RelocateCommand : Runnable {
         println("  buffer: $bufferMb MB")
         println()
 
-        runBlocking {
+        runBlocking(MDCContext()) {
             relocator.migrate(sourcePath, targetPath, sourceSize, sourceCount).collect { event ->
                 when (event) {
                     is MigrateEvent.Started -> {
@@ -177,7 +185,7 @@ class RelocateCommand : Runnable {
                 return
             }
             println("Deleting source files...")
-            runBlocking {
+            runBlocking(MDCContext()) {
                 val deletedFiles = deleteSourceRecursive(fromProviderObj, sourcePath)
                 println("Deleted $deletedFiles files")
             }

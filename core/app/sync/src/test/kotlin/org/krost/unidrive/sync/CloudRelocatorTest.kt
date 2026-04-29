@@ -1,9 +1,17 @@
 package org.krost.unidrive.sync
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
+import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -496,6 +504,67 @@ class CloudRelocatorTest {
             )
         }
 
+    // -- UD-284: MDC propagation into flow log lines ---------------------------
+    //
+    // Pre-fix: RelocateCommand's `runBlocking { migrate().collect { ... } }`
+    // had no MDCContext, so the `build`, `profile`, and `scan` MDC keys set
+    // on the calling thread by Main.main / Main.resolveCurrentProfile didn't
+    // reach Dispatchers.IO worker threads. Log lines from CloudRelocator's
+    // catch blocks rendered as `[???????] [*] [-------]` (the logback fallback
+    // values from logback.xml line 31). Postmortem against unidrive.log was
+    // impossible — couldn't filter on profile, couldn't pin a build SHA.
+    //
+    // This test verifies the underlying claim: when migrate() is collected
+    // inside an MDCContext scope, the catch-block log.warn lines carry the
+    // caller's MDC values across the `.flowOn(Dispatchers.IO)` boundary.
+
+    @Test
+    fun `UD-284 - migrate flow preserves caller MDC into log lines from catch blocks`() =
+        runTest {
+            // Setup: a failure on listChildren triggers the targetIndex catch
+            // (UD-286) which emits log.warn. We assert that warn line carries
+            // the MDC values set on the caller's thread.
+            source.children["/"] = listOf(cloudItem("/file.txt", size = 10))
+            source.fileContents["/file.txt"] = ByteArray(10)
+            // Make target's listChildren throw on "/" so CloudRelocator's
+            // targetIndex catch emits log.warn (the line whose MDC we assert).
+            target.listChildrenFailPaths.add("/")
+
+            val logger = LoggerFactory.getLogger(CloudRelocator::class.java) as Logger
+            val appender = ListAppender<ILoggingEvent>().apply { start() }
+            logger.addAppender(appender)
+
+            MDC.put("build", "abc1234")
+            MDC.put("profile", "test-profile")
+            try {
+                withContext(MDCContext()) {
+                    val relocator = CloudRelocator(source, target)
+                    relocator.migrate("/", "/").toList()
+                }
+            } finally {
+                MDC.remove("build")
+                MDC.remove("profile")
+                logger.detachAppender(appender)
+            }
+
+            val warns = appender.list.filter { it.level == Level.WARN }
+            assertTrue(warns.isNotEmpty(), "expected at least one WARN line from targetIndex catch")
+            val firstWarn = warns.first()
+            // The MDC propertyMap on the captured event MUST contain the
+            // caller's `build` + `profile` values — that's the post-fix
+            // contract that breaks if the runBlocking forgets MDCContext().
+            assertEquals(
+                "abc1234",
+                firstWarn.mdcPropertyMap["build"],
+                "build MDC must propagate to catch-block log line; mdcMap=${firstWarn.mdcPropertyMap}",
+            )
+            assertEquals(
+                "test-profile",
+                firstWarn.mdcPropertyMap["profile"],
+                "profile MDC must propagate to catch-block log line; mdcMap=${firstWarn.mdcPropertyMap}",
+            )
+        }
+
     // -- helpers ----------------------------------------------------------------
 
     private fun cloudItem(
@@ -535,6 +604,12 @@ class CloudRelocatorTest {
         // catch blocks in CloudRelocator re-throw cancellation cleanly
         // instead of absorbing it.
         val cancellationPaths = mutableSetOf<String>()
+
+        // UD-284: paths whose listChildren should throw a generic exception
+        // (so the targetIndex catch in CloudRelocator emits log.warn — used
+        // by the MDC-propagation regression test).
+        val listChildrenFailPaths = mutableSetOf<String>()
+
         var listChildrenCount = 0
 
         override suspend fun authenticate() {}
@@ -545,6 +620,9 @@ class CloudRelocatorTest {
             listChildrenCount++
             if (path in cancellationPaths) {
                 throw CancellationException("Simulated cancellation on listChildren($path)")
+            }
+            if (path in listChildrenFailPaths) {
+                throw RuntimeException("Simulated listChildren failure for $path")
             }
             return children[path] ?: emptyList()
         }

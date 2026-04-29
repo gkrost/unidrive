@@ -19,6 +19,9 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
+    // UD-284: MDCContext-propagation regression test pins kotlinx-coroutines-slf4j
+    // for the calling-side wrapping pattern that RelocateCommand uses.
+    testImplementation(libs.kotlinx.coroutines.slf4j)
 }
 
 tasks.test {
