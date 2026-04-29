@@ -5131,3 +5131,90 @@ target that's full but where quota fetch succeeds, the relocate
 will fail mid-way once the disk fills. Bad UX (lots of mid-relocate
 errors) but not data-loss. On the audit's symptom path, this is
 not blocking; on production reliability it's a real gap.
+
+---
+id: UD-284
+title: MDC profile field renders as '[???????]' in relocate's coroutine workers
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-29
+resolved_by: commit a47c113. Fixed: all 5 runBlocking calls in RelocateCommand wrap with MDCContext(). 1 regression test verifies build/profile MDC propagates from caller into CloudRelocator's flow.collect catch-block log.warn (via .flowOn(Dispatchers.IO)). The [???????] was the build-MDC fallback (logback default-value), not encoding-mangled question marks as the original audit guessed — fix shape unchanged. :app:cli:check + :app:sync:check pass.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/app/cli/src/main/resources/logback.xml
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a long-running
+`unidrive relocate --from unidrive-localfs-19notte78 --to ds418play-webdav`,
+every log line produced by `DefaultDispatcher-worker-N` threads renders
+the MDC profile field as **`[???????]`** (seven question marks)
+instead of the active profile name:
+
+```
+2026-04-29 15:25:37.414 DEBUG [???????] [*] [-------] [DefaultDispatcher-worker-1] o.k.unidrive.webdav.WebDavApiService - Upload: ...
+2026-04-29 15:05:36.630 DEBUG [???????] [*] [-------] [DefaultDispatcher-worker-3] o.krost.unidrive.sync.CloudRelocator - skip-check ...
+```
+
+Affects every relocate worker thread observed (1, 3, 7, 11). Logback
+pattern is `%X{profile:-*}` so the `*` fallback shows when MDC is
+empty; instead we see `???????`, which suggests something is putting
+literal `???????` into MDC, OR the renderer is treating an
+encoding-mangled profile name as `???????` (cp1252 → UTF-8?).
+
+**Why this matters.** Per
+[CLAUDE.md](../../CLAUDE.md#before-you-read-unidrivelog) §"Before
+you read unidrive.log", the profile prefix is the primary triage
+signal when reading a 10+ MB log with multiple sync runs commingled.
+A `[???????]` prefix is worse than `[*]` — it looks like a real
+value, so you can't filter on it (`grep -v '\[\*\]'` works; there's
+no clean filter for the literal question-mark string), and it makes
+log lines from concurrent profile runs indistinguishable.
+
+**Probable root cause.** UD-212 wired `MDC.put("profile", _profile.name)`
+in `Main.resolveCurrentProfile`, with `runBlocking(MDCContext())`
+expected to propagate the value into coroutine workers. The
+relocate path likely:
+- Either spawns its `DefaultDispatcher` work without the
+  `MDCContext()` wrapper (so MDC inheritance breaks), and the empty
+  string is being rendered as `???????` by some downstream encoder, **or**
+- The profile name actually being put into MDC is itself
+  cp1252-mangled UTF-8 from a launcher / env var, and what's
+  rendered is the visible damage. The CLI has UD-258
+  (`-Dstdout.encoding=UTF-8`) but this is an **MDC value**, not a
+  stdout write — different code path.
+
+**Investigation steps.**
+1. Find the relocate's coroutine launch site
+   (`CloudRelocator.kt`?). Confirm whether it wraps in
+   `runBlocking(MDCContext())` or just `runBlocking`.
+2. Add a one-shot log line at the relocate entry: `log.debug("MDC at
+   relocate entry: {}", MDC.getCopyOfContextMap())` to see the
+   actual map contents (vs the rendered output).
+3. Verify on a small relocate (10 files) whether the same `???????`
+   appears in non-relocate log lines from this profile (i.e.,
+   `[???????]` in CLI startup messages too) — that would prove it's
+   the MDC value, not coroutine inheritance.
+
+**Proposed fix.** Whatever the investigation shows — either:
+- (a) Wrap the relocate's `runBlocking` in `MDCContext()` (matches
+  the pattern UD-212 established for sync/Pass 2), or
+- (b) UTF-8-clean the MDC value at insert time. `_profile.name`
+  comes from a TOML key that's already UTF-8 — mangling would have
+  to happen at logback render. Pin
+  `<encoder>...<charset>UTF-8</charset></encoder>` in `logback.xml`.
+
+**Acceptance.**
+- New `RelocateCommandTest` regression: invoke a 10-file relocate,
+  assert no log line contains the literal substring `[???????]`.
+- Manual: drive a relocate end-to-end, verify the active profile
+  name appears in every worker thread's log line.
+
+**Related.**
+- UD-212 — original "log/CLI profile context" wiring.
+- UD-258 — UTF-8 stdout encoding (a different surface).
+- CLAUDE.md §"Before you read unidrive.log" calls out that
+  filtering on profile is the first triage action; this regression
+  silently breaks that workflow.
