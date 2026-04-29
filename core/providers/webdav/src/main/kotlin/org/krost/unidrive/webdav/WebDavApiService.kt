@@ -106,11 +106,33 @@ open class WebDavApiService(
                 org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder
                     .create()
                     .setTlsStrategy(tlsStrategy)
-                    .build()
+                    // UD-287: probe pooled connections before reuse if they've
+                    // been idle ≥ 2 s. Cheap; eliminates the WSAECONNABORTED
+                    // cascade that follows a UD-285 request-timeout — Ktor
+                    // cancels the in-flight write but Apache5 returns the
+                    // connection to the pool half-closed; without this probe
+                    // the next PUT picks it up and Windows TCP returns 10053.
+                    .setDefaultConnectionConfig(
+                        org.apache.hc.client5.http.config.ConnectionConfig
+                            .custom()
+                            .setValidateAfterInactivity(
+                                org.apache.hc.core5.util.TimeValue
+                                    .ofSeconds(2),
+                            ).build(),
+                    ).build()
             HttpClient(io.ktor.client.engine.apache5.Apache5) {
                 engine {
                     customizeClient {
                         setConnectionManager(connManager)
+                        // UD-287: actively rotate stale sockets out of the pool.
+                        // DSM Apache mod_dav keep-alive defaults to ~5 min;
+                        // 30 s idle eviction stays well inside that window
+                        // so we never reuse a server-side-closed connection.
+                        evictExpiredConnections()
+                        evictIdleConnections(
+                            org.apache.hc.core5.util.TimeValue
+                                .ofSeconds(30),
+                        )
                     }
                 }
                 commonConfig()
@@ -176,16 +198,31 @@ open class WebDavApiService(
                         override val contentType = ContentType.Application.OctetStream
 
                         override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
-                            withContext(Dispatchers.IO) {
-                                java.nio.file.Files.newInputStream(localPath).use { input ->
-                                    val buf = ByteArray(65536)
-                                    var n: Int
-                                    while (input.read(buf).also { n = it } != -1) {
-                                        channel.writeFully(buf, 0, n)
+                            // UD-287: flushAndClose MUST run on every exit path,
+                            // including exceptions from the IO loop (file-read
+                            // errors, partial writes, cancellation). Pre-fix,
+                            // a mid-write throw skipped flushAndClose; the PUT
+                            // never got its terminating chunk frame; the server
+                            // dropped the connection; Apache5 still returned it
+                            // to the pool — feeding the WSAECONNABORTED cascade
+                            // that the eviction policy above (also UD-287)
+                            // cleans up.
+                            //
+                            // runCatching on close so a secondary close-failure
+                            // doesn't shadow the original cause from the IO loop.
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    java.nio.file.Files.newInputStream(localPath).use { input ->
+                                        val buf = ByteArray(65536)
+                                        var n: Int
+                                        while (input.read(buf).also { n = it } != -1) {
+                                            channel.writeFully(buf, 0, n)
+                                        }
                                     }
                                 }
+                            } finally {
+                                runCatching { channel.flushAndClose() }
                             }
-                            channel.flushAndClose()
                         }
                     },
                 )
