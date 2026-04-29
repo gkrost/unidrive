@@ -83,6 +83,21 @@ class McpServer(
             return
         }
         val args = params["arguments"]?.jsonObject ?: buildJsonObject {}
+
+        // UD-283: validate the optional `profile` argument BEFORE invoking the
+        // tool handler. Pre-fix, every tool ignored args["profile"] entirely
+        // (no tool ever read it) — passing the wrong profile name silently
+        // returned data for the active default profile. That's worse than the
+        // CLI's `Unknown profile: X` error because an LLM caller can't see
+        // the configured-profiles list to course-correct, and mutating tools
+        // (sync, pin, relocate, profile_remove) could operate on the wrong
+        // target without any signal.
+        val profileError = profileMismatchError(args, ctx)
+        if (profileError != null) {
+            send(profileError(id))
+            return
+        }
+
         val result =
             try {
                 tool.handler(args, ctx)

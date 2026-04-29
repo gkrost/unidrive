@@ -26,6 +26,7 @@ fun buildErrorResponse(
     id: JsonElement,
     code: Int,
     message: String,
+    data: JsonElement? = null,
 ): String =
     buildJsonObject {
         put("jsonrpc", "2.0")
@@ -35,6 +36,11 @@ fun buildErrorResponse(
             buildJsonObject {
                 put("code", code)
                 put("message", message)
+                // UD-283: optional `data` field per JSON-RPC 2.0 §5.1. Used by
+                // tool-call error responses to carry the configured-profiles
+                // list so an LLM client can present recovery context without
+                // re-reading the message string.
+                if (data != null) put("data", data)
             },
         )
     }.toString()
