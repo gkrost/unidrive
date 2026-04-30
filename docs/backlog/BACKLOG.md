@@ -1997,3 +1997,113 @@ schema-creation path in `initialize()`.
 
 **Out of scope:** other --dry-run-with-X mutexes. Audit them
 separately if this lands cleanly.
+---
+id: UD-739
+title: Normalize path strings (NFC) at all entry points to fix NFC/NFD mismatch causing spurious uploads
+category: tooling
+priority: high
+effort: M
+status: open
+opened: 2026-04-30
+---
+**Why:** No Unicode normalization is applied to path strings anywhere in
+unidrive — neither `LocalScanner` (which returns whatever bytes NTFS
+gives via `Path.toString()`) nor any provider's `toCloudItem` /
+path-building helpers (which return whatever the upstream API
+returned). Reconciler does exact-string Map lookups
+(`Reconciler.kt:25-44`). When a file's name contains an accented
+character that can be encoded in two equivalent UTF-8 forms, the local
+side and the remote side may not match, and the planner mis-classifies
+the file as `Upload` (`localState=NEW + remoteState=UNCHANGED`).
+
+**Real-case (2026-04-30, post-UD-296/297/299 dry-run on
+inxt_gernot_krost_posteo):** dry-run plan included 29 spurious uploads
+of files known to exist on both sides. Example:
+
+* Local path: `/Documents/Calibre/Calibre-Import/Elektroinstallation in
+  Wohngebäuden Handbuch für die Installationspraxis Dipl.-lng. Herbert
+  Schmolke .pdf`
+* Remote URL: `https://drive.internxt.com/file/fb49adb7-69d0-46c1-a579-21566995f076`
+* Both refer to the same content; the file is dehydrated locally
+  (Internxt placeholder).
+
+The umlaut `ä` in `Wohngebäuden` can be encoded as:
+
+* **NFC** (precomposed): `0xC3 0xA4` — 1 codepoint, 2 bytes
+* **NFD** (decomposed): `0x61 0xCC 0x88` — 2 codepoints, 3 bytes
+
+NTFS preserves whatever bytes the writer gave it, and every API may
+return whichever form its server stored. Java's `Path.toString()`
+does NOT normalize.
+
+## Verification step (TODO — needs user data)
+
+Run on the user's machine:
+
+```powershell
+$local = "Wohngebäuden"
+$remote = "<plainName from Internxt API for fb49adb7-...>"
+[System.Text.Encoding]::UTF8.GetBytes($local) | ForEach-Object { '{0:X2}' -f $_ }
+[System.Text.Encoding]::UTF8.GetBytes($remote) | ForEach-Object { '{0:X2}' -f $_ }
+```
+
+Different byte sequences → confirms the hypothesis.
+
+## Proposed fix
+
+Normalize every path string to **NFC** (the form recommended by
+Unicode Annex #15 and what Linux/macOS userland tools tend to use)
+at every entry point into reconciler-visible state. Two entry
+points:
+
+1. `LocalScanner` — wrap `syncRoot.relativize(file).toString()` in
+   `java.text.Normalizer.normalize(s, Form.NFC)` before adding to
+   `seenPaths` / `changes`.
+2. Each provider's `toCloudItem` / `fileToCloudItem` /
+   `folderToCloudItem` — normalize the constructed `path` and `name`
+   to NFC before returning the `CloudItem`. Affects:
+   * Internxt (`InternxtProvider.kt:419, 434, 455`)
+   * OneDrive (`GraphApiService.kt` toCloudItem)
+   * HiDrive
+   * WebDAV
+   * SFTP
+   * S3 / Rclone
+3. Reconciler — defensive: also normalize keys on lookup. Belt+braces.
+
+## Migration concern
+
+Existing state.db entries from prior syncs were stored with whatever
+form the original path arrived in. If we normalize on read going
+forward, *some* paths may flip form between the DB and the new scan,
+producing one round of spurious actions on the first sync after this
+ticket lands.
+
+Mitigation options:
+
+a. One-shot DB migration: walk `sync_entries`, NFC-normalize every
+   `path` column.
+b. Lazy: ignore the issue; the planner will fix itself within one
+   sync cycle (the spurious actions resolve to "no-op" since
+   target paths match after normalization).
+c. Document the risk; ask users to `--reset` if they see weirdness.
+
+(a) is cleanest. Land it as part of the same ticket so users don't
+need to know.
+
+## Tests
+
+* Unit: NFC and NFD forms of the same path are equal in
+  `LocalScanner.scan()` output (synthesise the two byte forms in a
+  temp dir; assert the same key in the result Map).
+* Unit: `InternxtProvider.fileToCloudItem` with NFD `plainName`
+  returns NFC `path`.
+* Integration: round-trip through reconciler — local NFD + remote NFC
+  → no Upload action.
+
+## Out of scope
+
+* Other normalization issues (case sensitivity is already handled
+  via `getEntryCaseInsensitive`; trailing-space differences are
+  separate).
+* Backward-compatible reading (always normalize on read; the DB
+  migration above handles legacy data).
