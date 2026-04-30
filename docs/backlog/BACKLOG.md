@@ -1964,51 +1964,6 @@ say "Internxt client appears stopped" instead of a generic IOError.
   and a *different* unidrive provider as another remote). Different
   feature entirely.
 ---
-id: UD-736
-title: LocalScanner: override visitFileFailed to log+continue, expose skipped count
-category: tooling
-priority: medium
-effort: XS
-status: open
-opened: 2026-04-30
----
-**Why:** `LocalScanner.scan()` calls `Files.walkFileTree(syncRoot,
-SimpleFileVisitor<Path>)` without overriding `visitFileFailed`. Default
-behaviour: re-throw the IOException and abort the walk. That's loud
-(good) but a *partial* walk that succeeded for thousands of entries
-before hitting one bad one would lose all visited state. Worse: any
-Cloud Files API recall failure (foreign client offline — see UD-900)
-on a single placeholder would kill the whole sync's local scan with
-a generic IOException.
-
-**What:** Override `visitFileFailed(file, exc)`:
-
-* `log.warn("Skipping unreadable file {} ({}: {})", file, exc.javaClass.simpleName, exc.message)`
-* increment a per-scan skipped counter
-* return `FileVisitResult.CONTINUE` (don't kill the walk)
-
-Surface the count via `LocalScanner.lastScanSkipped: Int` (or include
-it in a small data class wrapping `Map<String, ChangeState>`) so
-SyncEngine can include it in the dry-run / sync-complete summary.
-
-Same `visitFileFailed` should also fire for `preVisitDirectory`-equivalent
-errors — leave the directory case to the OS default (most directory
-read failures are non-recoverable).
-
-**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt`
-
-**Tests:**
-
-* Walk a tree where one file throws on visit (mock attribute read failure)
-  — assert remaining entries still in result, skipped count == 1, log
-  warning emitted.
-* Empty tree → 0 skipped.
-* All-files-fail → result map empty, skipped == file count.
-
-**Defensive depth-of-coverage angle:** UD-900's foreign-client-offline
-mode probably surfaces here first; this ticket lands the catch
-mechanism, UD-900 follow-ups can classify the specific exception types.
----
 id: UD-737
 title: --upload-only should NOT plan DeleteRemote by default; require --propagate-deletes opt-in
 category: tooling
