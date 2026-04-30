@@ -17,7 +17,7 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.hidrive.model.HiDriveItem
 import org.krost.unidrive.hidrive.model.HiDriveUserInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
-import org.krost.unidrive.http.readBoundedErrorBody
+import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -135,21 +135,14 @@ class HiDriveApiService(
                 )
             }
 
-            // UD-333: mirror the closed UD-231 OneDrive fix. CDN edge nodes
-            // occasionally return HTTP 200 with `Content-Type: text/html` —
-            // captive-portal pages, throttle redirects, expired-URL login
-            // pages — and the raw HTML would otherwise stream straight into
-            // the destination file at the matching byte size. The UD-226
-            // NUL-stub sweep doesn't catch this because HTML is non-NUL
-            // content. Guard before any write hits disk.
-            val contentType = response.contentType()
-            if (contentType != null && contentType.match(ContentType.Text.Html)) {
-                val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
-                throw java.io.IOException(
-                    "Download returned HTML instead of file bytes (status=${response.status.value}, " +
-                        "Content-Type=$contentType): $snippet",
-                )
-            }
+            // UD-340: shared assertNotHtml at :app:core/http (UD-333/UD-231/
+            // UD-293 lineage). CDN edge nodes occasionally return HTTP 200
+            // with `text/html` — captive portal, throttle redirect, expired
+            // URL — and the raw HTML would otherwise stream into the
+            // destination file at the matching byte size. UD-226 NUL-stub
+            // sweep wouldn't catch it. Bounded read prevents the UD-293
+            // OOM on multi-GB fake-html bodies.
+            assertNotHtml(response, contextMsg = "Download $relativePath")
 
             val channel: ByteReadChannel = response.bodyAsChannel()
             withContext(Dispatchers.IO) {

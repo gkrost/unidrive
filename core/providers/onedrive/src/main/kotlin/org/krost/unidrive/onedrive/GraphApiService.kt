@@ -17,6 +17,7 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.ShareInfo
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.onedrive.model.*
@@ -271,30 +272,19 @@ class GraphApiService(
                                 response.status.value,
                             )
                         }
-                        // UD-231: CDN edge nodes occasionally return HTTP 200 with a `text/html` body
-                        // (tenant throttle page, captive-portal redirect, expired-URL login page). The
-                        // raw HTML would otherwise stream straight into the destination file at the
-                        // correct byte size — sweep detectors for NUL-stub corruption (UD-226) would
-                        // NOT flag it, because HTML is non-NUL content. Guard here before any write:
-                        // if Content-Type is `text/html` (any charset), treat as a retriable flake so
-                        // the UD-309 flake loop catches it, retries the same URL, and surfaces a
-                        // hard failure after MAX_FLAKE_ATTEMPTS rather than silently writing garbage.
-                        //
-                        // UD-293: pre-fix used `response.bodyAsText().take(200)` which materialised
-                        // the ENTIRE response body as a String before the take — when the CDN
-                        // returned a 2.3 GB binary file with Content-Type: text/html (Graph
-                        // throttle page misreported as the file's MIME), bodyAsText OOM'd with
-                        // "Can't create an array of size 2_233_659_189". Now reads at most 4 KB
-                        // off the channel for the snippet — the diagnostic value is the FIRST
-                        // bytes (HTML preamble), not the full page.
-                        val contentType = response.contentType()
-                        if (contentType != null && contentType.match(ContentType.Text.Html)) {
-                            val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
-                            throw java.io.IOException(
-                                "Download returned HTML instead of file bytes (status=${response.status.value}, " +
-                                    "Content-Type=$contentType): $snippet",
-                            )
-                        }
+                        // UD-340: shared `assertNotHtml` lifted from UD-231/UD-293
+                        // OneDrive helper to :app:core/http so HiDrive + Internxt
+                        // share the exact guard. CDN edge nodes occasionally return
+                        // HTTP 200 with a `text/html` body (tenant throttle page,
+                        // captive-portal redirect, expired-URL login page). Without
+                        // this guard the raw HTML would stream into the destination
+                        // file at the correct byte size — UD-226 NUL-stub sweep
+                        // doesn't flag it (HTML is non-NUL). Read is bounded
+                        // (UD-293) so a CDN attaching a multi-GB body to a fake
+                        // text/html response can't OOM the diagnostic path.
+                        // The IOException it throws bubbles into the UD-309 flake
+                        // loop for retry.
+                        assertNotHtml(response, contextMsg = "Download itemId=$itemId")
                         throttleBudget.recordSuccess()
                         // UD-329: bodyAsChannel() inside execute{} is the Ktor-blessed streaming path.
                         val channel: ByteReadChannel = response.bodyAsChannel()

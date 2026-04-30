@@ -9,7 +9,7 @@
         <error line="8" column="1" source="standard:no-wildcard-imports" />
         <error line="9" column="1" source="standard:no-wildcard-imports" />
         <error line="13" column="1" source="standard:no-wildcard-imports" />
-        <error line="22" column="1" source="standard:no-wildcard-imports" />
+        <error line="23" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt">
         <error line="3" column="1" source="standard:no-wildcard-imports" />

@@ -16,7 +16,7 @@ import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
-import org.krost.unidrive.http.readBoundedErrorBody
+import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
 import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
@@ -239,25 +239,17 @@ class InternxtApiService(
             if (!response.status.isSuccess()) {
                 throw InternxtApiException("Download failed: ${response.status}", response.status.value)
             }
-            // UD-333: mirror the closed UD-231 OneDrive fix. CDN edge / bridge
-            // fallthroughs occasionally return HTTP 200 with text/html (captive
-            // portal, expired-URL login, throttle redirect). On Internxt this
-            // is HIGHER severity than on the OneDrive baseline because the
-            // body is fed through cipher.update() (AES-CTR) before write —
-            // HTML XOR'd through a strong keystream produces high-entropy
-            // bytes indistinguishable from a real decrypted file. UD-226's
-            // NUL-stub sweep does not catch it. Permanent silent corruption
-            // is the failure mode if the guard isn't here. Must execute
-            // BEFORE the first cipher.update() call so the AES-CTR keystream
-            // / IV state stays untouched and the URL can be retried cleanly.
-            val contentType = response.contentType()
-            if (contentType != null && contentType.match(ContentType.Text.Html)) {
-                val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
-                throw java.io.IOException(
-                    "Download returned HTML instead of file bytes (status=${response.status.value}, " +
-                        "Content-Type=$contentType): $snippet",
-                )
-            }
+            // UD-340: shared assertNotHtml at :app:core/http (UD-333/UD-231/
+            // UD-293 lineage). On Internxt this is HIGHER severity than on
+            // the OneDrive baseline because the body is fed through
+            // cipher.update() (AES-CTR) before write — HTML XOR'd through a
+            // strong keystream produces high-entropy bytes indistinguishable
+            // from a real decrypted file. UD-226's NUL-stub sweep does not
+            // catch it. Permanent silent corruption is the failure mode if
+            // the guard isn't here. Must execute BEFORE the first
+            // cipher.update() call so the AES-CTR keystream / IV state stays
+            // untouched and the URL can be retried cleanly.
+            assertNotHtml(response, contextMsg = "Download (encrypted) -> ${destination.fileName}")
             val channel: ByteReadChannel = response.body()
             var written = 0L
             withContext(Dispatchers.IO) {
