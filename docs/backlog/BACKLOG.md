@@ -1798,3 +1798,168 @@ doesn't exist:
 **Medium priority, M effort.** UX nicety, not a correctness bug.
 Worth scheduling alongside any future "profile management" work
 (UD-236 three-verb model, UD-233 tray brainstorm).
+---
+id: UD-900
+title: Brainstorm: detect & handle dehydrated/placeholder files when sync_root sits under a foreign cloud client's managed area
+category: experimental
+priority: medium
+effort: L
+status: open
+opened: 2026-04-30
+---
+**Status:** brainstorm — research questions, not an implementation
+spec. Spawn focused implementation tickets per detector / mitigation
+when the shape settles.
+
+## Why
+
+When unidrive's `sync_root` overlaps another cloud client's managed
+area (its "own" local mount that clinks into the host filesystem),
+files inside that tree may be **dehydrated placeholders**: the
+directory entry exists, attributes report a logical size, but the
+actual bytes live in the foreign provider's cloud. Reading the file
+triggers an OS-level callback to the foreign client; if that client
+isn't running (or has been uninstalled), the read fails.
+
+**Real-case (UD-296/297/299 thread, 2026-04-30):** user pointed
+`sync_root` at `C:\Users\gerno\InternxtDrive - <UUID>\` (Internxt
+official-client mount). Opening a file like
+`/dev/zvg/ZVG FileRepo/3A0C20B4...` produced
+> "Die Datei kann nicht geöffnet werden. Stellen Sie Sicher, dass
+> Internxt Drive auf Ihrem Computer ausgeführt wird."
+
+unidrive's scanner correctly *sees* the placeholder (directory entry
+is there), but an upload-side read would fail at byte-fetch time.
+
+**Migration scenario this targets:** user has data in the *foreign*
+provider's official client, points unidrive at the same tree to
+**replace** that client (or to mirror to a different provider).
+unidrive needs to either (a) refuse and tell the user how to
+proceed, (b) skip dehydrated entries with a clear report, or (c)
+force-hydrate before reading. Silent retry-storms or partial uploads
+are not acceptable.
+
+## Research question 1 — detect that sync_root sits inside a foreign client's mount
+
+Per-platform / per-provider:
+
+- **Windows + Cloud Files API** (universal across modern providers):
+  `FILE_ATTRIBUTE_REPARSE_POINT` on the directory + a known
+  `IO_REPARSE_TAG_CLOUD` on each placeholder file. Reparse-tag
+  registry under `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`.
+  This is the cleanest signal — it's how Explorer renders the
+  cloud-icon overlay.
+- **OneDrive (Windows):** registry `HKCU\Software\Microsoft\OneDrive\
+  Accounts\Personal\UserFolder` (and Business variant). Syncroots
+  under `SyncEngines\Providers\<...>`.
+- **OneDrive (macOS):** `~/Library/Containers/com.microsoft.OneDrive`
+  / `OneDrive*` folders under `~/`.
+- **Google Drive (Windows):** Drive File Stream's drive letter (often
+  `G:`) + `~/AppData/Local/Google/DriveFS/`. macOS: virtual mount
+  under `/Volumes/`.
+- **Dropbox:** `~/.dropbox/info.json` lists `personal` and `business`
+  roots. Smart-Sync placeholders are similar.
+- **iCloud Drive (macOS):** `~/Library/Mobile Documents/`. Dehydrated
+  files have `.icloud` extension or extended attribute
+  `com.apple.metadata:com_apple_ubiquity_unset_*`.
+- **Box Drive:** `~/Box/` (or configurable). Box sets reparse points
+  on Windows.
+- **Internxt:** directory naming pattern `InternxtDrive - <UUID>`
+  under `~/`, paired with a Windows Cloud Files reparse tag.
+
+Detection strategies, ranked:
+
+1. **Cloud Files API reparse tag** (Windows, modern OneDrive /
+   Internxt / Box / Dropbox Smart Sync): one syscall per directory,
+   tag identifies the provider unambiguously. Best signal.
+2. **Path heuristic** (cross-platform fallback): match `sync_root`
+   against a known list of well-known cloud-mount paths.
+3. **Per-file attributes** (also see Q2): cheap to combine with
+   the existing `Files.walkFileTree` pass.
+
+## Research question 2 — detect a *file* as dehydrated
+
+- **Windows:** `GetFileAttributesW` → `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`
+  (0x00400000) or `FILE_ATTRIBUTE_RECALL_ON_OPEN` (0x00040000), often
+  paired with `FILE_ATTRIBUTE_OFFLINE` (0x00001000). Java NIO
+  `BasicFileAttributes` doesn't surface these — need JNA / sun.nio.fs
+  reflection or shell out to PowerShell `Get-ItemProperty`.
+- **macOS:** `xattr -l` for `com.apple.bird` (iCloud) or vendor-specific
+  attributes. Files with `.icloud` extension are placeholders.
+- **Linux:** less standard. rclone vfs has a cache; FUSE mounts vary.
+
+The Windows Cloud Files API ones are the dominant case — most modern
+desktop clients on Windows go through it.
+
+## Research question 3 — behaviour once detected
+
+Possible policies, not mutually exclusive:
+
+a. **Refuse** at sync start: "sync_root sits inside <provider>'s
+   managed area. unidrive can't safely sync from a foreign cloud's
+   mount; copy the data to a regular folder first or set
+   `allow_foreign_managed_root = true` in config.toml."
+b. **Skip-and-report**: enumerate dehydrated entries during scan,
+   exclude them from action plan, surface count in the dry-run
+   summary ("skipping 47 dehydrated files; foreign client not
+   running"). Re-run after foreign client is up to pick them up.
+c. **Force-hydrate**: walk the tree and `Files.copy(file, /dev/null)`
+   on each placeholder to trigger recall. Slow + bandwidth-heavy +
+   doubles storage during sync; useful for migration but should be
+   opt-in.
+d. **Lazy-hydrate-on-read**: try to read normally, catch the recall
+   failure, mark as transient skip, retry on next pass once foreign
+   client is detected running.
+
+For the migration use-case (user replacing the foreign client),
+option (c) is the user's intent — they *want* the bytes locally.
+For occasional overlap, (a) or (b) are safer defaults.
+
+## Research question 4 — UX
+
+- First-sync banner already exists (UD-296). Extend with a
+  foreign-client-detected line:
+  > `note: sync_root is inside Internxt's managed area
+  > (placeholders may need foreign client running)`
+- Surface dehydrated-skipped count in the per-action summary the
+  same way conflicts and moves are.
+- Document the migration playbook (foreign client running, opt in
+  to force-hydrate, then uninstall foreign client) in `docs/`.
+
+## Research question 5 — failure mode when foreign client isn't running
+
+Reading a placeholder when its host client is offline gives an
+`IOException` of some specific kind on Windows
+(`ERROR_CLOUD_FILE_PROVIDER_TERMINATED` 0x8007016A or similar).
+Currently `LocalScanner` has no `visitFileFailed` override (see
+deferred E from the UD-296 thread) — a partial walk could go
+silently wrong. A specific catch + classification would let unidrive
+say "Internxt client appears stopped" instead of a generic IOError.
+
+## Open implementation directions (each = a future ticket)
+
+- **UD-???**: cross-platform `ForeignClientDetector` interface +
+  Windows reparse-tag implementation. Returns
+  `(provider, mountRoot, status)` for the configured `sync_root`.
+- **UD-???**: per-file `isDehydrated(path: Path): Boolean` helper,
+  Windows-first, used during scan to tag placeholders in
+  `LocalScanner` output.
+- **UD-???**: `allow_foreign_managed_root` config flag + abort-or-warn
+  policy at sync start (depends on first ticket).
+- **UD-???**: dehydrated-skip path in reconciler + summary
+  reporting. Re-test on next run.
+- **UD-???**: opt-in `--hydrate-first` mode that pre-recalls
+  placeholders before the upload phase.
+- **UD-???**: `visitFileFailed` override in `LocalScanner` (covers
+  the dehydration-failure case + general partial-scan defence-in-depth;
+  carry-over from the deferred-E pile).
+
+## Out of scope
+
+- Implementation. Land detectors and mitigations as their own UDs
+  once the design here is settled.
+- Foreign client orchestration (starting/stopping the foreign client
+  programmatically). That's a footgun — leave it to the user.
+- Two-way sync of placeholders (treating the foreign cloud as remote
+  and a *different* unidrive provider as another remote). Different
+  feature entirely.
