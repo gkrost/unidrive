@@ -527,6 +527,68 @@ class SyncEngineTest {
             )
         }
 
+    // UD-299 — track sync_root, refuse run when changed
+
+    private fun engineWithSyncRoot(root: Path) =
+        SyncEngine(
+            provider = provider,
+            db = db,
+            syncRoot = root,
+            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+            reporter = ProgressReporter.Silent,
+        )
+
+    @Test
+    fun `UD-299 first sync stores sync_root in state DB`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            val stored = db.getSyncState("sync_root")
+            assertEquals(syncRoot.toAbsolutePath().normalize().toString(), stored)
+        }
+
+    @Test
+    fun `UD-299 same sync_root on subsequent run does not throw`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            // Second run with the same engine + same syncRoot — must not throw.
+            engine.syncOnce()
+        }
+
+    @Test
+    fun `UD-299 different sync_root throws with both paths in message`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            val newRoot = Files.createTempDirectory("unidrive-engine-test-new")
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithSyncRoot(newRoot).syncOnce()
+                }
+            assertTrue(ex.message!!.contains("sync_root changed from"))
+            assertTrue(ex.message!!.contains(syncRoot.toAbsolutePath().normalize().toString()))
+            assertTrue(ex.message!!.contains(newRoot.toAbsolutePath().normalize().toString()))
+            assertTrue(ex.message!!.contains("--reset"))
+        }
+
+    @Test
+    fun `UD-299 after reset different sync_root runs and stores new root`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            val newRoot = Files.createTempDirectory("unidrive-engine-test-new")
+            // Simulate `--reset` — the SyncCommand wires this up by calling
+            // db.resetAll() before the engine starts.
+            db.resetAll()
+            engineWithSyncRoot(newRoot).syncOnce()
+
+            val stored = db.getSyncState("sync_root")
+            assertEquals(newRoot.toAbsolutePath().normalize().toString(), stored)
+        }
+
     // UD-223 Part A — fast-bootstrap
 
     private fun bootstrapEngine() =

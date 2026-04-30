@@ -110,6 +110,29 @@ class SyncEngine(
         val uploaded = AtomicInteger(0)
         val conflicts = AtomicInteger(0)
 
+        // UD-299: detect sync_root drift between runs. state.db is per-profile
+        // (not per-(profile, sync_root)), so editing sync_root in config.toml
+        // leaves the DB indexing the old tree. Every absent old-root path then
+        // becomes a DeleteRemote in the next plan. Refuse to run when the
+        // stored sync_root differs from the current one — `--reset` is the
+        // bypass (it wipes state.db, so the next run records the new root).
+        val currentRoot =
+            syncRoot
+                .toAbsolutePath()
+                .normalize()
+                .toString()
+        val storedRoot = db.getSyncState("sync_root")
+        if (storedRoot.isNullOrEmpty()) {
+            db.setSyncState("sync_root", currentRoot)
+        } else if (!sameSyncRoot(storedRoot, currentRoot)) {
+            throw IllegalStateException(
+                "sync_root changed from '$storedRoot' to '$currentRoot'. " +
+                    "The state DB still indexes the old tree and would produce " +
+                    "spurious del-remote actions. Run with --reset to wipe state " +
+                    "and re-sync from scratch, or revert sync_root in config.toml.",
+            )
+        }
+
         // Auto-purge expired trash entries
         trashManager?.purge(trashRetentionDays)
         versionManager?.pruneByAge(versionRetentionDays)
@@ -1074,6 +1097,18 @@ class SyncEngine(
         if (!Files.exists(syncRoot)) return true
         if (!Files.isDirectory(syncRoot)) return true
         return Files.newDirectoryStream(syncRoot).use { !it.iterator().hasNext() }
+    }
+
+    // UD-299: case-insensitive compare on Windows (drive-letter case + NTFS
+    // semantics), exact compare elsewhere. Both inputs are already
+    // .toAbsolutePath().normalize() so separator and dot-segment normalisation
+    // are taken care of.
+    private fun sameSyncRoot(
+        a: String,
+        b: String,
+    ): Boolean {
+        val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
+        return if (isWindows) a.equals(b, ignoreCase = true) else a == b
     }
 
     private fun logFailure(
