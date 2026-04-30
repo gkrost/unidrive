@@ -43,7 +43,14 @@ class CliProgressReporter(
             // remote scan emits 2k+ updates without scrolling the terminal.
             // The final fire from SyncEngine after the loop has the same
             // shape; the next phase's println will commit a newline first.
-            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed)")
+            //
+            // UD-713: append items/min throughput once we've collected enough
+            // signal (>= 5s elapsed AND >= 100 items). Full bucketed ETA
+            // depends on knowing the *total* upfront, which neither LocalScanner
+            // nor most remote-delta APIs expose without a separate count probe;
+            // throughput alone is the "should I go to lunch?" signal.
+            val rateSuffix = formatThroughput(count, elapsedSecs)
+            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed$rateSuffix)")
         }
     }
 
@@ -127,6 +134,19 @@ class CliProgressReporter(
             totalSecs < 3600 -> "${totalSecs / 60}m ${totalSecs % 60}s"
             else -> "${totalSecs / 3600}h ${(totalSecs / 60) % 60}m"
         }
+
+    // UD-713: items-per-minute throughput suffix for scan heartbeats. Returns
+    // ", ~N items/min" once we have a stable signal (>= 5s elapsed AND >= 100
+    // items observed), or "" otherwise. The leading comma+space lets callers
+    // append directly inside the existing parenthesised metadata.
+    private fun formatThroughput(
+        items: Int,
+        elapsedSecs: Long,
+    ): String {
+        if (elapsedSecs < 5 || items < 100) return ""
+        val perMin = (items.toLong() * 60) / elapsedSecs
+        return ", ~$perMin items/min"
+    }
 
     private val cols: Int = terminalWidth()
 

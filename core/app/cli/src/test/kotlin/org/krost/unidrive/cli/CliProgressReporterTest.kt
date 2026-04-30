@@ -175,4 +175,35 @@ class CliProgressReporterTest {
             "scan and Reconciled lines must not glue together; got: $output",
         )
     }
+
+    // UD-713 — throughput suffix once enough signal has accumulated.
+
+    @Test
+    fun `UD-713 scan heartbeat omits throughput when too few items`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("local", 0)
+        // count below 100 items threshold — no items/min line yet.
+        reporter.onScanProgress("local", 50)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertFalse(
+            output.contains("items/min"),
+            "throughput suffix must not appear with <100 items; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-713 scan heartbeat omits throughput when elapsed too short`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("local", 0)
+        // 200 items but virtually no time elapsed — throughput would be wildly
+        // unstable. Should be suppressed by the 5s elapsed gate.
+        reporter.onScanProgress("local", 200)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertFalse(
+            output.contains("items/min"),
+            "throughput suffix must not appear before 5s elapsed; got: $output",
+        )
+    }
 }
