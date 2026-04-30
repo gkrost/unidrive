@@ -217,7 +217,7 @@ fun deployWindows(
         |# UD-270: PowerShell launcher. Invoked by ${'$'}binDir\unidrive.cmd
         |# so CTRL-C from the user's shell exits cleanly without cmd.exe's
         |# trailing "Terminate batch job?" prompt.
-        |& java -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" @args
+        |& java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" @args
         |exit ${'$'}LASTEXITCODE
         """.trimMargin() + "\r\n",
     )
@@ -240,7 +240,7 @@ fun deployWindows(
     batchWrapper.writeText(
         "@echo off\r\n" +
             ":loop\r\n" +
-            "java -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar " +
+            "java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar " +
             "\"${targetJar.absolutePath}\" sync --watch\r\n" +
             "if exist \"${localAppData}\\unidrive\\stop\" (\r\n" +
             "    del \"${localAppData}\\unidrive\\stop\"\r\n" +
@@ -290,7 +290,7 @@ fun deployLinux(
     launcher.writeText(
         """
         |#!/usr/bin/env bash
-        |exec java -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" "${'$'}@"
+        |exec java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" "${'$'}@"
         """.trimMargin() + "\n",
     )
     launcher.setExecutable(true)

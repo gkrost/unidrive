@@ -107,6 +107,7 @@ $flightRecorderArg = "-XX:StartFlightRecording=" + ($jfrParams -join ',')
 # plus JFR-specific options. `-XX:FlightRecorderOptions=stackdepth=128`
 # captures deep stacks so async coroutine stitching survives in the dump.
 $jvmArgs = @(
+    '-Xmx6g'
     '-Dstdout.encoding=UTF-8'
     '-Dstderr.encoding=UTF-8'
     '--enable-native-access=ALL-UNNAMED'

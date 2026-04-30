@@ -183,7 +183,7 @@ fun deployWindows(
         // UD-258 (follow-up): force UTF-8 stdout/stderr so JSON-RPC payloads
         // with unicode (filenames, display names, errors) don't get mangled
         // by Windows' default OEM codepage.
-        "@echo off\r\njava -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar \"$targetJar\" %*\r\n",
+        "@echo off\r\njava -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar \"$targetJar\" %*\r\n",
     )
 
     println("Deployed unidrive-mcp $projectVersion (Windows):")
@@ -211,7 +211,7 @@ fun deployLinux(
     launcher.writeText(
         """
         |#!/usr/bin/env bash
-        |exec java --enable-native-access=ALL-UNNAMED -jar "$targetJar" "${'$'}@"
+        |exec java -Xmx6g --enable-native-access=ALL-UNNAMED -jar "$targetJar" "${'$'}@"
         """.trimMargin() + "\n",
     )
     launcher.setExecutable(true)

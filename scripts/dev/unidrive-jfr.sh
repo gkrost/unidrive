@@ -134,6 +134,7 @@ fi
 # plus JFR-specific options. stackdepth=256 captures deep stacks so async
 # coroutine stitching survives in the dump.
 JVM_ARGS=(
+  -Xmx6g
   -Dstdout.encoding=UTF-8
   -Dstderr.encoding=UTF-8
   --enable-native-access=ALL-UNNAMED
