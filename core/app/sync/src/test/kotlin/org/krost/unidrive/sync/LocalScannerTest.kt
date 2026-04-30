@@ -162,6 +162,35 @@ class LocalScannerTest {
         assertEquals(0, scanner.lastScanSkipped)
     }
 
+    // UD-742 — onProgress callback fires during long walks
+
+    @Test
+    fun `UD-742 scan with no callback does not throw and returns same map shape`() {
+        Files.writeString(syncRoot.resolve("a.txt"), "1")
+        Files.writeString(syncRoot.resolve("b.txt"), "2")
+        val out = scanner.scan() // no callback overload still works
+        assertEquals(2, out.size)
+    }
+
+    @Test
+    fun `UD-742 scan fires onProgress at item-count threshold during walk`() {
+        // Threshold inside scan() is 5000 items per fire. Generate enough files
+        // for at least one heartbeat. Tempdir cleanup is fine — small files.
+        val target = 5_500
+        for (i in 0 until target) {
+            Files.writeString(syncRoot.resolve("f$i.txt"), "x")
+        }
+        val seen = mutableListOf<Int>()
+        scanner.scan { count -> seen.add(count) }
+        // At least one mid-scan fire
+        assertTrue(seen.isNotEmpty(), "expected at least one heartbeat fire for $target files")
+        // Last fire should be <= total items visited
+        assertTrue(
+            seen.last() <= target,
+            "heartbeat count ${seen.last()} should be <= total visited $target",
+        )
+    }
+
     @Test
     fun `UD-736 visitFileFailed continues walk and increments skipped count`() {
         // POSIX-only: make a subdirectory unreadable so walkFileTree's attempt

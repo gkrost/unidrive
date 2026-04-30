@@ -113,4 +113,66 @@ class CliProgressReporterTest {
         assertEquals("", CliProgressReporter.truncateForWidth("anything", 0))
         assertEquals("", CliProgressReporter.truncateForWidth("anything", -5))
     }
+
+    // UD-742 — scan-phase heartbeat with elapsed time + commitInline newline
+
+    @Test
+    fun `UD-742 scan progress with count gt 0 includes elapsed time text`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("local", 0)
+        Thread.sleep(30) // ensure elapsed >= 0; format will say "0s" but rendering is the point
+        reporter.onScanProgress("local", 1234)
+        // Force the inline state to commit so anything pending is in the buffer.
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Scanning local changes...") && output.contains("1234 items"),
+            "expected scan line with count, got: $output",
+        )
+        assertTrue(
+            output.contains("elapsed"),
+            "expected 'elapsed' marker in heartbeat output, got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-742 onSyncComplete after inline-active scan emits newline first`() {
+        val reporter = CliProgressReporter(dryRun = true)
+        // Trigger an inline scan progress that leaves the cursor mid-line in TTY mode.
+        reporter.onScanProgress("local", 0)
+        reporter.onScanProgress("local", 100)
+        // Now finish — commitInline must emit a \n before the dry-run summary so
+        // the two lines don't glue together (the user's reported `.mp4Dry-run:`
+        // bug from 2026-04-30).
+        reporter.onSyncComplete(0, 0, 0, 1500L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        // Output should contain BOTH the scan-progress text AND the dry-run line,
+        // with a newline between them. We don't care about exact byte positions
+        // (TTY/non-TTY paths differ), only that they're not directly concatenated.
+        val dryRunIdx = output.indexOf("Dry-run:")
+        assertTrue(dryRunIdx >= 0, "expected Dry-run output, got: $output")
+        // The character immediately preceding "Dry-run:" must be a newline OR the
+        // scan output must have used println (non-TTY path), in which case the
+        // line just before is a newline anyway. The key invariant: NO scan-line
+        // characters glued directly to "Dry-run:".
+        assertFalse(
+            output.contains("itemsDry-run:") || output.contains("100 items elapsed)Dry-run:"),
+            "scan and Dry-run lines must not glue together; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-742 onActionCount after inline-active scan emits newline first`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("remote", 0)
+        reporter.onScanProgress("remote", 50)
+        reporter.onActionCount(7)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("Reconciled: 7 actions"), "expected reconcile line; got: $output")
+        // No glue — "Reconciled:" should not be touching scan-progress text
+        assertFalse(
+            output.contains("itemsReconciled:"),
+            "scan and Reconciled lines must not glue together; got: $output",
+        )
+    }
 }

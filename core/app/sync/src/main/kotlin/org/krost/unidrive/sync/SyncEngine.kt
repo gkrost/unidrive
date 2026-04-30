@@ -154,7 +154,11 @@ class SyncEngine(
         reporter.onScanProgress("remote", remoteChanges.size)
 
         reporter.onScanProgress("local", 0)
-        val allLocalChanges = scanner.scan()
+        val allLocalChanges =
+            scanner.scan { count ->
+                // UD-742: scanner emits this every 5k items / 10s during long walks.
+                reporter.onScanProgress("local", count)
+            }
         val localChanges =
             if (syncPath != null) {
                 val ancestors = syncPathAncestors(syncPath)
@@ -605,6 +609,11 @@ class SyncEngine(
             changes[resolved.path] = resolved
         }
         db.setSyncState("pending_cursor", page.cursor)
+        // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
+        // so a 113k-item drive emits ~2260 update events — cheap, and the
+        // reporter is responsible for throttling display (CliProgressReporter
+        // overwrites the same line via printInline).
+        reporter.onScanProgress("remote", changes.size)
 
         while (page.hasMore) {
             page = nextPage(page.cursor)
@@ -613,6 +622,7 @@ class SyncEngine(
                 changes[resolved.path] = resolved
             }
             db.setSyncState("pending_cursor", page.cursor)
+            reporter.onScanProgress("remote", changes.size)
         }
 
         if (isFullSync) {

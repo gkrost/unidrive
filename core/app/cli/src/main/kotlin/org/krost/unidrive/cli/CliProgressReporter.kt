@@ -17,18 +17,38 @@ class CliProgressReporter(
     private var actionStartTime = 0L
     private val isTty = System.console() != null
 
+    // UD-742: track when each scan phase started so heartbeat lines can show
+    // elapsed wall-clock. Cleared as each phase begins (count == 0).
+    private val scanStartTimes = mutableMapOf<String, Long>()
+
+    // UD-742 / UD-735: when printInline emitted text and left the cursor
+    // mid-line (no trailing newline), any subsequent println-using method
+    // would glue its output to the inline tail (e.g. observed
+    // ".mp4Dry-run: ..." in the user's terminal). Track the inline-active
+    // state and commit a newline before the next non-printInline output.
+    private var inlineActive = false
+
     override fun onScanProgress(
         phase: String,
         count: Int,
     ) {
+        val now = System.currentTimeMillis()
         if (count == 0) {
+            scanStartTimes[phase] = now
             printInline("Scanning $phase changes...")
         } else {
-            println("Scanning $phase changes... $count items")
+            val start = scanStartTimes[phase] ?: now
+            val elapsedSecs = (now - start) / 1000
+            // UD-742: heartbeat overwrites in-place via printInline so a 113k
+            // remote scan emits 2k+ updates without scrolling the terminal.
+            // The final fire from SyncEngine after the loop has the same
+            // shape; the next phase's println will commit a newline first.
+            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed)")
         }
     }
 
     override fun onActionCount(total: Int) {
+        commitInline()
         println("Reconciled: $total actions")
     }
 
@@ -66,6 +86,7 @@ class CliProgressReporter(
         lastConflicts = conflicts
         // UD-204: Locale.ROOT so "1.5s" stays stable across locales.
         val secs = String.format(Locale.ROOT, "%.1f", durationMs / 1000.0)
+        commitInline()
         if (dryRun) {
             val parts = mutableListOf("download $downloaded", "upload $uploaded")
             val extras =
@@ -83,8 +104,29 @@ class CliProgressReporter(
     }
 
     override fun onWarning(message: String) {
+        commitInline()
         System.err.println("  WARN: $message")
     }
+
+    // UD-742: emit a newline iff a printInline call is mid-flight, so the
+    // next println starts on a fresh line instead of gluing onto the
+    // overwrite buffer.
+    private fun commitInline() {
+        if (inlineActive) {
+            println()
+            inlineActive = false
+        }
+    }
+
+    // UD-742: compact human-readable elapsed seconds for scan heartbeats —
+    // "47s", "5m 12s", "1h 23m". Drops the seconds field at hour granularity
+    // since by then the user only cares about whole minutes.
+    private fun formatElapsed(totalSecs: Long): String =
+        when {
+            totalSecs < 60 -> "${totalSecs}s"
+            totalSecs < 3600 -> "${totalSecs / 60}m ${totalSecs % 60}s"
+            else -> "${totalSecs / 3600}h ${(totalSecs / 60) % 60}m"
+        }
 
     private val cols: Int = terminalWidth()
 
@@ -96,6 +138,7 @@ class CliProgressReporter(
             // overwrite stays on a single physical row.
             val displayed = truncateForWidth(msg, cols - 1)
             print("\r\u001b[K$displayed")
+            inlineActive = true
         } else {
             println(msg)
         }

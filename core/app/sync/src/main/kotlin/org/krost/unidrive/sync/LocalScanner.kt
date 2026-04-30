@@ -24,13 +24,33 @@ class LocalScanner(
 
     private fun isExcluded(relativePath: String): Boolean = excludePatterns.any { pattern -> Reconciler.matchesGlob(relativePath, pattern) }
 
-    fun scan(): Map<String, ChangeState> {
+    fun scan(onProgress: ((Int) -> Unit)? = null): Map<String, ChangeState> {
         val changes = mutableMapOf<String, ChangeState>()
         val seenPaths = mutableSetOf<String>()
         var skipped = 0
 
         // Load all DB entries once — avoids N+1 queries during file tree walk
         val dbEntries = db.getAllEntries().associateBy { it.path }
+
+        // UD-742: heartbeat — fire onProgress every 5000 items OR every 10s
+        // wall-clock since the last fire, whichever comes first. Both thresholds
+        // are relative to the previous fire so a fast walk fires by item-count
+        // and a slow walk fires by wall-clock.
+        var visited = 0
+        var lastFireItems = 0
+        var lastFireMs = System.currentTimeMillis()
+        val heartbeatIntervalMs = 10_000L
+        val heartbeatItemThreshold = 5_000
+
+        fun maybeFireHeartbeat() {
+            if (onProgress == null) return
+            val now = System.currentTimeMillis()
+            if (visited - lastFireItems >= heartbeatItemThreshold || now - lastFireMs >= heartbeatIntervalMs) {
+                onProgress.invoke(visited)
+                lastFireItems = visited
+                lastFireMs = now
+            }
+        }
 
         // Walk local filesystem
         Files.walkFileTree(
@@ -43,6 +63,7 @@ class LocalScanner(
                     val relativePath = "/" + syncRoot.relativize(file).toString().replace('\\', '/')
                     if (isExcluded(relativePath)) return FileVisitResult.CONTINUE
                     seenPaths.add(relativePath)
+                    visited++
 
                     val entry = dbEntries[relativePath]
                     if (entry == null) {
@@ -56,6 +77,7 @@ class LocalScanner(
                     }
                     // Skip dehydrated files for modification check (mtime is synthetic)
 
+                    maybeFireHeartbeat()
                     return FileVisitResult.CONTINUE
                 }
 
