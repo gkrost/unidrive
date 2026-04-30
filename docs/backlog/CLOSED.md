@@ -8652,3 +8652,87 @@ shouldn't lock up unidrive for 10 minutes.
 * No regression on existing `:providers:internxt:test` suite.
 * Catastrophic transient outage (3+ retries failing) still bubbles
   up the original exception — UD-300 cancellation contract preserved.
+
+---
+id: UD-745
+title: onSyncComplete summary: surface failed-action count so users notice work remaining
+category: tooling
+priority: high
+effort: XS
+status: closed
+closed: 2026-04-30
+resolved_by: commit fac51e1. ProgressReporter.onSyncComplete adds ; SyncEngine sums passOneFailures + transferFailures; CliProgressReporter renders ', N failed' when non-zero; all delegating reporters (Notify/Ipc/SyncTool/CompositeReporter) updated. 3 unit tests.
+opened: 2026-04-30
+---
+**Why:** `CliProgressReporter.onSyncComplete` renders
+
+```
+Sync complete: $downloaded downloaded, $uploaded uploaded, $conflicts conflicts (${secs}s)
+```
+
+with no mention of **failed actions**. SyncEngine tracks
+`transferFailures` (Pass 2) and per-action failures via
+`consecutiveFailures` + `logFailure` (Pass 1) but neither flows into
+the summary. Result: a user can kick off sync, see "Sync complete:
+0 downloaded, 12 450 uploaded, 0 conflicts," and walk away — not
+realising 230 mkdir-remote calls 502'd and need a re-run.
+
+The infrastructure already exists:
+
+* `transferFailures: AtomicInteger` at [SyncEngine.kt:409](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:409).
+* Pass 1 has no equivalent counter — every action failure increments
+  `consecutiveFailures` (which resets on the next success) and logs
+  via `logFailure` / `reporter.onWarning`, but the running total is
+  not retained.
+
+## What
+
+1. Add `passOneFailures: AtomicInteger` at the same level as
+   `transferFailures`. Increment in the Pass 1 catch block at
+   [SyncEngine.kt:351](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:351).
+2. Extend `ProgressReporter.onSyncComplete` with `failed: Int = 0`
+   parameter (default keeps backward compat with reporters that
+   don't care).
+3. SyncEngine calls
+   `reporter.onSyncComplete(downloaded, uploaded, conflicts,
+   duration, actionCounts, failed = passOneFailures.get() +
+   transferFailures.get())`.
+4. CliProgressReporter renders:
+   ```
+   Sync complete: 12450 uploaded, 0 downloaded, 0 conflicts, 230 failed (4523.1s)
+   ```
+   and dry-run:
+   ```
+   Dry-run: would download 0, upload 12450, 230 mkdir-remote, 0 conflicts (45.2s)
+   ```
+   (Dry-run already shows action category counts — `failed` only
+   makes sense for live runs since dry-run produces no real failures.)
+
+## Tests
+
+* SyncEngine: deliberate Pass 1 mkdir failure (mock provider
+  returning 5xx); after `syncOnce()`, captured `onSyncComplete` event
+  has `failed >= 1`.
+* CliProgressReporter: `onSyncComplete(failed = 5)` produces output
+  containing `5 failed`; `failed = 0` omits the segment OR shows
+  ", 0 failed" (decide — probably omit when zero to avoid noise on
+  clean runs).
+* IpcProgressReporter / NotifyProgressReporter / Silent — the
+  default-arg keeps these compiling without changes; check none of
+  them were relying on the parameter list shape.
+
+## Out of scope
+
+* Per-action-type breakdown ("4 mkdir failed, 226 upload failed").
+  Aggregate count is the headline; categorised breakdown can come
+  later if useful.
+* Routing failures to a separate end-of-sync output stream (e.g.,
+  always-emit-on-stderr regardless of success). Just include in the
+  existing summary.
+
+## Acceptance
+
+* After a sync that hit any number of action failures, the final
+  line surfaces a non-zero `failed` count.
+* Existing tests still pass (the default-arg makes the change
+  source-compatible).
