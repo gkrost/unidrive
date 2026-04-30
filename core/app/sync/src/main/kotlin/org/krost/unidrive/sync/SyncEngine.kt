@@ -30,6 +30,10 @@ class SyncEngine(
     private val conflictLog: ConflictLog? = null,
     private val syncPath: String? = null,
     private val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
+    // UD-737: --upload-only is push-additive by default — local deletes do NOT
+    // propagate to remote. Set to true to opt back in to legacy "local is
+    // source of truth" semantics. No effect outside SyncDirection.UPLOAD.
+    private val propagateDeletes: Boolean = false,
     private val maxDeletePercentage: Int = 50,
     private val verifyIntegrity: Boolean = false,
     private val providerId: String = "",
@@ -192,8 +196,13 @@ class SyncEngine(
             when (syncDirection) {
                 SyncDirection.UPLOAD ->
                     allActions.filter {
+                        // UD-737: DeleteRemote only flows in upload-direction
+                        // when --propagate-deletes is explicitly set. The flag
+                        // name `--upload-only` reads as a one-way uploader,
+                        // and the default is push-additive: only Upload /
+                        // CreateRemoteFolder / MoveRemote land on remote.
                         it is SyncAction.Upload ||
-                            it is SyncAction.DeleteRemote ||
+                            (propagateDeletes && it is SyncAction.DeleteRemote) ||
                             it is SyncAction.CreateRemoteFolder ||
                             it is SyncAction.MoveRemote ||
                             it is SyncAction.Conflict ||

@@ -80,6 +80,15 @@ class SyncCommand : Runnable {
     @Option(names = ["--force-delete"], description = ["Override deletion safeguard (max_delete_percentage)"])
     var forceDelete: Boolean = false
 
+    @Option(
+        names = ["--propagate-deletes"],
+        description = [
+            "UD-737: with --upload-only, also propagate local-side deletions to remote.",
+            "Default for --upload-only is to skip del-remote entirely (push-additive semantics).",
+        ],
+    )
+    var propagateDeletes: Boolean = false
+
     @Option(names = ["--exclude"], description = ["Exclude paths matching glob pattern (repeatable)"])
     var cliExcludePatterns: List<String> = emptyList()
 
@@ -115,6 +124,15 @@ class SyncCommand : Runnable {
             throw CommandLine.ParameterException(
                 spec.commandLine(),
                 "--reset and --dry-run are mutually exclusive: --reset clears sync state on disk, which --dry-run cannot undo.",
+            )
+        }
+        // UD-737: --propagate-deletes only makes sense as an opt-in modifier for
+        // --upload-only. Without it, --upload-only's default is push-additive
+        // (no del-remote). With it, locally-deleted entries propagate to remote.
+        if (propagateDeletes && !uploadOnly) {
+            throw CommandLine.ParameterException(
+                spec.commandLine(),
+                "--propagate-deletes is only valid together with --upload-only.",
             )
         }
         val lock = parent.acquireProfileLock()
@@ -226,6 +244,7 @@ class SyncCommand : Runnable {
                 append(directionLabel)
                 if (dryRun) append(", dry-run")
                 if (forceDelete) append(", force-delete")
+                if (propagateDeletes) append(", propagate-deletes")
                 if (watch) append(", watch")
             }
         println(
@@ -283,6 +302,7 @@ class SyncCommand : Runnable {
                 conflictLog = conflictLog,
                 syncPath = syncPath,
                 syncDirection = effectiveDirection,
+                propagateDeletes = propagateDeletes,
                 maxDeletePercentage = config.maxDeletePercentage,
                 verifyIntegrity = config.verifyIntegrity,
                 providerId = profile.type,

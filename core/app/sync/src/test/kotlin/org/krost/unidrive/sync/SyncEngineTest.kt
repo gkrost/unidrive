@@ -589,6 +589,86 @@ class SyncEngineTest {
             assertEquals(newRoot.toAbsolutePath().normalize().toString(), stored)
         }
 
+    // UD-737 — --upload-only is push-additive by default; --propagate-deletes opts back in
+
+    private fun engineUploadOnly(propagateDeletes: Boolean) =
+        SyncEngine(
+            provider = provider,
+            db = db,
+            syncRoot = syncRoot,
+            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+            reporter = ProgressReporter.Silent,
+            syncDirection = SyncDirection.UPLOAD,
+            propagateDeletes = propagateDeletes,
+        )
+
+    @Test
+    fun `UD-737 upload-only without propagate-deletes drops local-delete from plan`() =
+        runTest {
+            // Establish the file on both sides via a normal first-sync
+            provider.files["/will-stay-on-remote.txt"] = ByteArray(10)
+            provider.deltaItems = listOf(cloudItem("/will-stay-on-remote.txt", size = 10))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertTrue(Files.exists(syncRoot.resolve("will-stay-on-remote.txt")))
+
+            // Delete locally — under the OLD semantics this would propagate to remote.
+            Files.delete(syncRoot.resolve("will-stay-on-remote.txt"))
+
+            // Empty delta (no remote-side change) so the engine sees only the
+            // local-deletion candidate.
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+
+            engineUploadOnly(propagateDeletes = false).syncOnce()
+
+            // No call to provider.delete should have happened
+            assertFalse(
+                provider.deletedPaths.contains("/will-stay-on-remote.txt"),
+                "expected del-remote suppressed under --upload-only default; got: ${provider.deletedPaths}",
+            )
+        }
+
+    @Test
+    fun `UD-737 upload-only with propagate-deletes propagates local-delete to remote`() =
+        runTest {
+            provider.files["/will-be-deleted.txt"] = ByteArray(10)
+            provider.deltaItems = listOf(cloudItem("/will-be-deleted.txt", size = 10))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+
+            Files.delete(syncRoot.resolve("will-be-deleted.txt"))
+
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+
+            engineUploadOnly(propagateDeletes = true).syncOnce()
+
+            assertTrue(
+                provider.deletedPaths.contains("/will-be-deleted.txt"),
+                "expected del-remote when --propagate-deletes set; got: ${provider.deletedPaths}",
+            )
+        }
+
+    @Test
+    fun `UD-737 upload-only still uploads new local files regardless of propagate-deletes`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            Files.writeString(syncRoot.resolve("new.txt"), "fresh")
+
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+
+            engineUploadOnly(propagateDeletes = false).syncOnce()
+
+            assertTrue(
+                provider.uploadedPaths.contains("/new.txt"),
+                "expected Upload action under --upload-only default; got: ${provider.uploadedPaths}",
+            )
+        }
+
     // UD-223 Part A — fast-bootstrap
 
     private fun bootstrapEngine() =
