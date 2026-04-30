@@ -1798,55 +1798,6 @@ need to know.
 * Backward-compatible reading (always normalize on read; the DB
   migration above handles legacy data).
 ---
-id: UD-740
-title: Move action: print src + dest in CLI/log (currently only dest)
-category: tooling
-priority: medium
-effort: XS
-status: open
-opened: 2026-04-30
----
-**Why:** `SyncAction.MoveRemote` and `SyncAction.MoveLocal` carry both
-`fromPath` and `toPath`, but the CLI/log output for `move` actions
-prints only the destination. The user can't see what was renamed *to*
-what — only that something arrived at a path. Real-case (2026-04-30,
-post-UD-737 dry-run on inxt_gernot_krost_posteo): action lines like
-
-```
-[31640/31722] move /Documents/Calibre/Calibre-Import/...Schmolke .p[31647/31722] move /Documents/...
-```
-
-leave the user wondering "moved from where?" and also chain together
-because of the long-path TTY wrap.
-
-**What:** In `SyncEngine.actionLabel(action)` and the call sites in
-`onActionProgress`, render `move` actions as `from -> to` (or
-`from → to` if non-ASCII OK in the TTY context — UD-291 lessons say
-ASCII safer on Windows). Both for stdout progress lines and for the
-`failures.jsonl` / log writes.
-
-**Where:**
-
-* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
-  — `actionLabel()` (~line 997) currently returns just `"move"`; needs
-  to either return both paths or have the call sites format separately.
-  Cleanest: add a helper `displayPath(action: SyncAction): String` that
-  for `MoveRemote` / `MoveLocal` returns `"$fromPath -> $toPath"` and
-  for everything else returns `action.path`.
-* `reporter.onActionProgress(index, total, label, path)` — `path` is
-  what gets rendered. Pass the helper's result.
-* `failureLogPath` writer in `logFailure` — same change.
-
-**Tests:**
-
-* Unit: action with `MoveRemote(fromPath=/a, toPath=/b)` produces a
-  display string that contains both `/a` and `/b`.
-* Existing `onActionProgress` tests' fixtures may need an expectation
-  refresh.
-
-**Out of scope:** the TTY wrap-around problem is UD-735 (already
-landed). This is purely "make `move` lines self-describing."
----
 id: UD-741
 title: Sync banner: include sync_path arg when set
 category: tooling
