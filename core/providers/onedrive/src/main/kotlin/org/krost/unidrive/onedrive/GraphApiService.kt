@@ -249,17 +249,22 @@ class GraphApiService(
                         }
                         if (response.status == HttpStatusCode.Unauthorized) {
                             throw AuthenticationException(
-                                "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
+                                "Authentication failed (401): ${readBoundedErrorBody(response)}",
                             )
                         }
                         if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
-                            val body = response.bodyAsText()
+                            // UD-227 + UD-293: read a bounded prefix for retryAfterSeconds parsing.
+                            // The Graph throttle JSON body is < 1 KB; bounding here keeps the OOM
+                            // risk gone even on the off-chance that a CDN edge attaches a giant
+                            // body to a 429/503 (observed: text/html captive portal pages with
+                            // Content-Length matching the original asset = 2+ GB).
+                            val body = readBoundedErrorBody(response, maxBytes = 16384)
                             val waitMs = pickBackoffMsWithBody(response, body, throttleAttempts, totalThrottleWaitMs)
                             return@execute DownloadOutcome.Throttle(waitMs, response.status.value)
                         }
                         if (!response.status.isSuccess()) {
                             throw GraphApiException(
-                                "Download failed: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
+                                "Download failed: ${response.status} - ${readBoundedErrorBody(response)}",
                                 response.status.value,
                             )
                         }
@@ -271,9 +276,17 @@ class GraphApiService(
                         // if Content-Type is `text/html` (any charset), treat as a retriable flake so
                         // the UD-309 flake loop catches it, retries the same URL, and surfaces a
                         // hard failure after MAX_FLAKE_ATTEMPTS rather than silently writing garbage.
+                        //
+                        // UD-293: pre-fix used `response.bodyAsText().take(200)` which materialised
+                        // the ENTIRE response body as a String before the take — when the CDN
+                        // returned a 2.3 GB binary file with Content-Type: text/html (Graph
+                        // throttle page misreported as the file's MIME), bodyAsText OOM'd with
+                        // "Can't create an array of size 2_233_659_189". Now reads at most 4 KB
+                        // off the channel for the snippet — the diagnostic value is the FIRST
+                        // bytes (HTML preamble), not the full page.
                         val contentType = response.contentType()
                         if (contentType != null && contentType.match(ContentType.Text.Html)) {
-                            val snippet = truncateErrorBody(response.bodyAsText().take(200))
+                            val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
                             throw java.io.IOException(
                                 "Download returned HTML instead of file bytes (status=${response.status.value}, " +
                                     "Content-Type=$contentType): $snippet",
@@ -351,6 +364,39 @@ class GraphApiService(
             }
         }
     }
+
+    /**
+     * UD-293: read at most [maxBytes] from the response body channel and decode
+     * as UTF-8. Used everywhere the streaming-download flow needs a diagnostic
+     * snippet from a non-success / non-JSON-shaped response.
+     *
+     * Pre-fix the surrounding code used `response.bodyAsText()` which
+     * materialises the ENTIRE response into a String — when the CDN edge
+     * returned a 2.3 GB binary with `Content-Type: text/html` (Graph throttle
+     * captive-portal page misreported as the file's MIME), the allocation
+     * failed with `Can't create an array of size 2_233_659_189` and crashed
+     * the download attempt. The flake-retry loop then re-invoked the request
+     * which paper-over-succeeded on attempt 2 because the CDN had reset to
+     * the binary path — but it could equally have OOM'd N more times.
+     *
+     * Output is then run through [truncateErrorBody] (already-existing) so
+     * the log layout doesn't get a multi-page HTML preamble.
+     */
+    private suspend fun readBoundedErrorBody(
+        response: HttpResponse,
+        maxBytes: Int = 4096,
+    ): String =
+        try {
+            val channel = response.bodyAsChannel()
+            val buf = ByteArray(maxBytes)
+            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
+            truncateErrorBody(String(buf, 0, read, Charsets.UTF_8))
+        } catch (_: Exception) {
+            // If even the bounded read fails (channel already consumed,
+            // network died), surface a placeholder rather than crash the
+            // diagnostic path.
+            "<body unavailable>"
+        }
 
     /** UD-227: Graph sometimes tucks the retry-after seconds into the JSON error body, e.g.
      *  `{"error": {..., "retryAfterSeconds": 5}}`. Read the header first; fall back to the body. */
