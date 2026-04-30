@@ -216,6 +216,23 @@ class SyncCommand : Runnable {
             }
         }
 
+        // UD-296: surface profile + provider type + sync_root + direction up
+        // front so users can spot sync_root drift (wrong directory pointed at)
+        // before the planner produces its first del-remote line. ASCII-only
+        // for Windows console codepage hostility.
+        val directionLabel = effectiveDirection.name.lowercase()
+        val mode =
+            buildString {
+                append(directionLabel)
+                if (dryRun) append(", dry-run")
+                if (forceDelete) append(", force-delete")
+                if (watch) append(", watch")
+            }
+        println(
+            "sync: profile=${profile.name} type=${profile.type} " +
+                "sync_root=${config.syncRoot} mode=$mode",
+        )
+
         // Create the watcher early so SyncEngine can suppress echo events.
         // In non-watch mode we still pass the callbacks (they become no-ops since
         // watcher is only started in watch mode).
