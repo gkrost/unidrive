@@ -60,7 +60,18 @@ class Main : Runnable {
     @Option(names = ["-p", "--provider"], description = ["Provider profile name or type (see 'provider list')"])
     var provider: String? = null
 
-    @Option(names = ["-v", "--verbose"], description = ["Verbose output"])
+    // UD-271: scope = INHERIT propagates -v / --verbose down to every subcommand
+    // and sub-subcommand spec at picocli parse time. Pre-fix `unidrive auth -v`
+    // and `unidrive relocate --from X -v` rejected the flag with a misleading
+    // "Possible solutions: --version" hint that pointed users at a worse bug
+    // (silent --version exit on subcommands). With INHERIT the same boolean
+    // field receives the value regardless of where on the command line it
+    // appears, so existing `parent.verbose` consumers (SyncCommand) keep working.
+    @Option(
+        names = ["-v", "--verbose"],
+        description = ["Verbose output"],
+        scope = CommandLine.ScopeType.INHERIT,
+    )
     var verbose: Boolean = false
 
     @Spec

@@ -86,6 +86,38 @@ class RelocateCommandTest {
         assertTrue("--force" in options)
     }
 
+    // -- UD-271: parent --verbose visible on every subcommand spec -------------
+    //
+    // scope = ScopeType.INHERIT on the top-level @Option propagates the flag
+    // to every subcommand at picocli parse time. Pre-fix `unidrive auth -v`
+    // and `unidrive relocate -v --from X` rejected the flag with a misleading
+    // "Possible solutions: --version" hint. The tests below pin the post-fix
+    // contract: the option is in the subcommand's effective option list.
+
+    @Test
+    fun `UD-271 - relocate subcommand inherits --verbose from parent`() {
+        val names = relocateCmd.commandSpec.options().flatMap { it.names().toList() }
+        assertTrue("--verbose" in names, "relocate should accept --verbose; got=$names")
+        assertTrue("-v" in names, "relocate should accept -v; got=$names")
+    }
+
+    @Test
+    fun `UD-271 - --verbose parses successfully on relocate subcommand`() {
+        // CommandLine.parseArgs returns successfully when the flag is in the
+        // subcommand's spec; throws UnmatchedArgumentException otherwise.
+        // Pre-fix this threw "Unknown option: '--verbose'".
+        val parsed =
+            cmd.parseArgs(
+                "relocate",
+                "--from",
+                "src",
+                "--to",
+                "dst",
+                "--verbose",
+            )
+        assertNotNull(parsed, "parseArgs should succeed when --verbose is on the subcommand")
+    }
+
     @Test
     fun `--force defaults to false`() {
         val opt = relocateCmd.commandSpec.options().first { "--force" in it.names() }
