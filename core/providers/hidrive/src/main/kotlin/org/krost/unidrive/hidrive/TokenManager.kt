@@ -1,6 +1,7 @@
 package org.krost.unidrive.hidrive
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -63,9 +64,20 @@ class TokenManager(
             val refreshToken = freshToken.refreshToken
             if (refreshToken != null) {
                 try {
-                    token = oauthService.refreshToken(refreshToken)
-                    oauthService.saveToken(token!!)
-                    return token!!
+                    // UD-331: mirror the UD-310 OneDrive fix — wrap the network
+                    // call AND the saveToken in NonCancellable so a Pass-2 scope
+                    // cancel on a sibling coroutine's 401 can't abort the
+                    // refresh between "got new access_token" and "wrote it to
+                    // disk." Without this, in-memory token disagrees with
+                    // what's persisted across crashes / process restart.
+                    val refreshed =
+                        withContext(NonCancellable) {
+                            val newToken = oauthService.refreshToken(refreshToken)
+                            oauthService.saveToken(newToken)
+                            newToken
+                        }
+                    token = refreshed
+                    return refreshed
                 } catch (e: Exception) {
                     println("Token refresh failed: ${e.message}")
                 }

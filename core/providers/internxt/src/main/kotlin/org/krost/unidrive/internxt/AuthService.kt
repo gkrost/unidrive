@@ -4,8 +4,10 @@ import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -210,10 +212,19 @@ open class AuthService(
             if (current.jwt != stale.jwt) {
                 return@withLock current
             }
-            val newJwt = fetchRefreshedJwt(current.jwt)
-            val rotated = current.copy(jwt = newJwt)
+            // UD-331: mirror the UD-310 OneDrive fix — wrap the network call AND
+            // the saveCredentials in NonCancellable so a Pass-2 scope cancel on
+            // a sibling's 401 can't abort the refresh between "got new JWT" and
+            // "wrote it to disk." Without this, in-memory `credentials` disagrees
+            // with what's persisted across crashes / process restart.
+            val rotated =
+                withContext(NonCancellable) {
+                    val newJwt = fetchRefreshedJwt(current.jwt)
+                    val updated = current.copy(jwt = newJwt)
+                    saveCredentials(updated)
+                    updated
+                }
             credentials = rotated
-            saveCredentials(rotated)
             rotated
         }
     }
