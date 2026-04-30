@@ -2006,3 +2006,122 @@ This ticket is the unimplemented remainder of UD-713.
 **Medium priority, M effort.** Touches every provider. Defer until a
 specific operator with multi-hour syncs asks. The throughput
 shipped in UD-713 is the 80/20 fix; this is the polish.
+---
+id: UD-335
+title: Internxt: tactical retry on transient 5xx + 429 with retry_after parsing (UD-330 narrow scope)
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-04-30
+---
+**Why:** Tactical, Internxt-only fix for the 502 Bad Gateway / Cloudflare
+origin-bad-gateway error pattern observed during a real upload run on
+2026-04-30:
+
+```
+12:44:48.331 WARN ... Action failed for /19notte78/Pictures/RileySatisfaction
+  (1 consecutive): InternxtApiException: API error: 502 Bad Gateway - {
+  "error_name":"origin_bad_gateway", "error_category":"origin",
+  "retryable":true, "retry_after":60, ...
+  }
+```
+
+`InternxtApiService.checkResponse` throws `InternxtApiException` on any
+non-2xx with no retry layer. The action then propagates up to
+SyncEngine which logs WARN, increments `consecutiveFailures`, and
+moves on — that action is dropped for this pass and re-evaluated on
+the next sync. With ~1 230 mkdir-remote calls in flight on a fresh
+upload, several 502 clusters at peak time mean dozens of folders +
+their child files won't land until the user re-runs.
+
+UD-330 covers the structural fix (adopt `HttpRetryBudget` across all
+providers including Internxt). This ticket is the **tactical** fix:
+add a small private retry wrapper inside `InternxtApiService` for the
+write endpoints, parse `retry_after` from the response body when
+present, fall back to exponential backoff. ~30 lines, no provider
+abstraction changes.
+
+## Affected endpoints
+
+Wrap only the *write* endpoints — the user's pain is mkdir + upload
+(create) loops. List endpoints already retry implicitly via reconciler
+re-runs.
+
+* `createFolder` — mkdir-remote driver
+* `createFile` — file-upload metadata writer
+* `moveFile` — rename
+* `moveFolder` — rename
+* (skip `deleteFile` / `deleteFolder` — idempotent on 404, less impact)
+* (skip read-only `listFiles` / `listFolders` / `getFileMeta` — re-scan
+  on next sync recovers cheaply)
+* (skip `downloadFileStreaming` — restarting a stream mid-decrypt is
+  not safe; UD-330 is the right place for the structural fix)
+
+## Behaviour
+
+```kotlin
+private suspend fun <T> retryOnTransient(
+    maxAttempts: Int = 3,
+    op: suspend () -> T,
+): T {
+    var attempt = 0
+    while (true) {
+        try { return op() }
+        catch (e: InternxtApiException) {
+            if (e.statusCode !in TRANSIENT_STATUSES) throw e
+            attempt++
+            if (attempt >= maxAttempts) throw e
+            val retryAfterMs =
+                parseRetryAfter(e.message)
+                    ?: (1000L shl (attempt - 1))         // 1s, 2s, 4s
+            val cappedMs = retryAfterMs.coerceIn(500L, 60_000L)
+            log.warn(
+                "Internxt {} on attempt {}/{}, sleeping {}ms before retry",
+                e.statusCode, attempt, maxAttempts, cappedMs,
+            )
+            kotlinx.coroutines.delay(cappedMs)
+        }
+    }
+}
+```
+
+Transient statuses: `429, 500, 502, 503, 504`.
+
+`parseRetryAfter` regex: `"retry_after"\s*:\s*(\d+)` matched against
+the exception message (which contains the bodyAsText snippet).
+Multiplies by 1000 for ms. Falls back to exponential backoff
+(`1s, 2s, 4s`) when the body doesn't carry the field.
+
+Cap: 60 s per sleep. A Cloudflare 502 quoting `retry_after: 600`
+shouldn't lock up unidrive for 10 minutes.
+
+## Tests
+
+* Mock httpClient returns 502 once with `"retry_after":1` body, then
+  201 with valid folder JSON. `createFolder` succeeds with 1 retry.
+* Mock returns 502 three times — `createFolder` throws after the
+  retry budget is exhausted; assert the same `InternxtApiException`
+  surfaces (not a wrapped one).
+* Mock returns 401 — no retry, immediate throw (auth failure).
+* Mock returns 400 — no retry (bad request, not transient).
+
+## Out of scope
+
+* Per-action backoff coordination across concurrent calls (UD-330's
+  `HttpRetryBudget` does this — multiple concurrent mkdirs hitting
+  502 should share a single backoff window, not each sleep
+  independently).
+* Stream-restart logic for `downloadFileStreaming` (cipher state
+  invalid after partial read).
+* HTTP `Retry-After` header parsing (the body field is the only
+  signal Cloudflare consistently provides; header MAY be set on 503
+  but we don't see it in the captured exception message).
+
+## Acceptance
+
+* Upload run that previously hit ~30 502s during mkdir clustering
+  now completes them in-band rather than dropping to next-sync retry.
+* No regression on existing `:providers:internxt:test` suite.
+* Catastrophic transient outage (3+ retries failing) still bubbles
+  up the original exception — UD-300 cancellation contract preserved.
