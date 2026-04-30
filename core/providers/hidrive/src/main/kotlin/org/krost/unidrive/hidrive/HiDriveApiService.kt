@@ -110,28 +110,38 @@ class HiDriveApiService(
         log.debug("Download: {}", relativePath)
         val home = getHome()
         val absPath = toAbsolutePath(relativePath, home)
-        val response =
-            httpClient.get("$baseUrl/file") {
+        // UD-332: mirror the closed UD-329 OneDrive fix — switch from
+        // `httpClient.get(url)` + `response.body<ByteReadChannel>()` (Ktor 3
+        // buffers the entire response into a single `byte[contentLength]`
+        // before exposing the channel; >2 GiB files OOM at allocation time)
+        // to `prepareGet(url).execute { ... }` + `response.bodyAsChannel()`
+        // (true streaming, only the 8 KiB ring buffer below holds bytes).
+        val statement =
+            httpClient.prepareGet("$baseUrl/file") {
                 bearerAuth(tokenProvider())
                 parameter("path", absPath)
             }
+        statement.execute { response ->
+            if (response.status == HttpStatusCode.Unauthorized) {
+                throw AuthenticationException("Authentication failed (401)")
+            }
+            if (!response.status.isSuccess()) {
+                throw HiDriveApiException(
+                    "Download failed: ${response.status} - ${response.bodyAsText()}",
+                    response.status.value,
+                )
+            }
 
-        if (response.status == HttpStatusCode.Unauthorized) {
-            throw AuthenticationException("Authentication failed (401)")
-        }
-        if (!response.status.isSuccess()) {
-            throw HiDriveApiException("Download failed: ${response.status} - ${response.bodyAsText()}", response.status.value)
-        }
-
-        val channel: ByteReadChannel = response.body()
-        withContext(Dispatchers.IO) {
-            Files.createDirectories(destination.parent)
-            Files.newOutputStream(destination, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                val buf = ByteArray(8192)
-                while (true) {
-                    val n = channel.readAvailable(buf)
-                    if (n <= 0) break
-                    out.write(buf, 0, n)
+            val channel: ByteReadChannel = response.bodyAsChannel()
+            withContext(Dispatchers.IO) {
+                Files.createDirectories(destination.parent)
+                Files.newOutputStream(destination, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = channel.readAvailable(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                    }
                 }
             }
         }
