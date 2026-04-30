@@ -6,6 +6,22 @@ interface ProgressReporter {
         count: Int,
     )
 
+    /**
+     * UD-747 (UD-744 slice): hand the reporter the wall-clock seconds the
+     * matching phase took on the previous run, if known. Reporters that
+     * surface ETA (CliProgressReporter) use this to compute
+     * `etaSecs = max(0, lastSecs - elapsedSecs)` and bucket it for the
+     * heartbeat. First-run / `--reset` scans don't fire this method, so
+     * the ETA suffix is silently absent until persistence catches up.
+     *
+     * Default no-op so reporters that don't render ETA (IPC, Notify,
+     * Silent, test shells) need no update.
+     */
+    fun onScanHistoricalHint(
+        phase: String,
+        lastSecs: Long,
+    ) {}
+
     fun onActionCount(total: Int)
 
     fun onActionProgress(

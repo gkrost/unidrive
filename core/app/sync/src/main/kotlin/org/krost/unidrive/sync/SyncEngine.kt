@@ -142,6 +142,14 @@ class SyncEngine(
         versionManager?.pruneByAge(versionRetentionDays)
 
         // Phase 1: Gather changes
+        // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
+        // for each phase to the reporter so the heartbeat can render a
+        // bucketed ETA. First-run / `--reset` scans simply have no key in
+        // sync_state and the reporter falls back to throughput-only output.
+        db.getSyncState("last_scan_secs_remote")?.toLongOrNull()?.let {
+            reporter.onScanHistoricalHint("remote", it)
+        }
+        val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
         val allRemoteChanges = gatherRemoteChanges()
 
@@ -152,7 +160,14 @@ class SyncEngine(
                 allRemoteChanges
             }
         reporter.onScanProgress("remote", remoteChanges.size)
+        // UD-747: persist the wall-clock for next run's ETA.
+        val remoteScanSecs = (System.currentTimeMillis() - remotePhaseStart) / 1000
+        db.setSyncState("last_scan_secs_remote", remoteScanSecs.toString())
 
+        db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
+            reporter.onScanHistoricalHint("local", it)
+        }
+        val localPhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("local", 0)
         val allLocalChanges =
             scanner.scan { count ->
@@ -167,6 +182,8 @@ class SyncEngine(
                 allLocalChanges
             }
         reporter.onScanProgress("local", localChanges.size)
+        val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
+        db.setSyncState("last_scan_secs_local", localScanSecs.toString())
 
         // UD-297: empty-local + populated-DB sanity check. Catches the
         // wrong-sync_root case (user pointed at an empty directory while

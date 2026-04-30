@@ -21,6 +21,12 @@ class CliProgressReporter(
     // elapsed wall-clock. Cleared as each phase begins (count == 0).
     private val scanStartTimes = mutableMapOf<String, Long>()
 
+    // UD-747 (UD-744 slice): historical wall-clock seconds for each scan
+    // phase, populated by SyncEngine via onScanHistoricalHint at phase
+    // start when state.db has a previous timing recorded. Empty on first
+    // sync / `--reset`; the ETA suffix is suppressed in that case.
+    private val historicalScanSecs = mutableMapOf<String, Long>()
+
     // UD-742 / UD-735: when printInline emitted text and left the cursor
     // mid-line (no trailing newline), any subsequent println-using method
     // would glue its output to the inline tail (e.g. observed
@@ -49,9 +55,21 @@ class CliProgressReporter(
             // depends on knowing the *total* upfront, which neither LocalScanner
             // nor most remote-delta APIs expose without a separate count probe;
             // throughput alone is the "should I go to lunch?" signal.
+            //
+            // UD-747: append bucketed ETA when state.db has a previous
+            // wall-clock timing for this phase (second sync onwards). Pure
+            // historical extrapolation — no count probe required.
             val rateSuffix = formatThroughput(count, elapsedSecs)
-            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed$rateSuffix)")
+            val etaSuffix = formatEtaBucket(historicalScanSecs[phase], elapsedSecs)
+            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed$rateSuffix$etaSuffix)")
         }
+    }
+
+    override fun onScanHistoricalHint(
+        phase: String,
+        lastSecs: Long,
+    ) {
+        if (lastSecs > 0) historicalScanSecs[phase] = lastSecs
     }
 
     override fun onActionCount(total: Int) {
@@ -154,6 +172,33 @@ class CliProgressReporter(
         if (elapsedSecs < 5 || items < 100) return ""
         val perMin = (items.toLong() * 60) / elapsedSecs
         return ", ~$perMin items/min"
+    }
+
+    // UD-747 (UD-744 slice): bucketed ETA suffix derived from the previous
+    // run's wall-clock seconds for this phase. Returns ", ETA: <bucket>"
+    // when historical data exists and remaining time is non-zero, or "".
+    //
+    // Buckets per UD-713 spec — operators care about "should I wait, walk
+    // away for coffee, or go to lunch?", not seconds-precision. Suppressed
+    // when [lastSecs] is null (first run), zero or negative, when elapsed
+    // already exceeds the historical estimate (the previous run was
+    // presumably faster — we'd lie if we said "5s remaining" with no
+    // signal), or in the first second (rounds to 0 anyway).
+    internal fun formatEtaBucket(
+        lastSecs: Long?,
+        elapsedSecs: Long,
+    ): String {
+        if (lastSecs == null || lastSecs <= 0) return ""
+        val remainingSecs = lastSecs - elapsedSecs
+        if (remainingSecs <= 0) return ""
+        val bucket =
+            when {
+                remainingSecs < 5 * 60 -> "<5m"
+                remainingSecs < 15 * 60 -> "5-15m"
+                remainingSecs < 60 * 60 -> "15-60m"
+                else -> ">1h"
+            }
+        return ", ETA: $bucket"
     }
 
     private val cols: Int = terminalWidth()

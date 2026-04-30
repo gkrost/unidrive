@@ -235,4 +235,83 @@ class CliProgressReporterTest {
         assertTrue(output.contains("Dry-run: would"), "expected dry-run header; got: $output")
         assertFalse(output.contains("failed"), "dry-run summary should not include failed segment; got: $output")
     }
+
+    // UD-747 (UD-744 slice) — bucketed ETA from historical scan timings.
+    // formatEtaBucket is internal so tests pin its bucket boundaries
+    // directly; the integration assertion below exercises the end-to-end
+    // heartbeat-string shape via the reporter.
+
+    @Test
+    fun `UD-747 formatEtaBucket returns empty when no historical data`() {
+        val reporter = CliProgressReporter()
+        assertEquals("", reporter.formatEtaBucket(null, 10L))
+    }
+
+    @Test
+    fun `UD-747 formatEtaBucket returns empty when historical data is zero or negative`() {
+        val reporter = CliProgressReporter()
+        assertEquals("", reporter.formatEtaBucket(0L, 10L))
+        assertEquals("", reporter.formatEtaBucket(-5L, 10L))
+    }
+
+    @Test
+    fun `UD-747 formatEtaBucket returns empty when elapsed exceeds historical estimate`() {
+        // Previous scan took 60s; current run is already at 90s. Don't lie
+        // with "ETA: <5m" — the previous estimate is stale.
+        val reporter = CliProgressReporter()
+        assertEquals("", reporter.formatEtaBucket(60L, 90L))
+        // Edge: exactly equal — we have no remaining time to suggest.
+        assertEquals("", reporter.formatEtaBucket(60L, 60L))
+    }
+
+    @Test
+    fun `UD-747 formatEtaBucket bucket boundaries`() {
+        val reporter = CliProgressReporter()
+        // <5m bucket: 1s..299s remaining
+        assertEquals(", ETA: <5m", reporter.formatEtaBucket(100L, 0L))
+        assertEquals(", ETA: <5m", reporter.formatEtaBucket(300L, 1L)) // 299s remaining
+        // 5-15m bucket: 300s..899s remaining
+        assertEquals(", ETA: 5-15m", reporter.formatEtaBucket(300L, 0L)) // exactly 5m
+        assertEquals(", ETA: 5-15m", reporter.formatEtaBucket(900L, 1L)) // 899s
+        // 15-60m bucket: 900s..3599s remaining
+        assertEquals(", ETA: 15-60m", reporter.formatEtaBucket(900L, 0L))
+        assertEquals(", ETA: 15-60m", reporter.formatEtaBucket(3600L, 1L)) // 3599s
+        // >1h bucket: ≥3600s remaining
+        assertEquals(", ETA: >1h", reporter.formatEtaBucket(3600L, 0L))
+        assertEquals(", ETA: >1h", reporter.formatEtaBucket(7200L, 0L))
+    }
+
+    @Test
+    fun `UD-747 scan heartbeat shows ETA bucket when historical hint provided`() {
+        // Simulates the second sync run where state.db has a prior scan
+        // timing. The hint is fed in BEFORE onScanProgress(_, 0) — the
+        // typical SyncEngine call order.
+        val reporter = CliProgressReporter()
+        reporter.onScanHistoricalHint("local", lastSecs = 600L) // 10m last time
+        reporter.onScanProgress("local", 0)
+        // The heartbeat itself fires synchronously off onScanProgress;
+        // elapsed will be ~0s, so remainingSecs ≈ 600s → 5-15m bucket.
+        reporter.onScanProgress("local", 1234)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("ETA: 5-15m"),
+            "expected ETA bucket suffix in heartbeat; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-747 scan heartbeat omits ETA on first run`() {
+        // No onScanHistoricalHint called — the reporter has no historical
+        // data and must suppress the ETA segment cleanly.
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("local", 0)
+        reporter.onScanProgress("local", 1234)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertFalse(
+            output.contains("ETA:"),
+            "first-run heartbeat must not include ETA segment; got: $output",
+        )
+    }
 }
