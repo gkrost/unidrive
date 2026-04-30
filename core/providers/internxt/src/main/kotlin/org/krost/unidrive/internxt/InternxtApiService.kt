@@ -51,11 +51,9 @@ class InternxtApiService(
             // UD-255: per-request correlation id + DEBUG req/response logging.
             install(org.krost.unidrive.http.RequestId)
         }
-    private val json =
-        Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
+
+    // UD-343: shared :app:core UnidriveJson singleton.
+    private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse {

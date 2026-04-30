@@ -9,7 +9,6 @@ import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
@@ -40,11 +39,9 @@ class HiDriveApiService(
             // UD-255: per-request correlation id + DEBUG req/response logging.
             install(org.krost.unidrive.http.RequestId)
         }
-    private val json =
-        Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
+
+    // UD-343: shared :app:core UnidriveJson singleton.
+    private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = HiDriveConfig.API_BASE_URL
     private var homePath: String? = null
 

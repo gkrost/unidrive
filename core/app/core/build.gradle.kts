@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm")
+    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -14,6 +15,11 @@ dependencies {
     // ktor-client-core brings slf4j-api transitively for the plugin's DEBUG
     // logging.
     implementation(libs.ktor.client.core)
+
+    // UD-343: shared `UnidriveJson` singleton lives here too so every
+    // provider's wire-format parser can stop building its own Json {}
+    // configuration block.
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(kotlin("test"))
     testImplementation(libs.ktor.client.mock)

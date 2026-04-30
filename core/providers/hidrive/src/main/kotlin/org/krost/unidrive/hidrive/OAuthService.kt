@@ -7,8 +7,10 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.Pkce
 import org.krost.unidrive.hidrive.model.HiDriveToken
 import org.krost.unidrive.hidrive.model.HiDriveTokenResponse
+import org.krost.unidrive.io.setPosixPermissionsIfSupported
 import java.net.URLEncoder
 import java.nio.file.Files
 
@@ -62,25 +64,15 @@ class OAuthService(
         return Pair(url, verifier)
     }
 
-    private fun generateCodeVerifier(): String {
-        val bytes = ByteArray(32)
-        java.security.SecureRandom().nextBytes(bytes)
-        return java.util.Base64
-            .getUrlEncoder()
-            .withoutPadding()
-            .encodeToString(bytes)
-    }
+    // UD-351: PKCE helpers lifted to org.krost.unidrive.auth.Pkce.
+    // Note: HiDrive's pre-lift challenge used `verifier.toByteArray()`
+    // (default UTF-8); the shared helper uses US-ASCII per RFC 7636 §4.2.
+    // The verifier is always Base64 (URL alphabet, ASCII subset) so the
+    // resulting bytes are identical; no behaviour change for any
+    // valid call site.
+    private fun generateCodeVerifier(): String = Pkce.generateVerifier()
 
-    private fun generateCodeChallenge(verifier: String): String {
-        val digest =
-            java.security.MessageDigest
-                .getInstance("SHA-256")
-                .digest(verifier.toByteArray())
-        return java.util.Base64
-            .getUrlEncoder()
-            .withoutPadding()
-            .encodeToString(digest)
-    }
+    private fun generateCodeChallenge(verifier: String): String = Pkce.generateChallenge(verifier)
 
     suspend fun exchangeCodeForToken(
         code: String,
@@ -163,27 +155,4 @@ class OAuthService(
         )
 }
 
-/** See [org.krost.unidrive.onedrive.setPosixPermissionsIfSupported] for docs. */
-internal fun setPosixPermissionsIfSupported(
-    path: java.nio.file.Path,
-    ownerRwx: Boolean,
-) {
-    val view =
-        java.nio.file.Files
-            .getFileAttributeView(path, java.nio.file.attribute.PosixFileAttributeView::class.java)
-            ?: return
-    val perms =
-        if (ownerRwx) {
-            setOf(
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
-            )
-        } else {
-            setOf(
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-            )
-        }
-    view.setPermissions(perms)
-}
+// UD-347: setPosixPermissionsIfSupported lifted to org.krost.unidrive.io.

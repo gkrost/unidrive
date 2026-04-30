@@ -53,11 +53,12 @@ class GraphApiService(
             // UD-255: per-request correlation id + DEBUG req/response logging.
             install(org.krost.unidrive.http.RequestId)
         }
-    private val json =
-        Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
+
+    // UD-343: defer to the shared :app:core UnidriveJson singleton —
+    // ignoreUnknownKeys + isLenient is the right default for unidrive's
+    // wire formats. If a future Graph contract demands stricter parsing,
+    // flip to a local Json {} with a comment explaining why.
+    private val json = org.krost.unidrive.UnidriveJson
     private val sessionStore = UploadSessionStore(config.tokenPath)
     private val baseUrl = "${OneDriveConfig.GRAPH_BASE_URL}/${OneDriveConfig.GRAPH_VERSION}"
 

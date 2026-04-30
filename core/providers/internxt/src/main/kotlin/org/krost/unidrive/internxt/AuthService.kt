@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.internxt.model.*
+import org.krost.unidrive.io.setPosixPermissionsIfSupported
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.file.Files
@@ -261,27 +262,4 @@ open class AuthService(
     }
 }
 
-/** See [org.krost.unidrive.onedrive.setPosixPermissionsIfSupported] for docs. */
-internal fun setPosixPermissionsIfSupported(
-    path: java.nio.file.Path,
-    ownerRwx: Boolean,
-) {
-    val view =
-        java.nio.file.Files
-            .getFileAttributeView(path, java.nio.file.attribute.PosixFileAttributeView::class.java)
-            ?: return
-    val perms =
-        if (ownerRwx) {
-            setOf(
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
-            )
-        } else {
-            setOf(
-                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
-            )
-        }
-    view.setPermissions(perms)
-}
+// UD-347: setPosixPermissionsIfSupported lifted to org.krost.unidrive.io.
