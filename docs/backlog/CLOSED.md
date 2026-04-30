@@ -9133,3 +9133,138 @@ gate. Likely a 1-2 hour bisect + targeted fix.
   (unconditional IPC).
 - **UD-272** (closed) — profile-lock guarantees the socket name
   uniqueness; not the issue.
+
+---
+id: UD-337
+title: Per-request 600s timeout cuts off long uploads — fatal, must not happen (cross-provider)
+category: providers
+priority: high
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit 8d9ce50. Lifted UD-277 WebDavTimeoutPolicy to :app:core/http UploadTimeoutPolicy. Adopted at upload PUT sites in WebDAV / Internxt / OneDrive / HiDrive / S3. 5 GiB file at 50 KiB/s now gets ~28h legitimate budget; 60s socket-no-bytes watchdog still trips for stuck connections.
+opened: 2026-04-30
+---
+**Fatal: every Ktor-using provider applies a flat 10-minute
+`requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS` to upload
+PUTs. When the file is large enough that the legitimate transfer
+exceeds 10 minutes, the client tears down the still-progressing
+connection and the upload fails — but the **remote was still
+willing**. unidrive timed out, not the server. Must not happen.**
+
+## Real-case reproductions
+
+**2026-04-30 Internxt OVH-S3 PUT** (running build `[413e3e8]`,
+`-p inxt_gernot_krost_posteo sync --upload-only --sync-path
+/19notte78`):
+
+```
+2026-04-30 13:54:47 WARN Upload failed for /19notte78/Videos/BellaCandyland2160p4k.mp4: HttpRequestTimeoutException: Request timeout has expired [url=https://s3.gra.io.cloud.ovh.net/temporal-uploads-bucket/8f4d9918-..., request_timeout=600000 ms]
+2026-04-30 14:06:02 WARN Upload failed for /19notte78/Videos/Exploratory-BTS_ALS-1080p.mp4: ... request_timeout=600000 ms
+2026-04-30 14:17:01 WARN Upload failed for /19notte78/Videos/Kamryn1080p.mp4: ... request_timeout=600000 ms
+2026-04-30 14:56:00 WARN Upload failed for /19notte78/Videos/eveline.morning.teenage.love.mp4: ... request_timeout=600000 ms
+2026-04-30 15:08:23 WARN Upload failed for /19notte78/Videos/kyler.quinn.resistance.is.futile.mp4: ... request_timeout=600000 ms
+2026-04-30 15:09:01 WARN Upload failed for /19notte78/Videos/laney.grey.mp4: ... request_timeout=600000 ms
+```
+
+6 large MP4s in a single session, all client-side timeout.
+
+**ds418play (WebDAV)** — user-reported: same symptom, same fatal
+classification. WebDAV's data-plane PUT was already remediated
+under UD-277 (size-adaptive); the flat 600s cap remained on the
+metadata plane and on the rest of the providers.
+
+## Architecture
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/HttpDefaults.kt`
+  defines `REQUEST_TIMEOUT_MS = 600_000` (10 min).
+- Five Ktor clients install it as the **whole-request** wall-clock
+  budget via `HttpTimeout { requestTimeoutMillis = ... }`:
+  * `core/providers/onedrive/.../GraphApiService.kt:49`
+  * `core/providers/hidrive/.../HiDriveApiService.kt:36`
+  * `core/providers/internxt/.../InternxtApiService.kt:47`
+  * `core/providers/s3/.../S3ApiService.kt:35`
+  * `core/providers/webdav/.../WebDavApiService.kt:58`
+- WebDAV already overrides at the call site: download uses
+  `Long.MAX_VALUE` (UD-285), upload uses size-adaptive
+  `WebDavTimeoutPolicy.computeRequestTimeoutMs` (UD-277).
+- The existing UD-277 helper:
+  ```kotlin
+  fun computeRequestTimeoutMs(
+      fileSize: Long,
+      floorMs: Long,        // default ≥ 30 min
+      minThroughputBytesPerSecond: Long,  // default 50 KiB/s
+  ): Long = maxOf(floorMs, fileSize / minThroughputBytesPerSecond * 1000)
+  ```
+  At default config (50 KiB/s floor) a 5 GiB file gets ~28h —
+  above DSM's server-side abort (~22 min), well below "forever".
+
+## Proposed fix
+
+**Two-part** mirror of UD-285 (downloads) + UD-277 (uploads):
+
+### Part A — lift the size-adaptive helper to `:app:core`
+
+Move `WebDavTimeoutPolicy.computeRequestTimeoutMs` (and its config
+defaults) to `core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt`
+alongside the UD-336 `ErrorBody` helpers. WebDAV keeps its existing
+call site; the four other providers adopt it.
+
+### Part B — adopt at every upload PUT
+
+| Provider | Where | Change |
+|---|---|---|
+| Internxt | `InternxtApiService.uploadShard()` (S3 PUT to OVH bucket) | per-call `timeout { requestTimeoutMillis = computeRequestTimeoutMs(fileSize, ...) }` |
+| OneDrive | `GraphApiService.upload*` (chunked + small) | same pattern; per-chunk size for chunked, full size for small |
+| HiDrive | `HiDriveApiService.upload()` | same |
+| S3 | `S3ApiService.put*` | same |
+
+Downloads: separate consideration. Internxt/OneDrive download
+through Ktor's `prepareGet().execute { bodyAsChannel() }` flow
+(UD-329 streaming) which doesn't have the same buffering issue
+but DOES still apply the 600s wall-clock cap. Inherit UD-285's
+`Long.MAX_VALUE` choice with the 60s `SOCKET_TIMEOUT_MS` watchdog
+as the safety net.
+
+### Part C — review per-call metadata-plane timeouts
+
+The 600s flat cap is wrong for data-plane PUTs but **right** for
+metadata calls (folder listing, delta cursor, getDrive). Those
+should keep the existing `requestTimeoutMillis` on the client-
+default path. The fix is per-call override on uploads/downloads
+only — DON'T globally raise the default.
+
+## Acceptance
+
+- A 1 GiB file upload at 50 KiB/s succeeds without `HttpRequestTimeoutException`.
+- A 10 MiB upload still fails at the floor timeout (default ≥ 30 min)
+  if the connection is genuinely stuck — i.e. the upload-stuck
+  watchdog is intact.
+- The 60s `SOCKET_TIMEOUT_MS` (no-bytes between reads) still trips
+  for completely-dead connections — that's the right "abort fast on
+  hard failure" backstop.
+- Per-provider regression tests pin the chosen timeout shape with a
+  fake-clock fixture (mirror UD-277's existing WebDAV test).
+- Metadata calls (listChildren, delta, getDrive) retain the
+  existing 600s cap.
+
+## Priority / effort
+
+**HIGH priority, M effort.** User-reported as fatal. ~30-50 lines
+per provider × 4 providers + 1 shared helper file + tests. The
+hardest part is the chunked-upload path on OneDrive — each chunk's
+timeout is per-chunk, and the orchestration layer needs the cumulative
+budget.
+
+## Related
+
+- **UD-277** (closed) — WebDAV upload size-adaptive timeout (the
+  precedent we're lifting).
+- **UD-285** (closed) — WebDAV download `Long.MAX_VALUE` (the
+  download-side precedent).
+- **UD-336** (closed) — sibling shared-helper extraction; same
+  package destination.
+- **UD-281** (open) — Right-size heap + stream Ktor upload body.
+  Sibling concern; streaming upload doesn't fix the timeout issue
+  (the stream IS already streaming, the timeout is the wall-clock
+  budget).
