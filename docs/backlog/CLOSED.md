@@ -8092,3 +8092,89 @@ change to its own ticket so the upload semantic can land first.
 
 **Out of scope:** changing default sync direction. Only filter-set
 change for the explicit flags.
+
+---
+id: UD-331
+title: Cross-provider NonCancellable OAuth refresh wrap (HiDrive, Internxt)
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 10fa7d2. withContext(NonCancellable) wrap added to HiDrive TokenManager.refreshToken and Internxt AuthService.refreshToken; both wrap the network call AND the persist step. No dedicated test (matches OneDrive UD-310 baseline).
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 + UD-319 audits
+(Phase D of UD-228 split).**
+
+Two of the three OAuth-bearing providers (HiDrive, Internxt) have
+the OneDrive baseline mutex+double-check shape on token refresh
+but **lack the UD-310 `withContext(NonCancellable) { ... }` wrap**.
+A Pass-2 scope cancellation on a sibling coroutine's 401 can
+abort the in-flight refresh mid-write to disk, leaving the
+in-memory token disagreeing with what's persisted.
+
+## Affected providers + audit citations
+
+| Provider | NonCancellable wrap? | File:line |
+|---|---|---|
+| **OneDrive** (reference) | Yes | [TokenManager.kt:99](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/TokenManager.kt#L99) — `withContext(NonCancellable) { oauthService.refreshToken(refreshToken) }` |
+| **HiDrive** | **No** | [hidrive-robustness.md §4](../providers/hidrive-robustness.md#4-idempotency) |
+| **Internxt** | **No** | [internxt-robustness.md §4.2](../providers/internxt-robustness.md#4-idempotency) |
+
+## Why it matters
+
+UD-310 root cause (verbatim from OneDrive's TokenManager):
+> Pass-2 scope cancel on a sibling's 401 was cancelling the
+> in-flight refresh as collateral damage. The `refresh_token`
+> itself was perfectly valid; cancellation chewed through the
+> flake budget logging the misleading "ScopeCoroutine was
+> cancelled" and falling through to the re-auth error.
+
+For HiDrive and Internxt this manifests as: a sync hits a 401 on
+worker A, the scope is cancelled to retry the file, worker B's
+in-flight refresh is cancelled, the refresh `oauthService.refreshToken(...)`
+half-completes (network call out, response came back, `saveToken`
+to disk did NOT run because cancellation interrupted between
+the receive and the file-write). Next session loads a stale
+token, gets 401, refreshes again — eventually thrashes.
+
+## Proposal
+
+In each affected `TokenManager.refreshToken` (or equivalent), wrap
+the actual refresh call in `withContext(NonCancellable) { ... }`.
+The mutex-guarded outer block stays on the parent context; the
+inner refresh becomes atomic w.r.t. cancellation.
+
+```kotlin
+val refreshed =
+    withContext(NonCancellable) {
+        oauthService.refreshToken(refreshToken)
+    }
+token = refreshed
+oauthService.saveToken(refreshed)
+return refreshed
+```
+
+## Acceptance
+
+- Each affected provider's refresh path uses `NonCancellable`.
+- A test per provider that cancels the parent scope mid-refresh
+  and asserts the refresh completes anyway (saveToken is called).
+  Pattern: copy `OneDriveTokenManagerTest`'s NonCancellable
+  test where it exists, or write a new one against a mock
+  OAuth service.
+
+## Priority / effort
+
+**Medium priority, S effort.** Each provider is a one-line wrap
+change plus one test. Could be bundled into one PR across the
+two providers.
+
+## Related
+
+- **UD-310** (closed) — original OneDrive fix; the canonical
+  example to copy.
+- **UD-330** (sibling cross-cutting follow-up) — HttpRetryBudget
+  adoption. Lands well alongside since both touch
+  TokenManager / authenticatedRequest call sites.
