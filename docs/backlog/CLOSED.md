@@ -7781,3 +7781,60 @@ guard; branch on `dryRun` for the action.
 * non-dry-run, deleteCount > maxDeletePercentage -> throws
 * dry-run, deleteCount <= maxDeletePercentage -> no warning
 * `--force-delete` -> no warning either side
+
+---
+id: UD-299
+title: Track sync_root in state.db; refuse run when changed unless --reset
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 41d305a. sync_root persisted to state.db on first run; subsequent runs compare and abort if changed; --reset wipes via db.resetAll() so next run records the new root; case-insensitive on Windows; 4 unit tests added
+opened: 2026-04-30
+---
+**Why:** state.db is per-profile, not per-(profile, sync_root). Editing
+`sync_root` in `config.toml` therefore leaves the DB indexing the *old*
+root's paths. The reconciler then plans `del-remote` for anything in
+the old DB that isn't under the new tree — which to the user looks
+like "unidrive wants to wipe my cloud" all over again.
+
+Real-case (UD-296/297 follow-up): after fixing sync_root from
+`~/unidrive-internxt-gernot` (empty) to `C:\Users\gerno\InternxtDrive
+- 0c06806b-...\` (Internxt official-client mount, 34 004 files), a
+dry-run still planned 33 767 del-remote actions because the DB had
+many entries from a previous sync_root (paths like
+`/.userhome/win11/apps/jdownloader/...`).
+
+**What:** Persist `sync_root` (absolute, normalised) into
+`sync_state` on first sync. On every subsequent run, compare the
+stored value against the configured one. If different, abort with:
+
+> `sync_root changed from <stored> to <configured>. The state DB
+> still indexes the old tree, which would produce spurious del-remote
+> actions. Run with --reset to wipe state and re-sync from scratch,
+> or revert sync_root in config.toml.`
+
+`--reset` is the bypass. It already wipes state.db; after a reset the
+new sync_root gets stored on the next pass.
+
+**Where:**
+* Storage: `db.setSyncState("sync_root", syncRoot.toAbsolutePath().normalize().toString())`
+  on first sync (when key not present) and after `--reset`.
+* Check: `SyncEngine.doSyncOnce` early — before remote/local scans —
+  so the abort message is the first thing the user sees if it fires.
+* Tests:
+  * Fresh DB → stores sync_root on first pass.
+  * Same sync_root next run → no abort.
+  * Different sync_root → throws with both paths in message.
+  * `--reset` after change → wipes, runs, stores new sync_root.
+
+**Out of scope:** auto-migration of DB paths from old root to new
+root. That's a much larger ask (path remapping, conflict handling)
+and `--reset` is a clean enough escape hatch.
+
+**Open question:** should we ALSO normalise paths case-insensitively
+on Windows when comparing? A user editing config.toml could change
+`C:\` to `c:\` and trigger a false positive. Probably yes — use
+`.toRealPath()` or case-fold on Windows. Document the behaviour either
+way.
