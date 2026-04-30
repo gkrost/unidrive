@@ -337,6 +337,15 @@ class SyncEngineTest {
     private class RecordingReporter : ProgressReporter {
         val warnings = mutableListOf<String>()
 
+        // UD-740: capture action progress events for tests that assert on the
+        // display path (move src -> dst rendering).
+        data class ActionEvent(
+            val label: String,
+            val path: String,
+        )
+
+        val actions = mutableListOf<ActionEvent>()
+
         override fun onScanProgress(
             phase: String,
             count: Int,
@@ -349,7 +358,9 @@ class SyncEngineTest {
             total: Int,
             action: String,
             path: String,
-        ) {}
+        ) {
+            actions.add(ActionEvent(action, path))
+        }
 
         override fun onTransferProgress(
             path: String,
@@ -666,6 +677,42 @@ class SyncEngineTest {
             assertTrue(
                 provider.uploadedPaths.contains("/new.txt"),
                 "expected Upload action under --upload-only default; got: ${provider.uploadedPaths}",
+            )
+        }
+
+    // UD-740 — move action displays src -> dst in the user-facing progress line
+
+    @Test
+    fun `UD-740 move action progress contains both fromPath and toPath separated by arrow`() =
+        runTest {
+            // Establish initial state: a folder with a file
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/a", isFolder = true),
+                    cloudItem("/a/docs", isFolder = true),
+                    cloudItem("/a/docs/file.txt", size = 42),
+                )
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+
+            // User moves /a/docs -> /b/docs (cross-parent)
+            val aDir = syncRoot.resolve("a")
+            val bDir = syncRoot.resolve("b")
+            Files.createDirectories(bDir)
+            Files.move(aDir.resolve("docs"), bDir.resolve("docs"))
+
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce()
+
+            // The MoveRemote action's progress event must surface BOTH paths
+            // joined by "->" (UD-740). Pre-fix, only the destination was shown.
+            val moveEvents = reporter.actions.filter { it.label == "move" }
+            assertTrue(moveEvents.isNotEmpty(), "expected at least one move event; got: ${reporter.actions}")
+            assertTrue(
+                moveEvents.any { it.path.contains("/a/docs") && it.path.contains("/b/docs") && it.path.contains("->") },
+                "expected move event with 'from -> to' shape; got: $moveEvents",
             )
         }
 

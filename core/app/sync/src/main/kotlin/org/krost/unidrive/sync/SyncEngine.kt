@@ -266,7 +266,7 @@ class SyncEngine(
             val counts = mutableMapOf<String, Int>()
             actions.forEachIndexed { index, action ->
                 val label = actionLabel(action)
-                reporter.onActionProgress(index + 1, actions.size, label, action.path)
+                reporter.onActionProgress(index + 1, actions.size, label, displayPath(action))
                 counts[label] = (counts[label] ?: 0) + 1
                 when (action) {
                     is SyncAction.DownloadContent -> downloaded.incrementAndGet()
@@ -389,7 +389,7 @@ class SyncEngine(
                     // stall indefinitely on a failure cluster.
                     delay(minOf(2_000L * consecutiveFailures, 10_000L))
                 }
-                reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), action.path)
+                reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), displayPath(action))
             }
             db.commitBatch()
         } catch (e: Exception) {
@@ -454,7 +454,7 @@ class SyncEngine(
                                             completedActions.incrementAndGet(),
                                             actions.size,
                                             actionLabel(action),
-                                            action.path,
+                                            displayPath(action),
                                         )
                                     }
                                 }
@@ -497,7 +497,7 @@ class SyncEngine(
                                             completedActions.incrementAndGet(),
                                             actions.size,
                                             actionLabel(action),
-                                            action.path,
+                                            displayPath(action),
                                         )
                                     }
                                 }
@@ -1071,6 +1071,18 @@ class SyncEngine(
             is SyncAction.RemoveEntry -> "cleanup"
         }
 
+    // UD-740: display path used in the user-facing progress line. For move
+    // actions, expand to `from -> to` so the operator can see what was
+    // renamed where; for everything else it's just `action.path`. The
+    // failures.jsonl JSON layer keeps `path` clean (destination) and adds
+    // `from_path` when relevant — see logFailure.
+    private fun displayPath(action: SyncAction): String =
+        when (action) {
+            is SyncAction.MoveRemote -> "${action.fromPath} -> ${action.path}"
+            is SyncAction.MoveLocal -> "${action.fromPath} -> ${action.path}"
+            else -> action.path
+        }
+
     private fun restoreToPlaceholder(
         remotePath: String,
         item: CloudItem,
@@ -1137,7 +1149,15 @@ class SyncEngine(
         val path = failureLogPath ?: return
         val kind = actionLabel(action)
         val msg = (error.message ?: error.javaClass.simpleName).replace("\"", "\\\"")
-        val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}","error":"$msg"}"""
+        // UD-740: include `from_path` for move actions so post-mortem readers
+        // can see the rename source. `path` keeps its destination meaning.
+        val fromSegment =
+            when (action) {
+                is SyncAction.MoveRemote -> ""","from_path":"${action.fromPath}""""
+                is SyncAction.MoveLocal -> ""","from_path":"${action.fromPath}""""
+                else -> ""
+            }
+        val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}"$fromSegment,"error":"$msg"}"""
         Files.createDirectories(path.parent)
         Files.writeString(path, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
