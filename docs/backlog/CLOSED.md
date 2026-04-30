@@ -7409,3 +7409,131 @@ opened: 2026-04-17
 chunk: ipc-ui
 ---
 OAuth refresh failures currently surface only as exception traces. Emit a structured log event and expose via MCP `status` so a user-facing client can prompt for re-auth.
+
+---
+id: UD-289
+title: CloudRelocator is fully sequential; one hung PUT halts entire migration for up to 10 minutes
+category: core
+priority: medium
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit ad5b2a6. channelFlow + bounded semaphore. Per-file work in launch { transferSemaphore.withPermit { } }. Counters atomic, emit serialised via Mutex. Concurrency from ProviderMetadata.maxConcurrentTransfers per UD-263 (WebDav=4, OneDrive=8, S3=16). UD-286 CE-propagation preserved via explicit outerScope.cancel(e). All 33 tests pass.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt
+opened: 2026-04-29
+---
+**Symptom (live, 2026-04-29).** During a 345 GB
+`unidrive relocate --to ds418play-webdav`, the user reports long
+unexplained pauses where progress stops moving entirely, then
+resumes. Pauses correlate with errors but stretch up to 10 minutes
+(the `requestTimeoutMillis` ceiling, UD-285).
+
+**Root cause.** `core/app/sync/.../CloudRelocator.kt` walks the
+source tree **fully sequentially**. Grepped the file for `launch`,
+`async`, `coroutineScope`, `supervisorScope`, `Semaphore` — **zero
+matches.** Migration is a single coroutine doing one
+download-then-upload at a time:
+
+```kotlin
+fun migrate(...) = flow {
+    walk(source, sourcePath).forEach { entry ->
+        emit(MigrateEvent.Progress(...))
+        val tempFile = downloadFromSource(entry)        // serial
+        try {
+            uploadToTarget(tempFile, newTarget)         // serial
+        } finally {
+            Files.deleteIfExists(tempFile)
+        }
+    }
+}
+```
+
+Combined with UD-285 (`requestTimeoutMillis = 600 000 ms`), one hung
+PUT halts the **entire** 345 GB walk for up to 10 minutes. With
+128 681 files and even a 1% transient-failure rate, the wall-clock
+cost in stalls dominates the actual transfer time.
+
+**Why parallelism is safe here.** Source = localfs (no rate limit,
+abundant disk-read bandwidth). Target = WebDAV → DSM Apache (LAN
++ disk-bound, but accepts concurrent connections happily — Apache
+worker MPM defaults to 256 simultaneous). The throttling shape of
+the relocate is "saturate target's accept rate without driving disk
+to thrash"; that's not 1.
+
+**Compare with `SyncEngine.kt`.** Already does this for downloads
+via `semaphoreForSize(...)` — sliding window per provider, sized
+by file size class, configurable via `concurrency_per_provider`.
+Same module conventions; lift-and-shift.
+
+**Proposed fix.**
+
+```kotlin
+fun migrate(
+    source: CloudProvider,
+    target: CloudProvider,
+    sourcePath: String,
+    targetPath: String,
+    concurrency: Int = 4,  // configurable via [providers.X].concurrency
+): Flow<MigrateEvent> = channelFlow {
+    val semaphore = Semaphore(concurrency)
+    coroutineScope {
+        walk(source, sourcePath).forEach { entry ->
+            launch {
+                semaphore.withPermit {
+                    try {
+                        send(MigrateEvent.Progress(...))
+                        migrateOne(entry)
+                        send(MigrateEvent.Completed(entry))
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        log.warn("Failed to migrate {}: {}: {}", entry.path,
+                            e.javaClass.simpleName, e.message, e)
+                        send(MigrateEvent.Error(entry.path, e))
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+`coroutineScope` (not `supervisorScope`) — one fatal failure should
+still halt the migration. But UD-286's per-job `try/catch` ensures
+only true cancellation/auth/programmer-error escalates; transient
+failures are absorbed into `MigrateEvent.Error` and the next file
+proceeds.
+
+**Concurrency knob.**
+- Default `4` — sane for residential link + Synology.
+- Per-target override via `[providers.X].concurrency` in
+  config.toml. UD-282 lands the warning surface for unknown keys
+  before this can be merged.
+- Per-source-class override might be useful (localfs source has no
+  rate limit; OneDrive source needs to stay below the Graph
+  throttle). Defer to follow-up if the static default works.
+
+**Acceptance.**
+- New `CloudRelocatorParallelismTest`: instrument a fake provider
+  that records concurrent inflight count; assert peak ≥ 2 with
+  default config and 10 small files.
+- New: assert one slow file (1 s `delay`) doesn't block other
+  files completing — total time < `concurrency` × per-file time.
+- New: under `coroutineScope` semantics, asserts a single auth
+  failure halts the migration (does not become Error event).
+- Manual: re-run the 345 GB relocate with `concurrency = 4`;
+  expected wall-clock improvement ~3-4× when transient failures
+  are present.
+
+**Order matters.** Land **after** UD-286 (need cancellation hygiene
+for the `coroutineScope` semantics to work) and **after** UD-288
+(per-file retry; without it, parallelism multiplies failures
+N-fold). UD-287 is independent.
+
+**Related.**
+- UD-285 — request timeout that the parallelism is hiding from.
+- UD-286 — cancellation hygiene (prerequisite).
+- UD-288 — retry (prerequisite for safe parallelism).
+- `SyncEngine.semaphoreForSize` — pattern source.
