@@ -7142,3 +7142,50 @@ a self-signed HTTPS Nginx/WebDAV variant and a matching integration-test class t
 Synology-specific note for the test author: the DSM 7.x WebDAV Server returns no ETag
 header on PUT responses, so `remote_hash` will be NULL in state.db — expected; not a
 bug in the test fixture.
+
+---
+id: UD-278
+title: Retry on connection-reset / premature EOF via HttpRetryBudget
+category: core
+priority: high
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit 2e0cb7f. IOException retry taxonomy lifted from WebDav (UD-288) to HttpRetryBudget.companion so HiDrive/Internxt/S3/Rclone can adopt it under UD-330 without re-deriving. Apache5 ConnectionClosedException matched by canonical name (no httpclient5 dep on :app:core). Counter (ioRetryCount + recordIoRetry) + log-watch.sh net_retry_reset row + JSON field. Provider-side adoption is UD-330.
+opened: 2026-04-21
+chunk: core
+---
+Same ds418play relocation run surfaced `Eine bestehende Verbindung wurde
+softwaregesteuert durch den Hostcomputer abgebrochen` (TCP RST from the
+Synology NAS) mid-upload on large files. `CloudRelocator` currently treats
+this as a permanent per-file failure and skips the file.
+
+This is a *different error class* than 429/5xx (UD-207 / UD-227): no HTTP
+status arrives, the socket just dies. Recovery shape is the same
+(exponential backoff, bounded retries, global budget).
+
+## Proposal
+
+Wire `HttpRetryBudget` (UD-262) into the shared HTTP client so
+`IOException` subclasses matching connection-reset / broken-pipe /
+premature EOF trigger bounded retry.
+
+## Acceptance
+
+1. Retryable `IOException` taxonomy documented in `HttpRetryBudget`
+   KDoc (ConnectionResetException, SocketException "connection reset",
+   "broken pipe", premature EOF during body transfer).
+2. Default: 3 attempts, exponential backoff with jitter, capped by
+   the existing global budget.
+3. Restart from byte 0 when Range PUT unavailable; coordinate with
+   UD-328 when available.
+4. Regression test: mock server closes socket after 1 MiB; upload
+   succeeds on attempt 2.
+5. `net_retry_reset` metric so `unidrive-log-anomalies` can classify.
+
+## Related
+
+- UD-207 / UD-227 — HTTP-layer retry.
+- UD-262 — shared `HttpRetryBudget`.
+- UD-277 — adaptive timeout reduces false-positive resets.
+- UD-328 — range resume lets retry start from last-acked byte.

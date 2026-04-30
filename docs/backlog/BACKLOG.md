@@ -1173,50 +1173,6 @@ stability problem — a relocate that works on a 10k-file tree may
 OOM on a 100k-file one without warning. Investigation is the bulk
 of the work; fix is usually small (close a resource, bound a queue).
 ---
-id: UD-278
-title: Retry on connection-reset / premature EOF via HttpRetryBudget
-category: core
-priority: high
-effort: M
-status: open
-opened: 2026-04-21
-chunk: core
----
-Same ds418play relocation run surfaced `Eine bestehende Verbindung wurde
-softwaregesteuert durch den Hostcomputer abgebrochen` (TCP RST from the
-Synology NAS) mid-upload on large files. `CloudRelocator` currently treats
-this as a permanent per-file failure and skips the file.
-
-This is a *different error class* than 429/5xx (UD-207 / UD-227): no HTTP
-status arrives, the socket just dies. Recovery shape is the same
-(exponential backoff, bounded retries, global budget).
-
-## Proposal
-
-Wire `HttpRetryBudget` (UD-262) into the shared HTTP client so
-`IOException` subclasses matching connection-reset / broken-pipe /
-premature EOF trigger bounded retry.
-
-## Acceptance
-
-1. Retryable `IOException` taxonomy documented in `HttpRetryBudget`
-   KDoc (ConnectionResetException, SocketException "connection reset",
-   "broken pipe", premature EOF during body transfer).
-2. Default: 3 attempts, exponential backoff with jitter, capped by
-   the existing global budget.
-3. Restart from byte 0 when Range PUT unavailable; coordinate with
-   UD-328 when available.
-4. Regression test: mock server closes socket after 1 MiB; upload
-   succeeds on attempt 2.
-5. `net_retry_reset` metric so `unidrive-log-anomalies` can classify.
-
-## Related
-
-- UD-207 / UD-227 — HTTP-layer retry.
-- UD-262 — shared `HttpRetryBudget`.
-- UD-277 — adaptive timeout reduces false-positive resets.
-- UD-328 — range resume lets retry start from last-acked byte.
----
 id: UD-279
 title: Relocation planner warns on poor transport fit (WebDAV for bulk)
 category: core
