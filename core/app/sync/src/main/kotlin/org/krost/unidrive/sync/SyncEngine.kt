@@ -311,6 +311,10 @@ class SyncEngine(
 
         var consecutiveFailures = 0
         val completedActions = AtomicInteger(0)
+        // UD-745: count of Pass 1 actions that hit a non-recoverable failure
+        // (mkdir/move/delete/conflict). Combined with `transferFailures`
+        // below for the headline `failed` count in onSyncComplete.
+        val passOneFailures = AtomicInteger(0)
 
         // Pass 1: sequential actions (placeholder ops, deletes, moves, conflicts, remote folder creates)
         // Batched into one SQLite transaction — avoids one fsync per action.
@@ -350,6 +354,7 @@ class SyncEngine(
                     throw e
                 } catch (e: Exception) {
                     consecutiveFailures++
+                    passOneFailures.incrementAndGet()
                     // UD-253: class name + throwable (SLF4J renders stack trace when the
                     // last arg is a Throwable) so WARNs are self-diagnosing in the log.
                     log.warn(
@@ -528,7 +533,13 @@ class SyncEngine(
         }
 
         val duration = System.currentTimeMillis() - startTime
-        reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration)
+        reporter.onSyncComplete(
+            downloaded.get(),
+            uploaded.get(),
+            conflicts.get(),
+            duration,
+            failed = passOneFailures.get() + transferFailures.get(),
+        )
     }
 
     private suspend fun gatherRemoteChanges(): Map<String, CloudItem> {

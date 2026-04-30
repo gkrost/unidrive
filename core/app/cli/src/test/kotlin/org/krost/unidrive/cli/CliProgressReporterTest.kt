@@ -206,4 +206,33 @@ class CliProgressReporterTest {
             "throughput suffix must not appear before 5s elapsed; got: $output",
         )
     }
+
+    // UD-745 — failed count surfaces in summary when non-zero.
+
+    @Test
+    fun `UD-745 sync complete summary shows failed count when non-zero`() {
+        val reporter = CliProgressReporter()
+        reporter.onSyncComplete(downloaded = 0, uploaded = 100, conflicts = 0, durationMs = 1000L, actionCounts = emptyMap(), failed = 7)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("7 failed"), "expected '7 failed' in summary; got: $output")
+    }
+
+    @Test
+    fun `UD-745 sync complete summary omits failed segment when zero`() {
+        val reporter = CliProgressReporter()
+        reporter.onSyncComplete(downloaded = 0, uploaded = 100, conflicts = 0, durationMs = 1000L, actionCounts = emptyMap(), failed = 0)
+        val output = captured.toString(Charsets.UTF_8)
+        assertFalse(output.contains("failed"), "expected no 'failed' marker on clean run; got: $output")
+    }
+
+    @Test
+    fun `UD-745 dry-run summary unchanged regardless of failed`() {
+        val reporter = CliProgressReporter(dryRun = true)
+        // Dry-run produces no real failures; failed=0 is the realistic value,
+        // but make sure passing it doesn't break the dry-run output shape.
+        reporter.onSyncComplete(downloaded = 0, uploaded = 50, conflicts = 0, durationMs = 1000L, actionCounts = emptyMap(), failed = 0)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("Dry-run: would"), "expected dry-run header; got: $output")
+        assertFalse(output.contains("failed"), "dry-run summary should not include failed segment; got: $output")
+    }
 }

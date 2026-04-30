@@ -645,8 +645,9 @@ class SyncCommand : Runnable {
             conflicts: Int,
             durationMs: Long,
             actionCounts: Map<String, Int>,
+            failed: Int,
         ) = delegates.forEach {
-            it.onSyncComplete(downloaded, uploaded, conflicts, durationMs, actionCounts)
+            it.onSyncComplete(downloaded, uploaded, conflicts, durationMs, actionCounts, failed)
         }
 
         override fun onWarning(message: String) = delegates.forEach { it.onWarning(message) }

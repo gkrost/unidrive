@@ -127,6 +127,7 @@ class SyncScanIdTest {
                         conflicts: Int,
                         durationMs: Long,
                         actionCounts: Map<String, Int>,
+                        failed: Int,
                     ) {}
 
                     override fun onWarning(message: String) {}

@@ -162,6 +162,7 @@ private class SummaryReporter : ProgressReporter {
         conflicts: Int,
         durationMs: Long,
         actionCounts: Map<String, Int>,
+        failed: Int,
     ) {
         this.downloaded = downloaded
         this.uploaded = uploaded

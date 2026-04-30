@@ -27,6 +27,11 @@ interface ProgressReporter {
         conflicts: Int,
         durationMs: Long,
         actionCounts: Map<String, Int> = emptyMap(),
+        // UD-745: count of actions that hit a non-recoverable failure during
+        // the sync (Pass 1 + Pass 2 combined). Surfaced in the summary so
+        // users know to re-run when work remains. Default 0 keeps existing
+        // implementers / call sites source-compatible.
+        failed: Int = 0,
     )
 
     fun onWarning(message: String)
@@ -58,6 +63,7 @@ interface ProgressReporter {
             conflicts: Int,
             durationMs: Long,
             actionCounts: Map<String, Int>,
+            failed: Int,
         ) {}
 
         override fun onWarning(message: String) {}

@@ -42,8 +42,9 @@ class NotifyProgressReporter(
         conflicts: Int,
         durationMs: Long,
         actionCounts: Map<String, Int>,
+        failed: Int,
     ) {
-        if (downloaded == 0 && uploaded == 0 && conflicts == 0) return
+        if (downloaded == 0 && uploaded == 0 && conflicts == 0 && failed == 0) return
         val parts = mutableListOf<String>()
         if (downloaded > 0) parts.add("↓$downloaded")
         if (uploaded > 0) parts.add("↑$uploaded")

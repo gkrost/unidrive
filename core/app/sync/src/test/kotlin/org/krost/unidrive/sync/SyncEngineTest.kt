@@ -368,13 +368,20 @@ class SyncEngineTest {
             totalBytes: Long,
         ) {}
 
+        // UD-745: capture failed count for tests asserting summary semantics.
+        var lastFailed: Int = 0
+            private set
+
         override fun onSyncComplete(
             downloaded: Int,
             uploaded: Int,
             conflicts: Int,
             durationMs: Long,
             actionCounts: Map<String, Int>,
-        ) {}
+            failed: Int,
+        ) {
+            lastFailed = failed
+        }
 
         override fun onWarning(message: String) {
             warnings.add(message)

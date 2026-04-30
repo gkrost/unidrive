@@ -101,6 +101,7 @@ class IpcProgressReporter(
         conflicts: Int,
         durationMs: Long,
         actionCounts: Map<String, Int>,
+        failed: Int,
     ) {
         val current = server.syncState ?: IpcServer.SyncState(profile = profileName)
         server.updateState(

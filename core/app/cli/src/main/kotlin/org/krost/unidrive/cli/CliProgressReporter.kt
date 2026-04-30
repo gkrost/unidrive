@@ -87,6 +87,7 @@ class CliProgressReporter(
         conflicts: Int,
         durationMs: Long,
         actionCounts: Map<String, Int>,
+        failed: Int,
     ) {
         lastDownloaded = downloaded
         lastUploaded = uploaded
@@ -106,7 +107,14 @@ class CliProgressReporter(
             parts.add("$conflicts conflicts")
             println("Dry-run: would ${parts.joinToString(", ")} (${secs}s)")
         } else {
-            println("Sync complete: $downloaded downloaded, $uploaded uploaded, $conflicts conflicts (${secs}s)")
+            // UD-745: include failed count when non-zero so users see "230
+            // failed" and know to re-run rather than walk away assuming
+            // the sync completed cleanly. Suppressed at zero for clean-run
+            // brevity.
+            val failedSegment = if (failed > 0) ", $failed failed" else ""
+            println(
+                "Sync complete: $downloaded downloaded, $uploaded uploaded, $conflicts conflicts$failedSegment (${secs}s)",
+            )
         }
     }
 
