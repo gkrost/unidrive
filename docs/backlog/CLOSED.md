@@ -7058,3 +7058,19 @@ Reproduced in UD-712: uploading `👨‍👩‍👧.txt` (U+1F468 ZWJ U+1F469 ZW
 3. No user-facing error, no policy knob, no new error type.
 
 Effort dropped from M to S. Revisit only if real-world telemetry surfaces the case often.
+
+---
+id: UD-214
+title: Offline-friendly quota — cache last-seen, show "as of T" when offline
+category: core
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit af97940. QuotaCommand caches successful quota into sync_state (key/value, no schema change) and falls back to the cached snapshot on network/provider failure with 'cached' header + As-of timestamp. Auth failures stay on handleAuthError. First-run cache miss preserves pre-fix behaviour (re-throw).
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-04-18
+chunk: core
+---
+Surfaced alongside UD-212/213: `unidrive quota` is a live call. When the network is down, status/tray/log should still show the last successful quota snapshot with a "stale since T" label rather than failing or going silent. Persist the quota tuple + fetch timestamp in `state.db` on every successful call.

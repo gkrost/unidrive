@@ -401,20 +401,6 @@ From desktop window (deeper):
 **Related:** UD-213 (tray layout), UD-215 (activity feed), UD-217 (wireframe doc), UD-221 (open-folder bug), UD-214 (last-sync timestamp), UD-216 (auth MCP/CLI gap), UD-232 (throttle state → UI indicator).
 
 ---
-id: UD-214
-title: Offline-friendly quota — cache last-seen, show "as of T" when offline
-category: core
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
-opened: 2026-04-18
-chunk: core
----
-Surfaced alongside UD-212/213: `unidrive quota` is a live call. When the network is down, status/tray/log should still show the last successful quota snapshot with a "stale since T" label rather than failing or going silent. Persist the quota tuple + fetch timestamp in `state.db` on every successful call.
-
----
 
 ---
 
