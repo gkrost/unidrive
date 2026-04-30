@@ -1798,3 +1798,132 @@ doesn't exist:
 **Medium priority, M effort.** UX nicety, not a correctness bug.
 Worth scheduling alongside any future "profile management" work
 (UD-236 three-verb model, UD-233 tray brainstorm).
+---
+id: UD-296
+title: Print sync banner: profile + sync_root + direction at start of sync
+category: core
+priority: high
+effort: XS
+status: open
+opened: 2026-04-30
+---
+**Why:** Sync output never tells the user *which* local directory unidrive
+considers "local". When `sync_root` drifts (e.g. user expected the Internxt
+official-client mount but `~/unidrive-internxt-gernot` is configured), the
+first hint is several thousand `del-remote` lines flying past. Surfacing
+profile + type + `sync_root` + direction at the start of every run lets the
+user spot the misconfiguration before the planner gets to that.
+
+**What:** Print a single banner line at the start of `sync` runs (both
+one-shot and `--watch`) listing:
+
+* profile name (e.g. `inxt_gernot_krost_posteo`)
+* provider type (`internxt`)
+* configured `sync_root` (absolute, expanded)
+* direction (`bidirectional` / `upload` / `download`)
+* dry-run flag if set
+
+ASCII-only — Windows console codepage hostility (UD-509 / UD-291 lessons).
+
+**Where:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`,
+just before `runBlocking { ... }` so it runs unconditionally before any auth
+or scan work. The existing watch-mode `"Starting continuous sync to ..."`
+line at line 325 collapses into the banner.
+
+**Tests:** small CLI integration test that captures stdout from a
+no-op profile and asserts the banner shape.
+---
+id: UD-297
+title: Empty-local + populated-DB sanity check (refuse plan unless --force-delete)
+category: core
+priority: high
+effort: S
+status: open
+opened: 2026-04-30
+---
+**Why:** When `sync_root` points at an empty (or wrong) directory while
+state.db has thousands of entries from prior runs, the reconciler
+correctly produces ~N `DeleteRemote` actions — but to the user this
+looks like "unidrive wants to wipe my cloud." Real-case: user pointed
+to `~/unidrive-internxt-gernot` (empty) while their actual files lived
+in `C:\Users\gerno\InternxtDrive - <uuid>\` (Internxt official-client
+mount). Dry-run output: "would download 0, upload 0, **65 237
+del-remote**, 1 cleanup". The 50% percentage safeguard at
+`SyncEngine.kt:188` catches non-dry-run, but dry-run skips it.
+
+**What:** Add a specific empty-local detector that runs *before* the
+percentage safeguard and *also fires in dry-run*:
+
+```
+if (!forceDelete && db.getEntryCount() > 10 && isSyncRootEffectivelyEmpty()) {
+    val msg = "Local sync_root '$syncRoot' is empty, but state DB knows
+              N entries. sync_root probably points at the wrong directory.
+              Re-run with --force-delete to propagate the empty local state."
+    if (dryRun) reporter.onWarning(msg) else throw IllegalStateException(msg)
+}
+```
+
+`isSyncRootEffectivelyEmpty()`:
+
+* `Files.exists(syncRoot)` false -> true
+* `Files.isDirectory(syncRoot)` false -> true
+* `Files.newDirectoryStream(syncRoot).iterator().hasNext()` false -> true
+* otherwise false
+
+The check is intentionally narrow (literally-empty directory) to avoid
+false positives when the user genuinely deleted some files. The broader
+"high deletion count" case is UD-298's territory.
+
+**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+in `doSyncOnce` after `scanner.scan()` returns and before
+`reconciler.reconcile(...)`. Bypassable with `--force-delete`.
+
+**Tests:**
+
+* DB has 100 entries, syncRoot is empty, dry-run -> reporter.onWarning called
+* DB has 100 entries, syncRoot is empty, non-dry-run -> throws
+* DB has 100 entries, syncRoot is empty, --force-delete -> no abort
+* DB has 100 entries, syncRoot has at least one file -> no abort
+* DB empty, syncRoot empty (fresh sync) -> no abort
+
+**Out of scope:** download-direction syncs that legitimately start with
+empty local — those are also caught and aborted, but the user can
+opt-in via `--force-delete`. Could later differentiate by direction
+if it's noisy in practice (UD-298 covers the broader threshold).
+---
+id: UD-298
+title: Apply max_delete_percentage safeguard in dry-run as warning
+category: core
+priority: high
+effort: XS
+status: open
+opened: 2026-04-30
+---
+**Why:** The percentage deletion safeguard at `SyncEngine.kt:188`
+already exists — gated on `if (!dryRun && !forceDelete && ...)`. So
+dry-run skips it entirely, which is exactly when the user is *most*
+likely to notice the problem and the system has the *least* to lose
+by being loud. Real-case (UD-297): user saw 65 237 del-remote lines
+fly past in `--dry-run` with no warning that this exceeded the 50%
+threshold.
+
+**What:** Restructure the safeguard so it always evaluates the
+threshold, and:
+
+* in non-dry-run: throw `IllegalStateException` (current behaviour)
+* in dry-run: emit `reporter.onWarning(msg)` and continue
+
+Add the configured `sync_root` to the message text so the user can
+spot config drift without reloading config.
+
+**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+lines 187-201. Pull the threshold check out of the `if (!dryRun ...)`
+guard; branch on `dryRun` for the action.
+
+**Tests:**
+
+* dry-run, deleteCount > maxDeletePercentage -> reporter.onWarning called,
+  sync proceeds
+* non-dry-run, deleteCount > maxDeletePercentage -> throws
+* dry-run, deleteCount <= maxDeletePercentage -> no warning
+* `--force-delete` -> no warning either side
