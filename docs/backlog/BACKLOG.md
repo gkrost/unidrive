@@ -2006,3 +2006,66 @@ This ticket is the unimplemented remainder of UD-713.
 **Medium priority, M effort.** Touches every provider. Defer until a
 specific operator with multi-hour syncs asks. The throughput
 shipped in UD-713 is the 80/20 fix; this is the polish.
+---
+id: UD-336
+title: UD-334 Part A: lift truncateErrorBody + readBoundedErrorBody to :app:core
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-04-30
+---
+**UD-334 Part A — extract HTTP error-body helpers to shared `:app:core`.**
+
+The OneDrive `GraphApiService` ships two related helpers:
+
+- `truncateErrorBody(body: String): String` — collapses non-JSON
+  bodies (HTML error pages, captive-portal redirects) to first
+  line + char-count tail. UD-234 lineage.
+- `readBoundedErrorBody(response, maxBytes): String` — bounded read
+  off the raw channel so a CDN serving a 2.3 GB binary as
+  `Content-Type: text/html` can't OOM the diagnostic path.
+  UD-293 lineage.
+
+UD-333 added `readBoundedErrorBody` to HiDrive and Internxt with
+copy-paste — three near-identical implementations now exist. This
+ticket lifts both helpers to `:app:core/http/ErrorBody.kt` (alongside
+the existing `RequestIdPlugin.kt` / `HttpRetryBudget.kt`).
+
+## Where
+
+- New: `core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt`
+- New: `core/app/core/src/test/kotlin/org/krost/unidrive/http/ErrorBodyTest.kt`
+- Update: `core/providers/onedrive/.../GraphApiService.kt` — drop
+  private helpers, import shared versions.
+- Update: `core/providers/hidrive/.../HiDriveApiService.kt` — same.
+- Update: `core/providers/internxt/.../InternxtApiService.kt` — same.
+
+## Acceptance
+
+- Both helpers live in `org.krost.unidrive.http` package, top-level,
+  with KDoc carrying the UD-234 / UD-293 origin notes.
+- All three providers consume the shared versions; no duplicate
+  bodies remain.
+- Unit tests cover: JSON pass-through, HTML truncation, bounded
+  read returning `<body unavailable>` on channel failure, mixed
+  cases.
+- ktlint + module tests stay green.
+
+## Out of scope (remains in UD-334)
+
+Part B — per-provider structured-field extraction (typed exceptions
+carrying `error_description`, `RequestId`, `HostId`, SSH_FX_*
+status mapping). Larger lift, deserves its own commit cycle.
+
+## Priority / effort
+
+**Medium priority, S effort.** Pure refactor; no behaviour change.
+Removes the duplication UD-333 introduced before it solidifies into
+a third copy somewhere.
+
+## Related
+
+- **UD-334** (parent) — keeps Part B scope.
+- **UD-333** (sibling) — introduced the duplication being removed.
+- **UD-228** (umbrella) — cross-provider audit.
