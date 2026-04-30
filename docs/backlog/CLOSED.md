@@ -9268,3 +9268,65 @@ budget.
   Sibling concern; streaming upload doesn't fix the timeout issue
   (the stream IS already streaming, the timeout is the wall-clock
   budget).
+
+---
+id: UD-342
+title: Lift Ktor streaming-upload OutgoingContent.WriteChannelContent block to :app:core/http
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit f152787. Shared streamingFileBody at :app:core/http with UD-287 finally-flushAndClose baked in. WebDAV/Internxt/HiDrive/S3 all consume; HiDrive/Internxt/S3 silently inherit the connection-pool-leak fix.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+Four providers each construct the same anonymous
+`OutgoingContent.WriteChannelContent` with `contentLength = fileSize`,
+`contentType = OctetStream`, `writeTo = Files.newInputStream + 64 KiB
+ring buffer + writeFully + flushAndClose`:
+
+- `core/providers/hidrive/.../HiDriveApiService.kt:184-201`
+- `core/providers/internxt/.../InternxtApiService.kt:388-407`
+- `core/providers/s3/.../S3ApiService.kt:101-118`
+- `core/providers/webdav/.../WebDavApiService.kt:368-401` — only one
+  with **UD-287's `runCatching { channel.flushAndClose() }` finally
+  guard**.
+
+**Silent bug**: HiDrive / Internxt / S3 lack the UD-287 finally-flushAndClose
+— a cancellation mid-write corrupts the connection pool. Lifting the
+helper closes the gap on three providers in one commit.
+
+## Proposal
+
+`:app:core/http/StreamingUpload.kt`:
+
+```kotlin
+fun fileBody(
+    localPath: Path,
+    fileSize: Long,
+    contentType: ContentType = ContentType.Application.OctetStream,
+): OutgoingContent
+```
+
+Always include UD-287's flushAndClose-in-finally. Document on the
+helper that forgetting it is a silent class of bug.
+
+## Acceptance
+
+- All four providers consume the shared helper.
+- HiDrive / Internxt / S3 inherit UD-287's finally guard.
+- Cancellation-during-upload fixture exercises the connection-pool
+  recovery path on every provider.
+
+## Effort / agent-ability
+
+**S effort**, agent-able fully — UD-287 finally-flushAndClose is the
+load-bearing detail; the rest is mechanical.
+
+## Related
+
+- **UD-287** (closed) — WebDAV finally-flushAndClose.
+- **UD-337** (closed, sibling) — UploadTimeoutPolicy adoption — this
+  helper would be the natural neighbour at every upload PUT site.
