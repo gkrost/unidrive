@@ -83,4 +83,78 @@ class InternxtApiServiceTest {
             )
         assertEquals("Basic $expected", header)
     }
+
+    // UD-335: tactical retry helpers (parseRetryAfter + retryOnTransient).
+
+    private fun mkService(): InternxtApiService =
+        InternxtApiService(InternxtConfig()) {
+            // Tests don't actually call any HTTP method that needs creds —
+            // they exercise the retry/parse helpers directly. Surface a
+            // sentinel so any accidental real call fails loudly.
+            error("test fixture: credentialsProvider must not be called")
+        }
+
+    @Test
+    fun `UD-335 parseRetryAfter pulls seconds from Cloudflare-style body and returns ms`() {
+        val service = mkService()
+        val body =
+            """API error: 502 Bad Gateway - {"type":"...","retryable":true,"retry_after":60,"detail":"..."}"""
+        assertEquals(60_000L, service.parseRetryAfter(body))
+    }
+
+    @Test
+    fun `UD-335 parseRetryAfter returns null when field absent`() {
+        val service = mkService()
+        assertEquals(null, service.parseRetryAfter("API error: 502 - {}"))
+        assertEquals(null, service.parseRetryAfter(null))
+    }
+
+    @Test
+    fun `UD-335 retryOnTransient succeeds on second attempt after 502`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            var attempts = 0
+            val result =
+                service.retryOnTransient {
+                    attempts++
+                    if (attempts < 2) throw InternxtApiException("API error: 502 - {\"retry_after\":1}", 502)
+                    "ok"
+                }
+            assertEquals("ok", result)
+            assertEquals(2, attempts)
+        }
+
+    @Test
+    fun `UD-335 retryOnTransient does not retry non-transient status`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            var attempts = 0
+            try {
+                service.retryOnTransient {
+                    attempts++
+                    throw InternxtApiException("API error: 400 - bad request", 400)
+                }
+                kotlin.test.fail("expected InternxtApiException")
+            } catch (e: InternxtApiException) {
+                assertEquals(400, e.statusCode)
+            }
+            assertEquals(1, attempts)
+        }
+
+    @Test
+    fun `UD-335 retryOnTransient surfaces original exception after budget exhausted`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            var attempts = 0
+            try {
+                service.retryOnTransient(maxAttempts = 3) {
+                    attempts++
+                    throw InternxtApiException("API error: 502 - {}", 502)
+                }
+                kotlin.test.fail("expected InternxtApiException")
+            } catch (e: InternxtApiException) {
+                assertEquals(502, e.statusCode)
+            }
+            assertEquals(3, attempts)
+        }
 }

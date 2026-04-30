@@ -16,6 +16,7 @@ import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.internxt.model.*
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -24,6 +25,18 @@ class InternxtApiService(
     private val config: InternxtConfig,
     private val credentialsProvider: suspend () -> InternxtCredentials,
 ) : AutoCloseable {
+    private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
+
+    companion object {
+        // UD-335: retry-eligible HTTP statuses for transient-failure write
+        // endpoints. 429 is rate-limit; 5xx are server-side. The Cloudflare
+        // 502 origin_bad_gateway pattern that drove this ticket lives here.
+        private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
+
+        // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
+        // Internxt JSON error bodies. Returns the integer seconds.
+        private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
+    }
     private val httpClient =
         HttpClient {
             install(HttpTimeout) {
@@ -91,88 +104,92 @@ class InternxtApiService(
         size: Long,
         type: String?,
         fileId: String? = null,
-    ): InternxtFile {
-        val creds = credentialsProvider()
-        val requestBody =
-            kotlinx.serialization.json.buildJsonObject {
-                put("bucket", kotlinx.serialization.json.JsonPrimitive(bucket))
-                put("folderUuid", kotlinx.serialization.json.JsonPrimitive(folderUuid))
-                put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
-                put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
-                put("size", kotlinx.serialization.json.JsonPrimitive(size))
-                put("encryptVersion", kotlinx.serialization.json.JsonPrimitive("03-aes"))
-                if (type != null) put("type", kotlinx.serialization.json.JsonPrimitive(type))
-                if (fileId != null) put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
-            }
-        val response =
-            httpClient.post("$baseUrl/files") {
-                applyAuth(creds)
-                contentType(ContentType.Application.Json)
-                setBody(requestBody.toString())
-            }
-        checkResponse(response)
-        return json.decodeFromString<InternxtFile>(response.bodyAsText())
-    }
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("bucket", kotlinx.serialization.json.JsonPrimitive(bucket))
+                    put("folderUuid", kotlinx.serialization.json.JsonPrimitive(folderUuid))
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                    put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
+                    put("size", kotlinx.serialization.json.JsonPrimitive(size))
+                    put("encryptVersion", kotlinx.serialization.json.JsonPrimitive("03-aes"))
+                    if (type != null) put("type", kotlinx.serialization.json.JsonPrimitive(type))
+                    if (fileId != null) put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
+                }
+            val response =
+                httpClient.post("$baseUrl/files") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
 
     suspend fun createFolder(
         parentUuid: String,
         plainName: String,
         encryptedName: String,
-    ): InternxtFolder {
-        val creds = credentialsProvider()
-        val requestBody =
-            kotlinx.serialization.json.buildJsonObject {
-                put("parentFolderUuid", kotlinx.serialization.json.JsonPrimitive(parentUuid))
-                put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
-                put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
-            }
-        val response =
-            httpClient.post("$baseUrl/folders") {
-                applyAuth(creds)
-                contentType(ContentType.Application.Json)
-                setBody(requestBody.toString())
-            }
-        checkResponse(response)
-        return json.decodeFromString<InternxtFolder>(response.bodyAsText())
-    }
+    ): InternxtFolder =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("parentFolderUuid", kotlinx.serialization.json.JsonPrimitive(parentUuid))
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                    put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
+                }
+            val response =
+                httpClient.post("$baseUrl/folders") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFolder>(response.bodyAsText())
+        }
 
     suspend fun moveFile(
         uuid: String,
         destinationFolderUuid: String,
-    ): InternxtFile {
-        val creds = credentialsProvider()
-        val requestBody =
-            kotlinx.serialization.json.buildJsonObject {
-                put("destinationFolder", kotlinx.serialization.json.JsonPrimitive(destinationFolderUuid))
-            }
-        val response =
-            httpClient.patch("$baseUrl/files/$uuid") {
-                applyAuth(creds)
-                contentType(ContentType.Application.Json)
-                setBody(requestBody.toString())
-            }
-        checkResponse(response)
-        return json.decodeFromString<InternxtFile>(response.bodyAsText())
-    }
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("destinationFolder", kotlinx.serialization.json.JsonPrimitive(destinationFolderUuid))
+                }
+            val response =
+                httpClient.patch("$baseUrl/files/$uuid") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
 
     suspend fun moveFolder(
         uuid: String,
         destinationFolderUuid: String,
-    ): InternxtFolder {
-        val creds = credentialsProvider()
-        val requestBody =
-            kotlinx.serialization.json.buildJsonObject {
-                put("destinationFolder", kotlinx.serialization.json.JsonPrimitive(destinationFolderUuid))
-            }
-        val response =
-            httpClient.patch("$baseUrl/folders/$uuid") {
-                applyAuth(creds)
-                contentType(ContentType.Application.Json)
-                setBody(requestBody.toString())
-            }
-        checkResponse(response)
-        return json.decodeFromString<InternxtFolder>(response.bodyAsText())
-    }
+    ): InternxtFolder =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("destinationFolder", kotlinx.serialization.json.JsonPrimitive(destinationFolderUuid))
+                }
+            val response =
+                httpClient.patch("$baseUrl/folders/$uuid") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFolder>(response.bodyAsText())
+        }
 
     suspend fun deleteFile(uuid: String) {
         val creds = credentialsProvider()
@@ -447,6 +464,63 @@ class InternxtApiService(
         if (!response.status.isSuccess()) {
             throw InternxtApiException("API error: ${response.status} - ${response.bodyAsText()}", response.status.value)
         }
+    }
+
+    // UD-335: tactical retry on transient 5xx + 429 for write endpoints
+    // (createFolder / createFile / moveFile / moveFolder). Cloudflare 502
+    // origin_bad_gateway during a 1230-folder mkdir burst on 2026-04-30
+    // surfaced as ~30 hard failures in a single sync — Internxt's API has
+    // no retry layer, so the action propagates straight to SyncEngine
+    // which logs WARN and moves on. With this wrapper the action retries
+    // in-band against the captured retry_after hint (or exponential
+    // fallback) before bubbling up.
+    //
+    // UD-330 is the structural cross-provider HttpRetryBudget lift. This is
+    // narrower: only the write endpoints, only Internxt, no shared budget
+    // across concurrent calls (each caller backs off independently).
+    //
+    // Idempotency caveat: POST `/folders` / `/files` MAY create a duplicate
+    // if the server completed the write but Cloudflare 502'd the response
+    // edge. Internxt's documented behaviour for duplicate-name creates is
+    // a 4xx (which we don't retry), so the typical case is "request never
+    // landed → safe to retry". A tiny tail of double-creates is the
+    // accepted cost vs the much-larger pain of dropping every transient
+    // failure.
+    internal suspend fun <T> retryOnTransient(
+        maxAttempts: Int = 3,
+        op: suspend () -> T,
+    ): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return op()
+            } catch (e: InternxtApiException) {
+                if (e.statusCode !in TRANSIENT_STATUSES) throw e
+                attempt++
+                if (attempt >= maxAttempts) throw e
+                val retryAfterMs =
+                    parseRetryAfter(e.message)
+                        ?: (1000L shl (attempt - 1))
+                val cappedMs = retryAfterMs.coerceIn(500L, 60_000L)
+                log.warn(
+                    "Internxt {} on attempt {}/{}, sleeping {}ms before retry",
+                    e.statusCode,
+                    attempt,
+                    maxAttempts,
+                    cappedMs,
+                )
+                kotlinx.coroutines.delay(cappedMs)
+            }
+        }
+    }
+
+    // UD-335: parse `"retry_after": <int seconds>` from the Cloudflare /
+    // Internxt error JSON body (which our InternxtApiException carries
+    // verbatim in its message). Returns ms, or null if absent/unparseable.
+    internal fun parseRetryAfter(message: String?): Long? {
+        if (message == null) return null
+        val match = RETRY_AFTER_REGEX.find(message) ?: return null
+        return match.groupValues[1].toLongOrNull()?.times(1000)
     }
 
     // UD-333: bounded read off the raw channel for diagnostic purposes (HTML
