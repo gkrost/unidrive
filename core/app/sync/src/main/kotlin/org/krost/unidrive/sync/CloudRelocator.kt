@@ -68,6 +68,19 @@ class CloudRelocator(
 ) {
     private val log = LoggerFactory.getLogger(CloudRelocator::class.java)
 
+    /**
+     * UD-269: exposes the temp directory currently in use by [migrate] so the
+     * RelocateCommand shutdown hook can clean it up on SIGINT / kill -9. The
+     * normal-completion path of [migrate] already deletes it via the existing
+     * `finally` block; this property only matters for the abort path.
+     *
+     * @Volatile because it's read by the JVM shutdown hook (a different
+     * thread) while the migrate flow is running on Dispatchers.IO.
+     */
+    @Volatile
+    var currentTempDir: java.nio.file.Path? = null
+        private set
+
     suspend fun preFlightCheck(
         sourcePath: String,
         onProgress: ((fileCount: Int, currentPath: String) -> Unit)? = null,
@@ -165,6 +178,7 @@ class CloudRelocator(
             var skippedSize = 0L
             var errorCount = 0
             val tempDir = Files.createTempDirectory("unidrive-relocate-")
+            currentTempDir = tempDir // UD-269: published for shutdown-hook cleanup.
 
             suspend fun targetIndex(path: String): Map<String, CloudItem> {
                 if (!skipExisting) return emptyMap()
@@ -329,6 +343,7 @@ class CloudRelocator(
                 // throw DirectoryNotEmptyException and shadow the original
                 // failure cause.
                 runCatching { tempDir.toFile().deleteRecursively() }
+                currentTempDir = null // UD-269: tempDir is gone; clear pointer.
             }
             val duration = System.currentTimeMillis() - startTime
             emit(
@@ -344,4 +359,56 @@ class CloudRelocator(
                 ),
             )
         }.flowOn(Dispatchers.IO)
+
+    companion object {
+        private val gcLog = LoggerFactory.getLogger(CloudRelocator::class.java)
+
+        /**
+         * UD-269: scan the JVM's `java.io.tmpdir` for `unidrive-relocate-*`
+         * directories older than [maxAgeMs] and delete them recursively.
+         *
+         * Catches the case where a previous relocate aborted via kill -9 / OS
+         * force-terminate / power loss — neither the in-flow `finally` nor the
+         * RelocateCommand shutdown hook ran, so the temp directory survives.
+         * Without this GC the user accumulates a `unidrive-relocate-<random>/`
+         * orphan per crashed run.
+         *
+         * Default age is 24 h: long enough that a legitimate concurrent
+         * relocate (rare but possible) doesn't get its tempDir deleted out
+         * from under it; short enough that disk reclaim happens within a day.
+         *
+         * Returns the number of directories actually deleted (0 = no orphans).
+         * Logs WARN per directory it can't delete; never throws.
+         */
+        fun cleanStaleTempDirs(
+            tmpDir: java.nio.file.Path =
+                java.nio.file.Paths
+                    .get(System.getProperty("java.io.tmpdir")),
+            maxAgeMs: Long = 24L * 60 * 60 * 1000,
+        ): Int {
+            val now = System.currentTimeMillis()
+            var deleted = 0
+            runCatching {
+                Files.list(tmpDir).use { stream ->
+                    stream
+                        .filter {
+                            it.fileName.toString().startsWith("unidrive-relocate-") && Files.isDirectory(it)
+                        }.forEach { dir ->
+                            val age =
+                                runCatching {
+                                    now - Files.getLastModifiedTime(dir).toMillis()
+                                }.getOrNull() ?: return@forEach
+                            if (age >= maxAgeMs) {
+                                if (runCatching { dir.toFile().deleteRecursively() }.getOrElse { false }) {
+                                    deleted++
+                                } else {
+                                    gcLog.warn("UD-269: failed to delete stale relocate tempdir: {}", dir)
+                                }
+                            }
+                        }
+                }
+            }
+            return deleted
+        }
+    }
 }

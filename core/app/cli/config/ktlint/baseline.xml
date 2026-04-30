@@ -4,9 +4,9 @@
         <error line="8" column="5" source="standard:blank-line-before-declaration" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/cli/Main.kt">
-        <error line="80" column="17" source="standard:backing-property-naming" />
-        <error line="81" column="17" source="standard:backing-property-naming" />
-        <error line="640" column="1" source="standard:no-consecutive-comments" />
+        <error line="91" column="17" source="standard:backing-property-naming" />
+        <error line="92" column="17" source="standard:backing-property-naming" />
+        <error line="651" column="1" source="standard:no-consecutive-comments" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt">
         <error line="5" column="1" source="standard:no-wildcard-imports" />

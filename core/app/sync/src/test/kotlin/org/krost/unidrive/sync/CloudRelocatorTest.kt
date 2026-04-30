@@ -504,6 +504,75 @@ class CloudRelocatorTest {
             )
         }
 
+    // -- UD-269: stale tempdir GC ---------------------------------------------
+
+    @Test
+    fun `UD-269 - cleanStaleTempDirs deletes dirs older than maxAge`() {
+        val tmp = Files.createTempDirectory("ud269-gc-test-")
+        try {
+            val stale = tmp.resolve("unidrive-relocate-stale-001")
+            Files.createDirectory(stale)
+            // Plant a file inside so we exercise the recursive-delete path.
+            Files.writeString(stale.resolve("orphan.txt"), "leftover")
+            // Backdate to 48h ago — older than the default 24h cutoff.
+            val twoDaysAgo =
+                java.nio.file.attribute.FileTime
+                    .fromMillis(System.currentTimeMillis() - 48L * 3600 * 1000)
+            Files.setLastModifiedTime(stale, twoDaysAgo)
+
+            val deleted = CloudRelocator.cleanStaleTempDirs(tmpDir = tmp)
+            assertEquals(1, deleted)
+            assertEquals(false, Files.exists(stale), "stale dir should have been deleted")
+        } finally {
+            runCatching { tmp.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun `UD-269 - cleanStaleTempDirs leaves fresh dirs alone`() {
+        val tmp = Files.createTempDirectory("ud269-gc-fresh-test-")
+        try {
+            val fresh = tmp.resolve("unidrive-relocate-fresh-001")
+            Files.createDirectory(fresh)
+            // mtime defaults to now; well under the 24h cutoff.
+
+            val deleted = CloudRelocator.cleanStaleTempDirs(tmpDir = tmp)
+            assertEquals(0, deleted)
+            assertTrue(Files.exists(fresh), "fresh dir should NOT be deleted")
+        } finally {
+            runCatching { tmp.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun `UD-269 - cleanStaleTempDirs ignores non-relocate dirs`() {
+        val tmp = Files.createTempDirectory("ud269-gc-other-test-")
+        try {
+            // A directory that's old but doesn't match the prefix — must not
+            // get deleted (might be another tool's working dir).
+            val unrelated = tmp.resolve("some-other-tool-cache-12345")
+            Files.createDirectory(unrelated)
+            val twoDaysAgo =
+                java.nio.file.attribute.FileTime
+                    .fromMillis(System.currentTimeMillis() - 48L * 3600 * 1000)
+            Files.setLastModifiedTime(unrelated, twoDaysAgo)
+
+            val deleted = CloudRelocator.cleanStaleTempDirs(tmpDir = tmp)
+            assertEquals(0, deleted, "non-relocate dirs must be left alone")
+            assertTrue(Files.exists(unrelated))
+        } finally {
+            runCatching { tmp.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun `UD-269 - cleanStaleTempDirs returns 0 when tmpdir does not exist`() {
+        // Pointing at a non-existent dir must not throw — the helper is
+        // called silently at every relocate startup.
+        val nonexistent = Files.createTempDirectory("ud269-nx-").resolve("nope")
+        assertEquals(0, CloudRelocator.cleanStaleTempDirs(tmpDir = nonexistent))
+    }
+
     // -- UD-327: WebDAV-style per-file size cap pre-flight ---------------------
 
     @Test

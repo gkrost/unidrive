@@ -64,6 +64,17 @@ class RelocateCommand : Runnable {
     }
 
     private fun runRelocate() {
+        // UD-269: GC orphan tempDirs from previous aborted relocates (kill -9
+        // / OS force-terminate / power loss) before starting a new migration.
+        // 24h cutoff so a legitimate concurrent relocate doesn't get its
+        // tempDir deleted out from under it; silent — caller doesn't care.
+        val gcCount = CloudRelocator.cleanStaleTempDirs()
+        if (gcCount > 0) {
+            org.slf4j.LoggerFactory
+                .getLogger(RelocateCommand::class.java)
+                .info("UD-269: garbage-collected {} stale relocate tempdir(s)", gcCount)
+        }
+
         val fromProfile =
             parent.resolveProfile(fromProvider)
                 ?: throw IllegalArgumentException("Unknown source provider: $fromProvider")
@@ -181,38 +192,86 @@ class RelocateCommand : Runnable {
         println("  buffer: $bufferMb MB")
         println()
 
-        runBlocking(MDCContext()) {
-            relocator.migrate(sourcePath, targetPath, sourceSize, sourceCount).collect { event ->
-                when (event) {
-                    is MigrateEvent.Started -> {
-                        println("Migrating ${event.totalFiles} files (${formatSize(event.totalSize)})...")
-                    }
-                    is MigrateEvent.FileProgressEvent -> {
-                        val pct = if (event.totalSize > 0) (event.doneSize * 100 / event.totalSize) else 0
-                        val filesFmt = String.format(Locale.ROOT, "%,d", event.doneFiles).replace(',', ' ')
-                        val totalFilesFmt = String.format(Locale.ROOT, "%,d", event.totalFiles).replace(',', ' ')
-                        print(
-                            "\r  $filesFmt / $totalFilesFmt files  " +
-                                "${formatSize(event.doneSize)} / ${formatSize(event.totalSize)} ($pct%)".padEnd(20),
-                        )
-                        System.out.flush()
-                    }
-                    is MigrateEvent.Completed -> {
-                        val transferredFiles = event.doneFiles - event.skippedFiles
-                        val transferredSize = event.doneSize - event.skippedSize
-                        println("\n\nMigration complete:")
-                        println("  transferred: $transferredFiles files (${formatSize(transferredSize)})")
-                        if (event.skippedFiles > 0) {
-                            println("  skipped:     ${event.skippedFiles} files (${formatSize(event.skippedSize)})")
+        // UD-269: register a shutdown hook so CTRL-C / SIGTERM produces a
+        // visible abort summary, a logged INFO line, and tempDir cleanup —
+        // instead of the pre-fix silent JVM exit that left
+        // `%TEMP%\unidrive-relocate-<random>\` orphans on disk and zero
+        // record in unidrive.log of what was already transferred.
+        val abortLog = org.slf4j.LoggerFactory.getLogger(RelocateCommand::class.java)
+        val abortFiles =
+            java.util.concurrent.atomic
+                .AtomicInteger(0)
+        val abortSize =
+            java.util.concurrent.atomic
+                .AtomicLong(0L)
+        val abortSkipped =
+            java.util.concurrent.atomic
+                .AtomicInteger(0)
+        val totalsForAbort = sourceSize
+        val totalCountForAbort = sourceCount
+        val shutdownHook =
+            Thread {
+                val files = abortFiles.get()
+                val bytes = abortSize.get()
+                val skipped = abortSkipped.get()
+                System.err.println()
+                System.err.println("Migration aborted:")
+                System.err.println("  transferred: ${files - skipped} files (${formatSize(bytes)})")
+                if (skipped > 0) System.err.println("  skipped:     $skipped files")
+                System.err.println("  remaining:   ${totalCountForAbort - files} files (${formatSize(totalsForAbort - bytes)})")
+                abortLog.info(
+                    "Migration aborted — transferred={} files, bytes={}, skipped={} files, remaining={} files",
+                    files - skipped,
+                    bytes,
+                    skipped,
+                    totalCountForAbort - files,
+                )
+                runCatching { relocator.currentTempDir?.toFile()?.deleteRecursively() }
+            }
+        Runtime.getRuntime().addShutdownHook(shutdownHook)
+        try {
+            runBlocking(MDCContext()) {
+                relocator.migrate(sourcePath, targetPath, sourceSize, sourceCount).collect { event ->
+                    when (event) {
+                        is MigrateEvent.Started -> {
+                            println("Migrating ${event.totalFiles} files (${formatSize(event.totalSize)})...")
                         }
-                        println("  errors: ${event.errorCount}")
-                        println("  time:   ${event.durationMs / 1000}s")
-                    }
-                    is MigrateEvent.Error -> {
-                        System.err.println("\nError: ${event.message}")
+                        is MigrateEvent.FileProgressEvent -> {
+                            // UD-269: surface running totals so the shutdown hook
+                            // has a useful number to print on abort.
+                            abortFiles.set(event.doneFiles)
+                            abortSize.set(event.doneSize)
+                            abortSkipped.set(event.skippedFiles)
+                            val pct = if (event.totalSize > 0) (event.doneSize * 100 / event.totalSize) else 0
+                            val filesFmt = String.format(Locale.ROOT, "%,d", event.doneFiles).replace(',', ' ')
+                            val totalFilesFmt = String.format(Locale.ROOT, "%,d", event.totalFiles).replace(',', ' ')
+                            print(
+                                "\r  $filesFmt / $totalFilesFmt files  " +
+                                    "${formatSize(event.doneSize)} / ${formatSize(event.totalSize)} ($pct%)".padEnd(20),
+                            )
+                            System.out.flush()
+                        }
+                        is MigrateEvent.Completed -> {
+                            val transferredFiles = event.doneFiles - event.skippedFiles
+                            val transferredSize = event.doneSize - event.skippedSize
+                            println("\n\nMigration complete:")
+                            println("  transferred: $transferredFiles files (${formatSize(transferredSize)})")
+                            if (event.skippedFiles > 0) {
+                                println("  skipped:     ${event.skippedFiles} files (${formatSize(event.skippedSize)})")
+                            }
+                            println("  errors: ${event.errorCount}")
+                            println("  time:   ${event.durationMs / 1000}s")
+                        }
+                        is MigrateEvent.Error -> {
+                            System.err.println("\nError: ${event.message}")
+                        }
                     }
                 }
             }
+        } finally {
+            // UD-269: only remove the hook on normal completion; abort
+            // path goes through the hook itself.
+            runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
         }
 
         if (deleteSource) {
