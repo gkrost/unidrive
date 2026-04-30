@@ -8335,3 +8335,77 @@ open them.
   adoption. The HTML-body guard is part of "what does
   retry/non-retry classification look like" so the two tickets
   land naturally together.
+
+---
+id: UD-742
+title: Scan-phase heartbeat: emit count update at least every 10s during long scans
+category: tooling
+priority: high
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 18e63df. LocalScanner.scan() onProgress callback (5000 items / 10s threshold); SyncEngine wires it to reporter.onScanProgress; CliProgressReporter shows count + elapsed via printInline overwrite. New inlineActive/commitInline pair prevents ',mp4Dry-run:' / 'itemsReconciled:' line-glue when phase transitions while inline buffer is live. ETA in UD-713; broader IPC in UD-240.
+opened: 2026-04-30
+---
+**Why:** Between
+
+```
+Scanning remote changes...
+```
+
+and the next output line (`Scanning remote changes... 2228 items`), the
+CLI may sit silent for *minutes to hours* on large drives. Real-case
+2026-04-30: a remote scan returning 112 932 items took >10 min;
+local scan of 128 681 files projected to take similar. The user can't
+distinguish "still working" from "deadlocked / hung / network-stalled."
+
+UD-240 (filed) covers the broader long-running-feedback problem
+(always-on IPC, progress state file, heartbeat, inline progress) but
+its scope is large. This ticket is the **smallest thing that fixes
+the immediate pain** during scan phases.
+
+**What:** During remote/local scan, emit a heartbeat line at most every
+10 s while no other progress event has fired. Heartbeat content:
+
+```
+Scanning remote changes... 47 800 items so far (1m 23s elapsed)
+Scanning local changes... 8 412 items so far (4m 02s elapsed)
+```
+
+Implementation sketch:
+
+* `ProgressReporter.onScanProgress(phase, count)` is already called by
+  `gatherRemoteChanges` and `LocalScanner` at start (count=0) and end
+  (count=N). Add periodic mid-scan calls.
+* Internxt + WebDAV providers iterate pages; emit `onScanProgress` at
+  the end of each page (cheap; no timer needed).
+* For `LocalScanner`, the file-tree walk has no natural pagination
+  — wrap the visitor in a counter that fires `onScanProgress` every N
+  files (say 5 000) OR every 10 s wall-clock since last fire.
+* `CliProgressReporter.onScanProgress` already prints `Scanning $phase
+  changes... $count items` for non-zero counts. Repeat-paint via the
+  existing `printInline` (UD-735's truncate-aware path).
+
+**Where:**
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt`
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  (`gatherRemoteChanges`'s page loop)
+* Per-provider `delta` paginators if they expose page-end hooks
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt`
+  — re-paint heartbeat via existing `printInline`
+
+**Tests:** unit test that calls `LocalScanner.scan()` against a synthetic
+tree of >5 000 files, captures `ProgressReporter.onScanProgress` calls,
+asserts > 1 mid-scan call.
+
+**Acceptance:**
+
+* During a >30 s scan phase, the user sees count update at least every
+  10 s.
+* No regression in scan correctness; the count reported at end equals
+  the actual items found.
+
+**Relationship:** strict subset of UD-240's 240b/240d. Lands first;
+UD-240 can subsume this and extend with bps / ETA / IPC progress
+later.
