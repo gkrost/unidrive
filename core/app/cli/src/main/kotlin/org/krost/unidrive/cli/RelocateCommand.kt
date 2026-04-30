@@ -45,6 +45,16 @@ class RelocateCommand : Runnable {
     )
     var force: Boolean = false
 
+    @Option(
+        names = ["--confirm-transport"],
+        description = [
+            "Acknowledge any transport-fitness warnings (UD-279) and proceed " +
+                "without surfacing them. Use in scripts / CI where the warning is " +
+                "informational and would otherwise clutter logs.",
+        ],
+    )
+    var confirmTransport: Boolean = false
+
     override fun run() {
         if (fromProvider == toProvider) {
             System.err.println("Error: source and target providers must be different")
@@ -160,6 +170,33 @@ class RelocateCommand : Runnable {
         if (sourceSize == 0L) {
             println("Nothing to migrate")
             return
+        }
+
+        // UD-279: planner-time transport-fitness warning. WebDAV is a poor fit
+        // for bulk media migration even on the LAN — DSM's nginx-bound
+        // throughput ceiling, no-chunked-PUT, and the no-resume risk
+        // (UD-327 / UD-328 territory) make any WebDAV plan > 50 GiB
+        // worth flagging at plan time. The user can pick a better-fit
+        // sibling profile on the same NAS (sftp / rclone) before burning
+        // the upload time. --confirm-transport suppresses for scripts / CI.
+        if (!confirmTransport && toProviderObj.id == "webdav") {
+            val fiftyGiB = 50L * 1024 * 1024 * 1024
+            val warnings = mutableListOf<String>()
+            if (sourceSize > fiftyGiB) {
+                warnings.add(
+                    "Plan size ${formatSize(sourceSize)} exceeds 50 GiB on a WebDAV target. " +
+                        "Throughput ceiling on nginx-mod_dav is typically < 30 MiB/s LAN; " +
+                        "expect this to take many hours. Consider sftp / rclone-native if the " +
+                        "same NAS exposes them.",
+                )
+            }
+            if (warnings.isNotEmpty()) {
+                System.err.println()
+                System.err.println("Transport-fitness warning (UD-279):")
+                warnings.forEach { System.err.println("  - $it") }
+                System.err.println("  Pass --confirm-transport to acknowledge and proceed silently.")
+                System.err.println()
+            }
         }
 
         // UD-327: warn early about files exceeding the target's per-file size
