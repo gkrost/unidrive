@@ -16,6 +16,7 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.hidrive.model.HiDriveItem
 import org.krost.unidrive.hidrive.model.HiDriveUserInfo
+import org.krost.unidrive.http.readBoundedErrorBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -382,22 +383,10 @@ class HiDriveApiService(
         return response.bodyAsText()
     }
 
-    // UD-333: bounded read off the raw channel for diagnostic purposes (HTML
-    // body sniff in downloadFile). Mirrors the OneDrive UD-293 helper —
-    // bodyAsText() would materialise the entire body into a String, OOM-ing
-    // when a CDN attaches a multi-GB body to a fake 200/text-html response.
-    private suspend fun readBoundedErrorBody(
-        response: HttpResponse,
-        maxBytes: Int = 4096,
-    ): String =
-        try {
-            val channel = response.bodyAsChannel()
-            val buf = ByteArray(maxBytes)
-            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
-            String(buf, 0, read, Charsets.UTF_8)
-        } catch (_: Exception) {
-            "<body unavailable>"
-        }
+    // UD-336 (UD-334 Part A): readBoundedErrorBody lifted to
+    // org.krost.unidrive.http.ErrorBody so HiDrive / Internxt / OneDrive
+    // share a single implementation. UD-333 / UD-293 origin notes are
+    // preserved on the lifted helper.
 
     override fun close() {
         httpClient.close()

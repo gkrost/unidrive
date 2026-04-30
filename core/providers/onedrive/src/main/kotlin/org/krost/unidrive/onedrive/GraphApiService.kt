@@ -16,6 +16,8 @@ import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.ShareInfo
 import org.krost.unidrive.http.HttpRetryBudget
+import org.krost.unidrive.http.readBoundedErrorBody
+import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.onedrive.model.*
 import org.slf4j.LoggerFactory
 import java.io.RandomAccessFile
@@ -365,38 +367,10 @@ class GraphApiService(
         }
     }
 
-    /**
-     * UD-293: read at most [maxBytes] from the response body channel and decode
-     * as UTF-8. Used everywhere the streaming-download flow needs a diagnostic
-     * snippet from a non-success / non-JSON-shaped response.
-     *
-     * Pre-fix the surrounding code used `response.bodyAsText()` which
-     * materialises the ENTIRE response into a String — when the CDN edge
-     * returned a 2.3 GB binary with `Content-Type: text/html` (Graph throttle
-     * captive-portal page misreported as the file's MIME), the allocation
-     * failed with `Can't create an array of size 2_233_659_189` and crashed
-     * the download attempt. The flake-retry loop then re-invoked the request
-     * which paper-over-succeeded on attempt 2 because the CDN had reset to
-     * the binary path — but it could equally have OOM'd N more times.
-     *
-     * Output is then run through [truncateErrorBody] (already-existing) so
-     * the log layout doesn't get a multi-page HTML preamble.
-     */
-    private suspend fun readBoundedErrorBody(
-        response: HttpResponse,
-        maxBytes: Int = 4096,
-    ): String =
-        try {
-            val channel = response.bodyAsChannel()
-            val buf = ByteArray(maxBytes)
-            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
-            truncateErrorBody(String(buf, 0, read, Charsets.UTF_8))
-        } catch (_: Exception) {
-            // If even the bounded read fails (channel already consumed,
-            // network died), surface a placeholder rather than crash the
-            // diagnostic path.
-            "<body unavailable>"
-        }
+    // UD-336 (UD-334 Part A): readBoundedErrorBody + truncateErrorBody live
+    // in `:app:core` at org.krost.unidrive.http.ErrorBody so HiDrive,
+    // Internxt, S3 etc. can share the implementation. UD-293 / UD-234 origin
+    // notes are preserved on the lifted helpers.
 
     /** UD-227: Graph sometimes tucks the retry-after seconds into the JSON error body, e.g.
      *  `{"error": {..., "retryAfterSeconds": 5}}`. Read the header first; fall back to the body. */
@@ -877,25 +851,6 @@ class GraphApiService(
             throttleBudget.recordSuccess()
             return response
         }
-    }
-
-    /** UD-234: many Graph and SharePoint-Online error bodies are full HTML pages (~3-5 KiB of
-     *  inline CSS + branding) that bloat `unidrive.log` — one SharePoint 503 dumps ~60 lines of
-     *  markup. Truncate any non-JSON body to its first line + a char-count tail so we keep the
-     *  diagnostic hint without drowning the log. JSON bodies pass through unchanged; callers
-     *  already rely on `{"error":{...}}` for structured parsing (UD-227 retryAfterSeconds). */
-    private fun truncateErrorBody(body: String): String {
-        val trimmed = body.trimStart()
-        if (trimmed.startsWith("{") || trimmed.startsWith("[")) return body
-        val firstLine =
-            body
-                .lineSequence()
-                .firstOrNull()
-                ?.trim()
-                .orEmpty()
-                .take(200)
-        val totalLen = body.length
-        return if (totalLen <= 200) body else "$firstLine … [$totalLen chars, non-JSON body truncated]"
     }
 
     private fun shouldBackoff(

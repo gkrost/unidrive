@@ -15,6 +15,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -37,6 +38,7 @@ class InternxtApiService(
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
     }
+
     private val httpClient =
         HttpClient {
             install(HttpTimeout) {
@@ -523,23 +525,10 @@ class InternxtApiService(
         return match.groupValues[1].toLongOrNull()?.times(1000)
     }
 
-    // UD-333: bounded read off the raw channel for diagnostic purposes (HTML
-    // body sniff in downloadFileStreaming). bodyAsText() would materialise
-    // the entire response into a String — UD-293 anti-pattern; on a captive
-    // portal page that happens to claim Content-Length matching the file's
-    // encrypted size, that's a multi-GB OOM.
-    private suspend fun readBoundedErrorBody(
-        response: HttpResponse,
-        maxBytes: Int = 4096,
-    ): String =
-        try {
-            val channel = response.bodyAsChannel()
-            val buf = ByteArray(maxBytes)
-            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
-            String(buf, 0, read, Charsets.UTF_8)
-        } catch (_: Exception) {
-            "<body unavailable>"
-        }
+    // UD-336 (UD-334 Part A): readBoundedErrorBody lifted to
+    // org.krost.unidrive.http.ErrorBody so HiDrive / Internxt / OneDrive
+    // share a single implementation. UD-333 / UD-293 origin notes are
+    // preserved on the lifted helper.
 
     override fun close() {
         httpClient.close()
