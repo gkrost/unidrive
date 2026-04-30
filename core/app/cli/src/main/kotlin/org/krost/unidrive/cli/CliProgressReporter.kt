@@ -27,6 +27,13 @@ class CliProgressReporter(
     // sync / `--reset`; the ETA suffix is suppressed in that case.
     private val historicalScanSecs = mutableMapOf<String, Long>()
 
+    // UD-748 (UD-744 slice 2): historical *item count* for each scan
+    // phase from the previous run, populated via onScanCountHint. Used
+    // jointly with historicalScanSecs to compute a progress-fraction-
+    // based ETA that adapts to actual run speed. Optional — the
+    // wall-clock-only path (UD-747) is the fallback.
+    private val historicalScanCount = mutableMapOf<String, Int>()
+
     // UD-742 / UD-735: when printInline emitted text and left the cursor
     // mid-line (no trailing newline), any subsequent println-using method
     // would glue its output to the inline tail (e.g. observed
@@ -59,8 +66,19 @@ class CliProgressReporter(
             // UD-747: append bucketed ETA when state.db has a previous
             // wall-clock timing for this phase (second sync onwards). Pure
             // historical extrapolation — no count probe required.
+            //
+            // UD-748: when both hints exist (lastSecs + lastCount), the
+            // bucket helper prefers a progress-fraction-based ETA so that
+            // a faster-than-last run reports a shorter remaining time
+            // instead of waiting for the wall-clock to catch up.
             val rateSuffix = formatThroughput(count, elapsedSecs)
-            val etaSuffix = formatEtaBucket(historicalScanSecs[phase], elapsedSecs)
+            val etaSuffix =
+                formatEtaBucket(
+                    lastSecs = historicalScanSecs[phase],
+                    elapsedSecs = elapsedSecs,
+                    lastCount = historicalScanCount[phase],
+                    currentCount = count,
+                )
             printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed$rateSuffix$etaSuffix)")
         }
     }
@@ -70,6 +88,13 @@ class CliProgressReporter(
         lastSecs: Long,
     ) {
         if (lastSecs > 0) historicalScanSecs[phase] = lastSecs
+    }
+
+    override fun onScanCountHint(
+        phase: String,
+        lastCount: Int,
+    ) {
+        if (lastCount > 0) historicalScanCount[phase] = lastCount
     }
 
     override fun onActionCount(total: Int) {
@@ -174,22 +199,66 @@ class CliProgressReporter(
         return ", ~$perMin items/min"
     }
 
-    // UD-747 (UD-744 slice): bucketed ETA suffix derived from the previous
-    // run's wall-clock seconds for this phase. Returns ", ETA: <bucket>"
-    // when historical data exists and remaining time is non-zero, or "".
+    // UD-747 / UD-748 (UD-744 slices): bucketed ETA suffix.
     //
-    // Buckets per UD-713 spec — operators care about "should I wait, walk
-    // away for coffee, or go to lunch?", not seconds-precision. Suppressed
-    // when [lastSecs] is null (first run), zero or negative, when elapsed
-    // already exceeds the historical estimate (the previous run was
-    // presumably faster — we'd lie if we said "5s remaining" with no
-    // signal), or in the first second (rounds to 0 anyway).
+    // Two paths:
+    //
+    // - **Wall-clock-only (UD-747).** When only [lastSecs] is known,
+    //   `remainingSecs = lastSecs - elapsedSecs`. Robust but blind to
+    //   the actual progress speed of THIS run.
+    //
+    // - **Count-aware (UD-748).** When both [lastSecs] and [lastCount]
+    //   exist AND the current run has accumulated ≥ 5% of last run's
+    //   count, derive the ETA from progress fraction:
+    //       progressFraction  = currentCount / lastCount
+    //       estimatedTotalSec = elapsedSecs / progressFraction
+    //       remainingSecs     = estimatedTotalSec - elapsedSecs
+    //   Sanity clamp: if the count-based estimate diverges by > 4× from
+    //   `lastSecs - elapsedSecs`, fall back to the wall-clock path —
+    //   the run isn't following last run's shape and we shouldn't
+    //   overcommit either way.
+    //
+    // Buckets per UD-713 spec. Suppressed when:
+    //   - [lastSecs] is null/zero/negative (first run, no foundation)
+    //   - the chosen estimate's remainingSecs ≤ 0 (don't lie about a
+    //     stale estimate)
     internal fun formatEtaBucket(
         lastSecs: Long?,
         elapsedSecs: Long,
+        lastCount: Int? = null,
+        currentCount: Int = 0,
     ): String {
         if (lastSecs == null || lastSecs <= 0) return ""
-        val remainingSecs = lastSecs - elapsedSecs
+        val wallClockRemaining = lastSecs - elapsedSecs
+
+        // UD-748: prefer count-aware extrapolation when both hints exist
+        // and we have ≥ 5% of last run's count for stability.
+        val countAwareRemaining: Long? =
+            if (
+                lastCount != null &&
+                lastCount > 0 &&
+                currentCount > 0 &&
+                currentCount.toDouble() / lastCount >= 0.05 &&
+                elapsedSecs >= 1
+            ) {
+                val progressFraction = currentCount.toDouble() / lastCount
+                val estimatedTotalSec = (elapsedSecs / progressFraction).toLong()
+                (estimatedTotalSec - elapsedSecs).coerceAtLeast(0)
+            } else {
+                null
+            }
+
+        // Sanity clamp: only trust the count-aware estimate if it's
+        // within 4× of the wall-clock reading. If it diverges wildly,
+        // the run isn't following last run's shape and we revert.
+        val remainingSecs =
+            if (countAwareRemaining != null && wallClockRemaining > 0) {
+                val ratio = countAwareRemaining.toDouble() / wallClockRemaining
+                if (ratio in 0.25..4.0) countAwareRemaining else wallClockRemaining
+            } else {
+                countAwareRemaining ?: wallClockRemaining
+            }
+
         if (remainingSecs <= 0) return ""
         val bucket =
             when {

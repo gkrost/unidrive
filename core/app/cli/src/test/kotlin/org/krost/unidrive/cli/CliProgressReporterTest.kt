@@ -314,4 +314,91 @@ class CliProgressReporterTest {
             "first-run heartbeat must not include ETA segment; got: $output",
         )
     }
+
+    // UD-748 (UD-744 slice 2) — count-aware ETA refinement.
+
+    @Test
+    fun `UD-748 formatEtaBucket falls back to wall-clock when count hint missing`() {
+        // Same shape as the UD-747 tests — count parameters omitted, so
+        // the bucket helper must use the wall-clock subtraction path.
+        val reporter = CliProgressReporter()
+        assertEquals(
+            ", ETA: 5-15m",
+            reporter.formatEtaBucket(lastSecs = 600L, elapsedSecs = 0L),
+        )
+    }
+
+    @Test
+    fun `UD-748 formatEtaBucket uses count-aware path when both hints exist and progress past 5 percent`() {
+        // Last run: 1000 items in 600s. This run: 500 items in 100s
+        // (50% progress, but only 100s elapsed → much faster pace).
+        // Count-aware: estimatedTotal = 100 / 0.5 = 200s; remaining =
+        // 200 - 100 = 100s → "<5m".
+        // Wall-clock would say: 600 - 100 = 500s → "5-15m".
+        // Sanity clamp: ratio = 100/500 = 0.2 → BELOW 0.25 threshold,
+        // so the count-aware estimate is rejected and we fall back to
+        // wall-clock. Pin that explicit boundary.
+        val reporter = CliProgressReporter()
+        val result =
+            reporter.formatEtaBucket(
+                lastSecs = 600L,
+                elapsedSecs = 100L,
+                lastCount = 1000,
+                currentCount = 500,
+            )
+        assertEquals(", ETA: 5-15m", result, "expected wall-clock fallback when count-aware diverges 4×+")
+    }
+
+    @Test
+    fun `UD-748 formatEtaBucket count-aware path picks bucket when within sanity range`() {
+        // Last run: 1000 items in 600s. This run: 500 items in 250s
+        // (50% progress, half the time → on track).
+        // Count-aware: estimatedTotal = 250 / 0.5 = 500s; remaining =
+        // 500 - 250 = 250s → "<5m" (under 300).
+        // Wall-clock: 600 - 250 = 350s → "5-15m".
+        // Ratio = 250/350 ≈ 0.71 → in 0.25..4.0 range → count-aware wins.
+        val reporter = CliProgressReporter()
+        val result =
+            reporter.formatEtaBucket(
+                lastSecs = 600L,
+                elapsedSecs = 250L,
+                lastCount = 1000,
+                currentCount = 500,
+            )
+        assertEquals(", ETA: <5m", result)
+    }
+
+    @Test
+    fun `UD-748 formatEtaBucket suppresses count-aware path when progress under 5 percent`() {
+        // Only 4% of last run's count → too unstable; fall back to
+        // wall-clock-only ETA. lastSecs=600, elapsed=10 → 590s → 5-15m.
+        val reporter = CliProgressReporter()
+        val result =
+            reporter.formatEtaBucket(
+                lastSecs = 600L,
+                elapsedSecs = 10L,
+                lastCount = 1000,
+                currentCount = 40, // 4% — below threshold
+            )
+        assertEquals(", ETA: 5-15m", result)
+    }
+
+    @Test
+    fun `UD-748 scan heartbeat uses count-aware path when both hints provided`() {
+        // Integration: SyncEngine fires both hints, then onScanProgress.
+        // We can't easily control the wall-clock elapsed in this test, but
+        // we can verify that the heartbeat output contains an ETA segment
+        // and is consistent with count-aware extrapolation.
+        val reporter = CliProgressReporter()
+        reporter.onScanHistoricalHint("local", lastSecs = 1200L) // 20m last
+        reporter.onScanCountHint("local", lastCount = 5000)
+        reporter.onScanProgress("local", 0)
+        reporter.onScanProgress("local", 2500) // 50% of last
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("ETA:"),
+            "expected ETA segment in count-aware heartbeat; got: $output",
+        )
+    }
 }

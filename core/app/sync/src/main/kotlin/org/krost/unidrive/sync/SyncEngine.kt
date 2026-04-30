@@ -146,8 +146,14 @@ class SyncEngine(
         // for each phase to the reporter so the heartbeat can render a
         // bucketed ETA. First-run / `--reset` scans simply have no key in
         // sync_state and the reporter falls back to throughput-only output.
+        // UD-748: also pass the previous run's *final item count* for each
+        // phase so the bucket helper can use progress-fraction extrapolation
+        // when the current run is faster/slower than last time.
         db.getSyncState("last_scan_secs_remote")?.toLongOrNull()?.let {
             reporter.onScanHistoricalHint("remote", it)
+        }
+        db.getSyncState("last_scan_count_remote")?.toIntOrNull()?.let {
+            reporter.onScanCountHint("remote", it)
         }
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
@@ -160,12 +166,17 @@ class SyncEngine(
                 allRemoteChanges
             }
         reporter.onScanProgress("remote", remoteChanges.size)
-        // UD-747: persist the wall-clock for next run's ETA.
+        // UD-747 / UD-748: persist the wall-clock + final count for next
+        // run's ETA computation.
         val remoteScanSecs = (System.currentTimeMillis() - remotePhaseStart) / 1000
         db.setSyncState("last_scan_secs_remote", remoteScanSecs.toString())
+        db.setSyncState("last_scan_count_remote", remoteChanges.size.toString())
 
         db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
             reporter.onScanHistoricalHint("local", it)
+        }
+        db.getSyncState("last_scan_count_local")?.toIntOrNull()?.let {
+            reporter.onScanCountHint("local", it)
         }
         val localPhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("local", 0)
@@ -184,6 +195,7 @@ class SyncEngine(
         reporter.onScanProgress("local", localChanges.size)
         val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
         db.setSyncState("last_scan_secs_local", localScanSecs.toString())
+        db.setSyncState("last_scan_count_local", localChanges.size.toString())
 
         // UD-297: empty-local + populated-DB sanity check. Catches the
         // wrong-sync_root case (user pointed at an empty directory while

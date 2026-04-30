@@ -22,6 +22,22 @@ interface ProgressReporter {
         lastSecs: Long,
     ) {}
 
+    /**
+     * UD-748 (UD-744 slice 2): companion to [onScanHistoricalHint] —
+     * the previous run's *final item count* for this phase. With both
+     * hints, the reporter can compute a progress-fraction-based ETA
+     * (`elapsed / (count / lastCount)`) that adapts to how fast THIS
+     * run is going, not just last run's wall-clock. Falls back to the
+     * UD-747 time-only path when count data is missing or progress
+     * fraction is too low to be stable.
+     *
+     * Default no-op for parity with [onScanHistoricalHint].
+     */
+    fun onScanCountHint(
+        phase: String,
+        lastCount: Int,
+    ) {}
+
     fun onActionCount(total: Int)
 
     fun onActionProgress(
