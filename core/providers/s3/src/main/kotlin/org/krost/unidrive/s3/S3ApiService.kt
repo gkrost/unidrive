@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
+import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -96,6 +97,15 @@ open class S3ApiService(
             )
         val response =
             httpClient.put(url) {
+                // UD-337: size-adaptive request timeout. Replaces the
+                // default HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat
+                // cap so a multi-GB upload at typical link speed isn't
+                // torn down mid-PUT. copyObject below stays on the
+                // default cap — it's a metadata-plane operation
+                // (server-side copy, no body).
+                timeout {
+                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
+                }
                 headers.forEach { (k, v) -> header(k, v) }
                 setBody(
                     object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {

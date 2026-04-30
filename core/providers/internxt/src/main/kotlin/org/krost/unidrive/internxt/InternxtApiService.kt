@@ -15,6 +15,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
@@ -369,6 +370,15 @@ class InternxtApiService(
     ) {
         val response =
             httpClient.put(url) {
+                // UD-337: size-adaptive request timeout. The default
+                // HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat cap was
+                // tearing down legitimate long uploads against OVH S3
+                // (Internxt's bucket backend), reported as fatal in the
+                // 2026-04-30 user session — 6 large MP4 PUTs aborted
+                // client-side while the remote was still willing.
+                timeout {
+                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(data.size.toLong())
+                }
                 header("Content-Type", "application/octet-stream")
                 setBody(data)
             }
@@ -384,6 +394,12 @@ class InternxtApiService(
     ) {
         val response =
             httpClient.put(url) {
+                // UD-337: size-adaptive request timeout — see
+                // putEncryptedShard above. This is the streaming variant
+                // that actually triggered the user's report.
+                timeout {
+                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(size)
+                }
                 header("Content-Type", "application/octet-stream")
                 setBody(
                     object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {

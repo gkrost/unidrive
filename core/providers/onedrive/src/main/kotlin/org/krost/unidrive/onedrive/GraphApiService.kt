@@ -16,6 +16,7 @@ import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.ShareInfo
 import org.krost.unidrive.http.HttpRetryBudget
+import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.onedrive.model.*
@@ -411,6 +412,13 @@ class GraphApiService(
 
         val response =
             httpClient.put("$baseUrl/me/drive/root:/$encoded:/content") {
+                // UD-337: size-adaptive request timeout. Replaces the
+                // default HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat
+                // cap which would tear down a legitimate large-content
+                // PUT before completion.
+                timeout {
+                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
+                }
                 bearerAuth(tokenProvider(false))
                 contentType(ContentType.Application.OctetStream)
                 setBody(content)
@@ -666,6 +674,14 @@ class GraphApiService(
         for ((attempt, delayMs) in retryDelays.withIndex()) {
             val response =
                 httpClient.put(uploadUrl) {
+                    // UD-337: size-adaptive request timeout per chunk.
+                    // Most chunks (10-50 MB) clear well within the 600s
+                    // floor at any reasonable link speed; the policy
+                    // mainly matters when an admin sets a slow-link
+                    // throughput floor or runs a giant chunk size.
+                    timeout {
+                        requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
+                    }
                     contentType(ContentType.Application.OctetStream)
                     header("Content-Range", "bytes $currentOffset-$endByte/$fileSize")
                     setBody(currentBytes)

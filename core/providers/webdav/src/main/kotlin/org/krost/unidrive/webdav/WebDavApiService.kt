@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.net.URLEncoder
@@ -356,8 +357,13 @@ open class WebDavApiService(
         // max(uploadFloorTimeoutMs, fileSize / uploadMinThroughputBytesPerSecond).
         // For the empirical 277 MB / 50 KiB-per-sec defaults that's ~90 min —
         // above DSM's 22-min server-side abort, well below "forever".
+        // UD-337: WebDavTimeoutPolicy lifted to :app:core/http as
+        // UploadTimeoutPolicy so Internxt / OneDrive / HiDrive / S3 share
+        // the same size-adaptive bound. WebDAV's per-config defaults
+        // (uploadFloorTimeoutMs, uploadMinThroughputBytesPerSecond) still
+        // win at the call site — operators can override per-profile.
         val uploadTimeout =
-            WebDavTimeoutPolicy.computeRequestTimeoutMs(
+            UploadTimeoutPolicy.computeRequestTimeoutMs(
                 fileSize = fileSize,
                 floorMs = config.uploadFloorTimeoutMs,
                 minThroughputBytesPerSecond = config.uploadMinThroughputBytesPerSecond,

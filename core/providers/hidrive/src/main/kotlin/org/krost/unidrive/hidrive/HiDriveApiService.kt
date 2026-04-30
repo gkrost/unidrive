@@ -16,6 +16,7 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.hidrive.model.HiDriveItem
 import org.krost.unidrive.hidrive.model.HiDriveUserInfo
+import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -177,6 +178,15 @@ class HiDriveApiService(
 
         val response =
             httpClient.put("$baseUrl/file") {
+                // UD-337: size-adaptive request timeout. The default
+                // HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat cap was
+                // tearing down legitimate long uploads cross-provider —
+                // the user reported this against ds418play (WebDAV) and
+                // Internxt (OVH S3) on 2026-04-30. HiDrive sits behind
+                // the same default; this lift closes the gap.
+                timeout {
+                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
+                }
                 bearerAuth(tokenProvider())
                 parameter("dir", absDir)
                 parameter("name", fileName)

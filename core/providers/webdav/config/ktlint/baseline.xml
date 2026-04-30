@@ -10,7 +10,7 @@
         <error line="9" column="1" source="standard:no-wildcard-imports" />
         <error line="10" column="1" source="standard:no-wildcard-imports" />
         <error line="11" column="1" source="standard:no-wildcard-imports" />
-        <error line="38" column="1" source="standard:no-consecutive-comments" />
+        <error line="39" column="1" source="standard:no-consecutive-comments" />
     </file>
     <file name="src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt">
         <error line="4" column="1" source="standard:no-wildcard-imports" />

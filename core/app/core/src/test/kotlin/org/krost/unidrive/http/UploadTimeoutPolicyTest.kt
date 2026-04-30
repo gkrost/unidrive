@@ -1,14 +1,20 @@
-package org.krost.unidrive.webdav
+package org.krost.unidrive.http
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-class WebDavTimeoutPolicyTest {
-    private val policy = WebDavTimeoutPolicy
+/**
+ * UD-337 / UD-277: pin the size-adaptive request-timeout shape. Originally
+ * `WebDavTimeoutPolicyTest` in the webdav provider; lifted alongside the
+ * helper itself so Internxt / OneDrive / HiDrive / S3 inherit the same
+ * tested contract when they adopt the policy.
+ */
+class UploadTimeoutPolicyTest {
+    private val policy = UploadTimeoutPolicy
 
-    // UD-277 acceptance #2 — explicit fixture from the ticket:
-    //   fileSize = 2 GiB, minThroughput = 512 KiB/s → timeout >= 4096 s
+    // UD-277 acceptance #2 — explicit fixture from the original WebDAV
+    // ticket: fileSize = 2 GiB, minThroughput = 512 KiB/s → timeout ≥ 4096 s
 
     @Test
     fun `UD-277 - 2 GiB at 512 KiB-per-second yields at least 4096 seconds`() {
@@ -57,8 +63,8 @@ class WebDavTimeoutPolicyTest {
 
     @Test
     fun `zero or negative fileSize returns the floor`() {
-        // Edge case: WebDAV PUT body is sometimes computed before file size
-        // is known, or the file is truncated to zero. Don't divide-by-zero;
+        // Edge case: PUT body is sometimes computed before file size is
+        // known, or the file is truncated to zero. Don't divide-by-zero;
         // just hand back the floor.
         val timeoutMs = policy.computeRequestTimeoutMs(0L, floorMs = 600_000L, minThroughputBytesPerSecond = 100_000L)
         assertEquals(600_000L, timeoutMs)
@@ -89,5 +95,20 @@ class WebDavTimeoutPolicyTest {
         val fourEiB = 4L * 1024 * 1024 * 1024 * 1024 * 1024 * 1024
         val timeoutMs = policy.computeRequestTimeoutMs(fourEiB, floorMs = 600_000L, minThroughputBytesPerSecond = 1L)
         assertEquals(Long.MAX_VALUE, timeoutMs, "no overflow; clamps to MAX_VALUE")
+    }
+
+    // UD-337 — verify default arguments work as documented.
+
+    @Test
+    fun `UD-337 default arguments use 50 KiB-per-second floor and 600 s floor`() {
+        // Small file: defaults yield the floor.
+        val oneMiB = 1L * 1024 * 1024
+        assertEquals(600_000L, policy.computeRequestTimeoutMs(oneMiB))
+        // 5 GiB at 50 KiB/s: 5 * 1024 * 1024 / 50 = 104 857.6 s → 104 858 s
+        // (ceiling), * 1000 = 104_858_000 ms — well above the floor.
+        val fiveGiB = 5L * 1024 * 1024 * 1024
+        val expected = (fiveGiB / (50L * 1024) + 1) * 1000L
+        assertEquals(expected, policy.computeRequestTimeoutMs(fiveGiB))
+        assertTrue(expected > 600_000L, "5 GiB should exceed the floor with default throughput")
     }
 }
