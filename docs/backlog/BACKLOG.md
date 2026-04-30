@@ -1799,40 +1799,6 @@ doesn't exist:
 Worth scheduling alongside any future "profile management" work
 (UD-236 three-verb model, UD-233 tray brainstorm).
 ---
-id: UD-296
-title: Print sync banner: profile + sync_root + direction at start of sync
-category: core
-priority: high
-effort: XS
-status: open
-opened: 2026-04-30
----
-**Why:** Sync output never tells the user *which* local directory unidrive
-considers "local". When `sync_root` drifts (e.g. user expected the Internxt
-official-client mount but `~/unidrive-internxt-gernot` is configured), the
-first hint is several thousand `del-remote` lines flying past. Surfacing
-profile + type + `sync_root` + direction at the start of every run lets the
-user spot the misconfiguration before the planner gets to that.
-
-**What:** Print a single banner line at the start of `sync` runs (both
-one-shot and `--watch`) listing:
-
-* profile name (e.g. `inxt_gernot_krost_posteo`)
-* provider type (`internxt`)
-* configured `sync_root` (absolute, expanded)
-* direction (`bidirectional` / `upload` / `download`)
-* dry-run flag if set
-
-ASCII-only — Windows console codepage hostility (UD-509 / UD-291 lessons).
-
-**Where:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`,
-just before `runBlocking { ... }` so it runs unconditionally before any auth
-or scan work. The existing watch-mode `"Starting continuous sync to ..."`
-line at line 325 collapses into the banner.
-
-**Tests:** small CLI integration test that captures stdout from a
-no-op profile and asserts the banner shape.
----
 id: UD-297
 title: Empty-local + populated-DB sanity check (refuse plan unless --force-delete)
 category: core
