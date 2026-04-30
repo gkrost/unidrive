@@ -66,7 +66,12 @@ open class WebDavApiService(
         followRedirects = false
     }
 
-    private val httpClient =
+    // UD-807: visible to tests so the Apache5-vs-CIO branch decision is
+    // assertable directly (the user-visible TLS behaviour depends on which
+    // engine was constructed for `trust_all_certs = true`). No production
+    // caller — package-internal.
+    @PublishedApi
+    internal val httpClient =
         if (config.trustAllCerts) {
             // Apache5 engine for LAN/self-signed certs.
             // Neither java.net.http.HttpClient (hardcodes HTTPS hostname verification)

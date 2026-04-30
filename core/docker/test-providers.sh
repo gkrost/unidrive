@@ -141,15 +141,38 @@ test_status_shows_profile() {
 # `quota` is the first command that reaches the live provider — it auths
 # and hits a read-only API endpoint on each adapter. Success here means
 # the adapter could build a client, authenticate, and receive a response.
+#
+# UD-811 (a): pre-fix the regex matched 'unlimited' / '0 bytes' / any
+# header text containing 'quota'. A broken adapter that hard-coded
+# `total = 0` and `used = 0` would still pass — neither value crosses
+# the wire and the regex still matches the column header strings.
+# Tightened to require BOTH a Used/Total line AND a non-zero Total
+# parsed out of the formatted size, so `total = 0 B` fails the
+# adapter even if it manages to print the labels.
 test_quota() {
     local profile="$1"
-    local OUTPUT
+    local OUTPUT TOTAL_LINE TOTAL_BYTES
     OUTPUT=$(${JAVA} -c "${CONFIG_DIR}" -p "${profile}" quota 2>&1 || true)
-    if echo "${OUTPUT}" | grep -qiE "total|used|free|remaining|bytes|unlimited|quota"; then
-        pass "${profile} quota reaches server"
-    else
-        fail "${profile} quota" "$(echo "${OUTPUT}" | head -2 | tr '\n' ' ')"
+
+    # Surface the structural envelope first — both labels must appear in
+    # the output the human-facing CliProgressReporter prints.
+    if ! echo "${OUTPUT}" | grep -qE "^[[:space:]]+Used:" || \
+       ! echo "${OUTPUT}" | grep -qE "^[[:space:]]+Total:"; then
+        fail "${profile} quota" "missing Used/Total lines: $(echo "${OUTPUT}" | head -2 | tr '\n' ' ')"
+        return
     fi
+
+    # Then assert Total > 0. CliProgressReporter.formatSize emits
+    # "<float> <unit>" or "<int> B" — extract the leading number.
+    TOTAL_LINE=$(echo "${OUTPUT}" | grep -E "^[[:space:]]+Total:" | head -1)
+    TOTAL_BYTES=$(echo "${TOTAL_LINE}" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
+    if [[ -z "${TOTAL_BYTES}" ]] || \
+       awk -v t="${TOTAL_BYTES}" 'BEGIN { exit !(t+0 == 0) }'; then
+        fail "${profile} quota" "Total <= 0 (line=${TOTAL_LINE}); broken adapter signature"
+        return
+    fi
+
+    pass "${profile} quota reaches server (Total=${TOTAL_BYTES})"
 }
 
 # ── round-trip side-channel verifiers ──────────────────────────────────────

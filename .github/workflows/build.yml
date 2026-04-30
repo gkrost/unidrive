@@ -52,6 +52,11 @@ jobs:
         shell: bash
         run: ./gradlew dependencies -q
 
+      - name: Test-hygiene lint (UD-704-residual)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: bash scripts/ci/test-hygiene.sh
+
       - name: Semgrep security scan
         if: matrix.os == 'ubuntu-latest'
         run: pip install semgrep && semgrep scan --config .semgrep.yml --error

@@ -39,4 +39,50 @@ class WebDavApiServiceSslTest {
             assertNotNull(svc)
         }
     }
+
+    // -- UD-807: engine-selection branch coverage ------------------------------
+    //
+    // Pre-fix the two SSL tests above only verified construction succeeded —
+    // they couldn't catch a regression where `trust_all_certs = true` quietly
+    // started routing through CIO (which fails the TLS handshake on Synology
+    // DSM 7.x with a fatal ProtocolVersion alert) instead of Apache5. The full
+    // docker-compose self-signed Nginx harness in the original ticket is
+    // deferred — these unit assertions catch the engine-selection regression
+    // for free against the in-process Ktor httpClient instance.
+
+    @Test
+    fun `UD-807 - trustAllCerts=true selects Apache5 engine`() {
+        val cfg =
+            WebDavConfig(
+                baseUrl = "https://self-signed.invalid/dav",
+                username = "u",
+                password = "p",
+                trustAllCerts = true,
+            )
+        WebDavApiService(cfg).use { svc ->
+            val engineFqn = svc.httpClient.engine.javaClass.canonicalName ?: ""
+            assertTrue(
+                engineFqn.contains("apache5", ignoreCase = true),
+                "trust_all_certs=true must route through the Apache5 engine; got '$engineFqn'",
+            )
+        }
+    }
+
+    @Test
+    fun `UD-807 - trustAllCerts=false selects CIO engine`() {
+        val cfg =
+            WebDavConfig(
+                baseUrl = "https://dav.example.com/",
+                username = "u",
+                password = "p",
+                trustAllCerts = false,
+            )
+        WebDavApiService(cfg).use { svc ->
+            val engineFqn = svc.httpClient.engine.javaClass.canonicalName ?: ""
+            assertTrue(
+                engineFqn.contains("cio", ignoreCase = true),
+                "trust_all_certs=false must route through the CIO engine; got '$engineFqn'",
+            )
+        }
+    }
 }

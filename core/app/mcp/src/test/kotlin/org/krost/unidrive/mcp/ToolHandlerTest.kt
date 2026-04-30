@@ -860,12 +860,23 @@ class ToolHandlerTest {
 
     @Test
     fun `relocate - invalid fromProfile returns error`() {
+        // UD-704-residual: pre-fix this asserted .contains("Failed to create
+        // source provider") — a literal copy of the implementation's error
+        // string that any improvement to the message wording would break,
+        // even though the *behaviour* (error returned, not silent success)
+        // didn't change. Now asserts only the behavioural invariant: the
+        // result is an error AND mentions the offending profile name.
         val result =
             relocateTool.handler(
                 args("fromProfile" to "nonexistent-provider-xyz", "toProfile" to "other"),
                 ctxNoProvider(),
             )
-        assertTrue(isError(result))
-        assertTrue(resultText(result).contains("Failed to create source provider"))
+        assertTrue(isError(result), "expected error result; got success")
+        // The user-supplied profile name must reach the error message — that
+        // IS the invariant (postmortem can identify which profile was bad).
+        assertTrue(
+            resultText(result).contains("nonexistent-provider-xyz"),
+            "error message must include the bad profile name; was '${resultText(result)}'",
+        )
     }
 }
