@@ -14,8 +14,25 @@ class TokenManager(
     private val config: OneDriveConfig,
     private val oauthService: OAuthService,
 ) {
+    private val log = org.slf4j.LoggerFactory.getLogger(TokenManager::class.java)
     private var token: Token? = null
     private val refreshMutex = Mutex()
+
+    /**
+     * UD-111: structured record of the most recent OAuth refresh failure,
+     * exposed for `unidrive status --audit` / MCP `unidrive_status` so a
+     * user-facing client can surface "please re-auth" at the right moment.
+     * Cleared on the next successful refresh.
+     */
+    @Volatile
+    var lastRefreshFailure: RefreshFailure? = null
+        private set
+
+    data class RefreshFailure(
+        val timestamp: java.time.Instant,
+        val errorClass: String,
+        val message: String?,
+    )
 
     val isAuthenticated: Boolean get() = token != null
 
@@ -101,9 +118,29 @@ class TokenManager(
                         }
                     token = refreshed
                     oauthService.saveToken(refreshed)
+                    // UD-111: clear the failure record on success so status
+                    // shows "auth-healthy" rather than a stale stale message.
+                    lastRefreshFailure = null
                     return refreshed
                 } catch (e: Exception) {
-                    println("Token refresh failed: ${e.message}")
+                    // UD-111: replaced the bare `println` with a structured
+                    // log.warn + stored RefreshFailure record. Pre-fix the
+                    // failure was visible only in stdout (often invisible to
+                    // daemon logs / tray) so users hit "please re-auth"
+                    // without warning.
+                    val failure =
+                        RefreshFailure(
+                            timestamp = java.time.Instant.now(),
+                            errorClass = e.javaClass.simpleName,
+                            message = e.message,
+                        )
+                    lastRefreshFailure = failure
+                    log.warn(
+                        "OAuth refresh failed: {}: {}. User will be prompted to re-authenticate.",
+                        failure.errorClass,
+                        failure.message,
+                        e,
+                    )
                 }
             }
 
