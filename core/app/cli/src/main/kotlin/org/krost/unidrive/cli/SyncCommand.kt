@@ -243,20 +243,18 @@ class SyncCommand : Runnable {
                 null
             }
 
-        if (watch) {
-            val socketPath = IpcServer.defaultSocketPath(profile.name)
-            ipcServer = IpcServer(socketPath)
-            ipcReporter = IpcProgressReporter(ipcServer, profile.name)
-            val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
-            if (notifyReporter != null) delegates.add(notifyReporter)
-            reporter = CompositeReporter(delegates)
-        } else {
-            if (notifyReporter != null) {
-                reporter = CompositeReporter(listOf(cliReporter, notifyReporter))
-            } else {
-                reporter = cliReporter
-            }
-        }
+        // UD-746 / UD-240a: advertise IPC for every sync run, not just
+        // --watch. One-shot syncs (the common case for an operator running
+        // `unidrive sync` from a shell) now expose their socket so the tray
+        // and `unidrive status` can show live progress instead of "no
+        // daemon." Profile lock (UD-272) ensures only one sync per profile
+        // runs at a time, so socket creation can't collide.
+        val socketPath = IpcServer.defaultSocketPath(profile.name)
+        ipcServer = IpcServer(socketPath)
+        ipcReporter = IpcProgressReporter(ipcServer, profile.name)
+        val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
+        if (notifyReporter != null) delegates.add(notifyReporter)
+        reporter = CompositeReporter(delegates)
 
         // UD-296: surface profile + provider type + sync_root + direction up
         // front so users can spot sync_root drift (wrong directory pointed at)
