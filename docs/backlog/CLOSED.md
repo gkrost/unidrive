@@ -8178,3 +8178,67 @@ two providers.
 - **UD-330** (sibling cross-cutting follow-up) — HttpRetryBudget
   adoption. Lands well alongside since both touch
   TokenManager / authenticatedRequest call sites.
+
+---
+id: UD-738
+title: Allow --reset --dry-run as virtual reset (in-memory shadow DB; leave state.db on disk untouched)
+category: tooling
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit e214e26. StateDatabase.inMemory flag opens :memory: SQLite. SyncCommand virtual-reset path copies sync_root from real DB to shadow before plan (preserves UD-299 detector). Old --reset/--dry-run parse-time mutex removed; new SyncCommandTest asserts that. 2 StateDatabase tests for isolation.
+opened: 2026-04-30
+---
+**Why:** `--reset --dry-run` is currently rejected at parse time
+(UD-243) on the basis that "--reset clears sync state on disk, which
+--dry-run cannot undo." Strictly correct under the literal reading,
+but it makes the natural workflow "preview the plan after wiping the
+DB" awkward — current workaround is `Move-Item state.db state.db.bak;
+sync --dry-run; sync` (used by the user during the UD-296/297/299
+investigation).
+
+**What:** Reinterpret `--reset --dry-run` as a *virtual* reset:
+
+* don't touch `state.db` on disk
+* construct the engine with an empty in-memory DB view
+* plan as if state were empty
+* emit normal dry-run output
+
+Implementation options, listed in increasing complexity:
+
+a. **Snapshot-and-restore:** at start of run, copy `state.db` to
+   `state.db.dryrun-snapshot`, call `db.resetAll()`, run, then
+   restore the snapshot. Simple, but adds disk I/O and a window where
+   a crash leaves the user holding a half-restored DB.
+b. **In-memory shadow DB:** open a fresh `:memory:` SQLite DB for
+   this run, leave the on-disk one alone. Cleanest semantically.
+c. **DB-bypass flag:** thread a `pretendEmpty: Boolean` through
+   `StateDatabase` that makes reads return empty regardless of
+   actual contents. Invasive; bug surface in normal use.
+
+**Recommend (b).** Confirm with a small spike that opening
+`StateDatabase("file::memory:?cache=shared")` doesn't break the
+schema-creation path in `initialize()`.
+
+**Where:**
+
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`
+  remove the parse-time rejection (lines 114–118 region), branch on
+  `dryRun && reset` to wire up the virtual-reset flow.
+* Possibly `StateDatabase.kt` if `:memory:` mode needs a constructor
+  variant.
+
+**Tests:**
+
+* `--reset --dry-run` runs without throwing, prints dry-run summary,
+  leaves `state.db` unchanged on disk (compare bytes / mtime).
+* Subsequent normal run still sees the original DB state.
+* `--reset` (without dry-run) still wipes for real.
+* UD-299 sync_root drift detector still fires correctly under the
+  shadow DB (the comparison should use the *real* db's stored
+  sync_root, not the shadow's empty one — make sure the wiring
+  doesn't accidentally make UD-299 silent).
+
+**Out of scope:** other --dry-run-with-X mutexes. Audit them
+separately if this lands cleanly.
