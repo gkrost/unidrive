@@ -232,9 +232,6 @@ class SyncCommand : Runnable {
         applyConfigPinRules(db, config, profile.name)
 
         val cliReporter = CliProgressReporter(parent.verbose, dryRun)
-        var ipcServer: IpcServer? = null
-        var ipcReporter: IpcProgressReporter? = null
-        val reporter: ProgressReporter
 
         val notifyReporter =
             if (config.desktopNotifications && NotifyProgressReporter.isAvailable()) {
@@ -250,11 +247,11 @@ class SyncCommand : Runnable {
         // daemon." Profile lock (UD-272) ensures only one sync per profile
         // runs at a time, so socket creation can't collide.
         val socketPath = IpcServer.defaultSocketPath(profile.name)
-        ipcServer = IpcServer(socketPath)
-        ipcReporter = IpcProgressReporter(ipcServer, profile.name)
+        val ipcServer = IpcServer(socketPath)
+        val ipcReporter = IpcProgressReporter(ipcServer, profile.name)
         val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
         if (notifyReporter != null) delegates.add(notifyReporter)
-        reporter = CompositeReporter(delegates)
+        val reporter: ProgressReporter = CompositeReporter(delegates)
 
         // UD-296: surface profile + provider type + sync_root + direction up
         // front so users can spot sync_root drift (wrong directory pointed at)
@@ -357,7 +354,7 @@ class SyncCommand : Runnable {
             // concurrent downloads on DefaultDispatcher workers. Without this, log lines emitted
             // from worker threads lose the profile tag.
             runBlocking(MDCContext()) {
-                ipcServer?.start(this)
+                ipcServer.start(this)
                 provider.authenticate()
 
                 // Ensure webhook subscription if configured
@@ -391,8 +388,8 @@ class SyncCommand : Runnable {
                     Runtime.getRuntime().addShutdownHook(
                         Thread {
                             println("\nShutting down...")
-                            watcher?.stop()
-                            ipcServer?.close()
+                            watcher.stop()
+                            ipcServer.close()
                             renewalScheduler?.cancelAll()
                             subscriptionStore.close()
                             db.close()
@@ -411,7 +408,7 @@ class SyncCommand : Runnable {
                                 ensureSubscription(rawProvider, subscriptionStore, profile.name, rpConfig, renewalScheduler)
                             }
 
-                            ipcReporter?.emitSyncStarted()
+                            ipcReporter.emitSyncStarted()
                             // UD-254: classify each pass. First iteration after daemon
                             // boot is BOOT; subsequent iterations are WATCH_POLL unless
                             // LocalWatcher fired a change (EVENT_DRIVEN, tracked below).
@@ -425,11 +422,11 @@ class SyncCommand : Runnable {
                             cycleFailures = 0
                             hadChanges = (cliReporter.lastDownloaded + cliReporter.lastUploaded + cliReporter.lastConflicts) > 0
                         } catch (e: AuthenticationException) {
-                            ipcReporter?.emitSyncError(e.message ?: "Authentication error")
+                            ipcReporter.emitSyncError(e.message ?: "Authentication error")
                             System.err.println("Authentication error, stopping: ${e.message}")
                             break
                         } catch (e: Exception) {
-                            ipcReporter?.emitSyncError(e.message ?: "Sync failed")
+                            ipcReporter.emitSyncError(e.message ?: "Sync failed")
                             cycleFailures++
                             val backoffMs = minOf(10_000L * (1L shl (cycleFailures - 1)), 600_000L)
                             System.err.println("Sync cycle failed (attempt $cycleFailures), retrying in ${backoffMs / 1000}s: ${e.message}")
@@ -451,18 +448,14 @@ class SyncCommand : Runnable {
                         val currentState = pollStateName(idleCycles)
                         if (currentState != lastState) {
                             if (parent.verbose) println("Polling: $currentState (${intervalSeconds}s)")
-                            ipcReporter?.emitPollState(currentState, intervalSeconds, idleCycles)
+                            ipcReporter.emitPollState(currentState, intervalSeconds, idleCycles)
                             lastState = currentState
                         }
 
-                        val hasLocalChange =
-                            watcher?.awaitChange(intervalSeconds.toLong().seconds) ?: run {
-                                delay(intervalSeconds * 1000L)
-                                false
-                            }
+                        val hasLocalChange = watcher.awaitChange(intervalSeconds.toLong().seconds)
                         if (hasLocalChange) idleCycles = 0
 
-                        watcher?.drainChanges()
+                        watcher.drainChanges()
                     }
                 } else {
                     engine.syncOnce(
@@ -475,7 +468,7 @@ class SyncCommand : Runnable {
         } catch (e: AuthenticationException) {
             parent.handleAuthError(e, rawProvider)
         } finally {
-            ipcServer?.close()
+            ipcServer.close()
             rawProvider.close()
             subscriptionStore.close()
             db.close()
