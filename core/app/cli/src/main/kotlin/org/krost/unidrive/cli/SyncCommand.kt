@@ -120,12 +120,12 @@ class SyncCommand : Runnable {
                 "--dry-run and --force-delete are mutually exclusive: --force-delete is a no-op when no writes happen.",
             )
         }
-        if (reset && dryRun) {
-            throw CommandLine.ParameterException(
-                spec.commandLine(),
-                "--reset and --dry-run are mutually exclusive: --reset clears sync state on disk, which --dry-run cannot undo.",
-            )
-        }
+        // UD-738: `--reset --dry-run` used to be rejected at parse time because
+        // `--reset` clears state on disk and `--dry-run` is supposed to be
+        // side-effect-free. Now reinterpreted as a *virtual* reset: open an
+        // in-memory shadow DB for this run, leave the on-disk state.db
+        // untouched. Wiring lives below where the DB is constructed.
+
         // UD-737: --propagate-deletes only makes sense as an opt-in modifier for
         // --upload-only. Without it, --upload-only's default is push-additive
         // (no del-remote). With it, locally-deleted entries propagate to remote.
@@ -196,12 +196,36 @@ class SyncCommand : Runnable {
             }
         val dbPath = parent.providerConfigDir().resolve("state.db")
 
-        val db = StateDatabase(dbPath)
-        db.initialize()
-
-        if (reset) {
-            db.resetAll()
-            println("Sync state cleared.")
+        // UD-738: virtual-reset mode. With `--reset --dry-run`, plan against a
+        // fresh in-memory DB while leaving state.db on disk untouched. Copy
+        // the real DB's stored sync_root into the shadow so UD-299's drift
+        // detector still has a baseline to compare against (otherwise the
+        // shadow would always look like "first sync ever" and the detector
+        // would silently no-op).
+        val virtualReset = reset && dryRun
+        val db: StateDatabase
+        if (virtualReset) {
+            // Read sync_root from the real DB before opening the shadow.
+            val realSyncRoot =
+                StateDatabase(dbPath).run {
+                    initialize()
+                    val v = getSyncState("sync_root")
+                    close()
+                    v
+                }
+            db = StateDatabase(dbPath, inMemory = true)
+            db.initialize()
+            if (!realSyncRoot.isNullOrEmpty()) {
+                db.setSyncState("sync_root", realSyncRoot)
+            }
+            println("Sync state virtually reset (dry-run; on-disk state.db untouched).")
+        } else {
+            db = StateDatabase(dbPath)
+            db.initialize()
+            if (reset) {
+                db.resetAll()
+                println("Sync state cleared.")
+            }
         }
 
         // Apply config pin patterns to DB

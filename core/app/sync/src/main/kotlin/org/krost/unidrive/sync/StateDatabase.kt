@@ -10,6 +10,12 @@ import java.time.Instant
 
 class StateDatabase(
     private val dbPath: Path,
+    // UD-738: when true, open an in-memory SQLite DB instead of a file-backed
+    // one. Used by `--reset --dry-run` to plan against a clean slate without
+    // touching the on-disk state.db. dbPath is retained for callers that
+    // still want to know "where the real one lives" but is not used for the
+    // connection URL.
+    private val inMemory: Boolean = false,
 ) {
     private lateinit var conn: Connection
 
@@ -18,8 +24,14 @@ class StateDatabase(
         if (::conn.isInitialized && !conn.isClosed) {
             conn.close()
         }
-        Files.createDirectories(dbPath.parent)
-        conn = DriverManager.getConnection("jdbc:sqlite:$dbPath")
+        val url =
+            if (inMemory) {
+                "jdbc:sqlite::memory:"
+            } else {
+                Files.createDirectories(dbPath.parent)
+                "jdbc:sqlite:$dbPath"
+            }
+        conn = DriverManager.getConnection(url)
         conn.autoCommit = true
         createTables()
     }

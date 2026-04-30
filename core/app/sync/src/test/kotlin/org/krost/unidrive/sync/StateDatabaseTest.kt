@@ -182,4 +182,56 @@ class StateDatabaseTest {
         db.upsertEntry(entry("/test.txt"))
         assertNotNull(db.getEntry("/test.txt"))
     }
+
+    // UD-738 — in-memory shadow DB for `--reset --dry-run`
+
+    @Test
+    fun `UD-738 inMemory true creates a working DB without touching dbPath on disk`() {
+        val tmpDir = Files.createTempDirectory("unidrive-shadow")
+        val sentinelPath = tmpDir.resolve("never-created.db")
+        val shadow = StateDatabase(sentinelPath, inMemory = true)
+        shadow.initialize()
+        try {
+            // The shadow DB schema is set up and writable
+            shadow.upsertEntry(entry("/in-memory-only.txt"))
+            assertNotNull(shadow.getEntry("/in-memory-only.txt"))
+            // Critically: nothing was created at sentinelPath
+            assertFalse(
+                Files.exists(sentinelPath),
+                "in-memory mode must NOT touch the file at dbPath",
+            )
+        } finally {
+            shadow.close()
+        }
+    }
+
+    @Test
+    fun `UD-738 inMemory true is isolated from any real on-disk DB at the same path`() {
+        // Real, file-backed DB with one entry
+        val tmpDir = Files.createTempDirectory("unidrive-isolated")
+        val realPath = tmpDir.resolve("state.db")
+        val real = StateDatabase(realPath)
+        real.initialize()
+        real.upsertEntry(entry("/file-backed.txt"))
+        real.close()
+
+        // Open a shadow at the same path — must be empty, not see the real entry
+        val shadow = StateDatabase(realPath, inMemory = true)
+        shadow.initialize()
+        try {
+            assertNull(shadow.getEntry("/file-backed.txt"))
+            assertEquals(0, shadow.getAllEntries().size)
+        } finally {
+            shadow.close()
+        }
+
+        // Real DB on disk still has its entry
+        val realAgain = StateDatabase(realPath)
+        realAgain.initialize()
+        try {
+            assertNotNull(realAgain.getEntry("/file-backed.txt"))
+        } finally {
+            realAgain.close()
+        }
+    }
 }
