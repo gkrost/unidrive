@@ -1118,54 +1118,6 @@ stability problem — a relocate that works on a 10k-file tree may
 OOM on a 100k-file one without warning. Investigation is the bulk
 of the work; fix is usually small (close a resource, bound a queue).
 ---
-id: UD-279
-title: Relocation planner warns on poor transport fit (WebDAV for bulk)
-category: core
-priority: medium
-effort: M
-status: open
-opened: 2026-04-21
-chunk: core
----
-The ds418play relocation failure pattern (UD-277 / UD-278 / UD-327 /
-UD-328) was partly self-inflicted: `ds418play-webdav` was chosen as
-target transport when the same NAS speaks SFTP, SMB, and rclone-native —
-all dramatically better fits for a 300 GiB media migration than DSM's
-non-chunked nginx WebDAV.
-
-The relocation planner has enough information to warn at plan time.
-
-## Proposal
-
-Planner-time "transport fitness" check that emits a warning (not a
-hard block):
-
-1. Inputs: target-provider kind, total plan size, per-file size
-   distribution, sibling profiles on the same host.
-2. Rules:
-   - target=webdav && plan_bytes > 50 GiB → warn on throughput ceiling.
-   - target=webdav && max_file_size > 1 GiB → warn on DSM cap +
-     restart-from-zero risk (link UD-327, UD-328).
-   - target=webdav && same host has configured sftp profile → name
-     the alternative in the warning.
-3. Warning appears once at plan time.
-4. `--confirm-transport` suppresses for scripts / CI.
-
-## Acceptance
-
-1. `relocate --from onedrive-test-local --to ds418play-webdav` on a
-   300 GiB plan emits a single planner-time warning naming the
-   fitness issue and any better-configured sibling profile.
-2. WebDAV-only target still warns about size ceiling but does not
-   invent a sibling recommendation.
-3. `--confirm-transport` suppresses for non-interactive use.
-4. No warning under 10 GiB plan size.
-
-## Related
-
-- UD-277 / UD-278 / UD-327 / UD-328 — the concrete pain this catches
-  at *plan* time rather than transfer time.
----
 id: UD-328
 title: WebDAV upload resume via Content-Range PUT
 category: providers

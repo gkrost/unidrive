@@ -7339,3 +7339,54 @@ If the user renames `onedrive-test` → `onedrive2` in config.toml and moves the
 
   * **Part A landed in `7211b25` (2026-04-19):** `--fast-bootstrap` CLI flag + per-profile `fast_bootstrap` config key + `Capability.FastBootstrap` + `CloudProvider.deltaFromLatest()` + OneDrive override via `GraphApiService.getDelta(fromLatest=true)`. Non-OneDrive providers log a WARN and fall through. Engine promotes the adopted cursor directly to `delta_cursor` (not `pending_cursor`) because `syncOnce` short-circuits on empty action list. Tests: `DeltaFromLatestTest` (MockEngine URL assertions), `SyncEngineTest` UD-223 trio, `SyncConfigTest` round-trip.
   * **Part B still pending:** state.db reuse across profile rename when the drive ID in `token.json` matches an existing sibling profile's cursor. Not yet scoped into a commit; ticket stays `open`.
+
+---
+id: UD-279
+title: Relocation planner warns on poor transport fit (WebDAV for bulk)
+category: core
+priority: medium
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit caedb3d. WebDAV+plan>50GiB → planner warning with throughput-ceiling explanation + sftp/rclone hint. --confirm-transport silences for scripts. Sibling-profile detection deferred (URL parsing + config walk is significant complexity for UX-only feature).
+opened: 2026-04-21
+chunk: core
+---
+The ds418play relocation failure pattern (UD-277 / UD-278 / UD-327 /
+UD-328) was partly self-inflicted: `ds418play-webdav` was chosen as
+target transport when the same NAS speaks SFTP, SMB, and rclone-native —
+all dramatically better fits for a 300 GiB media migration than DSM's
+non-chunked nginx WebDAV.
+
+The relocation planner has enough information to warn at plan time.
+
+## Proposal
+
+Planner-time "transport fitness" check that emits a warning (not a
+hard block):
+
+1. Inputs: target-provider kind, total plan size, per-file size
+   distribution, sibling profiles on the same host.
+2. Rules:
+   - target=webdav && plan_bytes > 50 GiB → warn on throughput ceiling.
+   - target=webdav && max_file_size > 1 GiB → warn on DSM cap +
+     restart-from-zero risk (link UD-327, UD-328).
+   - target=webdav && same host has configured sftp profile → name
+     the alternative in the warning.
+3. Warning appears once at plan time.
+4. `--confirm-transport` suppresses for scripts / CI.
+
+## Acceptance
+
+1. `relocate --from onedrive-test-local --to ds418play-webdav` on a
+   300 GiB plan emits a single planner-time warning naming the
+   fitness issue and any better-configured sibling profile.
+2. WebDAV-only target still warns about size ceiling but does not
+   invent a sibling recommendation.
+3. `--confirm-transport` suppresses for non-interactive use.
+4. No warning under 10 GiB plan size.
+
+## Related
+
+- UD-277 / UD-278 / UD-327 / UD-328 — the concrete pain this catches
+  at *plan* time rather than transfer time.
