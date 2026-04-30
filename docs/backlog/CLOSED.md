@@ -8482,3 +8482,51 @@ ASCII safer on Windows). Both for stdout progress lines and for the
 
 **Out of scope:** the TTY wrap-around problem is UD-735 (already
 landed). This is purely "make `move` lines self-describing."
+
+---
+id: UD-741
+title: Sync banner: include sync_path arg when set
+category: tooling
+priority: medium
+effort: XS
+status: closed
+closed: 2026-04-30
+resolved_by: commit 8af234e. syncPathSegment appended to UD-296 banner conditionally — silent when unset, ' sync_path=<value>' between sync_root and mode when set. No new test (UD-296 baseline also untested; one-line obvious correctness).
+opened: 2026-04-30
+---
+**Why:** UD-296's banner reports `profile`, `type`, `sync_root`, and
+`mode` at sync start, but **does not include `--sync-path`** when set.
+Real-case (2026-04-30):
+
+```
+unidrive -p inxt_gernot_krost_posteo sync --reset --upload-only \
+         --sync-path /19notte78 --dry-run
+Sync state virtually reset (dry-run; on-disk state.db untouched).
+sync: profile=inxt_gernot_krost_posteo type=internxt sync_root=C:\Users\gerno\InternxtDrive mode=upload, dry-run
+Scanning remote changes...
+```
+
+User scoped the run to `/19notte78` and the banner gives no acknowledgement
+of that. If they typo the sub-path, they only find out hours later when
+the action plan has the wrong tree.
+
+**What:** Append `sync_path=<value>` to the banner *only when* the flag
+is set (don't pollute the unscoped case). Place between `sync_root` and
+`mode` so the banner reads naturally:
+
+```
+sync: profile=... type=... sync_root=... sync_path=/19notte78 mode=upload, dry-run
+```
+
+**Where:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`,
+the `println("sync: ...")` block landed in UD-296. Read the `syncPath`
+@Option already wired into the command.
+
+**Tests:** small assertion that with `--sync-path X` the banner string
+contains `sync_path=X`; without `--sync-path` it does NOT contain
+`sync_path=`. Reuse the captured-stdout pattern from
+`CliProgressReporterTest`.
+
+**Out of scope:** any other flag surface in the banner. If we want
+`--exclude` or `--fast-bootstrap` reflected too, file separately —
+they're less likely to surprise the user.
