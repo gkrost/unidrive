@@ -7032,3 +7032,29 @@ Three parts:
 Low priority, S effort. Not a correctness bug — the user can rerun
 with UD-266 skip logic and converge. This is UX polish that would
 matter to an operator running long transfers.
+
+---
+id: UD-307
+title: OneDrive rejects ZWJ-compound emoji filenames with 409 nameAlreadyExists
+category: providers
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 32c1458. Option-C: doc + targeted WARN. OneDriveProvider.upload catches 409+nameAlreadyExists and emits a UD-307-tagged WARN with remotePath + SPECS pointer; re-throws so SyncEngine still counts as per-file failure (sync continues — existing Pass-2 behaviour). docs/SPECS.md §3.1 documents the ZWJ collision + the 14 codepoint families that DO round-trip.
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - docs/SPECS.md
+opened: 2026-04-18
+chunk: core
+---
+Reproduced in UD-712: uploading `👨‍👩‍👧.txt` (U+1F468 ZWJ U+1F469 ZWJ U+1F467) via Graph `PUT /me/drive/root:/<path>/<name>:/content` returns HTTP 409 `nameAlreadyExists` with message *"The specified item name is incompatible with a similar name on an existing item."* — even when no prior item with that name exists in the folder. OneDrive normalises or collapses ZWJ sequences internally and the resulting name collides with something (possibly the individual emoji characters in its search/index layer, or OneDrive's own NFC-folded form). The other 14 entries in the test set (¡, æ, ñ, Ω, Ж, א, ع, क, ก, ☃, あ, 中, 글, 🎉) upload cleanly and round-trip byte-equal.
+
+**Rescoped 2026-04-20 to option C** (from the original A/B/C direction set). The original scope covered three options: (a) surface a structured `NameNormalisationCollision` error; (b) auto-retry with NFC-normalised form; (c) document in SPECS as a known OneDrive limitation. ZWJ-compound emoji filenames are vanishingly rare in real sync sets — the cost of options A/B (new error type + policy plumbing + UI knob, or extra Graph round-trip) isn't justified by observed frequency.
+
+**Acceptance (option C only):**
+1. Document the limitation in `docs/SPECS.md` under a "Known provider limitations — OneDrive" section: ZWJ-compound emoji filenames may 409; no workaround short of renaming the source file.
+2. On 409 `nameAlreadyExists` for a path that has no prior entry in `sync_entries`, emit a WARN log with filename + 409 detail, skip the file, continue the sync.
+3. No user-facing error, no policy knob, no new error type.
+
+Effort dropped from M to S. Revisit only if real-world telemetry surfaces the case often.
