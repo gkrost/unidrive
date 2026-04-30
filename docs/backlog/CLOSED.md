@@ -6831,3 +6831,110 @@ Pre-flight probe at relocation-plan time:
 
 - UD-277 (adaptive timeout) — orthogonal.
 - UD-279 (transport fitness warning) — same spirit at a higher level.
+
+---
+id: UD-271
+title: CLI flag placement — --verbose/-v rejected at subcommand level + misleading --version suggestion
+category: core
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 149e65c. scope=ScopeType.INHERIT on the top-level -v/--verbose option propagates the spec to every subcommand at picocli parse time. parent.verbose consumers (SyncCommand) keep working unchanged. 2 new test cases pin the contract. Silent --version exit on subcommands is a separate concern, deferred.
+opened: 2026-04-21
+chunk: core
+---
+### Problem
+
+Three related CLI flag anomalies observed in the 2026-04-21 session:
+
+**1. `-v` / `--verbose` rejected at subcommand level.**
+
+```
+PS> unidrive -p ds418play auth --verbose
+Unknown option: '--verbose'
+Possible solutions: --version
+```
+
+```
+PS> unidrive relocate --from … --to … -v
+Unknown option: '-v'
+Possible solutions: --version
+```
+
+The top-level `Main` at
+`core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:63-64`
+declares `@Option(names = ["-v", "--verbose"])`, but picocli does
+not automatically inherit top-level options on subcommands. The
+user must write `unidrive -v auth …` (flag before the subcommand
+name), which violates git-style / docker-style conventions where
+flags can appear anywhere. Worse, the "Possible solutions:
+--version" hint is actively misleading — users who accept the
+suggestion and run `auth --version` hit problem #2 below.
+
+**2. `--version` on subcommands silently prints nothing.**
+
+```
+PS> unidrive -p ds418play auth --version
+PS>                                      ← silent, exit 0
+```
+
+Every subcommand has `mixinStandardHelpOptions = true`, which
+installs `-V/--version` pointing at the command's own version
+provider. `AuthCommand` et al. don't supply one, so picocli
+prints an empty string and exits cleanly. Users who follow the
+"Possible solutions: --version" hint from problem #1 get zero
+feedback and assume the CLI is broken.
+
+**3. Ambiguous shadowing: `-v` vs `-V`.**
+
+Top-level `-v` = verbose; picocli's mixinStandardHelpOptions
+always installs `-V` = version. They differ only in case; easy
+to mis-type on the command line. Most tools now use `-V` = verbose
+and `--version` = version to avoid this collision, or don't alias
+version at all.
+
+### Fix
+
+1. **Make `--verbose` accepted on every subcommand.** Two options:
+   - Declare `-v/--verbose` on every subcommand individually with
+     the Kotlin mixin pattern (`@Mixin VerboseOption`). Picocli
+     then attaches it to each subcommand's spec.
+   - Use picocli's `@ParentCommand` + post-parse fixup: walk the
+     remaining args after subcommand dispatch and promote any
+     stray `-v/--verbose` back to the parent. Fragile.
+   The mixin path is cleanest.
+
+2. **Disable version on subcommands** (or supply a per-command
+   provider that delegates to the top-level version). Simplest:
+   change `mixinStandardHelpOptions = true` to explicit
+   `@Option(names=["-h","--help"], usageHelp=true)` on each
+   subcommand and omit the version mixin. Users run
+   `unidrive --version` at the top level.
+
+3. **Stop picocli's "Possible solutions" suggestion when the
+   suggestion is `--version`.** Override `UnmatchedArgumentException`
+   handling in `Main.run()` (or at the commandline level) to drop
+   `--version` from the suggestion list.
+
+### Acceptance
+
+- `unidrive auth --verbose` and `unidrive auth -v` both succeed,
+  producing the same verbose output as `unidrive -v auth`.
+- `unidrive relocate -v --from X --to Y` succeeds.
+- `unidrive auth --version` either prints the same banner as
+  `unidrive --version` or returns a useful error ("use
+  `unidrive --version` at the top level"); not a silent exit.
+- Unknown-arg error at a subcommand no longer suggests `--version`
+  when the user typed `--verbose`.
+
+### Related
+
+- Earlier CLI polish tickets (UD-237, UD-240) touched adjacent
+  ergonomics but not the flag-placement question.
+
+### Priority / effort
+
+Low priority, S effort. Not a correctness bug — users who know
+the convention can still use `unidrive -v <subcommand>`. UX polish
+that would matter to anyone learning the tool.
