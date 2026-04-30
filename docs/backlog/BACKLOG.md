@@ -480,61 +480,6 @@ opened: 2026-04-18
 Three behaviours the unit tests can't catch: (a) large-file chunked upload path (>250 MB for OneDrive, multipart for S3) — validates `UploadSession` resumability on simulated drops; (b) many-file (10k files with Delta pagination) — validates engine's state-DB growth + reconciler performance; (c) N cycles of `sync` on an unchanged tree — expects 0 actions on cycles 2..N (idempotency guard against ghost re-uploads). Use tmpfs for the test set; cap total size to stay within CI runner limits.
 
 ---
-id: UD-223
-title: Fast first-sync — `?token=latest` blind bootstrap + state.db reuse across profile rename
-category: core
-priority: high
-effort: M
-status: open
-code_refs:
-  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
-opened: 2026-04-18
-chunk: core
----
-User intuition during UD-712 (346 GB OneDrive, ~130 k items, ~80 % static): "most of the drive just sits there. Can we skip the 11-min first-sync enumeration?" Answer: state.db itself is not portable (it's bound to a specific drive ID + an opaque Graph-issued delta cursor + account-specific item IDs — so no cross-account reuse, no shipping to other users), but the underlying optimisation the user is asking for exists as a Graph-specific feature.
-
-## Two related optimisations
-
-### A. `?token=latest` blind bootstrap (OneDrive-specific)
-
-`GET /me/drive/root/delta?token=latest` returns in ≈1 s with a cursor that represents **now**, zero items enumerated. Subsequent delta calls return only changes since then. Unidrive would skip the 11-min walk entirely.
-
-**Tradeoff (must be loud in UX):** unidrive has no view of remote items that currently exist. Anything that only lives remotely stays invisible until it mutates and shows up in the next delta. For a mostly-static drive the user wants local-only additions to propagate (upload direction), which is fine. For users who want a full local mirror, they should NOT pick fast-bootstrap.
-
-**Surface:** new `unidrive -p x sync --fast-bootstrap` (or `profile add --fast-bootstrap` at profile-creation time). Logs emit a clear "using remote state snapshot as of 2026-04-18T12:34Z; items that existed before this timestamp will not be seen until next mutation" warning.
-
-**Provider matrix:**
-  * OneDrive / Graph: yes (`?token=latest`).
-  * Box, Dropbox (if added): yes (similar `cursor=latest` semantics).
-  * Rclone-wrapped backends: inherit whatever the upstream supports; rclone's own `--no-traverse` flag is the closest equivalent.
-  * S3, SFTP, WebDAV, HiDrive, Internxt: no — no server-maintained delta token exists. Fast-bootstrap flag is a no-op + warning on these.
-
-### B. state.db reuse across profile rename / restore (same account)
-
-If the user renames `onedrive-test` → `onedrive2` in config.toml and moves the profile dir, the existing cursor + sync_entries stay valid because drive ID + item IDs don't change. Same for recovering from an accidental `state.db` delete if a backup exists. Today, unidrive simply refuses an invalid profile name and emits no hint that an existing state dir under a different name could be adopted.
-
-**Surface:** at profile resolve time, if `state.db` for this profile name doesn't exist but a sibling profile dir has a cursor tagged with the same drive ID (readable from token.json → a one-line Graph call), offer: `Profile 'onedrive2' is new but account matches existing profile 'onedrive-test' (drive id 3D49B6B2BAE9CB17). Reuse its sync state? (y/N)`. On `y`, rename the on-disk dir. On N / headless, fresh state.
-
-## Observed numbers from UD-712 to inform the feature
-
-  * Full first-sync enumeration on 346 GB / 129 933 items: **695 s** (2026-04-18 run).
-  * Graph Delta metadata throughput observed: ~187 items/s, ~1.8 MB/s (metadata JSON).
-  * For a user with 1 M items that's ~90 min vs 1 s via `?token=latest`. Not a subtle win.
-
-## Related
-
-  * UD-713 (first-sync ETA probe) — `?token=latest` makes the ETA a moot point; the features overlap but both stay in-scope because an operator who wants a full mirror still needs an ETA.
-  * UD-220 (consequences docs) — fast-bootstrap's invisibility-until-mutation tradeoff belongs in the Consequences section.
-  * UD-222 (adopt writes zeros) — orthogonal; `?token=latest` means the adopt-placeholder storm wouldn't happen at all on a fresh profile because remote items are unknown.
-
-## Progress
-
-  * **Part A landed in `7211b25` (2026-04-19):** `--fast-bootstrap` CLI flag + per-profile `fast_bootstrap` config key + `Capability.FastBootstrap` + `CloudProvider.deltaFromLatest()` + OneDrive override via `GraphApiService.getDelta(fromLatest=true)`. Non-OneDrive providers log a WARN and fall through. Engine promotes the adopted cursor directly to `delta_cursor` (not `pending_cursor`) because `syncOnce` short-circuits on empty action list. Tests: `DeltaFromLatestTest` (MockEngine URL assertions), `SyncEngineTest` UD-223 trio, `SyncConfigTest` round-trip.
-  * **Part B still pending:** state.db reuse across profile rename when the drive ID in `token.json` matches an existing sibling profile's cursor. Not yet scoped into a commit; ticket stays `open`.
-
----
 id: UD-813
 title: Audit all tests with challenge-test-assertion rubric; triage into healthy/impl-anchored/misleading/delete
 category: tests
@@ -2058,3 +2003,86 @@ but smaller than the full retry-loop adoption (UD-330).
   error fields.
 - **UD-228** (umbrella) — the cross-provider audit ticket this
   follow-up was filed against.
+---
+id: UD-295
+title: state.db reuse across profile rename / restore (UD-223 Part B)
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-04-30
+---
+**Split out from UD-223 Part B.** UD-223 Part A (`?token=latest`
+blind bootstrap) landed in `7211b25`; this ticket carries the
+remaining "state.db reuse across profile rename" work.
+
+## Problem
+
+The user renames `onedrive-test` → `onedrive2` in `config.toml` and
+moves the profile dir, OR recovers from an accidental `state.db`
+delete with a backup. The existing cursor + sync_entries are still
+valid because OneDrive's drive ID and item IDs don't change. Today,
+unidrive simply notices `state.db` is missing and re-enumerates
+the drive — burning the 11-minute first-sync time + Graph throttle
+budget for nothing.
+
+## Required surface
+
+At profile-resolve time, when `state.db` for this profile name
+doesn't exist:
+
+1. Authenticate the current profile and call a new method
+   `CloudProvider.accountFingerprint(): String?` (default null;
+   OneDrive returns `getDrive().id`, e.g. `3D49B6B2BAE9CB17`).
+2. Walk sibling profile dirs under `<configBaseDir>/<profile-name>/`
+   looking for ones whose `state.db.sync_state["account_fingerprint"]`
+   matches the current fingerprint.
+3. If a match is found and the run is interactive, prompt:
+   ```
+   Profile 'onedrive2' is new but the OneDrive account matches
+   existing profile 'onedrive-test' (drive id 3D49B6B2BAE9CB17).
+   Reuse its sync state? (y/N)
+   ```
+4. On `y` — rename the source dir to the new profile name (atomic;
+   verify no in-flight sync is using it via `ProcessLock`).
+5. On `N` or headless — fresh state. Optionally emit a one-line
+   WARN with the actionable hint so the user can do it manually.
+
+## Foundation work (prerequisite)
+
+- `CloudProvider` gains `suspend fun accountFingerprint(): String? =
+  null` — default no-op for providers that don't have a stable
+  account ID concept (LocalFs, SFTP, WebDAV-without-quota).
+- `OneDriveProvider` overrides to return `graphApi.getDrive().id`.
+- HiDrive + Internxt: similar overrides — HiDrive's user ID,
+  Internxt's user_uuid. (Filed as follow-up if not in initial PR.)
+- A new `sync_state["account_fingerprint"]` key written on first
+  successful authenticate + every subsequent (cheap idempotent
+  upsert).
+
+## Acceptance
+
+- Renaming a profile and re-running `unidrive sync` adopts the
+  existing state.db on user `y` confirmation.
+- Headless run with no matching sibling: pre-fix behaviour (fresh
+  enumeration).
+- Headless run with matching sibling: pre-fix behaviour + new
+  WARN one-liner pointing the user at the manual move.
+- Test: 2-profile fixture with the same fake fingerprint;
+  Main.resolveProfile returns the renamed profile dir on `y`,
+  rejects on `N`.
+
+## Related
+
+- **UD-223** — parent. Part A (`?token=latest`) is the perf win
+  that makes profile rename / reuse the natural follow-up.
+- **UD-272** — closed; ProcessLock surfaces holder PID. Required
+  for the atomic-rename safety check.
+- **UD-280** — closed lesson. The dir-walk should NOT confuse
+  benign JVM-internal files for profile state.
+
+## Priority / effort
+
+**Medium priority, M effort.** UX nicety, not a correctness bug.
+Worth scheduling alongside any future "profile management" work
+(UD-236 three-verb model, UD-233 tray brainstorm).
