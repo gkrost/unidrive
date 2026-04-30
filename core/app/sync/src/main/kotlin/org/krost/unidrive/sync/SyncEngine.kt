@@ -137,6 +137,25 @@ class SyncEngine(
             }
         reporter.onScanProgress("local", localChanges.size)
 
+        // UD-297: empty-local + populated-DB sanity check. Catches the
+        // wrong-sync_root case (user pointed at an empty directory while
+        // the state DB knows about thousands of remote entries) before
+        // the reconciler turns it into a wall of del-remote actions.
+        // Fires in dry-run too — that's where the user is most likely
+        // to notice and the system has the least to lose by being loud.
+        if (!forceDelete && db.getEntryCount() > 10 && isSyncRootEffectivelyEmpty()) {
+            val msg =
+                "Local sync_root '$syncRoot' is empty, but state DB knows " +
+                    "${db.getEntryCount()} entries. sync_root probably points at the " +
+                    "wrong directory. Re-run with --force-delete if the local data was " +
+                    "intentionally wiped."
+            if (dryRun) {
+                reporter.onWarning(msg)
+            } else {
+                throw IllegalStateException(msg)
+            }
+        }
+
         // Phase 2: Reconcile
         val allActions = reconciler.reconcile(remoteChanges, localChanges)
 
@@ -1039,6 +1058,15 @@ class SyncEngine(
             ancestors.add("/" + parts.subList(0, i).joinToString("/"))
         }
         return ancestors
+    }
+
+    // UD-297: literally-empty syncRoot detector. Narrow on purpose — any
+    // child entry (file, folder, hidden) makes this return false. The
+    // broader "high deletion percentage" case is UD-298.
+    private fun isSyncRootEffectivelyEmpty(): Boolean {
+        if (!Files.exists(syncRoot)) return true
+        if (!Files.isDirectory(syncRoot)) return true
+        return Files.newDirectoryStream(syncRoot).use { !it.iterator().hasNext() }
     }
 
     private fun logFailure(

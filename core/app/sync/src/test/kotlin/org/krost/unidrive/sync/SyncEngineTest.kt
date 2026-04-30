@@ -332,6 +332,149 @@ class SyncEngineTest {
             )
         }
 
+    // UD-297 — empty-local + populated-DB sanity check
+
+    private class RecordingReporter : ProgressReporter {
+        val warnings = mutableListOf<String>()
+
+        override fun onScanProgress(
+            phase: String,
+            count: Int,
+        ) {}
+
+        override fun onActionCount(total: Int) {}
+
+        override fun onActionProgress(
+            index: Int,
+            total: Int,
+            action: String,
+            path: String,
+        ) {}
+
+        override fun onTransferProgress(
+            path: String,
+            bytesTransferred: Long,
+            totalBytes: Long,
+        ) {}
+
+        override fun onSyncComplete(
+            downloaded: Int,
+            uploaded: Int,
+            conflicts: Int,
+            durationMs: Long,
+            actionCounts: Map<String, Int>,
+        ) {}
+
+        override fun onWarning(message: String) {
+            warnings.add(message)
+        }
+    }
+
+    private fun engineWithReporter(reporter: ProgressReporter) =
+        SyncEngine(
+            provider = provider,
+            db = db,
+            syncRoot = syncRoot,
+            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+            reporter = reporter,
+        )
+
+    private fun seedDbEntries(count: Int) {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        for (i in 0 until count) {
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/seeded-$i.txt",
+                    remoteId = "id-$i",
+                    remoteHash = "hash-$i",
+                    remoteSize = 100,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 100,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+        }
+        // Seed a non-null delta cursor so isFullSync is false and
+        // detectMissingAfterFullSync doesn't convert the seeded entries into
+        // remote-deleted CloudItems (which would turn DeleteRemote actions
+        // into RemoveEntry pairs and bypass the safeguards under test).
+        db.setSyncState("delta_cursor", "seeded-cursor")
+    }
+
+    @Test
+    fun `UD-297 dry-run with empty sync_root and populated DB warns instead of throwing`() =
+        runTest {
+            seedDbEntries(50)
+            provider.deltaItems = emptyList()
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = true)
+            assertTrue(
+                reporter.warnings.any { it.contains("sync_root") && it.contains("is empty") },
+                "expected empty-sync_root warning, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-297 non-dry-run with empty sync_root and populated DB throws`() =
+        runTest {
+            seedDbEntries(50)
+            provider.deltaItems = emptyList()
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("sync_root"))
+            assertTrue(ex.message!!.contains("is empty"))
+        }
+
+    @Test
+    fun `UD-297 force-delete bypasses empty-sync_root guard`() =
+        runTest {
+            seedDbEntries(50)
+            provider.deltaItems = emptyList()
+            // forceDelete should suppress the abort even though local is empty.
+            // The deletes themselves are still subject to the percentage safeguard,
+            // but force-delete bypasses that too.
+            engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = false, forceDelete = true)
+            // No exception means the guard was bypassed; specifics of what got
+            // deleted are out of scope here.
+        }
+
+    @Test
+    fun `UD-297 sync_root with at least one file does not trigger empty-guard`() =
+        runTest {
+            seedDbEntries(50)
+            Files.writeString(syncRoot.resolve("any.txt"), "x")
+            provider.deltaItems = emptyList()
+            val reporter = RecordingReporter()
+            try {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            } catch (_: IllegalStateException) {
+                // Tolerate other guards (UD-298 not in scope here).
+            }
+            assertFalse(
+                reporter.warnings.any { it.contains("is empty") },
+                "empty-sync_root warning fired even though sync_root is not empty",
+            )
+        }
+
+    @Test
+    fun `UD-297 fresh sync with empty DB and empty sync_root does not warn`() =
+        runTest {
+            // No seedDbEntries — DB starts empty
+            provider.deltaItems = emptyList()
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = true)
+            assertFalse(
+                reporter.warnings.any { it.contains("is empty") },
+                "empty-sync_root warning fired on a fresh sync where there's nothing to delete",
+            )
+        }
+
     // UD-223 Part A — fast-bootstrap
 
     private fun bootstrapEngine() =
