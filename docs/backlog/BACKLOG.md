@@ -1963,3 +1963,166 @@ say "Internxt client appears stopped" instead of a generic IOError.
 - Two-way sync of placeholders (treating the foreign cloud as remote
   and a *different* unidrive provider as another remote). Different
   feature entirely.
+---
+id: UD-736
+title: LocalScanner: override visitFileFailed to log+continue, expose skipped count
+category: tooling
+priority: medium
+effort: XS
+status: open
+opened: 2026-04-30
+---
+**Why:** `LocalScanner.scan()` calls `Files.walkFileTree(syncRoot,
+SimpleFileVisitor<Path>)` without overriding `visitFileFailed`. Default
+behaviour: re-throw the IOException and abort the walk. That's loud
+(good) but a *partial* walk that succeeded for thousands of entries
+before hitting one bad one would lose all visited state. Worse: any
+Cloud Files API recall failure (foreign client offline — see UD-900)
+on a single placeholder would kill the whole sync's local scan with
+a generic IOException.
+
+**What:** Override `visitFileFailed(file, exc)`:
+
+* `log.warn("Skipping unreadable file {} ({}: {})", file, exc.javaClass.simpleName, exc.message)`
+* increment a per-scan skipped counter
+* return `FileVisitResult.CONTINUE` (don't kill the walk)
+
+Surface the count via `LocalScanner.lastScanSkipped: Int` (or include
+it in a small data class wrapping `Map<String, ChangeState>`) so
+SyncEngine can include it in the dry-run / sync-complete summary.
+
+Same `visitFileFailed` should also fire for `preVisitDirectory`-equivalent
+errors — leave the directory case to the OS default (most directory
+read failures are non-recoverable).
+
+**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt`
+
+**Tests:**
+
+* Walk a tree where one file throws on visit (mock attribute read failure)
+  — assert remaining entries still in result, skipped count == 1, log
+  warning emitted.
+* Empty tree → 0 skipped.
+* All-files-fail → result map empty, skipped == file count.
+
+**Defensive depth-of-coverage angle:** UD-900's foreign-client-offline
+mode probably surfaces here first; this ticket lands the catch
+mechanism, UD-900 follow-ups can classify the specific exception types.
+---
+id: UD-737
+title: --upload-only should NOT plan DeleteRemote by default; require --propagate-deletes opt-in
+category: tooling
+priority: medium
+effort: S
+status: open
+opened: 2026-04-30
+---
+**Why:** `--upload-only` currently includes `DeleteRemote` in its
+direction filter (`SyncEngine.kt:151-159`). Defensible reading:
+"local is source of truth, push local changes (deletions included)
+to remote." But the flag *name* reads as a one-way uploader, and the
+UD-296/297/299 thread surfaced the exact footgun: a misconfigured
+sync_root produced 65 237 `del-remote` actions under
+`--upload-only --dry-run`. UD-297/298/299 add safety nets, but the
+underlying semantic mismatch remains — the safety nets fire *because*
+the flag's default behaviour is hostile.
+
+**What:** Change `--upload-only` direction filter to:
+
+* keep `Upload`, `CreateRemoteFolder`, `MoveRemote`, `Conflict`,
+  `RemoveEntry`
+* **drop** `DeleteRemote`
+
+Add a new opt-in flag `--propagate-deletes` (mutually compatible with
+`--upload-only` only) that re-enables `DeleteRemote` planning.
+
+**Migration:** users who relied on the old behaviour need to add the
+new flag. Document in CHANGELOG with a clear before/after example.
+Search for any internal tooling / scripts that pass `--upload-only` and
+update them.
+
+**Where:**
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  direction-filter block.
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`
+  add the new flag, plumb to engine.
+
+**Tests:**
+
+* `--upload-only` with locally-deleted entries → no DeleteRemote in
+  action list.
+* `--upload-only --propagate-deletes` → DeleteRemote present.
+* `--propagate-deletes` without `--upload-only` → ignored or rejected
+  (decide; probably rejected with a clear error).
+* Existing `--upload-only` tests need to be updated to either set the
+  new flag or assert deletes-are-skipped.
+
+**Open question:** symmetric change for `--download-only`? Currently
+it includes `DeleteLocal` (line 165). Same semantic concern. Decide
+together to keep the UX consistent — but punt the `--download-only`
+change to its own ticket so the upload semantic can land first.
+
+**Out of scope:** changing default sync direction. Only filter-set
+change for the explicit flags.
+---
+id: UD-738
+title: Allow --reset --dry-run as virtual reset (in-memory shadow DB; leave state.db on disk untouched)
+category: tooling
+priority: low
+effort: S
+status: open
+opened: 2026-04-30
+---
+**Why:** `--reset --dry-run` is currently rejected at parse time
+(UD-243) on the basis that "--reset clears sync state on disk, which
+--dry-run cannot undo." Strictly correct under the literal reading,
+but it makes the natural workflow "preview the plan after wiping the
+DB" awkward — current workaround is `Move-Item state.db state.db.bak;
+sync --dry-run; sync` (used by the user during the UD-296/297/299
+investigation).
+
+**What:** Reinterpret `--reset --dry-run` as a *virtual* reset:
+
+* don't touch `state.db` on disk
+* construct the engine with an empty in-memory DB view
+* plan as if state were empty
+* emit normal dry-run output
+
+Implementation options, listed in increasing complexity:
+
+a. **Snapshot-and-restore:** at start of run, copy `state.db` to
+   `state.db.dryrun-snapshot`, call `db.resetAll()`, run, then
+   restore the snapshot. Simple, but adds disk I/O and a window where
+   a crash leaves the user holding a half-restored DB.
+b. **In-memory shadow DB:** open a fresh `:memory:` SQLite DB for
+   this run, leave the on-disk one alone. Cleanest semantically.
+c. **DB-bypass flag:** thread a `pretendEmpty: Boolean` through
+   `StateDatabase` that makes reads return empty regardless of
+   actual contents. Invasive; bug surface in normal use.
+
+**Recommend (b).** Confirm with a small spike that opening
+`StateDatabase("file::memory:?cache=shared")` doesn't break the
+schema-creation path in `initialize()`.
+
+**Where:**
+
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`
+  remove the parse-time rejection (lines 114–118 region), branch on
+  `dryRun && reset` to wire up the virtual-reset flow.
+* Possibly `StateDatabase.kt` if `:memory:` mode needs a constructor
+  variant.
+
+**Tests:**
+
+* `--reset --dry-run` runs without throwing, prints dry-run summary,
+  leaves `state.db` unchanged on disk (compare bytes / mtime).
+* Subsequent normal run still sees the original DB state.
+* `--reset` (without dry-run) still wipes for real.
+* UD-299 sync_root drift detector still fires correctly under the
+  shadow DB (the comparison should use the *real* db's stored
+  sync_root, not the shadow's empty one — make sure the wiring
+  doesn't accidentally make UD-299 silent).
+
+**Out of scope:** other --dry-run-with-X mutexes. Audit them
+separately if this lands cleanly.
