@@ -96,11 +96,31 @@ class OneDriveProvider(
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val fileSize = Files.size(localPath)
-        return if (fileSize <= 4 * 1024 * 1024) {
-            val content = Files.readAllBytes(localPath)
-            graphApi.uploadSimple(remotePath, content).toCloudItem()
-        } else {
-            graphApi.uploadLargeFile(localPath, remotePath, onProgress).toCloudItem()
+        return try {
+            if (fileSize <= 4 * 1024 * 1024) {
+                val content = Files.readAllBytes(localPath)
+                graphApi.uploadSimple(remotePath, content).toCloudItem()
+            } else {
+                graphApi.uploadLargeFile(localPath, remotePath, onProgress).toCloudItem()
+            }
+        } catch (e: GraphApiException) {
+            // UD-307 (Option C): tag the OneDrive ZWJ-compound emoji collision
+            // case with a targeted WARN so postmortem can grep it apart from
+            // the generic SyncEngine "Upload failed" line. We re-throw so
+            // SyncEngine treats it as a per-file failure (one error, sync
+            // continues — the existing pass-2 behaviour). No auto-rename, no
+            // policy knob — see docs/SPECS.md §3.1 for the full rationale
+            // and the 14 codepoint families that DO round-trip cleanly.
+            if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
+                log.warn(
+                    "UD-307: OneDrive rejected '{}' with nameAlreadyExists — likely a " +
+                        "ZWJ-compound emoji filename or other server-side normalisation " +
+                        "collision. See docs/SPECS.md §3.1. Sync continues; rename the " +
+                        "source file to work around.",
+                    remotePath,
+                )
+            }
+            throw e
         }
     }
 
