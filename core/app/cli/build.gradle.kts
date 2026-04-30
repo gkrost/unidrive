@@ -217,7 +217,23 @@ fun deployWindows(
         |# UD-270: PowerShell launcher. Invoked by ${'$'}binDir\unidrive.cmd
         |# so CTRL-C from the user's shell exits cleanly without cmd.exe's
         |# trailing "Terminate batch job?" prompt.
-        |& java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" @args
+        |#
+        |# Args go through a single-quoted array + splat so PowerShell 5.1's
+        |# parser doesn't split tokens at `.`. Pre-fix the inline form
+        |# `& java -Dstdout.encoding=UTF-8 ...` became `-Dstdout` +
+        |# `.encoding=UTF-8` after PowerShell tokenisation; Java treated the
+        |# trailing fragment as a class name and crashed with
+        |# "Hauptklasse .encoding=UTF-8 konnte nicht gefunden oder geladen
+        |# werden". Single-quoted arrays bypass PowerShell's parser entirely.
+        |${'$'}javaArgs = @(
+        |    '-Xmx6g'
+        |    '-Dstdout.encoding=UTF-8'
+        |    '-Dstderr.encoding=UTF-8'
+        |    '--enable-native-access=ALL-UNNAMED'
+        |    '-jar'
+        |    '$targetJar'
+        |)
+        |& java @javaArgs @args
         |exit ${'$'}LASTEXITCODE
         """.trimMargin() + "\r\n",
     )
