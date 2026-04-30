@@ -8885,3 +8885,89 @@ a third copy somewhere.
 - **UD-334** (parent) — keeps Part B scope.
 - **UD-333** (sibling) — introduced the duplication being removed.
 - **UD-228** (umbrella) — cross-provider audit.
+
+---
+id: UD-747
+title: UD-744 slice: bucketed ETA from historical scan timings (no count probes)
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 0e40a46. Heartbeat shows ', ETA: <bucket>' on second+ scans. last_scan_secs_remote/local persisted in sync_state; bucketed per UD-713 (<5m / 5-15m / 15-60m / >1h). Per-provider count probes remain in UD-744.
+opened: 2026-04-30
+---
+**UD-744 minimum-viable slice — bucketed ETA from historical scan timings.**
+
+UD-744 specifies five parts:
+1. Per-provider total-count probe.
+2. DB-derived total fallback.
+3. Bucketed ETA computation.
+4. Display in heartbeat.
+5. Historical timings persisted in state.db.
+
+This sub-ticket covers parts 3+4+5 only — the path that needs zero
+per-provider work and ships ETA from the second scan onwards.
+
+## Approach
+
+On the **second and later** sync runs, we already know roughly how
+long the local + remote scan phases took last time (via
+`sync_state["last_scan_secs_local"]` / `last_scan_secs_remote`).
+Compute ETA as `max(0, last_secs − elapsed_secs)` and bucket per
+the UD-713 spec (`<5m / 5-15m / 15-60m / >1h`).
+
+First-run is silently absent (existing behaviour: throughput
+appears once we have ≥100 items + ≥5s elapsed; ETA stays absent
+until persisted timings exist).
+
+## Where
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt`
+  — wire `last_scan_secs_local` / `last_scan_secs_remote` keys via
+  the existing `getSyncState()` / `putSyncState()` helpers (no
+  schema change; sync_state is key-value).
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  — record start-of-scan timestamp per phase; on phase-complete,
+  upsert the elapsed seconds.
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt`
+  — extend the heartbeat formatter: if `lastScanSecs[phase]` is
+  non-null and the phase has been running ≥1s, append
+  `, ETA: <bucket>`. Buckets per UD-713: `<5m`, `5-15m`, `15-60m`,
+  `>1h`.
+- New reporter signal: pass the historical hint via existing
+  `onScanProgress` augmentation OR a new `onScanHistoricalHint`
+  call. Prefer the latter to keep `onScanProgress` slim.
+
+## Acceptance
+
+- Run a sync, complete it, run a second sync — heartbeat shows
+  `ETA: <bucket>`.
+- First-time sync has no ETA (missing `lastScanSecs` key).
+- `--reset` does not reset historical timings (they're a
+  measurement, not state).
+- Bucket boundaries match UD-713: `<5m`, `5-15m`, `15-60m`, `>1h`.
+- Tests:
+  - persistence round-trip (StateDatabase)
+  - bucket-boundary tests (CliProgressReporter)
+  - "no ETA on first run" test
+
+## Out of scope (remains in UD-744)
+
+- Per-provider count probes (`/me/drive/root?$count=true` for
+  Graph, `/files/count` for Internxt).
+- Bucketed ETA derived from `target − count` extrapolation. Only
+  the historical-timing path lands here.
+- Scale-aware tuning (huge dataset: bucket should adapt).
+
+## Priority / effort
+
+**Medium priority, S effort.** ~3 files + tests. Pure additive;
+no provider work; no schema changes.
+
+## Related
+
+- **UD-744** (parent) — keeps the count-probe + DB-fallback scope.
+- **UD-713** (sibling, closed) — defined the bucket layout.
+- **UD-742** (sibling, closed) — provided the heartbeat hooks
+  this slice extends.
