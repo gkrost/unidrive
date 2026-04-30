@@ -8032,3 +8032,63 @@ and then it's a hard OOM crash — not a graceful failure.
   byte[] for >2 GB downloads on a non-downloadFile path. Likely
   the same anti-pattern lurks on the OneDrive `simple-download`
   fallback that UD-329 didn't reach. Worth checking sibling-style.
+
+---
+id: UD-737
+title: --upload-only should NOT plan DeleteRemote by default; require --propagate-deletes opt-in
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit 2ca29f5. Push-additive default for --upload-only; --propagate-deletes opts back in. CLI mutex + banner surface. propagateDeletes plumbed through SyncEngine constructor; UPLOAD filter conditionally drops DeleteRemote. 3 unit tests added.
+opened: 2026-04-30
+---
+**Why:** `--upload-only` currently includes `DeleteRemote` in its
+direction filter (`SyncEngine.kt:151-159`). Defensible reading:
+"local is source of truth, push local changes (deletions included)
+to remote." But the flag *name* reads as a one-way uploader, and the
+UD-296/297/299 thread surfaced the exact footgun: a misconfigured
+sync_root produced 65 237 `del-remote` actions under
+`--upload-only --dry-run`. UD-297/298/299 add safety nets, but the
+underlying semantic mismatch remains — the safety nets fire *because*
+the flag's default behaviour is hostile.
+
+**What:** Change `--upload-only` direction filter to:
+
+* keep `Upload`, `CreateRemoteFolder`, `MoveRemote`, `Conflict`,
+  `RemoveEntry`
+* **drop** `DeleteRemote`
+
+Add a new opt-in flag `--propagate-deletes` (mutually compatible with
+`--upload-only` only) that re-enables `DeleteRemote` planning.
+
+**Migration:** users who relied on the old behaviour need to add the
+new flag. Document in CHANGELOG with a clear before/after example.
+Search for any internal tooling / scripts that pass `--upload-only` and
+update them.
+
+**Where:**
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  direction-filter block.
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`
+  add the new flag, plumb to engine.
+
+**Tests:**
+
+* `--upload-only` with locally-deleted entries → no DeleteRemote in
+  action list.
+* `--upload-only --propagate-deletes` → DeleteRemote present.
+* `--propagate-deletes` without `--upload-only` → ignored or rejected
+  (decide; probably rejected with a clear error).
+* Existing `--upload-only` tests need to be updated to either set the
+  new flag or assert deletes-are-skipped.
+
+**Open question:** symmetric change for `--download-only`? Currently
+it includes `DeleteLocal` (line 165). Same semantic concern. Decide
+together to keep the UX consistent — but punt the `--download-only`
+change to its own ticket so the upload semantic can land first.
+
+**Out of scope:** changing default sync direction. Only filter-set
+change for the explicit flags.
