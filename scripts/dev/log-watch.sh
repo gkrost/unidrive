@@ -121,6 +121,7 @@ summary() {
   echo "  array-of-size (UD-329 class): $(count_pattern 'Can.t create an array of size' "$files")"
   echo "  MDC missing (\\[?\\?\\?\\?\\?\\?\\?\\]):     $(count_pattern '\[\?\?\?\?\?\?\?\]' "$files")"
   echo "  Connection reset / aborted:   $(count_pattern 'Connection (reset|aborted)|Verbindung wurde' "$files")"
+  echo "  net_retry_reset (UD-278):     $(count_pattern 'I/O error \(attempt' "$files")"
   echo
   echo "=== sync scan boundaries ==="
   scan_summary "$files"
@@ -151,6 +152,7 @@ summary_json() {
   arraysize=$(count_pattern 'Can.t create an array of size' "$files")
   mdcmissing=$(count_pattern '\[\?\?\?\?\?\?\?\]' "$files")
   connreset=$(count_pattern 'Connection (reset|aborted)|Verbindung wurde' "$files")
+  netretryreset=$(count_pattern 'I/O error \(attempt' "$files")
 
   cat <<EOF
 {
@@ -168,7 +170,8 @@ summary_json() {
   "request_4xx_5xx": $req4xx5xx,
   "array_of_size_oom": $arraysize,
   "mdc_missing": $mdcmissing,
-  "connection_reset_or_aborted": $connreset
+  "connection_reset_or_aborted": $connreset,
+  "net_retry_reset": $netretryreset
 }
 EOF
 }

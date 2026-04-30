@@ -51,6 +51,11 @@ class HttpRetryBudget(
     private val globalResumeAfter = AtomicLong(0)
     private val concurrency = AtomicInteger(maxConcurrency)
 
+    // UD-278: counters for net-retry observability. log-watch.sh counts
+    // "I/O error (attempt" lines today; the budget keeps the same numbers
+    // available in-process for tests and future runtime metrics.
+    private val ioRetryCount = AtomicInteger(0)
+
     // Initialise well below any real epoch-ms clock so the first awaitSlot doesn't incur a
     // spurious minSpacingMs wait: `prev + minSpacingMs` stays below `clock()` on the first
     // call, so myStart = clock() and spacingWait = 0.
@@ -161,6 +166,25 @@ class HttpRetryBudget(
         return minSpacingMs
     }
 
+    /**
+     * UD-278: how many `IOException` retries were observed since process
+     * start. Field exposed for tests and `unidrive log` metrics.
+     */
+    fun ioRetryCount(): Int = ioRetryCount.get()
+
+    /**
+     * UD-278: caller invokes after a retry has been logged but before the
+     * next attempt fires. Distinct from [recordThrottle] (HTTP-status
+     * 429/503) — these are TCP-level events: connection-reset,
+     * broken-pipe, premature EOF, socket-timeout, on-the-wire connection
+     * close mid-body. Doesn't change concurrency; the surfacing into
+     * `unidrive.log` via the WebDav / OneDrive retry loops is what
+     * `unidrive-log-anomalies` greps for.
+     */
+    fun recordIoRetry() {
+        ioRetryCount.incrementAndGet()
+    }
+
     private fun pruneOldThrottles(now: Long) {
         while (true) {
             val head = recentThrottles.peekFirst() ?: break
@@ -169,6 +193,54 @@ class HttpRetryBudget(
         }
         if (recentThrottles.isEmpty()) {
             lastRetryAfterInWindowMs.set(0)
+        }
+    }
+
+    companion object {
+        /**
+         * UD-278: classify an [IOException] as "another attempt is worth trying"
+         * versus terminal. Conservatively narrow to known transient TCP failures —
+         * `UnknownHostException` (DNS misconfig) and SSL handshake errors
+         * (cert / protocol misconfig) are NOT transient and should propagate to
+         * the caller.
+         *
+         * Retriable taxonomy:
+         *  - [java.net.SocketTimeoutException] — read or connect timer fired.
+         *  - `org.apache.hc.core5.http.ConnectionClosedException` — Apache5
+         *    detected the server closed the socket mid-response. Common on
+         *    DSM mod_dav under load and the OneDrive Azure CDN edge.
+         *  - [java.net.SocketException] — covers "Connection reset",
+         *    "Broken pipe", and the Windows TCP RST family
+         *    (WSAECONNABORTED / WSAECONNRESET).
+         *  - Localised Windows messages: matches `aborted` / `reset` /
+         *    "Verbindung wurde" (German Windows TCP RST surface).
+         *
+         * Non-retriable:
+         *  - [java.net.UnknownHostException] — typo / DNS down.
+         *  - [javax.net.ssl.SSLPeerUnverifiedException] — cert mismatch.
+         *  - [javax.net.ssl.SSLHandshakeException] — protocol / cert version mismatch.
+         *
+         * The implementation mirrors the per-provider helpers (UD-288 for WebDAV).
+         * Surfacing it on the shared budget lets HiDrive / Internxt / S3 / Rclone
+         * adopt the same shape under UD-330 without re-deriving the taxonomy.
+         */
+        fun isRetriableIoException(e: java.io.IOException): Boolean {
+            if (e is java.net.SocketTimeoutException) return true
+            // Apache5's ConnectionClosedException is matched by canonical name
+            // so :app:core doesn't drag in the httpclient5 transitively. Per-
+            // provider modules already have it on the classpath.
+            if (e.javaClass.canonicalName == "org.apache.hc.core5.http.ConnectionClosedException") return true
+            if (e is java.net.UnknownHostException) return false
+            if (e is javax.net.ssl.SSLPeerUnverifiedException) return false
+            if (e is javax.net.ssl.SSLHandshakeException) return false
+            if (e is java.net.SocketException) return true
+            val msg = e.message ?: return false
+            return msg.contains("aborted", ignoreCase = true) ||
+                msg.contains("reset", ignoreCase = true) ||
+                msg.contains("broken pipe", ignoreCase = true) ||
+                msg.contains("premature", ignoreCase = true) ||
+                // German Windows TCP RST surface
+                msg.contains("Verbindung wurde", ignoreCase = true)
         }
     }
 }

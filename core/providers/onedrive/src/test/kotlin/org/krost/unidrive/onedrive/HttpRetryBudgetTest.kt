@@ -278,4 +278,61 @@ class HttpRetryBudgetTest {
         }
         assertEquals(3, b.currentConcurrency(), "Concurrency should cap at maxConcurrency")
     }
+
+    // -- UD-278: IOException retry classification + counter --------------------
+    //
+    // The taxonomy mirrors WebDav's UD-288 isRetriableIoException helper.
+    // Lifting it to HttpRetryBudget.companion lets every provider adopt the
+    // same shape (UD-330 follow-up). Tests pin both the include (transient
+    // TCP failures) and exclude (DNS / SSL misconfig) cases so a future
+    // taxonomy edit can't silently flip a class.
+
+    @Test
+    fun `UD-278 - isRetriableIoException - transient TCP failures retry`() {
+        // SocketTimeoutException — read or connect timer fired.
+        assertTrue(HttpRetryBudget.isRetriableIoException(java.net.SocketTimeoutException("read timed out")))
+        // SocketException — covers connection reset, broken pipe.
+        assertTrue(HttpRetryBudget.isRetriableIoException(java.net.SocketException("Connection reset")))
+        assertTrue(HttpRetryBudget.isRetriableIoException(java.net.SocketException("Broken pipe")))
+    }
+
+    @Test
+    fun `UD-278 - isRetriableIoException - localised Windows TCP RST messages match`() {
+        // Plain English "aborted" — Windows WSAECONNABORTED surface.
+        assertTrue(HttpRetryBudget.isRetriableIoException(java.io.IOException("Connection aborted")))
+        // German Windows: "Eine bestehende Verbindung wurde softwaregesteuert..."
+        assertTrue(
+            HttpRetryBudget.isRetriableIoException(
+                java.io.IOException(
+                    "Eine bestehende Verbindung wurde softwaregesteuert durch den Hostcomputer abgebrochen",
+                ),
+            ),
+        )
+        // Premature EOF mid-body.
+        assertTrue(HttpRetryBudget.isRetriableIoException(java.io.IOException("premature end of stream")))
+    }
+
+    @Test
+    fun `UD-278 - isRetriableIoException - misconfig classes do NOT retry`() {
+        // DNS misconfig — retrying won't fix it.
+        assertEquals(false, HttpRetryBudget.isRetriableIoException(java.net.UnknownHostException("nope.invalid")))
+        // SSL handshake — protocol/cert mismatch, retry won't fix.
+        assertEquals(false, HttpRetryBudget.isRetriableIoException(javax.net.ssl.SSLHandshakeException("bad cert")))
+        assertEquals(
+            false,
+            HttpRetryBudget.isRetriableIoException(javax.net.ssl.SSLPeerUnverifiedException("hostname mismatch")),
+        )
+        // Generic IOException with no clue — conservative default is don't retry.
+        assertEquals(false, HttpRetryBudget.isRetriableIoException(java.io.IOException("???")))
+    }
+
+    @Test
+    fun `UD-278 - recordIoRetry counter accumulates`() {
+        val b = HttpRetryBudget(maxConcurrency = 4)
+        assertEquals(0, b.ioRetryCount())
+        b.recordIoRetry()
+        b.recordIoRetry()
+        b.recordIoRetry()
+        assertEquals(3, b.ioRetryCount())
+    }
 }
