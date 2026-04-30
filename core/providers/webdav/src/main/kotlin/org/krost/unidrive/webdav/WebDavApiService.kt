@@ -17,6 +17,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.io.IOException
@@ -305,29 +306,37 @@ open class WebDavApiService(
             // right safety property for "completely stuck" reads. (UD-277
             // policy IS applied to upload() below where fileSize is known
             // up-front.)
-            val response =
-                httpClient.get(url) {
-                    timeout { requestTimeoutMillis = Long.MAX_VALUE }
-                }
-            checkResponse(response, url)
-            val channel: ByteReadChannel = response.body()
-            // UD-288: re-open the destination on every retry. Files.newOutputStream
-            // defaults to TRUNCATE_EXISTING so partial bytes from a failed prior
-            // attempt are discarded — written counter is local to the lambda
-            // body so it resets cleanly per attempt.
+            //
+            // UD-349: switch from `httpClient.get(url)` + `response.body()`
+            // (Ktor 3.x trap — buffers the entire body into a single
+            // `byte[contentLength]` before exposing the channel; > 2 GiB
+            // resources OOM at allocation time) to
+            // `prepareGet().execute { bodyAsChannel() }` (true streaming).
+            // Same fix as UD-329 (OneDrive) and UD-332 (HiDrive).
+            // UD-340 assertNotHtml guards against captive-portal HTML.
+            // UD-288 re-open-on-retry semantics preserved by withRetry's
+            // outer block resetting `written` per attempt.
             var written = 0L
-            withContext(Dispatchers.IO) {
-                Files.createDirectories(destination.parent)
-                Files.newOutputStream(destination).use { out ->
-                    val buf = ByteArray(8192)
-                    while (true) {
-                        val n = channel.readAvailable(buf)
-                        if (n <= 0) break
-                        out.write(buf, 0, n)
-                        written += n
+            httpClient
+                .prepareGet(url) {
+                    timeout { requestTimeoutMillis = Long.MAX_VALUE }
+                }.execute { response ->
+                    checkResponse(response, url)
+                    assertNotHtml(response, contextMsg = "Download $remotePath")
+                    val channel: ByteReadChannel = response.bodyAsChannel()
+                    withContext(Dispatchers.IO) {
+                        Files.createDirectories(destination.parent)
+                        Files.newOutputStream(destination).use { out ->
+                            val buf = ByteArray(8192)
+                            while (true) {
+                                val n = channel.readAvailable(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                written += n
+                            }
+                        }
                     }
                 }
-            }
             written
         }
 

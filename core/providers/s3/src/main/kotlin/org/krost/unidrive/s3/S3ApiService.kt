@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -54,23 +55,34 @@ open class S3ApiService(
         log.debug("Download: {}", key)
         val headers = SigV4Signer.sign("GET", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         log.debug("SigV4: GET {}", url)
-        val response = httpClient.get(url) { headers.forEach { (k, v) -> header(k, v) } }
-        checkResponse(response, url)
-
-        val channel: ByteReadChannel = response.body()
+        // UD-349: switch from `httpClient.get(url)` + `response.body<ByteReadChannel>()`
+        // (Ktor 3.x trap — buffers the entire body into a single
+        // `byte[contentLength]` before exposing the channel; > 2 GiB objects
+        // OOM at allocation time) to `prepareGet().execute { bodyAsChannel() }`
+        // (true streaming, only the 8 KiB ring buffer below holds bytes).
+        // Same fix as UD-329 (OneDrive) and UD-332 (HiDrive). UD-340
+        // assertNotHtml guards against captive-portal HTML masquerading as
+        // the file body.
         var written = 0L
-        withContext(Dispatchers.IO) {
-            Files.createDirectories(destination.parent)
-            Files.newOutputStream(destination).use { out ->
-                val buf = ByteArray(8192)
-                while (true) {
-                    val n = channel.readAvailable(buf)
-                    if (n <= 0) break
-                    out.write(buf, 0, n)
-                    written += n
+        httpClient
+            .prepareGet(url) { headers.forEach { (k, v) -> header(k, v) } }
+            .execute { response ->
+                checkResponse(response, url)
+                assertNotHtml(response, contextMsg = "Download key=$key")
+                val channel: ByteReadChannel = response.bodyAsChannel()
+                withContext(Dispatchers.IO) {
+                    Files.createDirectories(destination.parent)
+                    Files.newOutputStream(destination).use { out ->
+                        val buf = ByteArray(8192)
+                        while (true) {
+                            val n = channel.readAvailable(buf)
+                            if (n <= 0) break
+                            out.write(buf, 0, n)
+                            written += n
+                        }
+                    }
                 }
             }
-        }
         return written
     }
 
