@@ -9391,3 +9391,62 @@ provider download path.
 
 - **UD-333** (closed) — HiDrive + Internxt guard added.
 - **UD-336** (closed) — sibling extraction (truncate/readBoundedErrorBody).
+
+---
+id: UD-349
+title: Fix Ktor 3.x streaming-download trap (`response.body<ByteReadChannel>()`) in S3 + WebDAV
+category: providers
+priority: high
+effort: XS
+status: closed
+closed: 2026-04-30
+resolved_by: commit 2c7e667. Switched S3.getObject + WebDAV.download to prepareGet().execute { bodyAsChannel() } pattern. Closes Ktor 3.x trap (>2 GiB object OOM at allocation). Adds UD-340 assertNotHtml guards on both paths.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey. Lurking bug,
+not just duplication-removal.**
+
+UD-329 (OneDrive) + UD-332 (HiDrive) fixed the Ktor 3.x trap where
+`response.body<ByteReadChannel>()` buffers the **full** response into
+`byte[contentLength]` before exposing the channel — a > 2 GiB file
+OOMs at allocation. S3 and WebDAV both still use the trap pattern.
+
+- `core/providers/s3/.../S3ApiService.kt:55-72` — `httpClient.get(url)`
+  then `response.body<ByteReadChannel>()`.
+- `core/providers/webdav/.../WebDavApiService.kt:306-329` —
+  `httpClient.get(url) { timeout {...} }` then `response.body()` typed
+  as `ByteReadChannel`.
+
+## Proposal
+
+Apply the UD-329 / UD-332 pattern verbatim:
+
+```kotlin
+val statement = httpClient.prepareGet(url) { ... }
+statement.execute { response ->
+    val channel = response.bodyAsChannel()
+    // 8 KiB ring buffer write
+}
+```
+
+Remember UD-333 `text/html` content-type guard while touching the
+same lines.
+
+## Acceptance
+
+- S3 download of a > 2 GiB object completes without OOM.
+- WebDAV download of a > 2 GiB resource same.
+- 8 KiB ring buffer + UD-333 guard + UD-285 `Long.MAX_VALUE` timeout
+  override (WebDAV existing) intact.
+
+## Effort / agent-ability
+
+**XS each, S total**, agent-able fully.
+
+## Related
+
+- **UD-329** (closed) — OneDrive fix.
+- **UD-332** (closed) — HiDrive fix.
+- **UD-333** (closed) — HTML guard.
+- **2.4 streaming-download-loop** — would close this naturally if
+  filed first.
