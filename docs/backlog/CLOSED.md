@@ -7741,3 +7741,43 @@ in `doSyncOnce` after `scanner.scan()` returns and before
 empty local — those are also caught and aborted, but the user can
 opt-in via `--force-delete`. Could later differentiate by direction
 if it's noisy in practice (UD-298 covers the broader threshold).
+
+---
+id: UD-298
+title: Apply max_delete_percentage safeguard in dry-run as warning
+category: core
+priority: high
+effort: XS
+status: closed
+closed: 2026-04-30
+resolved_by: commit ef618ba. Phase 2b safeguard restructured: out of dryRun gate, branches on dryRun (warn vs throw); sync_root added to message; 3 unit tests added
+opened: 2026-04-30
+---
+**Why:** The percentage deletion safeguard at `SyncEngine.kt:188`
+already exists — gated on `if (!dryRun && !forceDelete && ...)`. So
+dry-run skips it entirely, which is exactly when the user is *most*
+likely to notice the problem and the system has the *least* to lose
+by being loud. Real-case (UD-297): user saw 65 237 del-remote lines
+fly past in `--dry-run` with no warning that this exceeded the 50%
+threshold.
+
+**What:** Restructure the safeguard so it always evaluates the
+threshold, and:
+
+* in non-dry-run: throw `IllegalStateException` (current behaviour)
+* in dry-run: emit `reporter.onWarning(msg)` and continue
+
+Add the configured `sync_root` to the message text so the user can
+spot config drift without reloading config.
+
+**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+lines 187-201. Pull the threshold check out of the `if (!dryRun ...)`
+guard; branch on `dryRun` for the action.
+
+**Tests:**
+
+* dry-run, deleteCount > maxDeletePercentage -> reporter.onWarning called,
+  sync proceeds
+* non-dry-run, deleteCount > maxDeletePercentage -> throws
+* dry-run, deleteCount <= maxDeletePercentage -> no warning
+* `--force-delete` -> no warning either side
