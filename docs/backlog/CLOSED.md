@@ -7680,3 +7680,64 @@ line at line 325 collapses into the banner.
 
 **Tests:** small CLI integration test that captures stdout from a
 no-op profile and asserts the banner shape.
+
+---
+id: UD-297
+title: Empty-local + populated-DB sanity check (refuse plan unless --force-delete)
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit e36657f. isSyncRootEffectivelyEmpty() helper + Phase-1.5 guard before reconcile in SyncEngine.doSyncOnce; dry-run warns, non-dry-run throws, --force-delete bypasses; 5 unit tests added
+opened: 2026-04-30
+---
+**Why:** When `sync_root` points at an empty (or wrong) directory while
+state.db has thousands of entries from prior runs, the reconciler
+correctly produces ~N `DeleteRemote` actions — but to the user this
+looks like "unidrive wants to wipe my cloud." Real-case: user pointed
+to `~/unidrive-internxt-gernot` (empty) while their actual files lived
+in `C:\Users\gerno\InternxtDrive - <uuid>\` (Internxt official-client
+mount). Dry-run output: "would download 0, upload 0, **65 237
+del-remote**, 1 cleanup". The 50% percentage safeguard at
+`SyncEngine.kt:188` catches non-dry-run, but dry-run skips it.
+
+**What:** Add a specific empty-local detector that runs *before* the
+percentage safeguard and *also fires in dry-run*:
+
+```
+if (!forceDelete && db.getEntryCount() > 10 && isSyncRootEffectivelyEmpty()) {
+    val msg = "Local sync_root '$syncRoot' is empty, but state DB knows
+              N entries. sync_root probably points at the wrong directory.
+              Re-run with --force-delete to propagate the empty local state."
+    if (dryRun) reporter.onWarning(msg) else throw IllegalStateException(msg)
+}
+```
+
+`isSyncRootEffectivelyEmpty()`:
+
+* `Files.exists(syncRoot)` false -> true
+* `Files.isDirectory(syncRoot)` false -> true
+* `Files.newDirectoryStream(syncRoot).iterator().hasNext()` false -> true
+* otherwise false
+
+The check is intentionally narrow (literally-empty directory) to avoid
+false positives when the user genuinely deleted some files. The broader
+"high deletion count" case is UD-298's territory.
+
+**Where:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+in `doSyncOnce` after `scanner.scan()` returns and before
+`reconciler.reconcile(...)`. Bypassable with `--force-delete`.
+
+**Tests:**
+
+* DB has 100 entries, syncRoot is empty, dry-run -> reporter.onWarning called
+* DB has 100 entries, syncRoot is empty, non-dry-run -> throws
+* DB has 100 entries, syncRoot is empty, --force-delete -> no abort
+* DB has 100 entries, syncRoot has at least one file -> no abort
+* DB empty, syncRoot empty (fresh sync) -> no abort
+
+**Out of scope:** download-direction syncs that legitimately start with
+empty local — those are also caught and aborted, but the user can
+opt-in via `--force-delete`. Could later differentiate by direction
+if it's noisy in practice (UD-298 covers the broader threshold).
