@@ -151,4 +151,49 @@ class LocalScannerTest {
 
         assertNull(changes["/cache/old.tmp"])
     }
+
+    // UD-736 — visitFileFailed override tests.
+
+    @Test
+    fun `UD-736 lastScanSkipped is zero when all files visit cleanly`() {
+        Files.writeString(syncRoot.resolve("a.txt"), "1")
+        Files.writeString(syncRoot.resolve("b.txt"), "2")
+        scanner.scan()
+        assertEquals(0, scanner.lastScanSkipped)
+    }
+
+    @Test
+    fun `UD-736 visitFileFailed continues walk and increments skipped count`() {
+        // POSIX-only: make a subdirectory unreadable so walkFileTree's attempt
+        // to enter it triggers the visitor's visitFileFailed callback. Windows
+        // ACL semantics make this hard to set up portably, so guard the test.
+        val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
+        org.junit.Assume.assumeFalse("POSIX-only test for visitFileFailed defence", isWindows)
+
+        // Sibling files that should still be visited
+        Files.writeString(syncRoot.resolve("ok-1.txt"), "1")
+        Files.writeString(syncRoot.resolve("ok-2.txt"), "2")
+
+        val unreadable = syncRoot.resolve("blocked")
+        Files.createDirectory(unreadable)
+        Files.writeString(unreadable.resolve("hidden.txt"), "x")
+        // Strip read+execute permissions so walkFileTree fails to enter
+        Files.setPosixFilePermissions(unreadable, emptySet())
+
+        try {
+            val changes = scanner.scan()
+            // Both healthy siblings must still be reported NEW
+            assertEquals(ChangeState.NEW, changes["/ok-1.txt"])
+            assertEquals(ChangeState.NEW, changes["/ok-2.txt"])
+            // The blocked directory raises visitFileFailed — at minimum once
+            assertTrue(scanner.lastScanSkipped >= 1, "expected >=1 skipped, got ${scanner.lastScanSkipped}")
+        } finally {
+            // Restore permissions so @AfterTest cleanup can remove the tempdir
+            Files.setPosixFilePermissions(
+                unreadable,
+                java.nio.file.attribute.PosixFilePermissions
+                    .fromString("rwx------"),
+            )
+        }
+    }
 }

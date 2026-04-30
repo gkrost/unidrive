@@ -1,6 +1,8 @@
 package org.krost.unidrive.sync
 
 import org.krost.unidrive.sync.model.ChangeState
+import org.slf4j.LoggerFactory
+import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
@@ -12,11 +14,20 @@ class LocalScanner(
     private val db: StateDatabase,
     private val excludePatterns: List<String> = emptyList(),
 ) {
+    private val log = LoggerFactory.getLogger(LocalScanner::class.java)
+
+    // UD-736: count of files where visitFileFailed swallowed an IOException so
+    // the walk could continue. Reset at the start of each scan(). Caller can
+    // read this after scan() returns to surface a "skipped N entries" notice.
+    var lastScanSkipped: Int = 0
+        private set
+
     private fun isExcluded(relativePath: String): Boolean = excludePatterns.any { pattern -> Reconciler.matchesGlob(relativePath, pattern) }
 
     fun scan(): Map<String, ChangeState> {
         val changes = mutableMapOf<String, ChangeState>()
         val seenPaths = mutableSetOf<String>()
+        var skipped = 0
 
         // Load all DB entries once — avoids N+1 queries during file tree walk
         val dbEntries = db.getAllEntries().associateBy { it.path }
@@ -62,8 +73,32 @@ class LocalScanner(
                     }
                     return FileVisitResult.CONTINUE
                 }
+
+                // UD-736: SimpleFileVisitor's default re-throws and aborts the
+                // entire walk. That's catastrophic when one Cloud-Files-API
+                // placeholder fails to recall (foreign client offline — UD-900),
+                // a permission-denied entry shows up, or an in-flight rename
+                // races us. Log and continue so the rest of the tree is still
+                // visited; the entry just doesn't get marked seen, so the
+                // existing DB-vs-disk reconciliation logic decides what to do
+                // (DELETE or skip via Files.exists check).
+                override fun visitFileFailed(
+                    file: Path,
+                    exc: IOException,
+                ): FileVisitResult {
+                    skipped++
+                    log.warn(
+                        "Skipping unreadable file {} ({}: {})",
+                        file,
+                        exc.javaClass.simpleName,
+                        exc.message,
+                    )
+                    return FileVisitResult.CONTINUE
+                }
             },
         )
+
+        lastScanSkipped = skipped
 
         // Check for deletions: entries in DB but not on disk
         for (entry in dbEntries.values) {
