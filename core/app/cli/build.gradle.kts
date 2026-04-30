@@ -225,6 +225,15 @@ fun deployWindows(
         |# trailing fragment as a class name and crashed with
         |# "Hauptklasse .encoding=UTF-8 konnte nicht gefunden oder geladen
         |# werden". Single-quoted arrays bypass PowerShell's parser entirely.
+        |#
+        |# Force UTF-8 console output so Java's UTF-8 stdout (set via
+        |# -Dstdout.encoding=UTF-8) renders correctly. Without this on a
+        |# German Windows console (default CP850 / CP437), box-drawing
+        |# characters render as mojibake — `─` (E2 94 80) is read as CP850
+        |# → "ÔöÇ". chcp 65001 tells conhost to interpret the stdout byte
+        |# stream as UTF-8.
+        |chcp 65001 > ${'$'}null
+        |
         |${'$'}javaArgs = @(
         |    '-Xmx6g'
         |    '-Dstdout.encoding=UTF-8'
