@@ -17,6 +17,7 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.readBoundedErrorBody
+import org.krost.unidrive.http.streamingFileBody
 import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -392,6 +393,9 @@ class InternxtApiService(
         file: java.nio.file.Path,
         size: Long,
     ) {
+        // UD-342: shared streamingFileBody adds UD-287 finally-flushAndClose
+        // (Internxt's previous inline body lacked it — silent connection-
+        // pool corruption on cancellation).
         val response =
             httpClient.put(url) {
                 // UD-337: size-adaptive request timeout — see
@@ -401,25 +405,7 @@ class InternxtApiService(
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(size)
                 }
                 header("Content-Type", "application/octet-stream")
-                setBody(
-                    object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
-                        override val contentLength: Long = size
-                        override val contentType: ContentType = ContentType.Application.OctetStream
-
-                        override suspend fun writeTo(channel: ByteWriteChannel) {
-                            withContext(Dispatchers.IO) {
-                                java.nio.file.Files.newInputStream(file).use { input ->
-                                    val buf = ByteArray(65536)
-                                    var n: Int
-                                    while (input.read(buf).also { n = it } != -1) {
-                                        channel.writeFully(buf, 0, n)
-                                    }
-                                }
-                            }
-                            channel.flushAndClose()
-                        }
-                    },
-                )
+                setBody(streamingFileBody(file, size))
             }
         if (!response.status.isSuccess()) {
             throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value)

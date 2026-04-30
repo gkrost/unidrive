@@ -18,6 +18,7 @@ import org.krost.unidrive.hidrive.model.HiDriveItem
 import org.krost.unidrive.hidrive.model.HiDriveUserInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.readBoundedErrorBody
+import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -190,25 +191,10 @@ class HiDriveApiService(
                 bearerAuth(tokenProvider())
                 parameter("dir", absDir)
                 parameter("name", fileName)
-                setBody(
-                    object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
-                        override val contentLength = fileSize
-                        override val contentType = ContentType.Application.OctetStream
-
-                        override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
-                            withContext(Dispatchers.IO) {
-                                Files.newInputStream(localPath).use { input ->
-                                    val buf = ByteArray(65536)
-                                    var n: Int
-                                    while (input.read(buf).also { n = it } != -1) {
-                                        channel.writeFully(buf, 0, n)
-                                    }
-                                }
-                            }
-                            channel.flushAndClose()
-                        }
-                    },
-                )
+                // UD-342: shared streamingFileBody adds UD-287
+                // finally-flushAndClose (HiDrive's previous inline
+                // body lacked it).
+                setBody(streamingFileBody(localPath, fileSize))
             }
 
         if (response.status == HttpStatusCode.Unauthorized) {

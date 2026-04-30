@@ -17,6 +17,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.net.URLEncoder
@@ -368,43 +369,14 @@ open class WebDavApiService(
                 floorMs = config.uploadFloorTimeoutMs,
                 minThroughputBytesPerSecond = config.uploadMinThroughputBytesPerSecond,
             )
+        // UD-342: shared streamingFileBody embeds UD-287's flushAndClose-
+        // in-finally guard. WebDAV had this inline pre-UD-342; lifting
+        // means HiDrive / Internxt / S3 (which silently lacked UD-287)
+        // inherit the fix.
         val response =
             httpClient.put(url) {
                 timeout { requestTimeoutMillis = uploadTimeout }
-                setBody(
-                    object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
-                        override val contentLength = fileSize
-                        override val contentType = ContentType.Application.OctetStream
-
-                        override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
-                            // UD-287: flushAndClose MUST run on every exit path,
-                            // including exceptions from the IO loop (file-read
-                            // errors, partial writes, cancellation). Pre-fix,
-                            // a mid-write throw skipped flushAndClose; the PUT
-                            // never got its terminating chunk frame; the server
-                            // dropped the connection; Apache5 still returned it
-                            // to the pool — feeding the WSAECONNABORTED cascade
-                            // that the eviction policy above (also UD-287)
-                            // cleans up.
-                            //
-                            // runCatching on close so a secondary close-failure
-                            // doesn't shadow the original cause from the IO loop.
-                            try {
-                                withContext(Dispatchers.IO) {
-                                    java.nio.file.Files.newInputStream(localPath).use { input ->
-                                        val buf = ByteArray(65536)
-                                        var n: Int
-                                        while (input.read(buf).also { n = it } != -1) {
-                                            channel.writeFully(buf, 0, n)
-                                        }
-                                    }
-                                }
-                            } finally {
-                                runCatching { channel.flushAndClose() }
-                            }
-                        }
-                    },
-                )
+                setBody(streamingFileBody(localPath, fileSize))
             }
         checkResponse(response, url)
         onProgress?.invoke(fileSize, fileSize)

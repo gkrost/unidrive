@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.streamingFileBody
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -107,25 +108,10 @@ open class S3ApiService(
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
                 }
                 headers.forEach { (k, v) -> header(k, v) }
-                setBody(
-                    object : io.ktor.http.content.OutgoingContent.WriteChannelContent() {
-                        override val contentLength = fileSize
-                        override val contentType = ContentType.Application.OctetStream
-
-                        override suspend fun writeTo(channel: io.ktor.utils.io.ByteWriteChannel) {
-                            withContext(Dispatchers.IO) {
-                                Files.newInputStream(localPath).use { input ->
-                                    val buf = ByteArray(65536)
-                                    var n: Int
-                                    while (input.read(buf).also { n = it } != -1) {
-                                        channel.writeFully(buf, 0, n)
-                                    }
-                                }
-                            }
-                            channel.flushAndClose()
-                        }
-                    },
-                )
+                // UD-342: shared streamingFileBody adds UD-287
+                // finally-flushAndClose (S3's previous inline body
+                // lacked it).
+                setBody(streamingFileBody(localPath, fileSize))
             }
         checkResponse(response, url)
         onProgress?.invoke(fileSize, fileSize)
