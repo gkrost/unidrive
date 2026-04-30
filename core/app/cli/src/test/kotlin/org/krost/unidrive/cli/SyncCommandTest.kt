@@ -3,8 +3,6 @@ package org.krost.unidrive.cli
 import picocli.CommandLine
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -139,26 +137,34 @@ class SyncCommandTest {
 
     // UD-738: --reset --dry-run is no longer rejected at parse time; it now
     // means "plan against an in-memory shadow DB; leave state.db untouched."
-    // The combination must reach the run() body without a ParameterException
-    // (it'll error out later trying to load profile config in this fixture,
-    // but that's a different code path — exit != 2).
+    // The combination must parse cleanly without a picocli ParameterException
+    // (the old UD-243 mutex would fire here).
+    //
+    // UD-749: do NOT use cli.execute() — it would invoke run(), which calls
+    // System.exit(1) on missing config and kills the test JVM ("Connection
+    // reset by peer" from gradle test runner). It also ran a real sync against
+    // the developer's default profile if one happened to exist. Use parseArgs
+    // instead — it returns a ParseResult without executing run(). The presence
+    // of the parsed `--reset` and `--dry-run` flags on the sync subcommand is
+    // sufficient evidence that the mutex isn't blocking.
     @Test
     fun `UD-738 reset and dry-run together no longer rejected at parse time`() {
         val cli = CommandLine(Main())
-        val errBuf = java.io.StringWriter()
-        cli.err = java.io.PrintWriter(errBuf)
-        val exit = cli.execute("sync", "--reset", "--dry-run")
-        // Whatever happens later (no profile loaded etc), it MUST NOT be the
-        // picocli parse-time exit-2 with the old "--reset and --dry-run are
-        // mutually exclusive" message.
-        assertFalse(
-            errBuf.toString().contains("--reset and --dry-run are mutually exclusive"),
-            "old UD-243 mutex must be gone; got stderr: $errBuf",
-        )
-        // Document the actual exit (likely non-zero from missing config) just so
-        // a future regression that re-introduces the parse-time rejection
-        // surfaces clearly.
-        assertNotEquals(2, exit, "must not be picocli ParameterException exit code 2; got: $exit, stderr: $errBuf")
+        val parseResult = cli.parseArgs("sync", "--reset", "--dry-run")
+        val syncResult =
+            parseResult.subcommand()
+                ?: fail("expected sync subcommand to parse")
+        val syncSpec = syncResult.commandSpec()
+        // Both flags must be present in the matched options — i.e. parsed
+        // without the old "--reset and --dry-run are mutually exclusive"
+        // ParameterException firing.
+        val matchedOptions = syncResult.matchedOptions().map { it.longestName() }
+        assertTrue("--reset" in matchedOptions, "expected --reset to parse; matched=$matchedOptions")
+        assertTrue("--dry-run" in matchedOptions, "expected --dry-run to parse; matched=$matchedOptions")
+        // Belt+braces: confirm the option specs exist on sync (regression
+        // guard against the flags being removed entirely).
+        assertNotNull(syncSpec.findOption("--reset"))
+        assertNotNull(syncSpec.findOption("--dry-run"))
     }
 
     @Test
