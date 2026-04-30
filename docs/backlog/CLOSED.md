@@ -8409,3 +8409,24 @@ asserts > 1 mid-scan call.
 **Relationship:** strict subset of UD-240's 240b/240d. Lands first;
 UD-240 can subsume this and extend with bps / ETA / IPC progress
 later.
+
+---
+id: UD-713
+title: First-sync ETA probe + progress output
+category: tooling
+priority: medium
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit ca2ba97. Throughput suffix landed in CliProgressReporter heartbeats (~items/min, gated 5s + 100 items). Full bucketed ETA + per-provider count probes + historical timings = UD-744 follow-up; deferred until a multi-hour-sync operator asks.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+opened: 2026-04-18
+---
+User-reported during UD-712: first-ever sync (or sync after state reset) against a large OneDrive can take "unknown time" — silent for many minutes while the engine walks the Graph Delta API. Rough-bucket ETA (`<5m`, `5-15m`, `15-60m`, `>1h`) is enough; exact numbers not required. Probe direction before starting the real scan:
+  1. TTFB measurement of a Graph metadata call.
+  2. Optional upload + download sample (~16 KB throwaway) for bandwidth signal — gated on `--estimate` flag since it touches remote.
+  3. If provider exposes `about.driveItemCount` or equivalent, use it; otherwise scale from `quota.used` plus `/me/drive/root/children/$count`.
+  4. Historical cursor-complete timings persisted in `state.db` for subsequent syncs.
+Present the estimated bucket + a live "scanning: N items seen, Mt elapsed" tick line during the scan. Tie UX into UD-212 (log context) so scan-in-progress is visible from `unidrive log` and the tray.

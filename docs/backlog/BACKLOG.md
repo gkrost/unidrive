@@ -274,25 +274,6 @@ Each doc ends with a concrete "what unidrive should do but doesn't yet" list tha
 ---
 
 ---
-id: UD-713
-title: First-sync ETA probe + progress output
-category: tooling
-priority: medium
-effort: M
-status: open
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
-  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
-opened: 2026-04-18
----
-User-reported during UD-712: first-ever sync (or sync after state reset) against a large OneDrive can take "unknown time" — silent for many minutes while the engine walks the Graph Delta API. Rough-bucket ETA (`<5m`, `5-15m`, `15-60m`, `>1h`) is enough; exact numbers not required. Probe direction before starting the real scan:
-  1. TTFB measurement of a Graph metadata call.
-  2. Optional upload + download sample (~16 KB throwaway) for bandwidth signal — gated on `--estimate` flag since it touches remote.
-  3. If provider exposes `about.driveItemCount` or equivalent, use it; otherwise scale from `quota.used` plus `/me/drive/root/children/$count`.
-  4. Historical cursor-complete timings persisted in `state.db` for subsequent syncs.
-Present the estimated bucket + a live "scanning: N items seen, Mt elapsed" tick line during the scan. Tie UX into UD-212 (log context) so scan-in-progress is visible from `unidrive log` and the tray.
-
----
 id: UD-804
 title: Delete propagation + bidirectional round-trip in docker provider harness
 category: tests
@@ -2026,3 +2007,96 @@ Windows-codepage lessons.)
 
 Implementation. This ticket is for design discussion. Once the open
 questions are answered, file the implementation as its own ticket.
+---
+id: UD-744
+title: Bucketed ETA + per-provider item-count probe (UD-713 follow-up)
+category: tooling
+priority: medium
+effort: M
+status: open
+opened: 2026-04-30
+---
+**Why:** UD-713 originally specified a comprehensive ETA story:
+TTFB probe + optional bandwidth sample + per-provider count probes +
+historical timings persisted in state.db + bucketed ETA display
+(`<5m`, `5-15m`, `15-60m`, `>1h`).
+
+UD-713 closed with a smaller subset: items-per-minute **throughput**
+in the scan heartbeat (commit ca2ba97). Throughput alone is enough
+for the "should I go to lunch?" decision when the operator knows
+their dataset. Bucketed ETA is the next step up — it requires the
+*total*, which neither LocalScanner nor most remote-delta APIs
+expose without provider-specific work.
+
+This ticket is the unimplemented remainder of UD-713.
+
+## What's needed
+
+1. **Per-provider total-count probe.** Where supported, query the
+   provider for the total item count before scan starts. Optional
+   for first-sync (no DB hint).
+
+   - OneDrive Graph: `/me/drive/root?$count=true` returns
+     `driveItemCount`. Cheap.
+   - Internxt: there's a `/files/count` API or similar — verify; or
+     piggy-back on the user/drive metadata call already in the
+     auth flow.
+   - HiDrive: `/quota` provides used bytes but not item count;
+     directory tree walk is the only option (expensive).
+   - WebDAV: PROPFIND with depth=infinity gives count via collection
+     enumeration (expensive — defeats the heartbeat's purpose).
+   - SFTP: not feasible without a full walk.
+
+2. **DB-derived total fallback.** When the count probe is unavailable
+   or the provider is offline, fall back to `db.getEntryCount()` as
+   the expected total. Skip ETA on `--reset` (or virtual-reset
+   per UD-738) since the shadow DB has 0 entries.
+
+3. **Bucketed ETA computation.** Once `target` and current `count` and
+   `elapsedSecs` are known:
+   - `remaining = max(0, target - count)`
+   - `rate = count / elapsedSecs.coerceAtLeast(1)` (items/sec)
+   - `etaSecs = remaining / rate`
+   - Bucket per UD-713 spec: `<5m / 5-15m / 15-60m / >1h`
+
+4. **Display.** Append to existing heartbeat:
+   ```
+   Scanning local changes... 8412 of ~33000 items (4m 02s elapsed, ~2100 items/min, ETA: 5-15m)
+   ```
+   Suppressed when target is unknown (already current behaviour
+   without this ticket).
+
+5. **Historical timings.** Persist `last_full_scan_seconds` per
+   provider in state.db (table `sync_state` already exists). Use as
+   a sanity check / second-opinion against extrapolation, especially
+   when the rate is unstable in the first few seconds.
+
+## Where
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  — add a `provider.estimateItemCount(): CapabilityResult<Long>?`
+  capability call before `gatherRemoteChanges`. Pipe the answer to
+  `reporter.onScanProgress` somehow (extra param? side channel?).
+* New `Capability.ItemCount` capability, opt-in per provider.
+* `core/providers/onedrive/.../GraphApiService.kt` — implement count
+  probe.
+* `core/providers/internxt/.../InternxtApiService.kt` — implement count
+  probe.
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt`
+  — extend `onScanProgress` signature OR accept the total via a new
+  reporter call (`onScanTotalEstimate(phase, total)`).
+
+## Acceptance
+
+* On a sync against a provider that supports count probes, the user
+  sees `ETA: <bucket>` in the heartbeat after >5s of scan time.
+* On a `--reset` / virtual-reset / unsupported-provider scan, ETA is
+  silently absent (current behaviour, throughput still shown).
+* Historical timing persisted across runs; future runs can use it to
+  validate the in-flight extrapolation.
+
+## Priority / effort
+
+**Medium priority, M effort.** Touches every provider. Defer until a
+specific operator with multi-hour syncs asks. The throughput
+shipped in UD-713 is the 80/20 fix; this is the polish.
