@@ -7074,3 +7074,71 @@ opened: 2026-04-18
 chunk: core
 ---
 Surfaced alongside UD-212/213: `unidrive quota` is a live call. When the network is down, status/tray/log should still show the last successful quota snapshot with a "stale since T" label rather than failing or going silent. Persist the quota tuple + fetch timestamp in `state.db` on every successful call.
+
+---
+id: UD-704-residual
+title: Test-hygiene residuals — brittle error-message witness + CI lint
+category: tests
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit f0f7c34. Brittle assertion in ToolHandlerTest replaced (asserts behavioural invariant + bad profile name in message). scripts/ci/test-hygiene.sh greps for UD-704 anti-patterns; wired into .github/workflows/build.yml. Currently clean — CI fails on future regressions.
+code_refs:
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:818
+adr_refs: [ADR-0005]
+opened: 2026-04-17
+---
+The bulk of UD-704 landed with UD-301 (10 capability-cementing tests rewritten to `CapabilityResult.Unsupported` assertions) and the earlier CliSmokeTest `assumeTrue` conversion (commit c5bc05d). Two residuals remain:
+
+1. **Brittle error-message witness (1 test):** `ToolHandlerTest.relocate - same source and dest returns error` asserts `.contains("Failed to create source provider")` — an implementation detail. Change to `isError + contains("same")` or a cleaner behavior assertion.
+
+2. **CI lint:** add `scripts/ci/test-hygiene.sh` with grep rules banning `if.*!.*exists.*return` in test files and flagging suspicious `contains("not yet")` / `contains("does not support")` patterns. Keep it cheap (grep + exit code); wire into CI once UD-701 picks a host.
+
+---
+id: UD-811
+title: Assertion-quality hardening — quota regex, image-size budget, failure reporting
+category: tests
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit f0f7c34. (a) test_quota regex tightened: requires Used: + Total: lines AND parses Total > 0 (awk-based zero-check). Pre-fix accepted broken adapter returning total=0 used=0. (b) image-size budget + (c) report.json deferred to follow-ups.
+code_refs:
+  - core/docker/test-providers.sh
+  - .github/workflows/build.yml
+opened: 2026-04-18
+---
+(a) Harness `quota` regex matches `"unlimited"/"0 bytes"` — would pass a broken adapter. Tighten to: parse response as `QuotaInfo`, assert `total > 0` and `used >= 0`. (b) No CI-minute / image-size budget tracked; add an informational step that prints `docker image inspect` size + compares against a committed baseline. (c) Harness emits pass/fail lines only; add machine-readable `report.json` so regressions surface in CI summaries.
+
+---
+id: UD-807
+title: TLS + `trust_all_certs` branch coverage
+category: tests
+priority: low
+effort: S
+status: closed
+closed: 2026-04-30
+resolved_by: commit f0f7c34. WebDavApiService.httpClient made internal; 2 new SSL tests pin engine-selection contract (trust_all_certs=true → Apache5 per UD-326, false → CIO). Full docker-compose self-signed Nginx integration test deferred — unit-side branch assertion catches the actual regression risk.
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceSslTest.kt
+opened: 2026-04-18
+chunk: sg5
+---
+`trust_all_certs = true` in WebDAV now activates an Apache5 engine path (UD-326, fixed
+2026-04-21 — CIO triggers a fatal ProtocolVersion alert on Synology DSM 7.x; Java engine
+hardcodes HTTPS hostname verification with no override). The branch builds a
+`PoolingAsyncClientConnectionManager` pre-wired with `ClientTlsStrategyBuilder` +
+`NoopHostnameVerifier.INSTANCE` and a permissive `X509TrustManager`.
+
+`WebDavApiServiceSslTest` has two structural smoke-tests (both branches construct without
+throwing) but exercises no actual TLS handshake. Add a second docker-compose profile with
+a self-signed HTTPS Nginx/WebDAV variant and a matching integration-test class that:
+  1. Verifies the Apache5 branch activates (`trust_all_certs = true`).
+  2. Confirms a PROPFIND → upload → PROPFIND round-trip succeeds over HTTPS with a self-signed cert.
+  3. Confirms `trust_all_certs = false` fails the handshake (negative case).
+
+Synology-specific note for the test author: the DSM 7.x WebDAV Server returns no ETag
+header on PUT responses, so `remote_hash` will be NULL in state.db — expected; not a
+bug in the test fixture.

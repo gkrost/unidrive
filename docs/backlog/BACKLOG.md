@@ -241,24 +241,6 @@ milestone: v0.1.0
 Root `settings.gradle.kts` composite scaffold landed; JVM unification to 21 LTS landed. Pending: verify `./gradlew build` from root green.
 
 ---
-id: UD-704-residual
-title: Test-hygiene residuals — brittle error-message witness + CI lint
-category: tests
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:818
-adr_refs: [ADR-0005]
-opened: 2026-04-17
----
-The bulk of UD-704 landed with UD-301 (10 capability-cementing tests rewritten to `CapabilityResult.Unsupported` assertions) and the earlier CliSmokeTest `assumeTrue` conversion (commit c5bc05d). Two residuals remain:
-
-1. **Brittle error-message witness (1 test):** `ToolHandlerTest.relocate - same source and dest returns error` asserts `.contains("Failed to create source provider")` — an implementation detail. Change to `isError + contains("same")` or a cleaner behavior assertion.
-
-2. **CI lint:** add `scripts/ci/test-hygiene.sh` with grep rules banning `if.*!.*exists.*return` in test files and flagging suspicious `contains("not yet")` / `contains("does not support")` patterns. Keep it cheap (grep + exit code); wire into CI once UD-701 picks a host.
-
----
 id: UD-801
 title: Core test coverage ≥ 60% for v0.1.0 scope
 category: tests
@@ -470,36 +452,6 @@ chunk: sg5
 Ensure adapters surface structured errors (not crashes) under: wrong credentials → `AuthenticationException`; 401 after token expiry → refresh attempt; 403 → typed permission error; 429 → backoff + retry respecting `Retry-After`; 500/502/503 → graceful degradation; SFTP `known_hosts` missing → fail-closed per UD-101 (regression guard). Use toxiproxy or an in-container stub HTTP server; no new external infra.
 
 ---
-id: UD-807
-title: TLS + `trust_all_certs` branch coverage
-category: tests
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
-  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceSslTest.kt
-opened: 2026-04-18
-chunk: sg5
----
-`trust_all_certs = true` in WebDAV now activates an Apache5 engine path (UD-326, fixed
-2026-04-21 — CIO triggers a fatal ProtocolVersion alert on Synology DSM 7.x; Java engine
-hardcodes HTTPS hostname verification with no override). The branch builds a
-`PoolingAsyncClientConnectionManager` pre-wired with `ClientTlsStrategyBuilder` +
-`NoopHostnameVerifier.INSTANCE` and a permissive `X509TrustManager`.
-
-`WebDavApiServiceSslTest` has two structural smoke-tests (both branches construct without
-throwing) but exercises no actual TLS handshake. Add a second docker-compose profile with
-a self-signed HTTPS Nginx/WebDAV variant and a matching integration-test class that:
-  1. Verifies the Apache5 branch activates (`trust_all_certs = true`).
-  2. Confirms a PROPFIND → upload → PROPFIND round-trip succeeds over HTTPS with a self-signed cert.
-  3. Confirms `trust_all_certs = false` fails the handshake (negative case).
-
-Synology-specific note for the test author: the DSM 7.x WebDAV Server returns no ETag
-header on PUT responses, so `remote_hash` will be NULL in state.db — expected; not a
-bug in the test fixture.
-
----
 id: UD-808
 title: OAuth provider test framework — OneDrive, HiDrive, Internxt
 category: tests
@@ -527,19 +479,6 @@ opened: 2026-04-18
 ---
 Three behaviours the unit tests can't catch: (a) large-file chunked upload path (>250 MB for OneDrive, multipart for S3) — validates `UploadSession` resumability on simulated drops; (b) many-file (10k files with Delta pagination) — validates engine's state-DB growth + reconciler performance; (c) N cycles of `sync` on an unchanged tree — expects 0 actions on cycles 2..N (idempotency guard against ghost re-uploads). Use tmpfs for the test set; cap total size to stay within CI runner limits.
 
----
-id: UD-811
-title: Assertion-quality hardening — quota regex, image-size budget, failure reporting
-category: tests
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/docker/test-providers.sh
-  - .github/workflows/build.yml
-opened: 2026-04-18
----
-(a) Harness `quota` regex matches `"unlimited"/"0 bytes"` — would pass a broken adapter. Tighten to: parse response as `QuotaInfo`, assert `total > 0` and `used >= 0`. (b) No CI-minute / image-size budget tracked; add an informational step that prints `docker image inspect` size + compares against a committed baseline. (c) Harness emits pass/fail lines only; add machine-readable `report.json` so regressions surface in CI summaries.
 ---
 id: UD-223
 title: Fast first-sync — `?token=latest` blind bootstrap + state.db reuse across profile rename
