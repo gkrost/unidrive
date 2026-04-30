@@ -203,18 +203,25 @@ class SyncEngine(
             return
         }
 
-        // Phase 2b: Deletion safeguard
-        if (!dryRun && !forceDelete && maxDeletePercentage in 1..99) {
+        // Phase 2b: Deletion safeguard. UD-298: also evaluate in dry-run —
+        // emit reporter.onWarning instead of throwing so the user still sees
+        // the planned actions but cannot miss the warning. Non-dry-run
+        // throws (current behaviour preserved).
+        if (!forceDelete && maxDeletePercentage in 1..99) {
             val deleteCount = actions.count { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
             val totalEntries = db.getEntryCount()
             if (totalEntries > 0 && deleteCount > 10) {
                 val pct = deleteCount * 100 / totalEntries
                 if (pct > maxDeletePercentage) {
-                    throw IllegalStateException(
+                    val msg =
                         "Deletion safeguard: $deleteCount of $totalEntries files ($pct%) would be deleted, " +
                             "exceeding max_delete_percentage=$maxDeletePercentage%. " +
-                            "Use --force-delete to override.",
-                    )
+                            "sync_root='$syncRoot'. Use --force-delete to override."
+                    if (dryRun) {
+                        reporter.onWarning(msg)
+                    } else {
+                        throw IllegalStateException(msg)
+                    }
                 }
             }
         }

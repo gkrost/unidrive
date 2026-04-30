@@ -475,6 +475,58 @@ class SyncEngineTest {
             )
         }
 
+    // UD-298 — apply percentage deletion safeguard in dry-run as warning
+
+    @Test
+    fun `UD-298 dry-run with high deletion percentage warns instead of throwing`() =
+        runTest {
+            // Seed DB with 100 entries; populate sync_root with ONE file so UD-297
+            // does not preempt this. Provider has nothing remote-side, so 99 of
+            // the seeded DB entries get marked DELETED -> DeleteRemote actions.
+            seedDbEntries(100)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = true)
+
+            assertTrue(
+                reporter.warnings.any { it.contains("Deletion safeguard") && it.contains("sync_root") },
+                "expected Deletion safeguard warning with sync_root mention, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-298 non-dry-run with high deletion percentage still throws`() =
+        runTest {
+            seedDbEntries(100)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("Deletion safeguard"))
+            assertTrue(ex.message!!.contains("sync_root"))
+        }
+
+    @Test
+    fun `UD-298 force-delete bypasses percentage safeguard in dry-run too`() =
+        runTest {
+            seedDbEntries(100)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = true, forceDelete = true)
+
+            assertFalse(
+                reporter.warnings.any { it.contains("Deletion safeguard") },
+                "force-delete should suppress safeguard warning, got: ${reporter.warnings}",
+            )
+        }
+
     // UD-223 Part A — fast-bootstrap
 
     private fun bootstrapEngine() =
