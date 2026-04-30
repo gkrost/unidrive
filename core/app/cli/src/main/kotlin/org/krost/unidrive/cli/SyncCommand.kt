@@ -271,9 +271,13 @@ class SyncCommand : Runnable {
                 if (propagateDeletes) append(", propagate-deletes")
                 if (watch) append(", watch")
             }
+        // UD-741: include sync_path conditionally — silent when unset (the
+        // common case), surfaced when set so the user can spot a typo'd
+        // sub-path before the scan eats minutes of wall-clock.
+        val syncPathSegment = if (syncPath != null) " sync_path=$syncPath" else ""
         println(
             "sync: profile=${profile.name} type=${profile.type} " +
-                "sync_root=${config.syncRoot} mode=$mode",
+                "sync_root=${config.syncRoot}$syncPathSegment mode=$mode",
         )
 
         // Create the watcher early so SyncEngine can suppress echo events.
