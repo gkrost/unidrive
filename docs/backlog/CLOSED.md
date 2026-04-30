@@ -8242,3 +8242,96 @@ schema-creation path in `initialize()`.
 
 **Out of scope:** other --dry-run-with-X mutexes. Audit them
 separately if this lands cleanly.
+
+---
+id: UD-333
+title: UD-231 HTML-body guard missing on HiDrive + Internxt download (Internxt = silent corruption)
+category: providers
+priority: high
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit 8b74822. Content-Type: text/html guard inserted in HiDriveApiService.downloadFile and InternxtApiService.downloadFileStreaming. Internxt guard placed BEFORE cipher.update() so AES-CTR state stays clean for retries. Private readBoundedErrorBody helper added on both sides (UD-293 bounded snippet pattern). No new tests — MockEngine fixtures absent on these providers; structural mirror of canonical UD-231.
+opened: 2026-04-29
+---
+**Cross-cutting follow-up surfaced by the UD-318 + UD-319 audits
+(Phase D of UD-228 split).**
+
+UD-231's HTML-body guard on the OneDrive download path is the
+single line that prevents a captive-portal page (CDN throttle
+"please wait" page, expired-URL login page) from streaming
+straight into the destination at the matching byte count and
+silently corrupting the local file. Two of the five non-OneDrive
+providers ship the same download path **without** the guard.
+
+## Affected providers + audit citations
+
+| Provider | HTML-body guard? | Severity |
+|---|---|---|
+| **OneDrive** (reference) | Yes — [GraphApiService.kt:275](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt#L275) | — |
+| **HiDrive** | **No** | Medium — captive-portal HTML written verbatim to disk; UD-226 NUL-stub sweep doesn't flag it because HTML is non-NUL content |
+| **Internxt** | **No** | **High — silent corruption** | 
+
+The Internxt severity is the headline. Internxt downloads pass
+the response body through `Cipher.update()` (AES-CTR
+decryption — see [internxt-robustness.md §4.3](../providers/internxt-robustness.md#4-idempotency))
+**before** writing to disk. A captive-portal HTML page XOR'd
+through the AES-CTR keystream produces byte output that is:
+
+- The right length (matches the encrypted-file's expected size).
+- High-entropy (XOR with a strong keystream looks random).
+- **Indistinguishable from a real decrypted file** — no NUL
+  patterns, no HTML tags, no plaintext signatures.
+
+UD-226 sweep detection catches NUL-stub corruption. It does NOT
+catch AES-CTR-encrypted HTML. The user's local file is permanently
+wrong, no observable signal until they open it.
+
+## Proposal
+
+Mirror UD-231 across the affected provider download paths. Before
+ANY decryption, transform, or write-to-disk, check
+`Content-Type`:
+
+```kotlin
+val contentType = response.contentType()
+if (contentType != null && contentType.match(ContentType.Text.Html)) {
+    val snippet = truncateErrorBody(response.bodyAsText().take(200))
+    throw java.io.IOException(
+        "Download returned HTML instead of file bytes (status=${response.status.value}, " +
+            "Content-Type=$contentType): $snippet",
+    )
+}
+```
+
+For Internxt specifically: this guard MUST be applied **before** the
+`Cipher.update()` call in the streaming-decrypt loop, otherwise
+the AES-CTR keystream has already been advanced and the IV state
+is invalid for any retry.
+
+## Acceptance
+
+- HiDrive + Internxt download paths reject 200 + `Content-Type:
+  text/*` responses before any byte hits disk.
+- Internxt's guard sits before the AES-CTR `Cipher.update()`.
+- Test per provider that mocks a 200 response with a small HTML
+  body and asserts the download throws (not silently succeeds).
+
+## Priority / effort
+
+**High priority, M effort.** ~15 lines per provider plus the
+Internxt-specific cipher-ordering surgery. High priority because
+the Internxt failure mode is silent corruption — the user has no
+observable signal that their files are wrong until they try to
+open them.
+
+## Related
+
+- **UD-231** (closed) — original OneDrive fix; the canonical
+  example.
+- **UD-226** — NUL-stub sweep; complementary detection but does
+  not catch this case.
+- **UD-330** (sibling cross-cutting follow-up) — HttpRetryBudget
+  adoption. The HTML-body guard is part of "what does
+  retry/non-retry classification look like" so the two tickets
+  land naturally together.
