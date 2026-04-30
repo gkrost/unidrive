@@ -26,6 +26,7 @@ for the gitignore policy.
 | [verify-before-narrative.md](verify-before-narrative.md) | Confirm distinguishing attributes before writing the diagnosis | Building a root-cause story from circumstantial evidence |
 | [halted-agent-leaks.md](halted-agent-leaks.md) | Halted sub-agents leak WIP into the main worktree | Multi-agent sessions, scope-limited tree commands |
 | [jfr-internal-noSuchMethodError.md](jfr-internal-noSuchMethodError.md) | JFR captures internal `NoSuchMethodError`s the JVM uses as control flow | Triaging a JFR's `JavaErrorThrow` events without filtering |
+| [one-truth-sync-discipline.md](one-truth-sync-discipline.md) | Code change ↔ docs / open tickets / lessons must move together | Refactoring; lifting helpers; renaming public symbols |
 
 ## Adding new lessons
 

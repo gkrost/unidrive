@@ -2245,13 +2245,22 @@ class CredentialStore<T>(
 
 ## Effort / agent-ability
 
-**S effort**, agent-able fully. Subsumes finding 3.3
-(posix-permissions-helper).
+**S effort**, agent-able fully.
+
+**2026-04-30 update:** UD-347 (the posix-permissions-helper sub-finding
+3.3) shipped independently in commit `b3f5755` — `:app:core/io/PosixPermissions.kt`
+now exists, three providers consume it. UD-344's remaining work is
+just the `CredentialStore<T>` lift + UD-312 atomic-write adoption in
+HiDrive/Internxt; the chmod helper is already lifted. Drop ~30 lines
+from the original scope estimate.
 
 ## Related
 
 - **UD-312** (closed) — OneDrive atomic-write + shape guard.
 - **UD-336** (closed, sibling) — same package destination.
+- **UD-347** (closed, 2026-04-30, b3f5755) — posix-permissions-helper
+  shipped ahead of UD-344; remaining UD-344 scope is `CredentialStore`
+  + atomic-write adoption only.
 ---
 id: UD-345
 title: Lift Snapshot data-class wrapper (entries+timestamp+Base64 JSON cursor) to :app:sync
@@ -2418,7 +2427,9 @@ pure with great test coverage; `openBrowser` is 17 lines pure utility.
 
 ## Related
 
-- **2.7 oauth-pkce-helpers** (sibling) — same package destination.
+- **UD-351** (closed, 2026-04-30, b3f5755) — was originally surveyed
+  as 2.7 oauth-pkce-helpers; now lives at `:app:core/auth/Pkce.kt`,
+  same package this ticket targets for the callback server.
 ---
 id: UD-350
 title: Internxt: extract `applyInternxtHeaders` for the four call sites that paste it
@@ -2745,3 +2756,121 @@ alongside `unidrive-log-anomalies` skill UX, etc.
 - `docs/dev/lessons/ktlint-baseline-drift.md` — current state lesson.
 - `scripts/dev/ktlint-sync.sh` — current manual script.
 - UD-728 (closed) — backlog tooling automation; same spirit.
+---
+id: UD-755
+title: Research: mechanize docs <-> code drift detection (CI gate or hook)
+category: tooling
+priority: low
+effort: M
+status: open
+opened: 2026-04-30
+---
+**Research item — detect docs ↔ code drift mechanically before it
+poisons the next contributor's mental model.**
+
+## Why
+
+The 2026-04-30 lift session (UD-336/337/340/342/343/347/349/351)
+moved six helpers from provider-private locations into `:app:core`.
+Without an active sweep, the following `.md` artifacts would have
+silently drifted:
+
+- **`docs/ARCHITECTURE.md`** — "Key files" list silently
+  not-mentioning a growing shared-helpers layer (`:app:core/http`,
+  `:app:core/auth`, `:app:core/io`).
+- **Open ticket UD-344** — body said "Subsumes 3.3 posix-permissions-
+  helper" after UD-347 (3.3) shipped independently.
+- **Open ticket UD-348** — references "2.7 oauth-pkce-helpers" by
+  the survey handle, never updated to the now-closed UD-351.
+- **Cross-package KDoc references** — three providers'
+  `setPosixPermissionsIfSupported` copies pointed at each other in
+  KDoc comments; the helpers are now gone, the KDoc anchors broken.
+
+The user articulated the principle in one line:
+**"sync knowledge ↔ code ↔ .md's — there can only be one truth"**.
+The lesson is now codified at
+[docs/dev/lessons/one-truth-sync-discipline.md](../dev/lessons/one-truth-sync-discipline.md).
+
+This ticket is about **mechanizing** the sweep so the lesson doesn't
+depend on agent / human discipline alone.
+
+## Hypotheses to spike
+
+### Option A — pre-push git hook
+
+Hook script that fails (or warns) when `git diff --name-only main..`
+shows source `.kt` paths but no docs paths. Heuristic:
+
+- if the branch touches `core/app/core/src/main/**/*.kt` AND
+- it doesn't touch any of `docs/ARCHITECTURE.md`, `docs/SPECS.md`,
+  `docs/dev/lessons/`, OR
+- it touches `core/providers/*/src/main/**/*.kt` AND
+  doesn't touch `docs/backlog/BACKLOG.md` (lifts often demand
+  follow-up tickets)
+- → `echo` a one-line warning with `--no-verify` escape hatch.
+
+Cheap to implement; high false-positive rate (many code changes
+genuinely don't need docs); needs tuning.
+
+### Option B — CI gate that resolves KDoc cross-package refs
+
+Walk every `.kt` file's KDoc, extract `[fully.qualified.name]`
+anchors, verify each one resolves to an existing public symbol.
+Catches "see [org.krost.unidrive.onedrive.setPosixPermissionsIfSupported]"
+when the helper has moved. Probably needs Dokka or a custom
+lightweight parser.
+
+Higher implementation cost; near-zero false positives once tuned.
+
+### Option C — periodic agent sweep
+
+A scheduled CI job that runs an "audit drift" agent prompt across
+the repo every N days, like the 2026-04-30 provider-duplication
+survey but for docs ↔ code. Outputs a triage list as a GitHub issue.
+
+Cheapest to start, but produces a backlog of items that may go
+stale themselves.
+
+### Option D — scoped post-commit reminder
+
+Single-line message in the post-commit hook output when a `.kt`
+file under a "watched" path is touched: "Reminder: did you sweep
+docs/ARCHITECTURE.md and any open ticket bodies that reference
+the changed symbol?" Zero blocking, just nudges.
+
+Lowest friction; relies on the contributor reading the message.
+
+## Acceptance
+
+- One of A–D ships as a contributor-visible mechanism.
+- The next "lift to `:app:core`" or "rename a public symbol" change
+  in an agent session generates a doc-sweep prompt without the user
+  having to articulate the principle from scratch.
+- Documented in
+  [docs/dev/lessons/one-truth-sync-discipline.md](../dev/lessons/one-truth-sync-discipline.md)
+  alongside the manual discipline.
+
+## Why this matters (in agent terms)
+
+A fresh-context agent reads CLAUDE.md, follows the doc trail, takes
+the code's current state as ground truth. When the trail
+contradicts the code, the agent confidently builds on the wrong
+premise. By the time the contradiction surfaces in a build error or
+runtime symptom, the agent has spent context and tool calls on an
+inconsistent foundation. Multiplied across daily sessions, this is
+a real cost.
+
+## Effort / priority
+
+**Low priority, M effort.** Quality-of-life. Pairs naturally with
+UD-754 (auto-format Kotlin). Both are "developer-ergonomics"
+research items — a future quiet slot can spike all three options
+cheaply and pick whichever ships fastest.
+
+## Related
+
+- [docs/dev/lessons/one-truth-sync-discipline.md](../dev/lessons/one-truth-sync-discipline.md)
+  — the manual-discipline counterpart.
+- **UD-754** (open) — auto-format Kotlin codebase. Sibling
+  developer-ergonomics ticket.
+- **UD-728** (closed) — backlog tooling automation. Same spirit.

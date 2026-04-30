@@ -102,6 +102,21 @@ dragging unrelated modules into the diff, e.g.
   classloader corrupts mid-execution; on Linux it's friendlier but
   still not safe. Always kill the daemon first, then copy. See
   [docs/dev/lessons/jar-hotswap-windows.md](docs/dev/lessons/jar-hotswap-windows.md).
+- Code change ↔ docs / open tickets / lessons move together. If you
+  rename a public symbol or lift a helper to a new package, sweep the
+  docs trail in the same branch. See
+  [docs/dev/lessons/one-truth-sync-discipline.md](docs/dev/lessons/one-truth-sync-discipline.md).
+
+## Before you write a new shared utility
+
+Before adding a new HTTP guard / auth helper / I/O wrapper to a
+provider, **grep `:app:core` first** — the cross-provider duplication
+audit (2026-04-30) lifted ~half a dozen helpers into
+`org.krost.unidrive.{http,auth,io}`. The current inventory lives in
+[docs/ARCHITECTURE.md §"Shared cross-provider utilities"](docs/ARCHITECTURE.md#shared-cross-provider-utilities-appcore).
+If the helper exists, import it. If you find yourself copying the
+same block across providers, lift it to `:app:core` and update the
+table.
 
 ## Everything else
 

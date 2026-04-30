@@ -86,6 +86,30 @@ schema directory, see [ADR-0012 §Re-opening criteria](adr/0012-linux-mvp-protoc
 - `core/app/xtra/src/main/kotlin/org/krost/unidrive/xtra/Vault.kt` — encrypted credential vault.
 - `core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt` — provider contract.
 
+## Shared cross-provider utilities (`:app:core`)
+
+Helpers that ≥ 2 providers need live in `:app:core` so the duplication
+audit (2026-04-30) doesn't have to re-find them. **Before adding a new
+shared concern to a provider, grep this section first** — if the
+helper already exists, import it. If you find yourself copy-pasting
+across providers, lift it here and update this list.
+
+| Package | File | Purpose | UD origin |
+|---|---|---|---|
+| `org.krost.unidrive.http` | `RequestIdPlugin.kt` | Per-request correlation id Ktor plugin (`X-Unidrive-Request-Id`) | UD-255 |
+| `org.krost.unidrive.http` | `HttpRetryBudget.kt` | Cross-call circuit breaker + token bucket | UD-232 |
+| `org.krost.unidrive.http` | `ErrorBody.kt` | `truncateErrorBody`, `readBoundedErrorBody` | UD-336 |
+| `org.krost.unidrive.http` | `UploadTimeoutPolicy.kt` | Size-adaptive request timeout for data-plane PUTs | UD-337 |
+| `org.krost.unidrive.http` | `StreamingUpload.kt` | `streamingFileBody(localPath, fileSize)` with UD-287 finally-flushAndClose | UD-342 |
+| `org.krost.unidrive.http` | `HtmlBodySniffGuard.kt` | `assertNotHtml(response, contextMsg?)` — captive-portal / throttle-redirect guard | UD-340 |
+| `org.krost.unidrive.auth` | `Pkce.kt` | RFC 7636 verifier + challenge | UD-351 |
+| `org.krost.unidrive.io` | `PosixPermissions.kt` | `setPosixPermissionsIfSupported` for token-file storage | UD-347 |
+| `org.krost.unidrive` (root) | `SharedJson.kt` | `UnidriveJson` — `Json { ignoreUnknownKeys; isLenient }` | UD-343 |
+
+Adoption status: every Ktor-using provider (OneDrive, HiDrive,
+Internxt, S3, WebDAV) installs the helpers above where applicable.
+SFTP and LocalFs are non-HTTP and use only the JSON / I/O helpers.
+
 ## Platform support
 
 > The MVP target is **Linux**. macOS and Windows are listed for honesty
