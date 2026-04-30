@@ -30,23 +30,6 @@ Consolidate the three sibling repos into a single monorepo at `greenfield/unidri
 ## Security (UD-100..199)
 
 ---
-id: UD-111
-title: Token refresh-failure telemetry + user notification
-category: security
-priority: medium
-effort: M
-status: open
-code_refs:
-  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
-  - core/providers/hidrive
-  - core/providers/internxt
-adr_refs: [ADR-0004]
-opened: 2026-04-17
-chunk: ipc-ui
----
-OAuth refresh failures currently surface only as exception traces. Emit a structured log event and expose via MCP `status` so a user-facing client can prompt for re-auth.
-
----
 id: UD-113
 title: Structured sync-action audit log (durable record of every local/remote mutation)
 category: security

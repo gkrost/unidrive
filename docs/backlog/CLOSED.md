@@ -7390,3 +7390,22 @@ hard block):
 
 - UD-277 / UD-278 / UD-327 / UD-328 — the concrete pain this catches
   at *plan* time rather than transfer time.
+
+---
+id: UD-111
+title: Token refresh-failure telemetry + user notification
+category: security
+priority: medium
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit 84783c1. OneDrive TokenManager: replaced println with log.warn, added structured RefreshFailure record (timestamp+class+msg) cleared on next success. HiDrive + Internxt analogous gaps tracked under UD-330. MCP status exposure of the record is a follow-up.
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
+  - core/providers/hidrive
+  - core/providers/internxt
+adr_refs: [ADR-0004]
+opened: 2026-04-17
+chunk: ipc-ui
+---
+OAuth refresh failures currently surface only as exception traces. Emit a structured log event and expose via MCP `status` so a user-facing client can prompt for re-auth.
