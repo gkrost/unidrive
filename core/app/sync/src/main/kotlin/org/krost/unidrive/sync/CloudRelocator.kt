@@ -2,14 +2,22 @@ package org.krost.unidrive.sync
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 sealed class MigrateEvent {
     abstract val doneFiles: Int
@@ -65,6 +73,16 @@ class CloudRelocator(
     private val target: CloudProvider,
     private val bufferSize: Long = 8 * 1024 * 1024,
     private val skipExisting: Boolean = true,
+    /**
+     * UD-289: maximum number of files transferred in parallel during the
+     * walk. Pre-fix the walk processed one file at a time end-to-end —
+     * a single slow upload (e.g. mid-stream connection-reset that triggered
+     * UD-288's 5-attempt retry budget at ~22 min/attempt) blocked every
+     * subsequent file behind it. Default 4 mirrors the SyncEngine Pass 2
+     * cap (UD-263); per-target tuning happens via the same provider
+     * metadata (`maxConcurrentTransfers`).
+     */
+    private val maxConcurrentTransfers: Int = 4,
 ) {
     private val log = LoggerFactory.getLogger(CloudRelocator::class.java)
 
@@ -162,7 +180,13 @@ class CloudRelocator(
         knownTotalSize: Long? = null,
         knownTotalFiles: Int? = null,
     ): Flow<MigrateEvent> =
-        flow {
+        // UD-289: channelFlow (vs flow) lets concurrent file-transfer
+        // coroutines call send() safely. Pre-fix the walk processed
+        // one file at a time end-to-end — a single slow upload blocked
+        // every subsequent file behind it (a 22-minute connection-reset
+        // retry on one file delayed all 4000 others on the WebDAV-DSM
+        // run that motivated this ticket).
+        channelFlow {
             val startTime = System.currentTimeMillis()
             val (totalSize, totalFiles) =
                 if (knownTotalSize != null && knownTotalFiles != null) {
@@ -170,15 +194,38 @@ class CloudRelocator(
                 } else {
                     preFlightCheck(sourcePath)
                 }
-            emit(MigrateEvent.Started(totalFiles = totalFiles, totalSize = totalSize))
+            send(MigrateEvent.Started(totalFiles = totalFiles, totalSize = totalSize))
 
-            var migratedFiles = 0
-            var migratedSize = 0L
-            var skippedFiles = 0
-            var skippedSize = 0L
-            var errorCount = 0
+            // UD-289: counters are atomic so launched coroutines don't
+            // race when reading running totals for FileProgressEvent.
+            // emitMutex serialises the FileProgressEvent + Error sends
+            // so the (doneFiles, doneSize) tuple stays internally
+            // consistent — without it a reader could see e.g.
+            // doneFiles=5 with doneSize from when only 3 had completed.
+            val migratedFiles = AtomicInteger(0)
+            val migratedSize = AtomicLong(0L)
+            val skippedFiles = AtomicInteger(0)
+            val skippedSize = AtomicLong(0L)
+            val errorCount = AtomicInteger(0)
+            val emitMutex = Mutex()
+            val transferSemaphore = Semaphore(maxConcurrentTransfers)
             val tempDir = Files.createTempDirectory("unidrive-relocate-")
             currentTempDir = tempDir // UD-269: published for shutdown-hook cleanup.
+
+            suspend fun emitProgress() {
+                emitMutex.withLock {
+                    send(
+                        MigrateEvent.FileProgressEvent(
+                            doneFiles = migratedFiles.get() + skippedFiles.get(),
+                            doneSize = migratedSize.get() + skippedSize.get(),
+                            totalFiles = totalFiles,
+                            totalSize = totalSize,
+                            skippedFiles = skippedFiles.get(),
+                            skippedSize = skippedSize.get(),
+                        ),
+                    )
+                }
+            }
 
             suspend fun targetIndex(path: String): Map<String, CloudItem> {
                 if (!skipExisting) return emptyMap()
@@ -202,7 +249,12 @@ class CloudRelocator(
                 }
             }
 
-            suspend fun walk(
+            // UD-289: walk is defined as an extension on CoroutineScope so
+            // `launch { ... }` inside resolves to the SCOPE PASSED IN by the
+            // outer `coroutineScope { walk(...) }` block, not the channelFlow's
+            // ProducerScope. Without this distinction, launches escape the
+            // join boundary — Completed gets sent before per-file work runs.
+            suspend fun kotlinx.coroutines.CoroutineScope.walk(
                 sourcePrefix: String,
                 targetPrefix: String,
             ) {
@@ -223,15 +275,8 @@ class CloudRelocator(
                         try {
                             target.createFolder(newTarget)
                         } catch (e: CancellationException) {
-                            // UD-286: never absorb cancellation.
                             throw e
                         } catch (e: Exception) {
-                            // Folder may already exist (HTTP 405 on WebDAV /
-                            // 409 on OneDrive / similar elsewhere) — that's the
-                            // intended idempotent-resume path. Log at DEBUG: a
-                            // real network failure here will surface loudly on
-                            // the subsequent walk into this folder, and the
-                            // per-file catch below produces the actual error.
                             log.debug(
                                 "createFolder for '{}' failed (assuming exists): {}: {}",
                                 newTarget,
@@ -251,64 +296,60 @@ class CloudRelocator(
                             )
                         }
                         if (existing != null && !existing.isFolder && isEquivalent(item, existing)) {
-                            skippedFiles++
-                            skippedSize += item.size
-                            emit(
-                                MigrateEvent.FileProgressEvent(
-                                    doneFiles = migratedFiles + skippedFiles,
-                                    doneSize = migratedSize + skippedSize,
-                                    totalFiles = totalFiles,
-                                    totalSize = totalSize,
-                                    skippedFiles = skippedFiles,
-                                    skippedSize = skippedSize,
-                                ),
-                            )
+                            skippedFiles.incrementAndGet()
+                            skippedSize.addAndGet(item.size)
+                            emitProgress()
                             continue
                         }
 
-                        val tempFile = tempDir.resolve(itemName)
-                        try {
-                            val size =
-                                withContext(Dispatchers.IO) {
-                                    source.download(newSource, tempFile)
+                        // UD-289: capture the outer coroutineScope so a per-file
+                        // CancellationException can cancel siblings explicitly
+                        // (Kotlin's structured concurrency does NOT auto-propagate
+                        // a child CE up to the scope — the scope just sees the
+                        // child as "cancelled" and continues. UD-286 relies on
+                        // CE escaping the migrate flow so the caller's `assertFailsWith
+                        // <CancellationException>` triggers; without explicit
+                        // outerScope.cancel(e), the scope completes normally and
+                        // siblings finish in parallel).
+                        val outerScope: kotlinx.coroutines.CoroutineScope = this
+                        launch {
+                            transferSemaphore.withPermit {
+                                val tempFile = tempDir.resolve(itemName)
+                                try {
+                                    val size =
+                                        withContext(Dispatchers.IO) {
+                                            source.download(newSource, tempFile)
+                                        }
+                                    target.upload(tempFile, newTarget)
+                                    migratedFiles.incrementAndGet()
+                                    migratedSize.addAndGet(size)
+                                    emitProgress()
+                                } catch (e: CancellationException) {
+                                    // UD-286 + UD-289: cancel siblings + re-throw
+                                    // so the channelFlow body's outer try/catch
+                                    // sees CE and lets it escape via .toList().
+                                    outerScope.cancel(e)
+                                    throw e
+                                } catch (e: Exception) {
+                                    log.warn(
+                                        "Failed to migrate {}: {}: {}",
+                                        newSource,
+                                        e.javaClass.simpleName,
+                                        e.message,
+                                        e,
+                                    )
+                                    errorCount.incrementAndGet()
+                                    emitMutex.withLock {
+                                        send(
+                                            MigrateEvent.Error(
+                                                "Failed to migrate $newSource: ${e.javaClass.simpleName}: ${e.message}",
+                                            ),
+                                        )
+                                    }
+                                } finally {
+                                    Files.deleteIfExists(tempFile)
                                 }
-                            target.upload(tempFile, newTarget)
-                            migratedFiles++
-                            migratedSize += size
-                            emit(
-                                MigrateEvent.FileProgressEvent(
-                                    doneFiles = migratedFiles + skippedFiles,
-                                    doneSize = migratedSize + skippedSize,
-                                    totalFiles = totalFiles,
-                                    totalSize = totalSize,
-                                    skippedFiles = skippedFiles,
-                                    skippedSize = skippedSize,
-                                ),
-                            )
-                        } catch (e: CancellationException) {
-                            // UD-286: never absorb cancellation. The finally
-                            // block still runs and cleans up tempFile.
-                            throw e
-                        } catch (e: Exception) {
-                            // UD-286: log class name + stack so unidrive.log
-                            // captures *what* failed, not just `e.message`.
-                            // The CLI surfaces e.message via MigrateEvent.Error;
-                            // postmortem reads the full record from the log.
-                            log.warn(
-                                "Failed to migrate {}: {}: {}",
-                                newSource,
-                                e.javaClass.simpleName,
-                                e.message,
-                                e,
-                            )
-                            errorCount++
-                            emit(
-                                MigrateEvent.Error(
-                                    "Failed to migrate $newSource: ${e.javaClass.simpleName}: ${e.message}",
-                                ),
-                            )
-                        } finally {
-                            Files.deleteIfExists(tempFile)
+                            }
                         }
                     }
                 }
@@ -316,11 +357,8 @@ class CloudRelocator(
 
             try {
                 try {
-                    walk(sourcePath, targetPath)
+                    coroutineScope { walk(sourcePath, targetPath) }
                 } catch (e: CancellationException) {
-                    // UD-286: cancellation propagates past the walk so the
-                    // outer flow honours structured concurrency. The finally
-                    // below still cleans up tempDir.
                     throw e
                 } catch (e: Exception) {
                     log.warn(
@@ -330,35 +368,40 @@ class CloudRelocator(
                         e.message,
                         e,
                     )
-                    emit(
-                        MigrateEvent.Error(
-                            "Migration failed: ${e.javaClass.simpleName}: ${e.message}",
-                        ),
-                    )
+                    emitMutex.withLock {
+                        send(
+                            MigrateEvent.Error(
+                                "Migration failed: ${e.javaClass.simpleName}: ${e.message}",
+                            ),
+                        )
+                    }
                 }
             } finally {
-                // UD-286: recursive cleanup that never throws. If walk was
-                // cancelled mid-download, a partial tempFile may remain in
-                // tempDir; deleteIfExists on a non-empty dir would otherwise
-                // throw DirectoryNotEmptyException and shadow the original
-                // failure cause.
                 runCatching { tempDir.toFile().deleteRecursively() }
-                currentTempDir = null // UD-269: tempDir is gone; clear pointer.
+                currentTempDir = null
             }
             val duration = System.currentTimeMillis() - startTime
-            emit(
+            send(
                 MigrateEvent.Completed(
-                    doneFiles = migratedFiles + skippedFiles,
-                    doneSize = migratedSize + skippedSize,
+                    doneFiles = migratedFiles.get() + skippedFiles.get(),
+                    doneSize = migratedSize.get() + skippedSize.get(),
                     totalFiles = totalFiles,
                     totalSize = totalSize,
-                    errorCount = errorCount,
+                    errorCount = errorCount.get(),
                     durationMs = duration,
-                    skippedFiles = skippedFiles,
-                    skippedSize = skippedSize,
+                    skippedFiles = skippedFiles.get(),
+                    skippedSize = skippedSize.get(),
                 ),
             )
-        }.flowOn(Dispatchers.IO)
+        }
+    // UD-289: NO flowOn(Dispatchers.IO) here — channelFlow manages its
+    // own context, and the inner launches (which need to run before
+    // coroutineScope returns) need to share the dispatcher with the
+    // channelFlow body. flowOn(Dispatchers.IO) added a hop that
+    // de-coordinated the launches with the channelFlow's join. Production
+    // callers (RelocateCommand) wrap the collect in
+    // `withContext(Dispatchers.IO)` already (see UD-294 + UD-263), so
+    // the IO offload happens at a higher layer.
 
     companion object {
         private val gcLog = LoggerFactory.getLogger(CloudRelocator::class.java)

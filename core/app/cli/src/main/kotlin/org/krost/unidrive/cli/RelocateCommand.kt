@@ -118,12 +118,21 @@ class RelocateCommand : Runnable {
             throw IllegalStateException("Run 'unidrive -p $toProvider auth' first")
         }
 
+        // UD-289: per-target concurrency from ProviderMetadata. The target
+        // is the bottleneck (uploads back-pressure on its rate limit /
+        // socket pool); source-side reads parallelise naturally underneath.
+        // Default 4 if metadata is missing.
+        val maxConcurrent =
+            org.krost.unidrive.ProviderRegistry
+                .getMetadata(toProfile.type)
+                ?.maxConcurrentTransfers ?: 4
         val relocator =
             CloudRelocator(
                 source = fromProviderObj,
                 target = toProviderObj,
                 bufferSize = bufferMb.toLong() * 1024 * 1024,
                 skipExisting = !force,
+                maxConcurrentTransfers = maxConcurrent,
             )
 
         println("Pre-flight checks...")
