@@ -7189,3 +7189,96 @@ premature EOF trigger bounded retry.
 - UD-262 — shared `HttpRetryBudget`.
 - UD-277 — adaptive timeout reduces false-positive resets.
 - UD-328 — range resume lets retry start from last-acked byte.
+
+---
+id: UD-293
+title: GraphApiService still buffers byte[] for >2 GB downloads on a non-downloadFile path (UD-329 left this surface)
+category: core
+priority: high
+effort: M
+status: closed
+closed: 2026-04-30
+resolved_by: commit a1a0c0f. Root cause: UD-231 captive-portal guard's response.bodyAsText().take(200) materialised the entire response body before take. CDN serving a 2.3 GB binary with Content-Type:text/html triggered the guard → 2.3 GB String allocation → OOM. New readBoundedErrorBody helper reads at most maxBytes off the channel; applied to all 4 diagnostic call sites in downloadFile's execute lambda.
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+opened: 2026-04-29
+---
+**Symptom (from log-feedback-loop-proposal 2026-04-29).** Two
+`Can't create an array of size 2_171_403_393` and `…2_233_659_189`
+WARN lines from `GraphApiService - Graph download failed (attempt
+1/3)`, 16 minutes apart, on two different OneDrive files. Both
+values exceed `Integer.MAX_VALUE` (2,147,483,647) — the JVM cannot
+allocate a Java `byte[]` of that length.
+
+UD-329 fixed this exact symptom for `downloadFile` (the CDN /
+Graph-content-stream path). UD-329's commit message says the fix
+switched to `httpClient.prepareGet(url).execute { response ->
+response.bodyAsChannel() }` for streaming. The proposal's analysis
+indicates **another code path in `GraphApiService.kt` still buffers
+the response body via the non-streaming `httpClient.get(url)` →
+`response.body<ByteReadChannel>()` shape**, which Ktor 3.x exposes
+only after allocating the full body as a `byte[contentLength]`.
+
+The proposal also notes: "Retries papered over it but the second
+attempt also allocates the same array, so the fact that it passed
+on retry is suspicious — verify whether the file was actually
+persisted or silently skipped."
+
+**Investigation needed.** Find the unfixed call site:
+
+```bash
+grep -n 'httpClient\.get\|response\.body<' \
+    core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+```
+
+Likely candidates per the proposal: a non-`downloadFile` Graph
+download path used for thumbnails, attachment children, or
+multi-part metadata? Or `getDelta` retry-on-stream-failure that
+falls back to non-streaming?
+
+**Proposed fix (mirror UD-329's pattern).**
+
+Wherever the buffered shape is found:
+
+```kotlin
+val bytes = httpClient.get(url).body<ByteArray>()  // ← BUG
+```
+
+becomes:
+
+```kotlin
+httpClient.prepareGet(url).execute { response ->
+    response.bodyAsChannel().copyAndClose(destination.toFileWriteChannel())
+}
+```
+
+Or `okio.Sink` / chunked `InputStream` copy straight to disk if a
+file destination is in scope.
+
+**Acceptance.**
+
+- New unit test against a Ktor MockEngine fake response with
+  `Content-Length: 2_300_000_000` (2.3 GB) where the response body is
+  a streaming source — assert the call completes without
+  `OutOfMemoryError: Can't create an array of size N`.
+- Live integration test (UNIDRIVE_INTEGRATION_TESTS=true) against the
+  two specific OneDrive files that triggered today's WARNs (the user
+  has the paths in their unidrive.log:
+  `unidrive.2026-04-29.{0,1,2}.log`) — assert successful download.
+- After fix, `bash scripts/dev/log-watch.sh --json` over the same
+  log set returns `array_of_size_oom: 0` instead of `2`.
+
+**Related.**
+- UD-329 — original fix for the same class of bug. Fix landed for
+  `downloadFile`; this ticket addresses the path UD-329 missed.
+- UD-309 — Ktor "Content-Length mismatch" short-read retry. May need
+  similar treatment on the new streaming path.
+- `docs/dev/log-feedback-loop-proposal.md` — source.
+- `scripts/dev/log-watch.sh` (UD-282-style enhancement landed
+  alongside this ticket): the `array_of_size_oom` counter pins the
+  symptom in CI / regression checks.
+
+**Why now.** Live trigger today: 2 files > 2 GB silently failed
+with retries that *also* failed allocation but somehow recovered
+(or silently skipped — to be verified). User has 16+ min of dead
+time per file, plus possible silent data loss.
