@@ -1816,3 +1816,284 @@ need to know.
   separate).
 * Backward-compatible reading (always normalize on read; the DB
   migration above handles legacy data).
+---
+id: UD-740
+title: Move action: print src + dest in CLI/log (currently only dest)
+category: tooling
+priority: medium
+effort: XS
+status: open
+opened: 2026-04-30
+---
+**Why:** `SyncAction.MoveRemote` and `SyncAction.MoveLocal` carry both
+`fromPath` and `toPath`, but the CLI/log output for `move` actions
+prints only the destination. The user can't see what was renamed *to*
+what — only that something arrived at a path. Real-case (2026-04-30,
+post-UD-737 dry-run on inxt_gernot_krost_posteo): action lines like
+
+```
+[31640/31722] move /Documents/Calibre/Calibre-Import/...Schmolke .p[31647/31722] move /Documents/...
+```
+
+leave the user wondering "moved from where?" and also chain together
+because of the long-path TTY wrap.
+
+**What:** In `SyncEngine.actionLabel(action)` and the call sites in
+`onActionProgress`, render `move` actions as `from -> to` (or
+`from → to` if non-ASCII OK in the TTY context — UD-291 lessons say
+ASCII safer on Windows). Both for stdout progress lines and for the
+`failures.jsonl` / log writes.
+
+**Where:**
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  — `actionLabel()` (~line 997) currently returns just `"move"`; needs
+  to either return both paths or have the call sites format separately.
+  Cleanest: add a helper `displayPath(action: SyncAction): String` that
+  for `MoveRemote` / `MoveLocal` returns `"$fromPath -> $toPath"` and
+  for everything else returns `action.path`.
+* `reporter.onActionProgress(index, total, label, path)` — `path` is
+  what gets rendered. Pass the helper's result.
+* `failureLogPath` writer in `logFailure` — same change.
+
+**Tests:**
+
+* Unit: action with `MoveRemote(fromPath=/a, toPath=/b)` produces a
+  display string that contains both `/a` and `/b`.
+* Existing `onActionProgress` tests' fixtures may need an expectation
+  refresh.
+
+**Out of scope:** the TTY wrap-around problem is UD-735 (already
+landed). This is purely "make `move` lines self-describing."
+---
+id: UD-741
+title: Sync banner: include sync_path arg when set
+category: tooling
+priority: medium
+effort: XS
+status: open
+opened: 2026-04-30
+---
+**Why:** UD-296's banner reports `profile`, `type`, `sync_root`, and
+`mode` at sync start, but **does not include `--sync-path`** when set.
+Real-case (2026-04-30):
+
+```
+unidrive -p inxt_gernot_krost_posteo sync --reset --upload-only \
+         --sync-path /19notte78 --dry-run
+Sync state virtually reset (dry-run; on-disk state.db untouched).
+sync: profile=inxt_gernot_krost_posteo type=internxt sync_root=C:\Users\gerno\InternxtDrive mode=upload, dry-run
+Scanning remote changes...
+```
+
+User scoped the run to `/19notte78` and the banner gives no acknowledgement
+of that. If they typo the sub-path, they only find out hours later when
+the action plan has the wrong tree.
+
+**What:** Append `sync_path=<value>` to the banner *only when* the flag
+is set (don't pollute the unscoped case). Place between `sync_root` and
+`mode` so the banner reads naturally:
+
+```
+sync: profile=... type=... sync_root=... sync_path=/19notte78 mode=upload, dry-run
+```
+
+**Where:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`,
+the `println("sync: ...")` block landed in UD-296. Read the `syncPath`
+@Option already wired into the command.
+
+**Tests:** small assertion that with `--sync-path X` the banner string
+contains `sync_path=X`; without `--sync-path` it does NOT contain
+`sync_path=`. Reuse the captured-stdout pattern from
+`CliProgressReporterTest`.
+
+**Out of scope:** any other flag surface in the banner. If we want
+`--exclude` or `--fast-bootstrap` reflected too, file separately —
+they're less likely to surprise the user.
+---
+id: UD-742
+title: Scan-phase heartbeat: emit count update at least every 10s during long scans
+category: tooling
+priority: high
+effort: S
+status: open
+opened: 2026-04-30
+---
+**Why:** Between
+
+```
+Scanning remote changes...
+```
+
+and the next output line (`Scanning remote changes... 2228 items`), the
+CLI may sit silent for *minutes to hours* on large drives. Real-case
+2026-04-30: a remote scan returning 112 932 items took >10 min;
+local scan of 128 681 files projected to take similar. The user can't
+distinguish "still working" from "deadlocked / hung / network-stalled."
+
+UD-240 (filed) covers the broader long-running-feedback problem
+(always-on IPC, progress state file, heartbeat, inline progress) but
+its scope is large. This ticket is the **smallest thing that fixes
+the immediate pain** during scan phases.
+
+**What:** During remote/local scan, emit a heartbeat line at most every
+10 s while no other progress event has fired. Heartbeat content:
+
+```
+Scanning remote changes... 47 800 items so far (1m 23s elapsed)
+Scanning local changes... 8 412 items so far (4m 02s elapsed)
+```
+
+Implementation sketch:
+
+* `ProgressReporter.onScanProgress(phase, count)` is already called by
+  `gatherRemoteChanges` and `LocalScanner` at start (count=0) and end
+  (count=N). Add periodic mid-scan calls.
+* Internxt + WebDAV providers iterate pages; emit `onScanProgress` at
+  the end of each page (cheap; no timer needed).
+* For `LocalScanner`, the file-tree walk has no natural pagination
+  — wrap the visitor in a counter that fires `onScanProgress` every N
+  files (say 5 000) OR every 10 s wall-clock since last fire.
+* `CliProgressReporter.onScanProgress` already prints `Scanning $phase
+  changes... $count items` for non-zero counts. Repeat-paint via the
+  existing `printInline` (UD-735's truncate-aware path).
+
+**Where:**
+
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt`
+* `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+  (`gatherRemoteChanges`'s page loop)
+* Per-provider `delta` paginators if they expose page-end hooks
+* `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt`
+  — re-paint heartbeat via existing `printInline`
+
+**Tests:** unit test that calls `LocalScanner.scan()` against a synthetic
+tree of >5 000 files, captures `ProgressReporter.onScanProgress` calls,
+asserts > 1 mid-scan call.
+
+**Acceptance:**
+
+* During a >30 s scan phase, the user sees count update at least every
+  10 s.
+* No regression in scan correctness; the count reported at end equals
+  the actual items found.
+
+**Relationship:** strict subset of UD-240's 240b/240d. Lands first;
+UD-240 can subsume this and extend with bps / ETA / IPC progress
+later.
+---
+id: UD-743
+title: Brainstorm: rich pre-flight sync banner with src/target visualisation + action matrix + exec status
+category: tooling
+priority: low
+effort: L
+status: open
+opened: 2026-04-30
+---
+**Status:** brainstorm — design proposal from a real user session, not
+yet a build spec.
+
+**Why:** The current sync banner is a single key=value line. Real-case
+2026-04-30 user proposal: a richer ASCII layout that shows source,
+target, direction, action breakdown, and execution status as a
+structured pre-flight summary. Conceptually similar to a Windows
+progress dialog, ASCII-rendered.
+
+User-supplied mockup:
+
+```
+==============================================================================
+                     UNIDRIVE SYNC OPERATION (SIMULATION)
+==============================================================================
+
+   [ LOCAL SOURCE ]                                   [ REMOTE TARGET ]
+   Local Windows File System                          Internxt Cloud Drive
+   (Profile: gerno)                                   (Profile: inxt_gernot...)
+   -------------------------                          -------------------------
+   C:\Users\gerno\InternxtDrive                       /19notte78
+         |                                                 ^
+         |                                                 |
+         |--------------- UPLOAD-ONLY SYNC -----------------|
+         |             (Local pushes to Remote)             |
+
+
+==============================================================================
+                    WHAT WOULD BE TRANSFORMED? (File Level)
+==============================================================================
+Because you used `--reset` combined with `--upload-only`, the tool ignores
+previous sync history (state.db) and evaluates everything from scratch as a
+one-way push from Local to Remote:
+
+ [F] NEW/MODIFIED LOCALLY  ====== COPY/UPLOAD ======>  Added to /19notte78
+ [X] DELETED LOCALLY       ====== DO NOTHING =======>  Retained on Remote
+ [=] IDENTICAL FILES       ====== DO NOTHING =======>  Skipped
+
+ * In strict upload-only modes, local deletions typically do not
+   trigger remote deletions, protecting the remote as a backup.
+
+
+==============================================================================
+EXECUTION STATUS: [DRY-RUN ACTIVE]
+   SIMULATION ONLY: No bytes are transferred.
+   STATE UNTOUCHED: The local state.db is not modified.
+==============================================================================
+```
+
+(Original mockup used emoji + box-drawing; ASCII-only here per UD-291
+Windows-codepage lessons.)
+
+## What it adds over the current banner
+
+* **Source ↔ target visualisation** with the actual paths labelled by
+  side. Current banner gives `sync_root=...` only, no remote-side
+  parity.
+* **Direction arrows.** Current banner says `mode=upload` but doesn't
+  visually anchor "what flows where."
+* **Per-flag action matrix.** Current banner does NOT explain what
+  `--upload-only --reset` actually means for each file class. The
+  user just had to learn this from UD-737 / UD-296 thread; an inline
+  cheat sheet would short-circuit that.
+* **Execution status callout.** `dry-run` is a single token in the
+  current banner; the proposal makes the consequences explicit
+  (no bytes transferred / state untouched).
+
+## Open design questions
+
+1. Width: 78-col cap? 100? Wrap on narrow terminals?
+2. Verbosity tiers: full vs current single-line vs `--quiet` mode?
+   Maybe a `--banner=full|short|quiet` flag (default short = current).
+3. Profile labels: where does `Profile: gerno` for the local side
+   come from? unidrive's profile is the *remote* side. Probably show
+   only the remote profile and label local as "Local FS" / "Local
+   Filesystem" with the path.
+4. Action matrix: derived from `(syncDirection, propagateDeletes,
+   reset)`. Need a small lookup table; compute and render at banner
+   time.
+5. Internationalisation? Probably no — keep CLI English only.
+6. Should non-dry-run runs also get the rich banner? Probably yes,
+   without the "SIMULATION" callout. Could replace `EXECUTION STATUS`
+   with `LIVE: Bytes will transfer`.
+
+## Implementation sketch
+
+* New module: `core/app/cli/src/main/kotlin/.../BannerRenderer.kt`
+  with a single `render(opts: BannerOpts): String`. Pure function
+  for testability.
+* `BannerOpts` data class holding profile name + type, syncRoot,
+  syncPath, direction, dryRun, forceDelete, propagateDeletes, watch,
+  reset.
+* `SyncCommand` calls `BannerRenderer.render(opts)` once before
+  `runBlocking { ... }`.
+
+## Relationship
+
+* Builds on UD-296 (banner content) and UD-735 (terminal width).
+* If UD-741 (sync_path in banner) lands first, this rich version
+  subsumes it — render via the new system.
+* UD-240 covers the *runtime* progress story; this is the *pre-flight*
+  story.
+
+## Out of scope
+
+Implementation. This ticket is for design discussion. Once the open
+questions are answered, file the implementation as its own ticket.
