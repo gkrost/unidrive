@@ -132,6 +132,22 @@ class HiDriveApiService(
                 )
             }
 
+            // UD-333: mirror the closed UD-231 OneDrive fix. CDN edge nodes
+            // occasionally return HTTP 200 with `Content-Type: text/html` —
+            // captive-portal pages, throttle redirects, expired-URL login
+            // pages — and the raw HTML would otherwise stream straight into
+            // the destination file at the matching byte size. The UD-226
+            // NUL-stub sweep doesn't catch this because HTML is non-NUL
+            // content. Guard before any write hits disk.
+            val contentType = response.contentType()
+            if (contentType != null && contentType.match(ContentType.Text.Html)) {
+                val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
+                throw java.io.IOException(
+                    "Download returned HTML instead of file bytes (status=${response.status.value}, " +
+                        "Content-Type=$contentType): $snippet",
+                )
+            }
+
             val channel: ByteReadChannel = response.bodyAsChannel()
             withContext(Dispatchers.IO) {
                 Files.createDirectories(destination.parent)
@@ -365,6 +381,23 @@ class HiDriveApiService(
 
         return response.bodyAsText()
     }
+
+    // UD-333: bounded read off the raw channel for diagnostic purposes (HTML
+    // body sniff in downloadFile). Mirrors the OneDrive UD-293 helper —
+    // bodyAsText() would materialise the entire body into a String, OOM-ing
+    // when a CDN attaches a multi-GB body to a fake 200/text-html response.
+    private suspend fun readBoundedErrorBody(
+        response: HttpResponse,
+        maxBytes: Int = 4096,
+    ): String =
+        try {
+            val channel = response.bodyAsChannel()
+            val buf = ByteArray(maxBytes)
+            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
+            String(buf, 0, read, Charsets.UTF_8)
+        } catch (_: Exception) {
+            "<body unavailable>"
+        }
 
     override fun close() {
         httpClient.close()

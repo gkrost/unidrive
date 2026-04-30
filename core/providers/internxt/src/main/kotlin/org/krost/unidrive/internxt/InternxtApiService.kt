@@ -218,6 +218,25 @@ class InternxtApiService(
             if (!response.status.isSuccess()) {
                 throw InternxtApiException("Download failed: ${response.status}", response.status.value)
             }
+            // UD-333: mirror the closed UD-231 OneDrive fix. CDN edge / bridge
+            // fallthroughs occasionally return HTTP 200 with text/html (captive
+            // portal, expired-URL login, throttle redirect). On Internxt this
+            // is HIGHER severity than on the OneDrive baseline because the
+            // body is fed through cipher.update() (AES-CTR) before write —
+            // HTML XOR'd through a strong keystream produces high-entropy
+            // bytes indistinguishable from a real decrypted file. UD-226's
+            // NUL-stub sweep does not catch it. Permanent silent corruption
+            // is the failure mode if the guard isn't here. Must execute
+            // BEFORE the first cipher.update() call so the AES-CTR keystream
+            // / IV state stays untouched and the URL can be retried cleanly.
+            val contentType = response.contentType()
+            if (contentType != null && contentType.match(ContentType.Text.Html)) {
+                val snippet = readBoundedErrorBody(response, maxBytes = 4096).take(200)
+                throw java.io.IOException(
+                    "Download returned HTML instead of file bytes (status=${response.status.value}, " +
+                        "Content-Type=$contentType): $snippet",
+                )
+            }
             val channel: ByteReadChannel = response.body()
             var written = 0L
             withContext(Dispatchers.IO) {
@@ -429,6 +448,24 @@ class InternxtApiService(
             throw InternxtApiException("API error: ${response.status} - ${response.bodyAsText()}", response.status.value)
         }
     }
+
+    // UD-333: bounded read off the raw channel for diagnostic purposes (HTML
+    // body sniff in downloadFileStreaming). bodyAsText() would materialise
+    // the entire response into a String — UD-293 anti-pattern; on a captive
+    // portal page that happens to claim Content-Length matching the file's
+    // encrypted size, that's a multi-GB OOM.
+    private suspend fun readBoundedErrorBody(
+        response: HttpResponse,
+        maxBytes: Int = 4096,
+    ): String =
+        try {
+            val channel = response.bodyAsChannel()
+            val buf = ByteArray(maxBytes)
+            val read = channel.readAvailable(buf, 0, maxBytes).coerceAtLeast(0)
+            String(buf, 0, read, Charsets.UTF_8)
+        } catch (_: Exception) {
+            "<body unavailable>"
+        }
 
     override fun close() {
         httpClient.close()
