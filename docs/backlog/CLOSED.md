@@ -8736,3 +8736,86 @@ The infrastructure already exists:
   line surfaces a non-zero `failed` count.
 * Existing tests still pass (the default-arg makes the change
   source-compatible).
+
+---
+id: UD-746
+title: Always-on IPC for one-shot sync runs (UD-240a sub-ticket)
+category: tooling
+priority: high
+effort: XS
+status: closed
+closed: 2026-04-30
+resolved_by: commit 4a69fc7. Always-on IPC: ipcServer + ipcReporter created unconditionally in SyncCommand.kt; one-shot sync now publishes its socket so tray/status see live progress.
+opened: 2026-04-30
+---
+**Why:** UD-240's research identified `240a — Always-on IPC` as the
+cheapest + highest-leverage win in the long-running-feedback story.
+This ticket pulls 240a out as a standalone for clean closure (the
+parent UD-240 still tracks 240b/c/d/e/f).
+
+Quoting UD-240's `240a` block verbatim:
+
+> Drop the `if (watch)` guard on `IpcServer` / `NamedPipeServer`
+> creation in `SyncCommand.kt`. Socket advertises for every `sync`
+> run, one-shot or continuous. **UI discovers one-shot daemons
+> automatically; no other change needed on the UI side.** Cheapest +
+> highest-leverage fix.
+
+User pain motivating the bump-up: 2026-04-30 sync run, 11+ min spent
+inside the local + remote scan with no live status visible to the
+tray or to a sibling `unidrive status --all` invocation. The only
+way to confirm the daemon was alive was `Get-Process java`. With
+always-on IPC, the running profile's socket appears under
+`%LOCALAPPDATA%\unidrive\<profile>.sock` (or `unidrive-*.sock` on
+POSIX) and any IPC client — tray, status command, or future tooling
+— can subscribe immediately.
+
+## What
+
+In `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt`,
+remove the `if (watch) { ... } else { ... }` distinction around
+IpcServer creation (currently lines 246-259). The new flow:
+
+```kotlin
+val socketPath = IpcServer.defaultSocketPath(profile.name)
+ipcServer = IpcServer(socketPath)
+ipcReporter = IpcProgressReporter(ipcServer, profile.name)
+val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
+if (notifyReporter != null) delegates.add(notifyReporter)
+reporter = CompositeReporter(delegates)
+```
+
+`ipcServer?.start(this)` at line 362 already fires for both branches;
+`ipcServer?.close()` in the finally / shutdown-hook paths already
+runs unconditionally. No other changes needed.
+
+## Concerns + answers
+
+* **Concurrent runs of the same profile** — guarded by
+  `parent.acquireProfileLock()` (UD-272). Only one sync per profile
+  at a time, so socket creation never collides.
+* **One-shot dry-run** — also advertises now. UI can show "dry-run
+  in progress." Minor surface area but no harm.
+* **Socket cleanup** — existing paths handle close. New socket
+  files are short-lived for one-shot runs.
+* **Stale sockets across crashes** — IpcServer's create path either
+  unlinks-and-rebinds or detects a live owner. Same path that
+  watch-mode already exercises.
+
+## Tests
+
+* SyncCommandTest fixture spying on the IpcServer factory: verify
+  the socket path is created on a non-watch sync invocation.
+* Smoke: run `unidrive sync --dry-run` against a fake profile, then
+  `Files.exists(IpcServer.defaultSocketPath(profile))` while the
+  sync is mid-flight.
+
+## Out of scope
+
+* 240b (progress state file)
+* 240c (idle heartbeat event)
+* 240d (CLI inline progress reporter — already partly covered by
+  UD-742 + UD-713)
+* 240e / 240f (still-working nudges, legacy fallback)
+
+These remain in UD-240 for follow-up.
