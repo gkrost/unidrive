@@ -2868,3 +2868,59 @@ Useful starting points:
 ## Provenance
 
 Sample audit 2026-05-01. Source: `logic-arts-official/unidrive`@`b8e4223`, `docs/CHANGELOG.md`.
+---
+id: UD-766
+title: Wire backlog-sync.kts into CI (build.yml)
+category: tooling
+priority: high
+effort: XS
+status: open
+code_refs:
+  - scripts/backlog-sync.kts
+  - scripts/ci/backlog-sync.sh
+  - .github/workflows/build.yml
+opened: 2026-05-01
+---
+**Wire `scripts/backlog-sync.kts` into `.github/workflows/build.yml` as a CI step. Best leverage-to-effort ratio in the tree.**
+
+The script and shell wrapper both already exist (`scripts/backlog-sync.kts`, 179 lines; `scripts/ci/backlog-sync.sh`, 6 lines), but no CI job invokes them — drift goes uncaught until someone runs `kotlinc -script` locally, and most contributors don't.
+
+## What's already there
+
+- `scripts/backlog-sync.kts` — canonical orphan/stale/anchorless/abandoned checker per AGENT-SYNC.md. Exit 0 on clean (or warnings only); exit 1 on hard errors (orphan code refs, stale closed items).
+- `scripts/ci/backlog-sync.sh` — already exists as the CI wrapper. Three lines: `cd` to repo root, `exec kotlinc -script scripts/backlog-sync.kts`. Ready to call.
+- `docs/AGENT-SYNC.md` — already documents that this script is the contract. The contract just isn't enforced.
+
+## What gets caught the moment we wire it
+
+In one shot:
+- **Orphan code refs** — `// UD-xyz` in source with no matching block in `BACKLOG.md`/`CLOSED.md`.
+- **Stale closed** — IDs in `CLOSED.md` still referenced in source.
+- **Non-canonical statuses** — frontmatter `status:` outside `open|in-progress|blocked|closed`.
+- **Anchorless open** (warning) — `code_refs:` pointing at non-existent files.
+- **Abandoned** (warning) — `status: open`, no `code_refs`, opened > 30 d ago.
+- **Source-vs-CLOSED drift** — entries that disagree between BACKLOG and CLOSED.
+
+These are the failure modes that today only surface during PR review or session handover. Wiring catches them at push time.
+
+## Acceptance
+
+- New job `backlog` in `.github/workflows/build.yml` running on `ubuntu-latest` only (kotlinc-only — no JDK build needed):
+  - Checkout
+  - Set up JDK 21 (kotlinc needs it)
+  - Install kotlinc (`curl` from GitHub releases, or use a marketplace action — pick whichever is cheaper)
+  - `bash scripts/ci/backlog-sync.sh`
+- Job runs on push to `main` and on PRs (same triggers as `core`).
+- Job is **fast** — script reads docs + greps `core/` for `UD-###` patterns, no Gradle invocation. Should be < 30 s including kotlinc warmup.
+- `concurrency:` group shared with the existing `core` group so PRs don't queue duplicates.
+- Failure surfaces in the PR check list with a useful summary (the script's stderr is already shaped for humans).
+
+## Out of scope
+
+- Re-using the existing Gradle daemon — kotlinc is fine standalone for a 179-line script.
+- Strict mode for warnings — keep "anchorless open" + "abandoned" as warnings only (script default). If we want to escalate later, that's a separate ticket.
+- Running this in a pre-commit hook — separate ticket, related to UD-762's `check-docs.sh` salvage.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Highest leverage/effort ratio in the tree because: (a) script + wrapper already exist, (b) checks every PR + every push to `main`, (c) catches 6 distinct drift classes simultaneously.
