@@ -22,7 +22,7 @@ It also governs [CHANGELOG.md](CHANGELOG.md) and in-code `UD-###` references.
 | UD-100..199 | Security |
 | UD-200..299 | Core daemon |
 | UD-300..399 | Providers |
-| UD-400..499 | Reserved (was `shell-win` / CFAPI; closed via [ADR-0011](adr/0011-shell-win-removal.md) + [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)) |
+| UD-400..499 | `cli` — CLI surface (subcommands, rendering, output formatting). Rebound 2026-05-01 from the retired `shell-win` tier ([ADR-0011](adr/0011-shell-win-removal.md) + [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)); UD-401..403 stay in CLOSED.md with `category: shell-win` as historical record. |
 | UD-500..599 | Reserved (was UI / tray; removed via [ADR-0013](adr/0013-ui-removal.md)) |
 | UD-600..699 | Reserved (was `protocol/` IPC contract; directory removed via [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)) |
 | UD-700..799 | Tooling / CI / docs |

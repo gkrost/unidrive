@@ -13,7 +13,7 @@ Category ranges (from docs/AGENT-SYNC.md):
   security      100..199
   core          200..299
   providers     300..399
-  shellwin      400..499
+  cli           400..499  (was shell-win; rebound 2026-05-01 per ADR-0011/0012)
   ui            500..599
   protocol      600..699
   tooling       700..799
@@ -41,8 +41,7 @@ CATEGORY_RANGES = {
     "security": (100, 199),
     "core": (200, 299),
     "providers": (300, 399),
-    "shellwin": (400, 499),
-    "shell-win": (400, 499),
+    "cli": (400, 499),
     "ui": (500, 599),
     "protocol": (600, 699),
     "tooling": (700, 799),
