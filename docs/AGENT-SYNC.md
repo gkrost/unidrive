@@ -29,6 +29,16 @@ It also governs [CHANGELOG.md](CHANGELOG.md) and in-code `UD-###` references.
 | UD-800..899 | Tests |
 | UD-900..999 | Reserved / experimental |
 
+### When a range fills up
+
+A category caps at 100 IDs (`core` saturated late April 2026 — UD-200..299 fully allocated). The escalation ladder, from least to most invasive:
+
+1. **Letter suffixes** (`UD-101a`, `UD-205b` — already permitted by the regex `\d{3}[a-z]?`) for follow-up tickets that share the parent's scope. `next-id` doesn't auto-allocate suffixes; type them by hand.
+2. **Repurpose retired ranges.** UD-400..499 was rebound from `shell-win` → `cli` on 2026-05-01 after [ADR-0011](adr/0011-shell-win-removal.md) retired the original tier. UD-500..599 (`ui`, retired by [ADR-0013](adr/0013-ui-removal.md)) and UD-600..699 (`protocol`, retired by [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)) are similarly available for rebinding when the need arises.
+3. **Widen to 4 digits.** Update the regex `\d{3}` → `\d{3,4}` in `scripts/dev/backlog.py` and the format string `:03d` → variable; bump category ranges 10× (e.g. `core 2000..2999`). Backwards-compatible — UD-101 still parses. One-commit migration when needed; no rewrite of historical IDs.
+
+Do **not** recycle closed IDs. The "IDs live forever" line above is load-bearing — git history, code comments (`// UD-205: ...`), and ADRs reference IDs forever. A recycled ID would point at a different change in different parts of the tree.
+
 ## BACKLOG.md entry format
 
 Each entry is a fenced frontmatter block followed by Markdown prose. The block is parsed by [scripts/backlog-sync.kts](../scripts/backlog-sync.kts).
