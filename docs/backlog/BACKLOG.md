@@ -2815,3 +2815,108 @@ After UD-209a + UD-816 + UD-817 land:
 - one-truth-sync-discipline.md — the lesson this ticket operationalises.
 - UD-755 (open) — proposed mechanical drift detection; this ticket is
   the manual sweep UD-755 would automate.
+---
+id: UD-209b
+title: LocalScanner unconditionally sets isHydrated=true; breaks UD-222 sparse-leftover invariant
+category: core
+priority: high
+effort: S
+status: open
+opened: 2026-05-01
+---
+**Surfaced 2026-05-01 during the UD-209a investigation on sg5.**
+
+UD-901 (commit 4f0f22c, "LocalScanner writes pending-upload entry on
+NEW-path sight") introduced a regression to UD-222.
+
+## Symptom
+
+A sparse placeholder file from an interrupted sync — physically on disk
+at the expected logical size but with one allocated trailing page — is
+adopted by the next sync as fully hydrated, never re-downloaded. The
+file silently stays as zeros. The engine's `applyCreatePlaceholder`
+sparse-detection at SyncEngine.kt:750 never fires because the scanner
+already classified the file as hydrated upstream.
+
+## Root cause
+
+[`LocalScanner.kt:58-80`](../../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt#L58):
+
+```kotlin
+val entry = dbEntries[relativePath]
+if (entry == null) {
+    changes[relativePath] = ChangeState.NEW
+    db.upsertEntry(
+        SyncEntry(
+            …
+            isHydrated = true,   // <— UD-901, but wrong for sparse placeholders
+            …
+        ),
+    )
+}
+```
+
+UD-901's intent is sound — give `unidrive status` a row to display
+local-only files before upload. But the unconditional
+`isHydrated = true` clobbers the post-interruption state where the
+file exists physically but is still a 0-block sparse hole.
+
+## Test impact
+
+Two `SyncCornerCaseTest` cases test this exact invariant:
+
+- `sparse placeholder from interrupted sync is replaced by real download`
+- `pinned file downloaded even if sparse placeholder exists`
+
+Both red on Linux; both fail because the engine never reaches the
+sparse-detection check — LocalScanner pre-empts with `isHydrated=true`,
+the Reconciler sees a fully-synced file and skips action emission.
+
+## Production impact
+
+A user whose sync was killed mid-cycle, leaving a sparse placeholder,
+will silently see a zero-byte content for that file forever. This is
+the UD-222 incident class on a different surface: not-NUL-bytes-on-NTFS,
+but stale-zeros-on-restart-because-scanner-lied.
+
+## Proposed fix
+
+In `LocalScanner.visitFile`, when `entry == null` and the file is
+non-zero-size, check sparseness before claiming hydrated:
+
+```kotlin
+val isSparseLeftover = attrs.size() > 0 && PlaceholderManager.isSparseStatic(file, attrs.size())
+db.upsertEntry(
+    SyncEntry(
+        …
+        isHydrated = !isSparseLeftover,
+        …
+    ),
+)
+```
+
+`isSparseStatic` (or pass a `PlaceholderManager` reference into
+`LocalScanner`) reuses the same `stat --format=%b` test the
+engine uses. Tests remain:
+
+- new sparse file → `isHydrated=false` → engine routes through
+  `DownloadContent` or `CreatePlaceholder` → real bytes pulled.
+- new dense file → `isHydrated=true` → existing UD-901 behavior preserved.
+
+## Acceptance
+
+- Both `SyncCornerCaseTest` cases pass on JDK 21 jbrsdk Linux.
+- `unidrive status` still shows local-only files immediately after
+  scan (UD-901 contract preserved for the dense case).
+- New regression test in `LocalScannerTest`: a 16 KiB sparse file
+  on a fresh sync_root produces a DB entry with `isHydrated=false`.
+
+## Related
+
+- UD-209a (open) — sibling: PlaceholderManager.dehydrate sparse on
+  JDK 21. Same incident root cause class.
+- UD-901 (closed) — the commit that introduced the regression.
+- UD-222 (closed) — the original "no NUL stubs" invariant being
+  silently broken.
+- UD-712 (closed) — the prior 346 GB-of-NUL-bytes incident on NTFS;
+  same class of failure on a different OS.
