@@ -413,7 +413,11 @@ class CloudRelocatorTest {
             source.fileContents["/never-reached.txt"] = ByteArray(10)
             source.cancellationPaths.add("/cancelled.txt")
 
-            val relocator = CloudRelocator(source, target)
+            // UD-817: maxConcurrentTransfers=1 forces sequential per-file processing,
+            // so cancelled.txt's CE always fires before never-reached.txt's launch.
+            // Default 4 lets both files race in parallel, never-reached can complete
+            // upload before outerScope.cancel(e) propagates from cancelled.txt's CE.
+            val relocator = CloudRelocator(source, target, maxConcurrentTransfers = 1)
 
             assertFailsWith<CancellationException> {
                 relocator.migrate("/", "/").toList()
