@@ -3,6 +3,7 @@ package org.krost.unidrive.mcp
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.authenticateAndLog
 
 val shareTool =
     ToolDef(
@@ -36,7 +37,7 @@ private fun handleShare(
     val normalizedPath = if (path.startsWith("/")) path else "/$path"
 
     val provider = ctx.createProvider()
-    runBlocking { provider.authenticate() }
+    runBlocking { provider.authenticateAndLog() }
 
     return when (action) {
         "create" -> {

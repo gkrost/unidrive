@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.StateDatabase
 import picocli.CommandLine.Command
 import picocli.CommandLine.ParentCommand
@@ -27,7 +28,7 @@ class QuotaCommand : Runnable {
         val stateDb = parent.configBaseDir().resolve(profile.name).resolve("state.db")
         try {
             runBlocking {
-                provider.authenticate()
+                provider.authenticateAndLog()
                 val quota = provider.quota()
                 cacheQuota(stateDb, quota)
                 println("Storage Quota (${provider.displayName}):")

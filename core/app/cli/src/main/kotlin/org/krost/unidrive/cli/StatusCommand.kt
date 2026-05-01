@@ -6,6 +6,7 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderRegistry
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
@@ -116,7 +117,7 @@ class StatusCommand : Runnable {
         val quota =
             if (Capability.QuotaExact in provider.capabilities()) {
                 runBlocking {
-                    provider.authenticate()
+                    provider.authenticateAndLog()
                     provider.quota()
                 }
             } else {
@@ -240,7 +241,7 @@ class StatusCommand : Runnable {
             val provider = parent.createProviderFor(profile, configDir)
             if (Capability.QuotaExact !in provider.capabilities()) return null
             runBlocking {
-                provider.authenticate()
+                provider.authenticateAndLog()
                 if (!provider.isAuthenticated) return@runBlocking null
                 provider.quota().used
             }

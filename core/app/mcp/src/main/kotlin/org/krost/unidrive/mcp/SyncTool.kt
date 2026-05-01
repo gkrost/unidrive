@@ -2,6 +2,7 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.*
 import java.nio.file.Paths
 
@@ -46,7 +47,7 @@ private fun handleSync(
         val db = ctx.openDb()
         try {
             val provider = ctx.createProvider()
-            runBlocking { provider.authenticate() }
+            runBlocking { provider.authenticateAndLog() }
 
             val os = System.getProperty("os.name", "").lowercase()
             val conflictBackupDir =

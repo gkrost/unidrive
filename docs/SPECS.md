@@ -8,23 +8,29 @@
 > [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) is the coarser narrative;
 > SPECS.md is the normative catalog with the file:line anchors.
 
-> **Linux MVP scope.** MVP is `core/` only. Sections referencing
-> `shell-win/`, `protocol/`, the named pipe, Surface B "shell ↔
-> daemon command pipe", `ui/`, or the C++ language matrix row are
-> **out of date** below — see ADRs 0011 / 0012 / 0013 for what was
-> removed and why. UI ↔ daemon IPC is UDS only with event shapes
-> inline in
-> [`IpcProgressReporter.kt`](../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt).
-
 ## 0. Product at a glance
 
-**UniDrive** — multi-provider bidirectional cloud-storage sync with sparse-placeholder local files. Files appear immediately with correct sizes but consume no disk space until opened or pinned (the OneDrive-on-Windows model, on Linux).
+**UniDrive** — multi-provider bidirectional cloud-storage sync. The
+local file shape is a **0-byte stub + `isHydrated=false` row in the
+state DB** until first open / explicit `unidrive get` / pin-rule
+match, at which point the provider streams real bytes into the file.
+The earlier sparse-file approach (UD-222 history: `setLength(size)` to
+make stat report cloud size with zero blocks allocated) was reverted
+because (a) on NTFS `setLength` allocates real NUL bytes — a 346 GB
+OneDrive turned into 346 GB of zeroes on disk during UD-712 — and
+(b) even on Linux where `setLength` is sparse, apps opening the stub
+see NUL bytes, indistinguishable from corruption. True OS-level
+placeholders belong to a future shell tier (CFAPI / FileProvider /
+FUSE), not user-space file sleight-of-hand. See `PlaceholderManager.kt:40-46`
+for the rationale comment in the code.
 
-Target platform hierarchy, recovered:
-
-- **Tier-1**: Linux (original target).
-- **Tier-2**: Windows 11 (added in the prior session per `shell-win/HANDOVER.md`, 2026-04-16).
-- **Tier-3**: macOS — not in scope.
+**Platform scope (per [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)):** Linux is the MVP target.
+Windows and macOS are out of scope for v0.0.x → v0.1.0. The CLI and
+MCP server still build on the JVM on either platform; provider
+adapters are JVM-only and platform-agnostic; but neither non-Linux
+platform has CI, packaging, or support claims. See ADR-0012
+§"Re-opening criteria for Windows / macOS support" for what would
+have to change to bring them back.
 
 ## 1. Architecture — intent vs implementation
 
@@ -46,14 +52,16 @@ Target platform hierarchy, recovered:
 | `providers/internxt` | Internxt w/ client-side crypto | [`core/providers/internxt/`](../core/providers/internxt) | ✅ |
 | `providers/localfs` | Local-to-local + testing | [`core/providers/localfs/`](../core/providers/localfs) | ✅ |
 
-### 1.2 Separate tiers (monorepo post-restart)
+### 1.2 Tree layout
 
 | Tier | Code | Role |
 |------|------|------|
-| JVM daemon | [`core/`](../core) | CLI + MCP + sync + providers |
-| ~~Swing tray UI~~ | ~~`ui/`~~ | Removed via [ADR-0013](adr/0013-ui-removal.md) — no first-party GUI in v0.0.x; UDS broadcast surface stays open for community trays |
-| Windows shell extension | [`shell-win/`](../shell-win) | C++20 / CfApi DLL for Explorer integration |
-| Shared IPC schemas | [`protocol/`](../protocol) | Code-free schema contract (new in greenfield restart) |
+| JVM daemon | [`core/`](../core) | CLI + MCP + sync + providers — the entire v0.0.x → v0.1.0 product |
+
+Removed (kept here for historical context — re-import criteria in each ADR):
+- **`ui/`** — Swing/Compose-Desktop system-tray applet. Removed via [ADR-0013](adr/0013-ui-removal.md). Third-party trays / indicators can still consume the UDS event stream.
+- **`shell-win/`** — C++20 / CfApi DLL for Windows Explorer integration. Removed via [ADR-0011](adr/0011-shell-win-removal.md).
+- **`protocol/`** — JSON-Schema contract directory + golden NDJSON fixtures. Removed via [ADR-0012](adr/0012-linux-mvp-protocol-removal.md); event shapes now defined inline in `IpcProgressReporter.kt`.
 
 ### 1.3 Toolchain
 
@@ -62,13 +70,12 @@ Target platform hierarchy, recovered:
 | Kotlin | 2.3.20 ✅ | 2.3.20 ([`core/gradle/libs.versions.toml`](../core/gradle/libs.versions.toml)) | agree |
 | JDK | 21 LTS ([`core/app/cli/build.gradle.kts:8`](../core/app/cli/build.gradle.kts#L8) — `jvmToolchain(21)`) | per [ADR-0006](adr/0006-toolchain.md). |
 | Gradle | 9.4.1 ✅ | 9.4.1 | agree |
-| C++ (shell-win) | — (not mentioned in recovered docs) | C++20 / MSVC 2022 ([`shell-win/CMakeLists.txt:5`](../shell-win/CMakeLists.txt#L5)) | code-only |
 
-## 2. IPC — three wire protocols
+## 2. IPC — two wire protocols
 
-The recovered docs reveal that **three distinct IPC surfaces exist**, not one. This is the single biggest clarification SPECS delivers over the earlier `ARCHITECTURE.md` in this repo. Each has its own transport and format.
+Two distinct IPC surfaces exist. Each has its own transport and format. (A third surface — a Windows named pipe for `shell-win` ↔ daemon — was removed via [ADR-0012](adr/0012-linux-mvp-protocol-removal.md) when the shell tier was cut.)
 
-### 2.1 Surface A — daemon → UI (push-only event stream)
+### 2.1 Surface A — daemon → consumer (push-only event stream)
 
 **Transport:** Unix-domain socket at `$XDG_RUNTIME_DIR/unidrive-<profile>.sock`, mode `0600`.
 
@@ -159,7 +166,7 @@ A `profile` field inside a tool-call's `arguments` object is **silently ignored*
 | **Move detection (remote renames)** | `CreatePlaceholder(new)` where `remoteId` matches existing entry at different path → `MoveLocal` + `renamePrefix` for children | 💻 verified |
 | **Conflict policy** | `keep_both` (default) → save remote as `file.conflict-remote-TIMESTAMP.ext`; `last_writer_wins` → most recent mtime wins | 💻 verified |
 | **Pin rules** | glob patterns for eager hydration, matched during apply | 💻 verified |
-| **Sparse placeholders** | `RandomAccessFile.setLength()`; `stat` reports cloud size, zero blocks allocated | ⚠ **POSIX only**; on Windows returns `false` unconditionally ([UD-209](backlog/BACKLOG.md#ud-209)) |
+| **0-byte placeholders** | Stub created via `Files.createFile`; `isHydrated=false` row in state DB; real bytes arrive via `provider.download` on access. The earlier sparse-file approach (`RandomAccessFile.setLength(size)`) was reverted in UD-222 — see `PlaceholderManager.kt:40-46` for the rationale | 💻 verified |
 | **Interrupt/resume** | delta cursor persisted in SQLite `sync_state` | 💻 verified; see [UD-205](backlog/BACKLOG.md#ud-205) for the Pass-2 concurrency angle |
 | **Deletion safeguard** | `max_delete_percentage` (default 50%) aborts sync if over-threshold | 💻 verified (integration-test Section 3 covers the CLI flag) |
 | **Selective sync** | `exclude_patterns` glob per profile, skipped during reconciliation | 💻 verified |
@@ -180,17 +187,21 @@ Reconciled against the post-Wave-1 [`docs/SECURITY.md`](SECURITY.md) (which subs
 | AES-256-GCM vault, PBKDF2-HMAC-SHA256 600k iter, 16-byte salt | `core/app/xtra/src/main/kotlin/org/krost/unidrive/xtra/XtraKeyManager.kt:31,118-119` | A2 |
 | POSIX `0600` on token files | `core/providers/onedrive/src/main/kotlin/.../OAuthService.kt:213` | A4 |
 | Array-form `ProcessBuilder` (no shell injection) | `core/providers/rclone/src/main/kotlin/.../RcloneCliService.kt:161` | rclone |
-| `safePath()` containment check (post-UD-304) | `core/providers/localfs/src/main/kotlin/.../LocalFsProvider.kt:60` | localfs |
-| NDJSON schema validation on IPC frames | `core/app/sync/src/main/kotlin/.../NamedPipeServer.kt:138` | UD-105 |
-| Frame size cap + token-bucket rate limit | `NamedPipeServer.kt:98,157-167` | UD-106 |
+| `safeResolveLocal()` path-traversal guard | `core/app/sync/src/main/kotlin/.../PlaceholderManager.kt:20-33` | UD-304 |
 | Per-profile `FileChannel.tryLock()` | `core/app/sync/src/main/kotlin/.../ProcessLock.kt:16` | A6 |
+
+Note: the prior `NamedPipeServer.kt`-based mitigations (NDJSON schema
+validation per UD-105; frame-size cap + token-bucket rate limit per
+UD-106) were removed in [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+along with the named-pipe transport itself. UDS is broadcast-only with
+no command surface, so neither attack class applies.
 
 ### 5.2 Gaps (all tracked in BACKLOG.md)
 
-- Named pipe has no SDDL → **LPE-adjacent** if daemon ever runs elevated ([UD-101](backlog/BACKLOG.md#ud-101)).
-- DLL compiled without CFG / DYNAMICBASE / `SetDefaultDllDirectories` ([UD-102](backlog/BACKLOG.md#ud-102)).
-- Windows DPAPI wrap for token files not implemented (doc-only wishlist).
-- Structured audit log per sync action ([UD-113](backlog/BACKLOG.md#ud-113) — opened this session when the UD-112 STRIDE review found the prior SECURITY.md had mis-attributed it).
+- Structured audit log per sync action ([UD-113](backlog/BACKLOG.md#ud-113)).
+- Vault passphrase hardening (rotation, lockout) — doc-only wishlist; no ticket yet.
+
+The prior Windows-shell-tier gaps (named-pipe SDDL UD-101, DLL hardening UD-102, DPAPI token wrap) closed via [ADR-0011](adr/0011-shell-win-removal.md) / [ADR-0012](adr/0012-linux-mvp-protocol-removal.md) when those tiers were cut. They re-open only if Windows support is re-introduced under the criteria documented in those ADRs.
 
 ## 6. Webhook flow
 
@@ -201,48 +212,41 @@ Flow:
 1. User sets `webhook = true` per-profile in `config.toml`.
 2. Daemon calls `GraphApiService.createSubscription(notificationUrl, expirationDateTime)` — 💻 verified at `core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt:556`.
 3. Graph API expires after 4230 minutes (~3 days).
-4. **Auto-renewal is partially wired:** `renewSubscription()` is called from [`SyncCommand.kt:344`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L344) inside `ensureSubscription()`, invoked on every poll cycle when `watch && webhook == true`. What's missing is the *scheduled* renewal policy (renew ≤24 h before expiry); today the cycle creates a new subscription if the old one lapsed, which works but trades one round-trip per sync cycle for correctness.
-5. `SubscriptionStore` exists and **is consumed** by [`SyncCommand.kt:224,235,258`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L224) — not by `SyncEngine` directly, but by the CLI-level orchestrator that drives the engine. My earlier "orphan" framing in the pre-verification draft of this doc was wrong; [UD-303](backlog/BACKLOG.md#ud-303) was refined during the verification sweep to reflect "scheduler-level auto-renewal policy missing, not consumer-missing".
+4. **Auto-renewal is fully wired ([UD-303](backlog/CLOSED.md#ud-303), closed):** `SubscriptionRenewalScheduler` arms a `(expiry − 24h)` callback that drives a single `renewSubscription()` Graph call per subscription lifetime. Per-cycle `ensureSubscription()` short-circuits via `scheduler.isScheduledAndValid(profileName)` when the scheduler is armed and the persisted subscription still has >24h left. See [`SyncCommand.kt:480-541`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L480) for the renewal logic (KDoc on `ensureSubscription` documents the fast-path).
+5. `SubscriptionStore` is consumed by `SyncCommand` (the CLI-level orchestrator drives both the store and the scheduler). The pre-verification "orphan" framing in earlier drafts of this doc was wrong.
 
 **Tunneling for NAT traversal:** ngrok, cloudflared, serveo.net, or production VPS with public IP + reverse proxy. Doc-only; no automation.
 
-## 7. Test strategy — doc target vs current reality
+## 7. Test strategy — current reality
 
-Test coverage targets:
+Snapshot at HEAD (2026-05-01, post UD-350/UD-751/UD-752 bundle). Total: **1427 tests, 0 failed, 14 skipped** (UD-209 sparse-Windows gates + a few UD-704 `assumeTrue` skips for live integration without OAuth credentials).
 
-| Module | Doc target (tests) | Doc target (coverage) | Current (2026-04-17) |
-|--------|-------------------:|----------------------:|---------------------:|
-| sync | 255 | 87% | **290** (+TokenBucket, NdjsonValidator, NamedPipeServerDispatch) |
-| cli | 83 | 43% | **113** (+CliProgressReporter, post-UD-704 assumeTrue) |
-| mcp | 23 | moderate | **114** (+McpRoundtripIntegrationTest after UD-202) |
-| core | 9 | low | **38** |
-| localfs | 31 | good | **34** (+3 UD-304 regressions) |
-| webdav | 24 | good | **73** (+WebDavApiServiceSsl post-UD-104) |
-| xtra | 20 | good | 20 |
-| onedrive | 42 | good | 57 |
-| internxt | 35 | good | 35 |
-| rclone | 33 | good | 33 |
-| s3 | 27 | good | 82 |
-| hidrive | 23 | good | 23 |
-| sftp | 15 | moderate | **91** |
-| **TOTAL** | **674** | — | **997 tests, 0 failed, 5 skipped (UD-209 sparse gates)** |
+The earlier per-module "doc target vs actual" table reflected pre-greenfield numbers from `0.2.x` and is no longer load-bearing — the test counts have moved well past it as the duplication-survey lifts (UD-336/UD-340/UD-342/UD-343/UD-347/UD-348/UD-351/UD-350/UD-751/UD-752) added shared-helper test coverage in `:app:core`. Re-baseline from `./gradlew test` if a fresh per-module breakdown is needed.
 
+### 7.1 Coverage of the previously-flagged high-risk areas
 
-### 7.1 Untested areas the checklist flagged as high-risk
-
-- **RelocateCommand + CloudRelocator** (312 lines, destructive `--delete-source`) — ⚠ still largely uncovered; add to [UD-801](backlog/BACKLOG.md#ud-801) scope.
-- **ShareCommand** (90 lines, user-facing) — partial via `ToolHandlerTest`; standalone CLI tests TBD.
-- **Main.kt config factory** (486 lines) — ⚠ still sparse.
+- **`RelocateCommand` (477 lines) + `CloudRelocator` (457 lines)** — well covered now: `CloudRelocatorTest` (881 lines) + `RelocateCommandTest` (261 lines). The destructive `--delete-source` paths have explicit cases. Outstanding live-mode coverage tracked under [UD-329](backlog/BACKLOG.md#ud-329).
+- **`ShareCommand` (131 lines)** — covered by `ShareCommandTest` (179 lines) + `ToolHandlerTest`.
+- **`Main.kt` config factory (839 lines)** — still the sparsest spot in the CLI. No dedicated ticket; lift candidates ([UD-754](backlog/BACKLOG.md#ud-754) auto-format research) may shrink it before targeted tests are worth writing.
 
 ### 7.2 Integration tests
 
-Doc expectation: `LocalFS roundtrip`, `Trash & Versioning`, `Share & Webhook (OneDrive live)`, `Relocate (2 profiles)`, `Vault & Encryption`, `Profile Management`, `Backup`, `Docker container`.
+The Docker test harness lives under [`core/docker/`](../core/docker) — three compose files, all driven from the Gradle root:
 
-Current:
-- ✅ `integration-test.sh --skip-network` passes after [UD-703](backlog/CLOSED.md#ud-703) — 2 local checks pass, 8 network checks cleanly skipped.
+| Harness | Compose file | Scope | Tests |
+|---|---|---|---|
+| localfs round-trip | `docker-compose.test.yml` | `localfs`-only sync; no external services | 8 |
+| provider contract | `docker-compose.providers.yml` | live `sftp` + `webdav` + `s3` (MinIO) + `rclone` | 20 |
+| MCP JSON-RPC (UD-815) | `docker-compose.mcp.yml` | shadow-jar MCP end-to-end vs seeded localfs profile | 9 |
+
+Expected on HEAD per [`core/docker/README.md`](../core/docker/README.md): all three harnesses pass with exit 0 (`8 + 20 + 9 = 37`). Runnable wherever `docker compose` is available.
+
+In-tree integration tests:
 - ✅ `McpRoundtripIntegrationTest` (6 tests).
-- ⚠ Docker container tests not runnable (no `docker` on this host).
-- ⚠ OneDrive live webhook tests not runnable (no OAuth token on this host).
+- ✅ `LiveGraphIntegrationTest` (canonical consumer of `UNIDRIVE_TEST_ACCESS_TOKEN` per CLAUDE.md; cleanly `assumeTrue`-skipped without an OAuth token).
+
+Out-of-tree:
+- ⚠ OneDrive live webhook tests require a tenant + tunneling (ngrok / cloudflared); not part of any automated run.
 
 ## 8. Version anchors
 
@@ -257,20 +261,15 @@ Interpretation: the current greenfield **inherits all those features in code** �
 
 ## 9. Intent-vs-code delta — things the docs assumed that the code doesn't do
 
-The important list. Items where the spec assumes behaviour the current code does not yet exhibit.
+Items where the spec assumes behaviour the current code does not yet exhibit. Rows for tiers that were cut (`shell-win` UD-401 / UD-101 / UD-102; UI-on-Windows UD-503) closed via [ADR-0011](adr/0011-shell-win-removal.md), [ADR-0012](adr/0012-linux-mvp-protocol-removal.md), [ADR-0013](adr/0013-ui-removal.md) and dropped from this list.
 
 | # | Topic | Doc assumption | Current reality | Tracked as |
 |---|-------|----------------|-----------------|-----------|
-| 1 | Named-pipe hydration | `fetch` / `dehydrate` over pipe drive CfApi callbacks | stubs returning "not yet implemented" | [UD-201](backlog/BACKLOG.md#ud-201), [UD-401](backlog/BACKLOG.md#ud-401) |
-| 2 | Webhook auto-renewal | subscriptions renewed <24 h before expiry | `renewSubscription()` exists, nothing calls it | [UD-303](backlog/BACKLOG.md#ud-303) |
-| 3 | Windows sparse placeholders | NTFS sparse-flag detection | always returns false on Windows | [UD-209](backlog/BACKLOG.md#ud-209) |
-| 4 | JDK target | JDK 25 | JDK 21 LTS (session choice) | [ADR-0006](adr/0006-toolchain.md) |
-| 5 | Named-pipe ACL | implicitly trusted; no SDDL | no SDDL; LPE if daemon elevated | [UD-101](backlog/BACKLOG.md#ud-101) |
-| 6 | DLL hardening | (docs silent) | no CFG / DYNAMICBASE | [UD-102](backlog/BACKLOG.md#ud-102) |
-| 7 | Provider capability defaults | silent `null/empty/false` | same (legacy); to be replaced by `Capability.Unsupported(reason)` | [UD-301](backlog/BACKLOG.md#ud-301), UD-704 |
-| 8 | IPC transport for UI | UDS on Linux; UDS on Windows via `%TEMP%` workaround | same | [UD-503](backlog/BACKLOG.md#ud-503) will unify to named pipe on Windows |
-| 9 | Audit log per sync action | not yet specced | not implemented | [UD-113](backlog/BACKLOG.md#ud-113) |
-| 11 | Sync action audit log reported via MCP | (doc-speculative; never released) | not present | [UD-113](backlog/BACKLOG.md#ud-113) |
+| 1 | JDK target | (older docs assumed JDK 25) | JDK 21 LTS | [ADR-0006](adr/0006-toolchain.md) |
+| 2 | Provider capability defaults | silent `null/empty/false` | same (legacy); to be replaced by `Capability.Unsupported(reason)` | [UD-301](backlog/BACKLOG.md#ud-301) |
+| 3 | Audit log per sync action | not yet specced; doc-speculative pipe to MCP | not implemented | [UD-113](backlog/BACKLOG.md#ud-113) |
+| 4 | Pass-2 transfer atomicity | concurrent transfers happen outside the metadata batch; SIGKILL-during-transfer recovery not audited | structural gap confirmed but not yet exercised by a fault-injection test | [UD-205](backlog/BACKLOG.md#ud-205) |
+| 5 | OS-level placeholder hydration | (legacy doc — implied OneDrive-on-Linux semantics) | reverted to 0-byte stubs in UD-222; shell-tier work cut by [ADR-0011](adr/0011-shell-win-removal.md). Re-opens only under that ADR's criteria | n/a |
 
 
 ## 10. Open questions

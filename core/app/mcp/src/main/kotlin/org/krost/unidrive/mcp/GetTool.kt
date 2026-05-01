@@ -2,6 +2,7 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.PlaceholderManager
 import java.nio.file.Files
 import java.time.Instant
@@ -63,7 +64,7 @@ private fun handleGet(
             }
 
             val provider = ctx.createProvider()
-            runBlocking { provider.authenticate() }
+            runBlocking { provider.authenticateAndLog() }
 
             val bytes =
                 runBlocking {

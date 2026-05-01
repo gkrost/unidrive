@@ -100,9 +100,7 @@ open class AuthService(
         val challengeResponse =
             httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login") {
                 contentType(ContentType.Application.Json)
-                header("internxt-client", InternxtConfig.CLIENT_NAME)
-                header("internxt-version", InternxtConfig.CLIENT_VERSION)
-                header("x-internxt-desktop-header", InternxtConfig.DESKTOP_HEADER)
+                applyInternxtHeaders()
                 setBody(
                     json.encodeToString(
                         kotlinx.serialization.json.JsonObject
@@ -136,9 +134,7 @@ open class AuthService(
         val accessResponse =
             httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login/access") {
                 contentType(ContentType.Application.Json)
-                header("internxt-client", InternxtConfig.CLIENT_NAME)
-                header("internxt-version", InternxtConfig.CLIENT_VERSION)
-                header("x-internxt-desktop-header", InternxtConfig.DESKTOP_HEADER)
+                applyInternxtHeaders()
                 setBody(
                     json.encodeToString(
                         kotlinx.serialization.json.JsonObject
@@ -189,9 +185,7 @@ open class AuthService(
         val response =
             httpClient.get("${InternxtConfig.API_BASE_URL}/users/refresh") {
                 bearerAuth(currentJwt)
-                header("internxt-client", InternxtConfig.CLIENT_NAME)
-                header("internxt-version", InternxtConfig.CLIENT_VERSION)
-                header("x-internxt-desktop-header", InternxtConfig.DESKTOP_HEADER)
+                applyInternxtHeaders()
             }
         if (!response.status.isSuccess()) {
             throw AuthenticationException("Token refresh failed: ${response.bodyAsText()}")

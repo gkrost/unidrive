@@ -62,9 +62,9 @@ schema directory, see [ADR-0012 §Re-opening criteria](adr/0012-linux-mvp-protoc
 
 | Artifact | Location | Format | Notes |
 |----------|----------|--------|-------|
-| Global config | `~/.config/unidrive/config.toml` (POSIX) / `%APPDATA%\unidrive\config.toml` (Win) | TOML | Profiles + provider defaults. Schema: [config-schema/config.schema.json](config-schema/config.schema.json); annotated example: [config-schema/config.example.toml](config-schema/config.example.toml). |
-| Encrypted vault | `{profile}/vault.enc` | AES-GCM, passphrase-derived | UD-xxx: passphrase hardening TBD |
-| OAuth tokens | `{profile}/token.json` | JSON | POSIX mode `0600`; Windows: DPAPI TBD |
+| Global config | `~/.config/unidrive/config.toml` | TOML | Profiles + provider defaults. Schema: [config-schema/config.schema.json](config-schema/config.schema.json); annotated example: [config-schema/config.example.toml](config-schema/config.example.toml). The CLI also resolves `%APPDATA%\unidrive\config.toml` and `~/Library/Application Support/unidrive/config.toml` for community best-effort use on Win/macOS, but neither is in MVP scope per [ADR-0012](adr/0012-linux-mvp-protocol-removal.md). |
+| Encrypted vault | `{profile}/vault.enc` | AES-GCM, passphrase-derived | Passphrase hardening (rotation, lockout) is on the roadmap as a doc-only wishlist — no UD ticket yet. |
+| OAuth tokens | `{profile}/token.json` | JSON | POSIX mode `0600` via `setPosixPermissionsIfSupported` (UD-347). |
 | Sync state | `{profile}/.state.db` | SQLite | `SyncEntry`, `PinRule`, `ConflictLog` |
 | Process lock | `{profile}/.lock` | pidfile | Per-profile single-instance guard |
 
@@ -178,7 +178,7 @@ Adding a new snapshot adapter: pick the pair that gives the lowest false-positiv
 
 - **delta**: primary sync-engine input. All providers must supply some form; snapshot-based adapters (S3, SFTP, rclone) are marked 🟡 because their cost is O(tree) rather than incremental.
 - **deltaShared**: enumerating items shared *with* the user (not *by* the user). Only Graph exposes this cleanly. Tracked by [UD-302](backlog/BACKLOG.md#ud-302).
-- **webhook**: push notifications from the provider. OneDrive subscriptions are partially wired; the orphan `SubscriptionStore` is tracked in [UD-303](backlog/BACKLOG.md#ud-303).
+- **webhook**: push notifications from the provider. OneDrive subscriptions are fully wired with scheduled `(expiry − 24h)` renewal via `SubscriptionRenewalScheduler` ([UD-303](backlog/CLOSED.md#ud-303), closed). `SubscriptionStore` is consumed by `SyncCommand.kt:480-541`.
 - **share**: first-class "give me a URL I can share" API. Generic "copy file & email it" is not this capability.
 - **quotaExact**: the provider returns true free/used/total. Estimated or derived values (from `df`, `about`, presence-based) are 🟡.
 

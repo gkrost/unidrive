@@ -73,7 +73,6 @@ class RcloneProvider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentEntries = cli.listAllRecursive()
-        log.debug("Delta: {} items", currentEntries.size)
         return computeDelta(currentEntries, cursor, config.path)
     }
 

@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.onedrive.OneDriveProvider
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -26,7 +27,7 @@ class AuthCommand : Runnable {
                     if (deviceCode && provider !is OneDriveProvider) {
                         println("Note: Device code flow is only available for OneDrive. Using browser flow.")
                     }
-                    provider.authenticate()
+                    provider.authenticateAndLog()
                 }
             }
             println("Authenticated to ${provider.displayName}")

@@ -2,6 +2,7 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
+import org.krost.unidrive.authenticateAndLog
 
 val quotaTool =
     ToolDef(
@@ -16,7 +17,7 @@ private fun handleQuota(
     ctx: ProfileContext,
 ): JsonElement {
     val provider = ctx.createProvider()
-    runBlocking { provider.authenticate() }
+    runBlocking { provider.authenticateAndLog() }
 
     val quota = runBlocking { provider.quota() }
 

@@ -9,7 +9,7 @@ for Linux, auditable, Apache-2.0.**
 [![Kotlin: 2.3.20](https://img.shields.io/badge/Kotlin-2.3.20-7F52FF.svg)](docs/adr/0006-toolchain.md)
 [![MVP target: Linux](https://img.shields.io/badge/MVP-Linux-informational.svg)](docs/adr/0012-linux-mvp-protocol-removal.md)
 
-**Repository:** <https://github.com/gkrost/unidrive-cli>
+**Repository:** <https://github.com/gkrost/unidrive>
 
 UniDrive aggregates multiple cloud-storage backends behind a single
 sync engine. One config file. One CLI. One MCP server an LLM can
@@ -118,8 +118,8 @@ UniDrive is a Kotlin/JVM project; the daemon is a Gradle composite at
 ### Build from source
 
 ```bash
-git clone https://github.com/gkrost/unidrive-cli
-cd unidrive-cli/core
+git clone https://github.com/gkrost/unidrive
+cd unidrive/core
 ./gradlew build test
 ```
 
@@ -433,7 +433,11 @@ tests landing, scanner/CI workflow scaffolded. No prebuilt binaries.
 - All UD-2xx core backlog items at priority `high` closed.
 - Test coverage ≥ 60% on `core/app/sync` and `core/app/mcp` (UD-801).
 - Smoke script `scripts/smoke.sh` passes end-to-end.
-- Security baseline items landed (UD-105, UD-106, UD-107, UD-112).
+- Security baseline: gitleaks (UD-107) and the STRIDE threat model in
+  `docs/SECURITY.md` (UD-112) shipped. Per-frame validation /
+  rate-limit / SDDL items (UD-101 / UD-105 / UD-106) closed via
+  [ADR-0012](docs/adr/0012-linux-mvp-protocol-removal.md) along with
+  the named-pipe transport they protected.
 - Provider scope: **localfs, s3, sftp**. Others remain preview.
 
 **v0.2.0 and beyond** — the
@@ -505,7 +509,7 @@ Read before bigger changes:
 - **Security:** `unidrive@krost.org` with subject prefix
   `[SECURITY]` (see [SECURITY.md](SECURITY.md))
 - **Bug reports / feature requests:** GitHub Issues at
-  <https://github.com/gkrost/unidrive-cli/issues> — please include
+  <https://github.com/gkrost/unidrive/issues> — please include
   the `[<short-sha>]` prefix from your `unidrive.log` so the daemon
   build is identifiable.
 

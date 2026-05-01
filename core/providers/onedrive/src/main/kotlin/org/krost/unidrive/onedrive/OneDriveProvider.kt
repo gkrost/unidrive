@@ -52,11 +52,7 @@ class OneDriveProvider(
         if (!tokenManager.isAuthenticated) {
             tokenManager.authenticateWithBrowser()
         }
-        if (tokenManager.isAuthenticated) {
-            log.debug("Auth: OneDrive authenticated")
-        } else {
-            log.warn("Auth: OneDrive not authenticated after initialize")
-        }
+        // UD-752: post-authenticate debug log lifted to authenticateAndLog wrapper.
     }
 
     suspend fun authenticateWithDeviceCode() {
@@ -155,10 +151,6 @@ class OneDriveProvider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val result = graphApi.getDelta(cursor)
-        // UD-313: don't mirror the "Delta: N items, hasMore=X" line — GraphApiService
-        // already logs the same data with more context (cursor prefix, request id)
-        // at GraphApiService.kt:137. On a 130k-item first-sync, walking ~1,300 pages
-        // through this mirror doubled the DEBUG log volume for zero diagnostic value.
 
         // Filter out the drive root item itself — it appears in delta responses
         // but is not a real child. Without this filter, it creates a phantom "root" folder.
@@ -202,7 +194,6 @@ class OneDriveProvider(
             )
         }
         val result = graphApi.getDelta(cursor)
-        // UD-313: same mirror removed as above; GraphApiService emits the line.
 
         val mainItems =
             result.items
