@@ -1,8 +1,13 @@
 package org.krost.unidrive.rclone
 
+import org.krost.unidrive.sync.Snapshot
 import kotlin.test.*
 
 class RcloneSnapshotTest {
+    private fun RcloneSnapshot.encode(): String = encode(RcloneSnapshotEntry.serializer())
+
+    private fun decode(cursor: String): RcloneSnapshot = Snapshot.decode(cursor, RcloneSnapshotEntry.serializer())
+
     @Test
     fun `encode and decode round-trip preserves entries`() {
         val entries =
@@ -23,7 +28,7 @@ class RcloneSnapshotTest {
                     ),
             )
         val original = RcloneSnapshot(entries = entries, timestamp = 1_700_000_000_000L)
-        val decoded = RcloneSnapshot.decode(original.encode())
+        val decoded = decode(original.encode())
 
         assertEquals(original.entries, decoded.entries)
         assertEquals(original.timestamp, decoded.timestamp)
@@ -32,13 +37,13 @@ class RcloneSnapshotTest {
     @Test
     fun `empty snapshot encodes and decodes`() {
         val snapshot = RcloneSnapshot(entries = emptyMap(), timestamp = 0L)
-        val decoded = RcloneSnapshot.decode(snapshot.encode())
+        val decoded = decode(snapshot.encode())
         assertTrue(decoded.entries.isEmpty())
     }
 
     @Test
     fun `decode rejects invalid base64`() {
-        assertFailsWith<Exception> { RcloneSnapshot.decode("not-valid-base64!!!") }
+        assertFailsWith<Exception> { decode("not-valid-base64!!!") }
     }
 
     @Test
@@ -56,34 +61,34 @@ class RcloneSnapshotTest {
     fun `hasChanged returns true when hash differs`() {
         val prev = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, "hash1")
         val curr = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, "hash2")
-        assertTrue(RcloneSnapshot.hasChanged(prev, curr))
+        assertTrue(rcloneHasChanged(prev, curr))
     }
 
     @Test
     fun `hasChanged returns false when hash matches even if modTime differs`() {
         val prev = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, "samehash")
         val curr = RcloneSnapshotEntry(100L, "2025-06-15T12:00:00Z", false, "samehash")
-        assertFalse(RcloneSnapshot.hasChanged(prev, curr))
+        assertFalse(rcloneHasChanged(prev, curr))
     }
 
     @Test
     fun `hasChanged returns true when size differs and no hashes`() {
         val prev = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, null)
         val curr = RcloneSnapshotEntry(200L, "2025-01-01T00:00:00Z", false, null)
-        assertTrue(RcloneSnapshot.hasChanged(prev, curr))
+        assertTrue(rcloneHasChanged(prev, curr))
     }
 
     @Test
     fun `hasChanged returns true when modTime differs and no hashes`() {
         val prev = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, null)
         val curr = RcloneSnapshotEntry(100L, "2025-06-15T12:00:00Z", false, null)
-        assertTrue(RcloneSnapshot.hasChanged(prev, curr))
+        assertTrue(rcloneHasChanged(prev, curr))
     }
 
     @Test
     fun `hasChanged returns false when size and modTime match and no hashes`() {
         val prev = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, null)
         val curr = RcloneSnapshotEntry(100L, "2025-01-01T00:00:00Z", false, null)
-        assertFalse(RcloneSnapshot.hasChanged(prev, curr))
+        assertFalse(rcloneHasChanged(prev, curr))
     }
 }

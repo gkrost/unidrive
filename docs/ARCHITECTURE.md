@@ -86,13 +86,14 @@ schema directory, see [ADR-0012 §Re-opening criteria](adr/0012-linux-mvp-protoc
 - `core/app/xtra/src/main/kotlin/org/krost/unidrive/xtra/Vault.kt` — encrypted credential vault.
 - `core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt` — provider contract.
 
-## Shared cross-provider utilities (`:app:core`)
+## Shared cross-provider utilities (`:app:core` and `:app:sync`)
 
-Helpers that ≥ 2 providers need live in `:app:core` so the duplication
-audit (2026-04-30) doesn't have to re-find them. **Before adding a new
-shared concern to a provider, grep this section first** — if the
-helper already exists, import it. If you find yourself copy-pasting
-across providers, lift it here and update this list.
+Helpers that ≥ 2 providers need live in `:app:core` (the no-runtime-deps
+contract module) or `:app:sync` (helpers that already lean on sync-side
+concerns like state.db cursors). **Before adding a new shared concern
+to a provider, grep this section first** — if the helper already
+exists, import it. If you find yourself copy-pasting across providers,
+lift it here and update this list.
 
 | Package | File | Purpose | UD origin |
 |---|---|---|---|
@@ -105,6 +106,7 @@ across providers, lift it here and update this list.
 | `org.krost.unidrive.auth` | `Pkce.kt` | RFC 7636 verifier + challenge | UD-351 |
 | `org.krost.unidrive.io` | `PosixPermissions.kt` | `setPosixPermissionsIfSupported` for token-file storage | UD-347 |
 | `org.krost.unidrive` (root) | `SharedJson.kt` | `UnidriveJson` — `Json { ignoreUnknownKeys; isLenient }` | UD-343 |
+| `org.krost.unidrive.sync` (`:app:sync`) | `Snapshot.kt` | Generic `Snapshot<E>` snapshot-cursor wrapper (`entries: Map<String, E>` + `timestamp: Long` + Base64-of-JSON encode/decode); on-disk-compatible with the pre-UD-345 per-provider classes | UD-345 |
 
 Adoption status: every Ktor-using provider (OneDrive, HiDrive,
 Internxt, S3, WebDAV) installs the helpers above where applicable.

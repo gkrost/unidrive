@@ -1,10 +1,15 @@
 package org.krost.unidrive.hidrive
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import java.util.Base64
+import org.krost.unidrive.sync.Snapshot
 
+/**
+ * Per-file state in a HiDrive delta-snapshot cursor.
+ *
+ * The wrapper class (`Snapshot<E>` + Base64-of-JSON `encode`/`decode`)
+ * lives in `:app:sync` (UD-345). Only the entry shape — provider-specific
+ * — stays here.
+ */
 @Serializable
 data class SnapshotEntry(
     val id: String,
@@ -14,20 +19,5 @@ data class SnapshotEntry(
     val isFolder: Boolean,
 )
 
-@Serializable
-data class DeltaSnapshot(
-    val entries: Map<String, SnapshotEntry>,
-    val timestamp: Long = System.currentTimeMillis(),
-) {
-    fun encode(): String {
-        val jsonString = Json.encodeToString(this)
-        return Base64.getEncoder().encodeToString(jsonString.toByteArray())
-    }
-
-    companion object {
-        fun decode(cursor: String): DeltaSnapshot {
-            val jsonBytes = Base64.getDecoder().decode(cursor)
-            return Json.decodeFromString(String(jsonBytes))
-        }
-    }
-}
+/** Backwards-compatible alias so existing call sites read naturally. */
+typealias DeltaSnapshot = Snapshot<SnapshotEntry>

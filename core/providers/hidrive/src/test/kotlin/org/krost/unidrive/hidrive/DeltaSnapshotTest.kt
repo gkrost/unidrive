@@ -1,11 +1,16 @@
 package org.krost.unidrive.hidrive
 
+import org.krost.unidrive.sync.Snapshot
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DeltaSnapshotTest {
+    private fun DeltaSnapshot.encode(): String = encode(SnapshotEntry.serializer())
+
+    private fun decode(cursor: String): DeltaSnapshot = Snapshot.decode(cursor, SnapshotEntry.serializer())
+
     @Test
     fun `encode and decode round-trip`() {
         val snapshot =
@@ -19,7 +24,7 @@ class DeltaSnapshotTest {
             )
 
         val encoded = snapshot.encode()
-        val decoded = DeltaSnapshot.decode(encoded)
+        val decoded = decode(encoded)
 
         assertEquals(snapshot.entries.size, decoded.entries.size)
         assertEquals(snapshot.entries["/Documents/file.txt"], decoded.entries["/Documents/file.txt"])
@@ -30,7 +35,7 @@ class DeltaSnapshotTest {
     @Test
     fun `empty snapshot encodes and decodes`() {
         val snapshot = DeltaSnapshot(entries = emptyMap(), timestamp = 0)
-        val decoded = DeltaSnapshot.decode(snapshot.encode())
+        val decoded = decode(snapshot.encode())
         assertTrue(decoded.entries.isEmpty())
     }
 
@@ -122,7 +127,7 @@ class DeltaSnapshotTest {
                         "/Documents" to SnapshotEntry("id1", null, 0, 1000, true),
                     ),
             )
-        val decoded = DeltaSnapshot.decode(snapshot.encode())
+        val decoded = decode(snapshot.encode())
         val entry = decoded.entries["/Documents"]!!
         assertTrue(entry.isFolder)
         assertEquals(null, entry.chash)

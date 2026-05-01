@@ -1,10 +1,14 @@
 package org.krost.unidrive.rclone
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import java.util.Base64
+import org.krost.unidrive.sync.Snapshot
 
+/**
+ * One object's state as recorded in a delta snapshot cursor.
+ *
+ * The wrapper class lives in `:app:sync` (UD-345); only this entry shape
+ * (and the rclone-specific `hasChanged` predicate) stay in the rclone module.
+ */
 @Serializable
 data class RcloneSnapshotEntry(
     val size: Long,
@@ -13,30 +17,20 @@ data class RcloneSnapshotEntry(
     val hash: String? = null,
 )
 
-@Serializable
-data class RcloneSnapshot(
-    val entries: Map<String, RcloneSnapshotEntry>,
-    val timestamp: Long = System.currentTimeMillis(),
-) {
-    fun encode(): String {
-        val json = Json.encodeToString(this)
-        return Base64.getEncoder().encodeToString(json.toByteArray())
-    }
+/** Backwards-compatible alias for the existing call sites. */
+typealias RcloneSnapshot = Snapshot<RcloneSnapshotEntry>
 
-    companion object {
-        fun decode(cursor: String): RcloneSnapshot {
-            val bytes = Base64.getDecoder().decode(cursor)
-            return Json.decodeFromString(String(bytes))
-        }
-
-        fun hasChanged(
-            prev: RcloneSnapshotEntry,
-            curr: RcloneSnapshotEntry,
-        ): Boolean {
-            if (prev.hash != null && curr.hash != null) {
-                return prev.hash != curr.hash
-            }
-            return prev.size != curr.size || prev.modTime != curr.modTime
-        }
+/**
+ * Rclone-specific change-detection predicate. `lsjson` returns a hash for
+ * remotes that support it; when both sides have one we compare hashes,
+ * otherwise we fall back to size+modTime.
+ */
+internal fun rcloneHasChanged(
+    prev: RcloneSnapshotEntry,
+    curr: RcloneSnapshotEntry,
+): Boolean {
+    if (prev.hash != null && curr.hash != null) {
+        return prev.hash != curr.hash
     }
+    return prev.size != curr.size || prev.modTime != curr.modTime
 }

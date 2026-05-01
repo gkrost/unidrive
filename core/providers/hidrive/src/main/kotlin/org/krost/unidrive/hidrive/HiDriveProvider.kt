@@ -2,6 +2,7 @@ package org.krost.unidrive.hidrive
 
 import org.krost.unidrive.*
 import org.krost.unidrive.hidrive.model.HiDriveItem
+import org.krost.unidrive.sync.Snapshot
 import java.nio.file.Path
 import java.time.Instant
 
@@ -115,12 +116,12 @@ class HiDriveProvider(
         if (cursor == null) {
             return DeltaPage(
                 items = currentItems.map { it.toCloudItem(home) },
-                cursor = currentSnapshot.encode(),
+                cursor = currentSnapshot.encode(SnapshotEntry.serializer()),
                 hasMore = false,
             )
         }
 
-        val previousSnapshot = DeltaSnapshot.decode(cursor)
+        val previousSnapshot = Snapshot.decode(cursor, SnapshotEntry.serializer())
         val changes = mutableListOf<CloudItem>()
 
         // New and modified items
@@ -156,7 +157,7 @@ class HiDriveProvider(
 
         return DeltaPage(
             items = changes,
-            cursor = currentSnapshot.encode(),
+            cursor = currentSnapshot.encode(SnapshotEntry.serializer()),
             hasMore = false,
         )
     }

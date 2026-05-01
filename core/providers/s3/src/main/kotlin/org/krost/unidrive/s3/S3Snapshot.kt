@@ -1,13 +1,14 @@
 package org.krost.unidrive.s3
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import java.util.Base64
+import org.krost.unidrive.sync.Snapshot
 
 /**
  * One object's state as recorded in a delta snapshot cursor.
  * S3 has no server-side change feed, so we compare full listings.
+ *
+ * The wrapper class lives in `:app:sync` (UD-345); only this entry shape
+ * stays in the S3 module.
  */
 @Serializable
 data class S3SnapshotEntry(
@@ -17,20 +18,5 @@ data class S3SnapshotEntry(
     val isFolder: Boolean,
 )
 
-@Serializable
-data class S3Snapshot(
-    val entries: Map<String, S3SnapshotEntry>,
-    val timestamp: Long = System.currentTimeMillis(),
-) {
-    fun encode(): String {
-        val json = Json.encodeToString(this)
-        return Base64.getEncoder().encodeToString(json.toByteArray())
-    }
-
-    companion object {
-        fun decode(cursor: String): S3Snapshot {
-            val bytes = Base64.getDecoder().decode(cursor)
-            return Json.decodeFromString(String(bytes))
-        }
-    }
-}
+/** Backwards-compatible alias for the existing call sites. */
+typealias S3Snapshot = Snapshot<S3SnapshotEntry>

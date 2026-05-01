@@ -5,6 +5,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.sync.Snapshot
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 
@@ -104,17 +105,17 @@ class RcloneProvider(
             if (cursor == null) {
                 return DeltaPage(
                     items = currentEntries.map { RcloneCliService.toCloudItem(it, basePath) },
-                    cursor = currentSnapshot.encode(),
+                    cursor = currentSnapshot.encode(RcloneSnapshotEntry.serializer()),
                     hasMore = false,
                 )
             }
 
-            val previousSnapshot = RcloneSnapshot.decode(cursor)
+            val previousSnapshot = Snapshot.decode(cursor, RcloneSnapshotEntry.serializer())
             val changes = mutableListOf<CloudItem>()
 
             for ((path, entry) in currentSnapshot.entries) {
                 val prev = previousSnapshot.entries[path]
-                if (prev == null || RcloneSnapshot.hasChanged(prev, entry)) {
+                if (prev == null || rcloneHasChanged(prev, entry)) {
                     val found =
                         currentEntries.firstOrNull {
                             "/${it.path}" == path
@@ -144,7 +145,7 @@ class RcloneProvider(
 
             return DeltaPage(
                 items = changes,
-                cursor = currentSnapshot.encode(),
+                cursor = currentSnapshot.encode(RcloneSnapshotEntry.serializer()),
                 hasMore = false,
             )
         }

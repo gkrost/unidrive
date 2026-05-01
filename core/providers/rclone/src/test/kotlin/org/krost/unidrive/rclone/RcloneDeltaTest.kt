@@ -3,7 +3,8 @@ package org.krost.unidrive.rclone
 import kotlin.test.*
 
 class RcloneDeltaTest {
-    private fun makeSnapshot(entries: Map<String, RcloneSnapshotEntry>): String = RcloneSnapshot(entries = entries).encode()
+    private fun makeSnapshot(entries: Map<String, RcloneSnapshotEntry>): String =
+        RcloneSnapshot(entries = entries).encode(RcloneSnapshotEntry.serializer())
 
     @Test
     fun `computeDelta with null cursor returns all items`() {

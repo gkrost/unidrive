@@ -1,6 +1,7 @@
 package org.krost.unidrive.localfs
 
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.Snapshot
 import org.slf4j.LoggerFactory
 import java.nio.file.FileStore
 import java.nio.file.Files
@@ -156,12 +157,12 @@ class LocalFsProvider(
         if (cursor == null) {
             return DeltaPage(
                 items = currentEntries.map { (rel, attrs) -> attrsToCloudItem(rel, attrs) },
-                cursor = currentSnapshot.encode(),
+                cursor = currentSnapshot.encode(LocalFsSnapshotEntry.serializer()),
                 hasMore = false,
             )
         }
 
-        val previousSnapshot = LocalFsSnapshot.decode(cursor)
+        val previousSnapshot = Snapshot.decode(cursor, LocalFsSnapshotEntry.serializer())
         val changes = mutableListOf<CloudItem>()
 
         // New and modified entries
@@ -195,7 +196,7 @@ class LocalFsProvider(
 
         return DeltaPage(
             items = changes,
-            cursor = currentSnapshot.encode(),
+            cursor = currentSnapshot.encode(LocalFsSnapshotEntry.serializer()),
             hasMore = false,
         )
     }

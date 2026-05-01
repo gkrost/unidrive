@@ -9,6 +9,7 @@ kotlin {
 
 dependencies {
     implementation(project(":app:core"))
+    implementation(project(":app:sync"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)

@@ -1,8 +1,13 @@
 package org.krost.unidrive.webdav
 
+import org.krost.unidrive.sync.Snapshot
 import kotlin.test.*
 
 class WebDavSnapshotTest {
+    private fun WebDavSnapshot.encode(): String = encode(WebDavSnapshotEntry.serializer())
+
+    private fun decode(cursor: String): WebDavSnapshot = Snapshot.decode(cursor, WebDavSnapshotEntry.serializer())
+
     @Test
     fun `encode and decode round-trip preserves entries`() {
         val entries =
@@ -23,7 +28,7 @@ class WebDavSnapshotTest {
                     ),
             )
         val original = WebDavSnapshot(entries = entries, timestamp = 1_700_000_000_000L)
-        val decoded = WebDavSnapshot.decode(original.encode())
+        val decoded = decode(original.encode())
 
         assertEquals(original.entries, decoded.entries)
         assertEquals(original.timestamp, decoded.timestamp)
@@ -32,13 +37,13 @@ class WebDavSnapshotTest {
     @Test
     fun `empty snapshot encodes and decodes`() {
         val snapshot = WebDavSnapshot(entries = emptyMap(), timestamp = 0L)
-        val decoded = WebDavSnapshot.decode(snapshot.encode())
+        val decoded = decode(snapshot.encode())
         assertTrue(decoded.entries.isEmpty())
     }
 
     @Test
     fun `decode rejects invalid base64`() {
-        assertFailsWith<Exception> { WebDavSnapshot.decode("not-valid-base64!!!") }
+        assertFailsWith<Exception> { decode("not-valid-base64!!!") }
     }
 
     @Test

@@ -1,6 +1,7 @@
 package org.krost.unidrive.sftp
 
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.Snapshot
 import java.nio.file.Path
 import java.time.Instant
 
@@ -119,12 +120,12 @@ class SftpProvider(
         if (cursor == null) {
             return DeltaPage(
                 items = currentEntries.map { it.toCloudItem() },
-                cursor = currentSnapshot.encode(),
+                cursor = currentSnapshot.encode(SftpSnapshotEntry.serializer()),
                 hasMore = false,
             )
         }
 
-        val previousSnapshot = SftpSnapshot.decode(cursor)
+        val previousSnapshot = Snapshot.decode(cursor, SftpSnapshotEntry.serializer())
         val changes = mutableListOf<CloudItem>()
 
         // New and modified entries
@@ -158,7 +159,7 @@ class SftpProvider(
 
         return DeltaPage(
             items = changes,
-            cursor = currentSnapshot.encode(),
+            cursor = currentSnapshot.encode(SftpSnapshotEntry.serializer()),
             hasMore = false,
         )
     }

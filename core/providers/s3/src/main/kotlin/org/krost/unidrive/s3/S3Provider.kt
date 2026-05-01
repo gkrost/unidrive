@@ -1,6 +1,7 @@
 package org.krost.unidrive.s3
 
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.Snapshot
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.time.Instant
@@ -178,12 +179,12 @@ class S3Provider(
         if (cursor == null) {
             return DeltaPage(
                 items = currentObjects.map { it.toCloudItem() },
-                cursor = currentSnapshot.encode(),
+                cursor = currentSnapshot.encode(S3SnapshotEntry.serializer()),
                 hasMore = false,
             )
         }
 
-        val previousSnapshot = S3Snapshot.decode(cursor)
+        val previousSnapshot = Snapshot.decode(cursor, S3SnapshotEntry.serializer())
         val changes = mutableListOf<CloudItem>()
 
         // New and modified objects
@@ -217,7 +218,7 @@ class S3Provider(
 
         return DeltaPage(
             items = changes,
-            cursor = currentSnapshot.encode(),
+            cursor = currentSnapshot.encode(S3SnapshotEntry.serializer()),
             hasMore = false,
         )
     }

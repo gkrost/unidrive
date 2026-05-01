@@ -7,6 +7,6 @@
         <error line="3" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/rclone/RcloneSnapshotTest.kt">
-        <error line="3" column="1" source="standard:no-wildcard-imports" />
+        <error line="4" column="1" source="standard:no-wildcard-imports" />
     </file>
 </baseline>

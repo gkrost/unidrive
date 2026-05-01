@@ -1,8 +1,13 @@
 package org.krost.unidrive.localfs
 
+import org.krost.unidrive.sync.Snapshot
 import kotlin.test.*
 
 class LocalFsSnapshotTest {
+    private fun LocalFsSnapshot.encode(): String = encode(LocalFsSnapshotEntry.serializer())
+
+    private fun decode(cursor: String): LocalFsSnapshot = Snapshot.decode(cursor, LocalFsSnapshotEntry.serializer())
+
     @Test
     fun `encode and decode round-trip preserves entries`() {
         val entries =
@@ -11,7 +16,7 @@ class LocalFsSnapshotTest {
                 "docs" to LocalFsSnapshotEntry(size = 0L, mtimeMillis = 1_699_000_000_000L, isFolder = true),
             )
         val original = LocalFsSnapshot(entries = entries, timestamp = 1_700_000_000_000L)
-        val decoded = LocalFsSnapshot.decode(original.encode())
+        val decoded = decode(original.encode())
 
         assertEquals(original.entries, decoded.entries)
         assertEquals(original.timestamp, decoded.timestamp)
@@ -20,13 +25,13 @@ class LocalFsSnapshotTest {
     @Test
     fun `empty snapshot encodes and decodes`() {
         val snapshot = LocalFsSnapshot(entries = emptyMap(), timestamp = 0L)
-        val decoded = LocalFsSnapshot.decode(snapshot.encode())
+        val decoded = decode(snapshot.encode())
         assertTrue(decoded.entries.isEmpty())
     }
 
     @Test
     fun `decode rejects invalid base64`() {
-        assertFailsWith<Exception> { LocalFsSnapshot.decode("not-valid-base64!!!") }
+        assertFailsWith<Exception> { decode("not-valid-base64!!!") }
     }
 
     @Test
