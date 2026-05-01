@@ -13,11 +13,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.internxt.model.*
-import org.krost.unidrive.io.setPosixPermissionsIfSupported
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.nio.file.Files
 
 open class AuthService(
     private val config: InternxtConfig,
@@ -226,34 +225,30 @@ open class AuthService(
 
     suspend fun logout() {
         credentials = null
-        val file = config.tokenPath.resolve(CREDENTIALS_FILE)
-        Files.deleteIfExists(file)
+        credentialStore.delete()
     }
 
-    private fun loadCredentials(): InternxtCredentials? {
-        val file = config.tokenPath.resolve(CREDENTIALS_FILE)
-        if (!Files.exists(file)) return null
-        return try {
-            json.decodeFromString<InternxtCredentials>(Files.readString(file))
-        } catch (e: Exception) {
-            log.warn("Failed to load credentials from {}: {}", file, e.message)
-            null
-        }
-    }
+    // UD-344: load / save / delete go through the shared `CredentialStore`.
+    // Pre-UD-344 this was a non-atomic `Files.writeString` — UD-312's atomic-move
+    // race-window fix only existed in OneDrive's copy. Lifting closes the gap
+    // for Internxt without copy-pasting the logic.
+    //
+    // Note: credentials include mnemonic in plaintext (file is chmod 600).
+    // For additional protection, use: unidrive vault encrypt
+    private val credentialStore: CredentialStore<InternxtCredentials> =
+        CredentialStore(
+            dir = config.tokenPath,
+            fileName = CREDENTIALS_FILE,
+            serializer = InternxtCredentials.serializer(),
+        )
+
+    private fun loadCredentials(): InternxtCredentials? = credentialStore.load()
 
     private fun saveCredentials(creds: InternxtCredentials) {
-        Files.createDirectories(config.tokenPath)
-        setPosixPermissionsIfSupported(config.tokenPath, ownerRwx = true)
-        val file = config.tokenPath.resolve(CREDENTIALS_FILE)
-        Files.writeString(file, json.encodeToString(InternxtCredentials.serializer(), creds))
-        setPosixPermissionsIfSupported(file, ownerRwx = false)
-        // Note: credentials include mnemonic in plaintext (file is chmod 600).
-        // For additional protection, use: unidrive vault encrypt
+        credentialStore.save(creds)
     }
 
     override fun close() {
         httpClient.close()
     }
 }
-
-// UD-347: setPosixPermissionsIfSupported lifted to org.krost.unidrive.io.

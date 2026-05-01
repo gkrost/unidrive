@@ -7,17 +7,15 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.Pkce
 import org.krost.unidrive.hidrive.model.HiDriveToken
 import org.krost.unidrive.hidrive.model.HiDriveTokenResponse
-import org.krost.unidrive.io.setPosixPermissionsIfSupported
 import java.net.URLEncoder
-import java.nio.file.Files
 
 class OAuthService(
     private val config: HiDriveConfig,
 ) : AutoCloseable {
-    private val log = org.slf4j.LoggerFactory.getLogger(OAuthService::class.java)
     private val json = Json { ignoreUnknownKeys = true }
     private val httpClient = HttpClient()
 
@@ -25,25 +23,21 @@ class OAuthService(
         private const val TOKEN_FILE = "token.json"
     }
 
-    suspend fun loadToken(): HiDriveToken? {
-        val tokenFile = config.tokenPath.resolve(TOKEN_FILE)
-        if (!Files.exists(tokenFile)) return null
+    // UD-344: load / save go through the shared `CredentialStore<HiDriveToken>`.
+    // Pre-UD-344 this was a non-atomic `Files.writeString` — UD-312's atomic-move
+    // race-window fix only existed in OneDrive's copy. Lifting closes the gap
+    // for HiDrive without copy-pasting the logic.
+    private val credentialStore: CredentialStore<HiDriveToken> =
+        CredentialStore(
+            dir = config.tokenPath,
+            fileName = TOKEN_FILE,
+            serializer = HiDriveToken.serializer(),
+        )
 
-        return try {
-            val content = Files.readString(tokenFile)
-            json.decodeFromString<HiDriveToken>(content)
-        } catch (e: Exception) {
-            log.warn("Failed to load token from {}: {}", tokenFile, e.message)
-            null
-        }
-    }
+    suspend fun loadToken(): HiDriveToken? = credentialStore.load()
 
     suspend fun saveToken(token: HiDriveToken) {
-        Files.createDirectories(config.tokenPath)
-        setPosixPermissionsIfSupported(config.tokenPath, ownerRwx = true)
-        val tokenFile = config.tokenPath.resolve(TOKEN_FILE)
-        Files.writeString(tokenFile, json.encodeToString(HiDriveToken.serializer(), token))
-        setPosixPermissionsIfSupported(tokenFile, ownerRwx = false)
+        credentialStore.save(token)
     }
 
     fun getAuthorizationUrl(state: String): Pair<String, String> {
@@ -155,4 +149,7 @@ class OAuthService(
         )
 }
 
-// UD-347: setPosixPermissionsIfSupported lifted to org.krost.unidrive.io.
+// UD-344: token-file load / save now route through the shared
+// `org.krost.unidrive.auth.CredentialStore<HiDriveToken>` — atomic move
+// (UD-312 lineage, previously OneDrive-only) and POSIX chmod (UD-347
+// helper) both live there.

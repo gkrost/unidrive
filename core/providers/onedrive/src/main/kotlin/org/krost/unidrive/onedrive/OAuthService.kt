@@ -8,13 +8,10 @@ import io.ktor.http.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.Pkce
-import org.krost.unidrive.io.setPosixPermissionsIfSupported
 import org.krost.unidrive.onedrive.model.*
 import java.net.URLEncoder
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
 
 class OAuthService(
@@ -35,61 +32,22 @@ class OAuthService(
         private const val TOKEN_FILE = "token.json"
     }
 
-    suspend fun loadToken(): Token? {
-        val tokenFile = config.tokenPath.resolve(TOKEN_FILE)
-        if (!Files.exists(tokenFile)) return null
+    // UD-344: load / save / delete go through the shared `CredentialStore<Token>`.
+    // The `validate` hook wires OneDrive's UD-312 `hasPlausibleAccessTokenShape`
+    // shape guard so a half-written / Graph-emitted-empty access_token never
+    // round-trips through `loadToken()`.
+    private val credentialStore: CredentialStore<Token> =
+        CredentialStore(
+            dir = config.tokenPath,
+            fileName = TOKEN_FILE,
+            serializer = Token.serializer(),
+            validate = { it.hasPlausibleAccessTokenShape() },
+        )
 
-        return try {
-            val content = Files.readString(tokenFile)
-            val parsed = json.decodeFromString<Token>(content)
-            // UD-312: reject tokens whose access_token is empty/truncated on load.
-            // Without this a half-written token.json (pre-atomic-save) or a Graph
-            // 2xx-with-empty-access-token response that was persisted earlier would
-            // be returned here, then sent to Graph, then 401'd with
-            // "IDX14100: JWT is not well formed, there are no dots (.)". Returning
-            // null forces the caller through a fresh refresh path instead.
-            if (!parsed.hasPlausibleAccessTokenShape()) {
-                log.warn(
-                    "Token at {} has a suspiciously short access_token (length={}) — discarding so caller refreshes",
-                    tokenFile,
-                    parsed.accessToken.length,
-                )
-                return null
-            }
-            parsed
-        } catch (e: Exception) {
-            log.warn("Failed to load token from {}: {}", tokenFile, e.message)
-            null
-        }
-    }
+    suspend fun loadToken(): Token? = credentialStore.load()
 
     suspend fun saveToken(token: Token) {
-        Files.createDirectories(config.tokenPath)
-        setPosixPermissionsIfSupported(config.tokenPath, ownerRwx = true)
-        val tokenFile = config.tokenPath.resolve(TOKEN_FILE)
-        // UD-312: atomic write. Non-atomic `Files.writeString` over an existing
-        // file opens a window where a concurrent loadToken() (another coroutine
-        // on the same JVM, or the MCP / tray reading the same file) sees the
-        // truncated-and-partially-written state and parses a Token with an empty
-        // access_token. Fix: write to a sibling .tmp then Files.move with
-        // ATOMIC_MOVE so any reader sees either the old or the new, never half.
-        // Fall back to non-atomic move on filesystems that reject ATOMIC_MOVE
-        // (some network shares on Windows) — the race window shrinks but doesn't
-        // fully close; that's documented limitation.
-        val tmpFile = config.tokenPath.resolve("$TOKEN_FILE.tmp")
-        Files.writeString(tmpFile, json.encodeToString(Token.serializer(), token))
-        try {
-            Files.move(
-                tmpFile,
-                tokenFile,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            log.warn("Filesystem rejected ATOMIC_MOVE at {} — falling back to non-atomic replace", tokenFile)
-            Files.move(tmpFile, tokenFile, StandardCopyOption.REPLACE_EXISTING)
-        }
-        setPosixPermissionsIfSupported(tokenFile, ownerRwx = false)
+        credentialStore.save(token)
     }
 
     /** Returns (authorizationUrl, pkceVerifier). Caller must pass verifier to exchangeCodeForToken(). */
@@ -405,6 +363,6 @@ class OAuthService(
 
 private const val MAX_AUTH_FLAKE_ATTEMPTS = 3
 
-// UD-347: setPosixPermissionsIfSupported lifted to
-// org.krost.unidrive.io. Imported at the top of this file; old local
-// internal-fun copy removed.
+// UD-344: token-file load / save / delete now route through the shared
+// `org.krost.unidrive.auth.CredentialStore<Token>` — atomic move,
+// shape-guard validate hook, and POSIX chmod (UD-347 helper) all live there.

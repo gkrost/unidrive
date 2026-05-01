@@ -105,6 +105,7 @@ lift it here and update this list.
 | `org.krost.unidrive.http` | `HtmlBodySniffGuard.kt` | `assertNotHtml(response, contextMsg?)` — captive-portal / throttle-redirect guard | UD-340 |
 | `org.krost.unidrive.auth` | `Pkce.kt` | RFC 7636 verifier + challenge | UD-351 |
 | `org.krost.unidrive.auth` | `OAuthCallbackServer.kt` | `awaitOAuthCallback(port, expectedState, providerLabel, timeout)` — single-shot loopback `ServerSocket` + parse-and-validate the redirect | UD-348 |
+| `org.krost.unidrive.auth` | `CredentialStore.kt` | Generic `CredentialStore<T>(dir, fileName, serializer, validate)` — `load()` / `save()` / `delete()` with UD-312 atomic move + `validate(T)` shape guard + UD-347 chmod baked in | UD-344 |
 | `org.krost.unidrive.io` | `PosixPermissions.kt` | `setPosixPermissionsIfSupported` for token-file storage | UD-347 |
 | `org.krost.unidrive.io` | `OpenBrowser.kt` | `openBrowser(url)` — `Desktop.browse` with `xdg-open` / `open` / `start` fallback | UD-348 |
 | `org.krost.unidrive` (root) | `SharedJson.kt` | `UnidriveJson` — `Json { ignoreUnknownKeys; isLenient }` | UD-343 |
