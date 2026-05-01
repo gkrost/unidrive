@@ -9606,3 +9606,131 @@ the lifted helper once, drop the duplicate test logic.
   package destination.
 - **2.8 token-file-load-save-pattern** (sibling, UD-344) — adjacent
   auth-storage cleanup.
+
+---
+id: UD-350
+title: Internxt: extract `applyInternxtHeaders` for the four call sites that paste it
+category: providers
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-01
+resolved_by: commit 6220e4f. Lifted private fun HttpRequestBuilder.applyInternxtHeaders() into Internxt-internal InternxtHeaders.kt; four call sites (InternxtApiService.applyAuth + AuthService login challenge / login access / refresh) now share the helper. Bridge calls intentionally untouched — different Authorization scheme + x-api-version header set.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey. Internxt-internal
+cleanup — not cross-provider.**
+
+Internxt requires four custom headers on every authenticated call
+(`internxt-client / internxt-version / x-internxt-desktop-header /
+accept(Json)`). The `applyAuth` helper handles them for the main API
+path; auth-flow + bridge calls paste them by hand.
+
+- `core/providers/internxt/.../InternxtApiService.kt:454-460`
+  (`applyAuth`)
+- `core/providers/internxt/.../InternxtApiService.kt:296-300, 313-317`
+  (`bridgeGet`, `bridgePost` — different `Authorization` scheme but
+  same internxt-client/version triplet)
+- `core/providers/internxt/.../AuthService.kt:103-104, 138-140`
+  (login-challenge + login-access)
+
+## Proposal
+
+Stay in the Internxt module. Extract a private extension:
+
+```kotlin
+private fun HttpRequestBuilder.applyInternxtHeaders()
+```
+
+Replace the four paste sites.
+
+## Acceptance
+
+- Four call sites use the extension; no header triplet inline.
+- A future header change (e.g. version bump) edits one place.
+
+## Effort / agent-ability
+
+**XS effort**, agent-able fully.
+
+## Related
+
+- **2.1 token-refresh-mutex-pattern** (sibling) — same module.
+
+---
+id: UD-751
+title: Move per-provider `Delta: N items` debug log to the engine call site
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-01
+resolved_by: commit 6220e4f. Lifted Delta: N items debug log to SyncEngine.nextPage. Five providers (webdav/s3/rclone/hidrive/onedrive-GraphApiService) drop their per-page debug line; SyncEngine logs Delta: N items, hasMore=X once per page from DeltaPage.hasMore — captures the OneDrive hasMore variant for free. UD-313 explanatory comments removed from OneDriveProvider since the mirror site is also gone.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+Every provider that snapshots fires `log.debug("Delta: {} items", ...)`
+after computing the delta. UD-313 OneDrive comment already calls this
+out as wasteful — the engine call site already knows the same data.
+
+- `core/providers/webdav/.../WebDavProvider.kt:138`
+- `core/providers/s3/.../S3Provider.kt:176`
+- `core/providers/rclone/.../RcloneProvider.kt:76`
+- `core/providers/hidrive/.../HiDriveProvider.kt:119` — variant
+  with `(snapshot comparison)` suffix.
+- `core/providers/onedrive/.../GraphApiService.kt:172` — variant
+  with `hasMore=` suffix.
+
+## Proposal
+
+Move to the `:app:sync` site that calls `provider.delta(cursor)`. Read
+`DeltaPage.hasMore` from the page itself (covers OneDrive's variant).
+Drop the per-provider lines.
+
+## Acceptance
+
+- `git grep "Delta:.*items"` in providers/ returns nothing.
+- `:app:sync` log emits `Delta: N items, hasMore=...` once per delta
+  call.
+
+## Effort / agent-ability
+
+**XS effort**, agent-able fully.
+
+---
+id: UD-752
+title: Move `Auth: {provider} authenticated` debug log to the engine call site
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-01
+resolved_by: commit 6220e4f. Lifted suspend fun CloudProvider.authenticateAndLog() into :app:core. Eleven production callers (six CLI commands + five MCP tools) now use the extension; OneDriveProvider/HiDriveProvider drop their per-class post-auth debug lines. Internxt/S3/SFTP/WebDAV/Rclone/LocalFs inherit the log line for free via the wrapper. Tests keep calling authenticate() directly — the log is purely diagnostic.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+OneDrive and HiDrive providers each emit identical
+`Auth: {provider} authenticated / not authenticated after initialize`
+debug lines after `authenticate()`. Other providers (Internxt, S3,
+SFTP, WebDAV, Rclone) silently skip — three of them probably should
+be logging too.
+
+- `core/providers/onedrive/.../OneDriveProvider.kt:55-59`
+- `core/providers/hidrive/.../HiDriveProvider.kt:38-42`
+
+## Proposal
+
+Wrap the `CloudProvider.authenticate()` call in the engine / factory,
+log with `provider.id`. Drop the per-provider lines.
+
+## Acceptance
+
+- All providers benefit from a consistent post-auth log line via the
+  shared wrapper.
+- No per-provider `Auth: ... authenticated` line remains.
+
+## Effort / agent-ability
+
+**XS effort**, agent-able fully.
