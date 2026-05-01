@@ -18,11 +18,20 @@ The earlier sparse-file approach (UD-222 history: `setLength(size)` to
 make stat report cloud size with zero blocks allocated) was reverted
 because (a) on NTFS `setLength` allocates real NUL bytes — a 346 GB
 OneDrive turned into 346 GB of zeroes on disk during UD-712 — and
-(b) even on Linux where `setLength` is sparse, apps opening the stub
-see NUL bytes, indistinguishable from corruption. True OS-level
-placeholders belong to a future shell tier (CFAPI / FileProvider /
-FUSE), not user-space file sleight-of-hand. See `PlaceholderManager.kt:40-46`
-for the rationale comment in the code.
+(b) `RandomAccessFile.setLength` is JDK-implementation-dependent: on
+JDK 21 jbrsdk Linux it emits `ftruncate(0) + write(zeros, N)` rather
+than `ftruncate(N)` (UD-209a strace evidence 2026-05-01), so even on
+Linux a `setLength`-based placeholder fully allocates the file. Apps
+opening the stub see NUL bytes either way, indistinguishable from
+corruption. True OS-level placeholders belong to a future shell tier
+(CFAPI / FileProvider / FUSE), not user-space file sleight-of-hand.
+
+`PlaceholderManager.dehydrate` (when it does need a sparse stub for an
+already-existing file, e.g. user-driven `unidrive free`) uses
+`FileChannel.open(WRITE, TRUNCATE_EXISTING) + position(N-1) + write(0)`
+so a single trailing 4 KiB page is allocated, regardless of JDK. See
+`PlaceholderManager.kt:40-46` and the UD-209a comment for the
+rationale.
 
 **Platform scope (per [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)):** Linux is the MVP target.
 Windows and macOS are out of scope for v0.0.x → v0.1.0. The CLI and
@@ -166,7 +175,7 @@ A `profile` field inside a tool-call's `arguments` object is **silently ignored*
 | **Move detection (remote renames)** | `CreatePlaceholder(new)` where `remoteId` matches existing entry at different path → `MoveLocal` + `renamePrefix` for children | 💻 verified |
 | **Conflict policy** | `keep_both` (default) → save remote as `file.conflict-remote-TIMESTAMP.ext`; `last_writer_wins` → most recent mtime wins | 💻 verified |
 | **Pin rules** | glob patterns for eager hydration, matched during apply | 💻 verified |
-| **0-byte placeholders** | Stub created via `Files.createFile`; `isHydrated=false` row in state DB; real bytes arrive via `provider.download` on access. The earlier sparse-file approach (`RandomAccessFile.setLength(size)`) was reverted in UD-222 — see `PlaceholderManager.kt:40-46` for the rationale | 💻 verified |
+| **0-byte placeholders** | Stub created via `Files.createFile`; `isHydrated=false` row in state DB; real bytes arrive via `provider.download` on access. The earlier sparse-file approach (`RandomAccessFile.setLength(size)`) was reverted in UD-222 — see `PlaceholderManager.kt:40-46` for the rationale. `dehydrate()` uses `FileChannel.position(N-1)+write(0)` instead of `setLength`, since on JDK 21 jbrsdk Linux the latter writes physical zeros rather than punching a hole (UD-209a, 2026-05-01) | 💻 verified |
 | **Interrupt/resume** | delta cursor persisted in SQLite `sync_state` | 💻 verified; see [UD-205](backlog/BACKLOG.md#ud-205) for the Pass-2 concurrency angle |
 | **Deletion safeguard** | `max_delete_percentage` (default 50%) aborts sync if over-threshold | 💻 verified (integration-test Section 3 covers the CLI flag) |
 | **Selective sync** | `exclude_patterns` glob per profile, skipped during reconciliation | 💻 verified |

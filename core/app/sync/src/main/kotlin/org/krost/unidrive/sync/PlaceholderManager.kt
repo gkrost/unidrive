@@ -43,8 +43,11 @@ open class PlaceholderManager(
     // the DB; real content arrives via provider.download. Previously setLength(size) was used as
     // a "sparse placeholder", but NTFS does not auto-sparse setLength — it fully allocates zero
     // bytes — so a 346 GB OneDrive turned into 346 GB of NUL-byte files on disk (UD-712 run).
-    // Even on Linux where setLength IS sparse, apps opening the stub see NUL bytes, which is
-    // indistinguishable from corruption. True placeholders belong to CfApi (UD-401/402/403).
+    // UD-209a (2026-05-01): even on Linux, RandomAccessFile.setLength(N) is JDK-implementation-
+    // dependent — JDK 21 jbrsdk emits ftruncate(0)+write(zeros, N) rather than ftruncate(N), so
+    // setLength-based placeholders fully allocate the file there too. Apps opening the stub see
+    // NUL bytes either way, indistinguishable from corruption. True placeholders belong to CfApi
+    // (UD-401/402/403).
     open fun createPlaceholder(
         remotePath: String,
         size: Long,
