@@ -2510,3 +2510,247 @@ cheaply and pick whichever ships fastest.
 - **UD-754** (open) — auto-format Kotlin codebase. Sibling
   developer-ergonomics ticket.
 - **UD-728** (closed) — backlog tooling automation. Same spirit.
+---
+id: UD-901
+title: LocalScanner: write pending-upload state.db entry on NEW-path sight (status LOCAL undercount)
+category: experimental
+priority: high
+effort: M
+status: open
+opened: 2026-05-01
+---
+**Problem.** The LOCAL column on `unidrive status` undercounts by the size of any locally-added file that has not yet completed upload. The sync engine learns about a NEW local path only when `LocalScanner.scan()` returns a `ChangeState.NEW`; the first DB write for that path happens inside `applyUpload()` *after* the byte transfer succeeds (`SyncEngine.kt:803-826`). Status reads only `state.db` (`StatusCommand.kt:307-315`), so during the window "files exist on disk" → "upload completes" the row simply doesn't exist and contributes 0 to LOCAL.
+
+Field-observed example (Internxt profile, 2026-05-01): user moved 25 GiB / 2,550 files into `sync_root`, then ran `unidrive status --all`. LOCAL showed 0 B for that profile. After the next sync uploaded the new files, LOCAL jumped to 25 GiB.
+
+**Root cause.** The state model has six logical states for an in-tree path; only one is missing from `state.db`:
+
+| State | On disk | In cloud | In DB | Today's flags |
+|---|---|---|---|---|
+| (a) Synced, downloaded | full bytes | yes | yes | `isHydrated=true`, `localSize=size` |
+| (b) Cloud placeholder | 0-byte stub | yes | yes | `isHydrated=false`, `localSize=0` |
+| (c) **Pending upload** | full bytes | no | **no entry** | n/a — the gap |
+| (d) Failed download (UD-225) | 0-byte stub | yes | yes | `isHydrated=false`, `localSize=0` |
+| (e) Recently deleted local | absent | yes | yes | `isHydrated=false`, `localSize=null` |
+| (f) Cloud-deleted (delta) | full bytes | no | yes | `isHydrated=true`, `localSize=size`, remoteId set |
+
+**Fix (Option 2 from the 2026-05-01 design discussion).** `LocalScanner.scan()` should upsert a pending-upload row the moment it sees a NEW path:
+
+```kotlin
+SyncEntry(
+    path = relativePath,
+    remoteId = null,                              // not yet uploaded
+    remoteHash = null,
+    remoteSize = 0,
+    remoteModified = null,
+    localMtime = attrs.lastModifiedTime().toMillis(),
+    localSize = attrs.size(),                     // ← the bytes the user can see on disk
+    isFolder = false,
+    isPinned = false,
+    isHydrated = true,                            // bytes are on disk = hydrated, even though not in cloud
+    lastSynced = Instant.EPOCH,                   // never (no roundtrip yet)
+)
+```
+
+`applyUpload()` later sets `remoteId` / `remoteHash` / `remoteSize` / `lastSynced=now` and the row promotes to state (a) cleanly. Reconciler still emits `SyncAction.Upload` because `localState=NEW` (computed by scanner before the upsert) and `remoteState=UNCHANGED`.
+
+**Affects:**
+- LOCAL column updates immediately on the next `status` call after a scan, without waiting for upload.
+- Survives interrupted syncs — the row stays around with `remoteId=null` so the next sync sees it again as pending.
+- If the file is deleted locally before sync runs, the next scan emits `ChangeState.DELETED` → reconciler emits `SyncAction.RemoveEntry`. Same path as today.
+
+**Acceptance criteria.**
+1. `LocalScanner.scan()` writes a pending-upload row for every NEW path it sees (file only — folders already have a different code path via `preVisitDirectory`).
+2. The row's `localSize` reflects on-disk size at scan time.
+3. Existing `applyUpload()` updates the row in place (no duplicate-key error from upsert).
+4. Existing `LocalScanner` test fixtures continue to pass.
+5. New test: scan-without-sync followed by `status` reports LOCAL > 0 for a sync_root containing local-only files.
+6. New test: scan + delete-before-sync + scan emits `RemoveEntry` and not `Upload`.
+7. New test: scan + interrupted upload + re-scan → row still present, second scan does not duplicate-emit `ChangeState.NEW` (existing entry path detection works).
+
+**Non-goals.**
+- Lifecycle-state enum (Option 3 in the design discussion). Tracked separately if/when needed.
+- Status table column change. Tracked as UD-756 (depends on this ticket).
+
+**Pre-existing precedent.** UD-225 (Reconciler "previously-failed downloads" code at `Reconciler.kt:88-112`) already shows a "synthesise an action from a partial DB row" pattern; this ticket is the inverse direction (scanner synthesises a row before any action runs).
+
+**References.**
+- 2026-05-01 design discussion in handover (LOCAL column root cause + 6 options matrix).
+- `StatusCommand.kt:315` — current `totalLocalSize` calculation.
+- `LocalScanner.kt:69-70` — current NEW-path emission point.
+- `SyncEngine.kt:803-826` — current applyUpload write-site.
+---
+id: UD-756
+title: Status table: split LOCAL into HYDRATED + PENDING columns
+category: tooling
+priority: medium
+effort: S
+status: open
+opened: 2026-05-01
+---
+**Problem.** The `unidrive status` table has one LOCAL column today that conflates two different signals:
+- (a) bytes downloaded from the cloud and physically present locally (hydrated entries that came from a `download`)
+- (b) bytes added locally that have not been uploaded yet (after UD-901 lands, these have a row with `remoteId=null` and `isHydrated=true`)
+
+Today's `StatusCommand.kt:315` sums both into LOCAL via `entries.filter { isHydrated }.sumOf { localSize }`. The user can't tell from the table whether 25 GiB of LOCAL means "downloaded from cloud" or "waiting to upload" — the two scenarios have very different actionable implications.
+
+**Fix (Option 4 from the 2026-05-01 design discussion).** Split LOCAL into two columns:
+
+| FILES | SPARSE | CLOUD | HYDRATED | PENDING | LAST SYNC |
+|---|---|---|---|---|---|
+| 66,208 | 63,658 | 313 GiB | 0 B | 25 GiB | 30 Apr 11:26 |
+
+- HYDRATED = `entries.filter { isHydrated && remoteId != null }.sumOf { localSize }` — bytes known on both sides.
+- PENDING = `entries.filter { isHydrated && remoteId == null }.sumOf { localSize }` — bytes only on local, awaiting upload.
+- SPARSE stays as-is (placeholder count).
+- FILES = HYDRATED-rows + SPARSE-rows + PENDING-rows. Could be dropped if the table gets too wide; keep for now.
+
+**Depends on:** UD-901 (the PENDING bucket only has rows once LocalScanner writes pending-upload entries). Until UD-901 lands this ticket has no data to show.
+
+**Layout concern.** Today's status table is 7 columns at width ~100. Adding an 8th column may push to ~110, marginal on an 80-col terminal. Mitigations to consider:
+1. Drop FILES (it's derivable from the others).
+2. Add `--wide` or `--narrow` flag.
+3. Reduce LAST SYNC width by using a more compact format ("30 Apr" not "30 Apr. 11:26" when over a day old).
+
+**Acceptance criteria.**
+1. Status table renders HYDRATED + PENDING as separate columns.
+2. PENDING shows non-zero only for entries whose `remoteId == null` and `isHydrated == true`.
+3. Existing `StatusCommandTest` fixtures updated for the new column count.
+4. New test: a profile with mixed hydrated + pending entries renders both columns correctly.
+5. Decision logged in commit message: keep FILES vs drop FILES, and width handling.
+
+**Non-goals.**
+- Adding a per-state breakdown beyond what's listed (e.g. FAILED_DOWNLOAD count). Tracked separately if needed.
+- Changing `--audit` output. UD-316's `status --audit` is a different surface.
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `StatusCommand.kt:254-356` — `buildAccountRow` + render.
+- UD-901 — the data dependency.
+---
+id: UD-352
+title: Provider remote-scan heartbeat: periodic onScanProgress during delta() walk
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-01
+---
+**Problem.** During `unidrive sync`, the user-facing line is "Scanning remote changes..." with no count, no elapsed time, and no folder/file split. On a large remote (Internxt, 63,658 items, 287 GiB), this can sit silent for many minutes while the provider walks the delta. The user has no way to tell whether sync is making progress or stuck.
+
+**Where the progress hooks already exist.**
+- `ProgressReporter.onScanProgress(phase: String, count: Int)` — interface is already wired.
+- `SyncEngine.kt:160` calls it with count=0 at the start of remote scan, `:169` calls it with the final count once the gather finishes.
+- `LocalScanner.kt:35-53` already implements a heartbeat (every 5,000 items OR every 10 s wall-clock since last fire) — the **local** scan therefore reports periodic counts. The **remote** scan does not.
+
+**Fix.** Each provider's `delta()` should fire `reporter.onScanProgress("remote", running_count)` at the same heartbeat cadence as `LocalScanner`. The simplest implementation: wrap the per-page accumulation in a small `RemoteScanHeartbeat` helper in `:app:sync` that takes `(reporter, intervalItems = 5000, intervalMs = 10_000L)` and exposes a `tick(deltaCount: Int)` method. Each provider invokes `heartbeat.tick(page.items.size)` after appending a page.
+
+**Cleanest call-site shape (per-provider):**
+
+```kotlin
+override suspend fun delta(prevCursor: String?): DeltaPage {
+    val heartbeat = RemoteScanHeartbeat(reporter, profile)
+    var cursor = prevCursor
+    val items = mutableListOf<CloudItem>()
+    do {
+        val page = api.deltaPage(cursor)
+        items += page.items
+        heartbeat.tick(items.size)
+        cursor = page.nextCursor
+    } while (page.hasMore)
+    return DeltaPage(items, cursor, hasMore = false)
+}
+```
+
+Note: providers don't currently hold a `ProgressReporter` reference. The cleanest plumbing is to have the **sync engine** wrap the provider with a delta-progress shim before calling — i.e. the engine knows the reporter and the provider; passing the heartbeat callback as an optional argument on `delta()` is one shape. Discuss in PR.
+
+**Affects all 6 snapshot/delta providers:** OneDrive (`GraphApiService.kt`), HiDrive, S3, SFTP, WebDAV, Rclone, Internxt, LocalFS. (LocalFS uses `Files.walk` and is fast enough to skip.)
+
+**Acceptance criteria.**
+1. During a remote scan that exceeds 5,000 items or 10 s, `onScanProgress("remote", N)` fires periodically with N increasing.
+2. The heartbeat does not fire faster than `intervalItems` items or `intervalMs` ms — whichever comes first.
+3. New test in `:app:sync` verifies the heartbeat math (mirrors `LocalScannerHeartbeatTest` pattern).
+4. Field test: a real Internxt sync with > 50 k items shows a count climbing during the remote-scan phase, not just at start and end.
+
+**Non-goals.**
+- ETA computation. Already wired via `onScanHistoricalHint` / `onScanCountHint` (UD-747/UD-748). The renderer reads those — see UD-757.
+- Provider-side parallelism / pagination optimization. Pure observability ticket.
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `SyncEngine.kt:160,169,183-188` — current scan-phase progress wiring.
+- `LocalScanner.kt:35-53` — the heartbeat math to mirror.
+- UD-747, UD-748 — historical-hint plumbing already in place.
+- UD-757 — paired ticket for the renderer.
+---
+id: UD-757
+title: CliProgressReporter: render count + elapsed + ETA on the Scanning... line
+category: tooling
+priority: medium
+effort: S
+status: open
+opened: 2026-05-01
+---
+**Problem.** Today's CLI rendering of the scan-phase line is:
+
+```
+Scanning remote changes...
+```
+
+No count. No elapsed wall-clock. No ETA. No folder/file split. The user has no way to gauge progress on a long scan (cf. user feedback 2026-05-01 — Internxt 63 k-item profile sat silent for minutes during gather).
+
+**Source files.**
+- `CliProgressReporter.onScanProgress(phase, count)` at line ~44 — the renderer.
+- `SyncEngine.kt:153-158, 176-181` — already plumbs `onScanHistoricalHint(phase, lastSecs)` and `onScanCountHint(phase, lastCount)` from the previous run's `state.db`.
+- `IpcProgressReporter` already accepts these hints; only the CLI renderer ignores them.
+
+**Target output.**
+
+When historical hints are available:
+```
+Scanning remote changes... 12,450 items (10,200 files / 2,250 folders) · 0:18 · ETA 1:02
+```
+
+When no historical data (first scan / `--reset`):
+```
+Scanning remote changes... 12,450 items (10,200 files / 2,250 folders) · 0:18
+```
+
+When count is 0 (start of phase):
+```
+Scanning remote changes...
+```
+
+**Required reporter changes.**
+1. Track `phaseStartMs: Map<String, Long>` — start time per phase. Set on first `onScanProgress(phase, 0)`.
+2. Track `historicalSecs: Map<String, Long>` — set by `onScanHistoricalHint`.
+3. Track `historicalCount: Map<String, Int>` — set by `onScanCountHint`.
+4. On every `onScanProgress(phase, count)` with `count > 0`:
+   - Compute elapsed = `(now - phaseStartMs[phase]) / 1000`.
+   - If both historical hints present, compute fraction = `count / historicalCount[phase]` and ETA = `historicalSecs[phase] - elapsed` clamped to non-negative; OR throughput-based ETA = `elapsed * (historicalCount[phase] - count) / count`. Pick the more stable signal — the bucket-based one is closer to UD-747's intent.
+   - Render the line.
+5. **Folder/file split.** Requires the count signal to be split. Either:
+   - (a) Extend `ProgressReporter` to emit `onScanProgress(phase, files: Int, folders: Int)` and update the engine + scanner to count separately. Bigger change, cleaner.
+   - (b) Keep the count combined and skip the split in this ticket. Smaller change.
+   Pick (b) for v1; defer (a) to a follow-up if user asks.
+
+**Acceptance criteria.**
+1. With historical hints present and count > 0, the line shows `N items · elapsed · ETA`.
+2. Without historical hints, the line shows `N items · elapsed` (no ETA).
+3. With count == 0, the line shows the bare label (today's behaviour preserved as the "starting" state).
+4. Folder/file split: out of scope for v1. File a follow-up if needed.
+5. New `CliProgressReporterTest` cases for: (i) no-history, (ii) with-history-and-on-track, (iii) with-history-and-overrun (ETA clamped to 0), (iv) count=0 baseline.
+6. Field smoke: re-run the Internxt sync from the user feedback; confirm the line ticks with a count + elapsed.
+
+**Non-goals.**
+- Heartbeat math on the **provider** side — that's UD-352.
+- Folder/file split — see acceptance criteria #4 above.
+- IPC NDJSON event shape change — already supports the count, no protocol change needed.
+
+**Pairs with UD-352.** Ship them together if possible: UD-352 emits the heartbeat, UD-757 renders it. Until UD-352 lands the renderer change is invisible during remote scans (still works for local).
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `CliProgressReporter.kt:44` — current renderer.
+- UD-747 / UD-748 — historical-hint side channel.
+- `IpcProgressReporterTest` for testing-pattern reference.
