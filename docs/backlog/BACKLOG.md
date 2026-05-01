@@ -2993,3 +2993,119 @@ Body sections (each one paragraph max — ADR-0014 is a summary, not a redo):
 ## Provenance
 
 Discussed 2026-05-01 with maintainer. Identified during the post-CHANGELOG-audit retrospective as the highest-leverage doc fix for new-contributor onboarding.
+---
+id: UD-767
+title: Add docs/ROADMAP.md + docs/NON-GOALS.md (half page each)
+category: tooling
+priority: high
+effort: XS
+status: open
+code_refs:
+  - docs/ROADMAP.md
+  - docs/NON-GOALS.md
+  - README.md
+opened: 2026-05-01
+---
+**Add `docs/ROADMAP.md` and `docs/NON-GOALS.md` — half a page each. Raises the project from "preview with strong opinions" to "preview with discoverable strategy."**
+
+The current public has rigorous tactical docs (`SPECS.md`, `ARCHITECTURE.md`, `AGENT-SYNC.md`, `BACKLOG.md`, 13 ADRs, lessons-learned files) but no single document that answers a contributor's first two questions:
+
+1. **"Where is this going?"** — answered today only by reading 13 ADRs + the BACKLOG.md (90+ tickets) + the wiki. That's a 30-minute reading task, and even after it the answer is implicit.
+2. **"What is this *not* trying to be?"** — answered today only by ADR-0011/0012/0013 (each phrased as "we removed X"), which is hard to discover proactively.
+
+Both gaps are common in open-source previews. Closing them is a half-day of writing that pays off every time someone asks "does it support Y?", "will it ever do Z?", "should I file this as a feature request?"
+
+## What goes where
+
+### `docs/ROADMAP.md` (~half a page)
+
+**Audience:** prospective contributor, prospective user, prospective sponsor.
+
+**Shape:** time-anchored milestones, not a feature list. Each milestone is one paragraph.
+
+```markdown
+# Roadmap
+
+## v0.1.0 — first release (Linux MVP)
+Quality-gated providers: localfs, s3, sftp. CLI + MCP + sync engine.
+Linux-only. Outstanding gates: <link to BACKLOG.md milestone:v0.1.0>.
+
+## v0.2.0 — preview providers graduate
+OneDrive, WebDAV, HiDrive, Internxt, Rclone leave preview status. Each
+needs: live-integration test in CI, capability-contract round-trip
+(ADR-0005), parallelism budget tuned in `ProviderMetadata`. Likely Q3.
+
+## v0.3.0 — release artefacts
+Standalone installer (`dist/install.sh`, UD-761), GitHub Releases with
+fat JAR, Scoop bucket / WinGet manifest if community appetite exists.
+Webhook-driven sync exits experimental status (UD-???).
+
+## Beyond v0.3.0 — not committed
+- Shell-extension overlays (Linux: Nautilus + Dolphin; Windows: depends
+  on appetite). See `BACKLOG_IDEAS_UI.md`.
+- Companion projects: `unidrive-android` (in flight in adjacent repo),
+  `unidrive-tray` (community).
+- Provider expansion to Google Drive, Dropbox, Box (currently only via
+  rclone gateway).
+```
+
+Cross-links into `BACKLOG.md`'s `milestone:v0.1.0` field. If we don't currently use the `milestone:` field consistently, the ROADMAP creation forces that audit.
+
+### `docs/NON-GOALS.md` (~half a page)
+
+**Audience:** anyone about to file a feature request that won't land.
+
+**Shape:** explicit list with one-line "why not" for each. Doesn't need numbering.
+
+```markdown
+# Non-goals
+
+unidrive-cli explicitly does NOT aim to:
+
+- **Be a backup tool.** Sync ≠ backup. We sync deltas; we do not snapshot
+  history-aware archives. Use restic/borg/duplicacy for that. (We do
+  retain `unidrive backup add` for one-way replication, which is
+  different from a backup tool.)
+- **Run on Windows or macOS in v0.1.0.** ADR-0012 is the authority. Both
+  are post-v0.3.0 candidates per `BACKLOG_IDEAS_UI.md`.
+- **Ship a system-tray UI in core.** ADR-0013 moved that to companion
+  projects; the daemon's UDS broadcast surface is the contract for
+  third-party trays. See `BACKLOG_IDEAS_UI.md` W11/W12.
+- **Implement provider-specific features that don't generalise.** The
+  `CloudProvider` interface is deliberately minimal; provider quirks
+  hide behind capabilities (ADR-0005). "OneDrive shared notebooks" or
+  "Dropbox Paper documents" are out unless they map to a generalisable
+  capability.
+- **Be a sync conflict resolver.** We surface conflicts (`unidrive
+  conflicts`) and offer two policies (`keep_both`, `last_writer_wins`),
+  but we do not auto-merge document contents. Document-merge tooling is
+  a different product.
+- **Replace native cloud storage clients.** OneDrive's official client
+  has features we won't replicate (cloud streams in Office, embedded
+  Teams sharing, etc.). We're a **second-class citizen** for any single
+  provider, but a **first-class citizen** for the multi-provider use
+  case. That's the trade.
+```
+
+Each non-goal cites either an ADR, a BACKLOG_IDEAS_UI section, or a "why" sentence. The list isn't fixed — adding a non-goal as the project matures is fine, and gets a date footer (`Updated YYYY-MM-DD`).
+
+## Why both, not just one
+
+A roadmap without non-goals reads as "all the things, eventually, just be patient" — which is what every preview looks like and trains contributors to file maximalist requests. Non-goals constrain expectations bidirectionally: contributors know what won't land, users know what to look elsewhere for, sponsors know the scope they're actually backing.
+
+## Acceptance
+
+- `docs/ROADMAP.md` exists, ~half a page, links to BACKLOG.md milestone field + ADR-0014 (when filed under UD-003).
+- `docs/NON-GOALS.md` exists, ~half a page, references ADR-0011/0012/0013 + ADR-0005 + `BACKLOG_IDEAS_UI.md`.
+- `README.md` adds two links in the docs section pointing at both.
+- Wiki Home page (built 2026-05-01) gets a "What's next" section with a one-liner pointer to ROADMAP.md.
+- If `BACKLOG.md` items don't currently have `milestone:` set, populate it for the ones in v0.1.0 / v0.2.0 / v0.3.0 buckets — keeps ROADMAP.md and BACKLOG.md in sync via the milestone field.
+
+## Out of scope
+
+- Detailed feature specs for v0.2.0 or v0.3.0 — those ship as separate spec files in `docs/specs/` when the time comes.
+- Marketing copy / pitch deck — different artefact, different audience.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Pairs with UD-003 (ADR-0014 surface consolidator) — together they make the project navigable for new contributors without reading 13 ADRs + 90 tickets.
