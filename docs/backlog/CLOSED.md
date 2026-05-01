@@ -10172,3 +10172,78 @@ Note: providers don't currently hold a `ProgressReporter` reference. The cleanes
 - `LocalScanner.kt:35-53` — the heartbeat math to mirror.
 - UD-747, UD-748 — historical-hint plumbing already in place.
 - UD-757 — paired ticket for the renderer.
+
+---
+id: UD-757
+title: CliProgressReporter: render count + elapsed + ETA on the Scanning... line
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 974fba7. Format: 'Scanning <phase-label>... <N> items · <M:SS>[ · ETA <M:SS>]'. Phase labels: 'remote'→'remote changes', 'local'→'local files'. ETA math (count-aware with 4x sanity clamp / 5% progress floor → wall-clock fallback) preserved; bucketing replaced with M:SS rendering. Throughput suffix dropped. Folder/file split deferred per ticket AC #4.
+opened: 2026-05-01
+---
+**Problem.** Today's CLI rendering of the scan-phase line is:
+
+```
+Scanning remote changes...
+```
+
+No count. No elapsed wall-clock. No ETA. No folder/file split. The user has no way to gauge progress on a long scan (cf. user feedback 2026-05-01 — Internxt 63 k-item profile sat silent for minutes during gather).
+
+**Source files.**
+- `CliProgressReporter.onScanProgress(phase, count)` at line ~44 — the renderer.
+- `SyncEngine.kt:153-158, 176-181` — already plumbs `onScanHistoricalHint(phase, lastSecs)` and `onScanCountHint(phase, lastCount)` from the previous run's `state.db`.
+- `IpcProgressReporter` already accepts these hints; only the CLI renderer ignores them.
+
+**Target output.**
+
+When historical hints are available:
+```
+Scanning remote changes... 12,450 items (10,200 files / 2,250 folders) · 0:18 · ETA 1:02
+```
+
+When no historical data (first scan / `--reset`):
+```
+Scanning remote changes... 12,450 items (10,200 files / 2,250 folders) · 0:18
+```
+
+When count is 0 (start of phase):
+```
+Scanning remote changes...
+```
+
+**Required reporter changes.**
+1. Track `phaseStartMs: Map<String, Long>` — start time per phase. Set on first `onScanProgress(phase, 0)`.
+2. Track `historicalSecs: Map<String, Long>` — set by `onScanHistoricalHint`.
+3. Track `historicalCount: Map<String, Int>` — set by `onScanCountHint`.
+4. On every `onScanProgress(phase, count)` with `count > 0`:
+   - Compute elapsed = `(now - phaseStartMs[phase]) / 1000`.
+   - If both historical hints present, compute fraction = `count / historicalCount[phase]` and ETA = `historicalSecs[phase] - elapsed` clamped to non-negative; OR throughput-based ETA = `elapsed * (historicalCount[phase] - count) / count`. Pick the more stable signal — the bucket-based one is closer to UD-747's intent.
+   - Render the line.
+5. **Folder/file split.** Requires the count signal to be split. Either:
+   - (a) Extend `ProgressReporter` to emit `onScanProgress(phase, files: Int, folders: Int)` and update the engine + scanner to count separately. Bigger change, cleaner.
+   - (b) Keep the count combined and skip the split in this ticket. Smaller change.
+   Pick (b) for v1; defer (a) to a follow-up if user asks.
+
+**Acceptance criteria.**
+1. With historical hints present and count > 0, the line shows `N items · elapsed · ETA`.
+2. Without historical hints, the line shows `N items · elapsed` (no ETA).
+3. With count == 0, the line shows the bare label (today's behaviour preserved as the "starting" state).
+4. Folder/file split: out of scope for v1. File a follow-up if needed.
+5. New `CliProgressReporterTest` cases for: (i) no-history, (ii) with-history-and-on-track, (iii) with-history-and-overrun (ETA clamped to 0), (iv) count=0 baseline.
+6. Field smoke: re-run the Internxt sync from the user feedback; confirm the line ticks with a count + elapsed.
+
+**Non-goals.**
+- Heartbeat math on the **provider** side — that's UD-352.
+- Folder/file split — see acceptance criteria #4 above.
+- IPC NDJSON event shape change — already supports the count, no protocol change needed.
+
+**Pairs with UD-352.** Ship them together if possible: UD-352 emits the heartbeat, UD-757 renders it. Until UD-352 lands the renderer change is invisible during remote scans (still works for local).
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `CliProgressReporter.kt:44` — current renderer.
+- UD-747 / UD-748 — historical-hint side channel.
+- `IpcProgressReporterTest` for testing-pattern reference.
