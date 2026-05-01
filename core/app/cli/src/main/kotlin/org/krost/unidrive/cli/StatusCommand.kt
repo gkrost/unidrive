@@ -20,14 +20,23 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 // Shared data classes for table rendering
+//
+// UD-756: dropped the FILES column and split LOCAL into HYDRATED + PENDING.
+// FILES (raw row count) was the cheapest column to drop while still keeping
+// the table within ~110 chars after adding a column. The two new columns
+// answer different questions:
+//   - HYDRATED — bytes downloaded from the cloud and physically on disk.
+//   - PENDING  — bytes added locally that haven't been uploaded yet
+//                (entries with remoteId=null + isHydrated=true, written by
+//                LocalScanner.scan() per UD-901).
 data class AccountRow(
     val profileName: String,
     val status: String, // "ok", "err", "auth", "dim"
     val statusLabel: String, // "[✔ OK]", "[✘ ERR]", "[✘ AUTH]", "[– –]"
-    val files: Int,
     val sparse: Int,
     val cloudSize: String,
-    val localSize: String,
+    val hydratedSize: String,
+    val pendingSize: String,
     val lastSync: String,
 )
 
@@ -36,6 +45,34 @@ data class ProviderGroup(
     val displayName: String,
     val accounts: List<AccountRow>,
 )
+
+/**
+ * UD-756: byte-bucket split of state.db entries used by the status table.
+ *
+ *  - hydrated: bytes downloaded from the cloud and physically on disk
+ *              (entries with `remoteId != null && isHydrated == true`).
+ *  - pending:  bytes added locally that have not yet been uploaded
+ *              (entries with `remoteId == null && isHydrated == true`,
+ *              written by LocalScanner.scan() per UD-901).
+ *
+ * Folders and not-hydrated entries (sparse placeholders) contribute zero
+ * to either bucket.
+ */
+internal data class LocalSizeBuckets(
+    val hydratedBytes: Long,
+    val pendingBytes: Long,
+)
+
+internal fun computeLocalSizeBuckets(entries: List<org.krost.unidrive.sync.model.SyncEntry>): LocalSizeBuckets {
+    var hydrated = 0L
+    var pending = 0L
+    for (e in entries) {
+        if (e.isFolder || !e.isHydrated) continue
+        val size = e.localSize ?: 0L
+        if (e.remoteId != null) hydrated += size else pending += size
+    }
+    return LocalSizeBuckets(hydrated, pending)
+}
 
 @Command(name = "status", description = ["Show sync status"], mixinStandardHelpOptions = true)
 class StatusCommand : Runnable {
@@ -279,10 +316,10 @@ class StatusCommand : Runnable {
                 profileName = label,
                 status = "dim",
                 statusLabel = GlyphRenderer.inactiveLabel(),
-                files = 0,
                 sparse = 0,
                 cloudSize = "0 B",
-                localSize = "0 B",
+                hydratedSize = "0 B",
+                pendingSize = "0 B",
                 lastSync = "never",
             )
         }
@@ -293,10 +330,10 @@ class StatusCommand : Runnable {
                 profileName = label,
                 status = if (isExpiring) "warn" else "ok",
                 statusLabel = statusLabel,
-                files = 0,
                 sparse = 0,
                 cloudSize = "0 B",
-                localSize = "0 B",
+                hydratedSize = "0 B",
+                pendingSize = "0 B",
                 lastSync = "never",
             )
         }
@@ -305,14 +342,19 @@ class StatusCommand : Runnable {
             val db = StateDatabase(stateDbPath)
             db.initialize()
             val entries = db.getAllEntries()
-            val fileCount = entries.count { !it.isFolder }
             val sparseCount = entries.count { !it.isHydrated && !it.isFolder }
             val totalRemoteSize = entries.filter { !it.isFolder }.sumOf { it.remoteSize }
             // UD-261: prefer the authoritative quota.used over the enumerated
             // sum for QuotaExact providers. quotaUsed is null when the provider
             // doesn't support quota or the auth/network call failed.
             val cloudSizeBytes = quotaUsed ?: totalRemoteSize
-            val totalLocalSize = entries.filter { it.isHydrated }.sumOf { it.localSize ?: 0L }
+            // UD-756: split the historical "totalLocalSize" into HYDRATED (bytes
+            // present locally that also exist remotely) and PENDING (bytes
+            // present locally but not yet uploaded — UD-901 places these rows
+            // with remoteId=null + isHydrated=true).
+            val buckets = computeLocalSizeBuckets(entries)
+            val hydratedBytes = buckets.hydratedBytes
+            val pendingBytes = buckets.pendingBytes
             val lastSyncRaw = db.getSyncState("last_full_scan")
             db.close()
             val lastSyncFormatted = formatLastSync(lastSyncRaw)
@@ -322,10 +364,10 @@ class StatusCommand : Runnable {
                     profileName = label,
                     status = "auth",
                     statusLabel = GlyphRenderer.authFailLabel(),
-                    files = fileCount,
                     sparse = sparseCount,
                     cloudSize = CliProgressReporter.formatSize(cloudSizeBytes),
-                    localSize = CliProgressReporter.formatSize(totalLocalSize),
+                    hydratedSize = CliProgressReporter.formatSize(hydratedBytes),
+                    pendingSize = CliProgressReporter.formatSize(pendingBytes),
                     lastSync = lastSyncFormatted,
                 )
             } else {
@@ -334,10 +376,10 @@ class StatusCommand : Runnable {
                     profileName = label,
                     status = if (isExpiring) "warn" else "ok",
                     statusLabel = statusLabel,
-                    files = fileCount,
                     sparse = sparseCount,
                     cloudSize = CliProgressReporter.formatSize(cloudSizeBytes),
-                    localSize = CliProgressReporter.formatSize(totalLocalSize),
+                    hydratedSize = CliProgressReporter.formatSize(hydratedBytes),
+                    pendingSize = CliProgressReporter.formatSize(pendingBytes),
                     lastSync = lastSyncFormatted,
                 )
             }
@@ -346,10 +388,10 @@ class StatusCommand : Runnable {
                 profileName = label,
                 status = "err",
                 statusLabel = GlyphRenderer.errLabel(),
-                files = 0,
                 sparse = 0,
                 cloudSize = "0 B",
-                localSize = "0 B",
+                hydratedSize = "0 B",
+                pendingSize = "0 B",
                 lastSync = "unknown",
             )
         }
@@ -359,14 +401,19 @@ class StatusCommand : Runnable {
         groups: List<ProviderGroup>,
         ansi: Boolean,
     ) {
-        // Column widths
+        // Column widths.
+        // UD-756: dropped FILES (was 11) and added two size columns. Total inner
+        // width grew from 95 → 102; with separators the table renders at ~110
+        // chars (was ~103). FILES is the cheapest column to drop because the
+        // sparse + hydrated + pending rows together already give the user a
+        // truer picture of what state.db holds.
         val wName = 38
         val wStatus = 10
-        val wFiles = 11
         val wSparse = 10
         val wCloud = 10
-        val wLocal = 10
-        val wSync = 16
+        val wHydrated = 10
+        val wPending = 10
+        val wSync = 14
 
         // Box-drawing helpers (ASCII-safe via GlyphRenderer for non-UTF-8 stdout)
         val h = GlyphRenderer.boxHorizontal()
@@ -386,17 +433,17 @@ class StatusCommand : Runnable {
             wName,
         )}$td${hLine(
             wStatus,
-        )}$td${hLine(wFiles)}$td${hLine(wSparse)}$td${hLine(wCloud)}$td${hLine(wLocal)}$td${hLine(wSync)}$tr"
+        )}$td${hLine(wSparse)}$td${hLine(wCloud)}$td${hLine(wHydrated)}$td${hLine(wPending)}$td${hLine(wSync)}$tr"
         val midBorder = "$teeR${hLine(
             wName,
         )}$x${hLine(
             wStatus,
-        )}$x${hLine(wFiles)}$x${hLine(wSparse)}$x${hLine(wCloud)}$x${hLine(wLocal)}$x${hLine(wSync)}$teeL"
+        )}$x${hLine(wSparse)}$x${hLine(wCloud)}$x${hLine(wHydrated)}$x${hLine(wPending)}$x${hLine(wSync)}$teeL"
         val botBorder = "$bl${hLine(
             wName,
         )}$tu${hLine(
             wStatus,
-        )}$tu${hLine(wFiles)}$tu${hLine(wSparse)}$tu${hLine(wCloud)}$tu${hLine(wLocal)}$tu${hLine(wSync)}$br"
+        )}$tu${hLine(wSparse)}$tu${hLine(wCloud)}$tu${hLine(wHydrated)}$tu${hLine(wPending)}$tu${hLine(wSync)}$br"
 
         fun cell(
             text: String,
@@ -414,10 +461,10 @@ class StatusCommand : Runnable {
         fun row(
             name: String,
             status: String,
-            files: String,
             sparse: String,
             cloud: String,
-            local: String,
+            hydrated: String,
+            pending: String,
             sync: String,
         ): String =
             "$v${cell(
@@ -427,14 +474,10 @@ class StatusCommand : Runnable {
                 status,
                 wStatus,
             )}$v${cell(
-                files,
-                wFiles,
-                true,
-            )}$v${cell(
                 sparse,
                 wSparse,
                 true,
-            )}$v${cell(cloud, wCloud, true)}$v${cell(local, wLocal, true)}$v${cell(sync, wSync)}$v"
+            )}$v${cell(cloud, wCloud, true)}$v${cell(hydrated, wHydrated, true)}$v${cell(pending, wPending, true)}$v${cell(sync, wSync)}$v"
 
         fun colorize(
             line: String,
@@ -450,7 +493,7 @@ class StatusCommand : Runnable {
 
         // Header
         println(topBorder)
-        println(row("STORAGE PROVIDER / ACCOUNT", "STATUS", "FILES", "SPARSE", "CLOUD", "LOCAL", "LAST SYNC"))
+        println(row("STORAGE PROVIDER / ACCOUNT", "STATUS", "SPARSE", "CLOUD", "HYDRATED", "PENDING", "LAST SYNC"))
         println(midBorder)
 
         // Render groups
@@ -467,10 +510,10 @@ class StatusCommand : Runnable {
                     row(
                         "$icon ${group.displayName}",
                         acct.statusLabel,
-                        "%,d".format(acct.files),
                         "%,d".format(acct.sparse),
                         acct.cloudSize,
-                        acct.localSize,
+                        acct.hydratedSize,
+                        acct.pendingSize,
                         acct.lastSync,
                     )
                 println(colorize(provLine, headerColor))
@@ -495,10 +538,10 @@ class StatusCommand : Runnable {
                         row(
                             "$connector${acct.profileName}",
                             acct.statusLabel,
-                            "%,d".format(acct.files),
                             "%,d".format(acct.sparse),
                             acct.cloudSize,
-                            acct.localSize,
+                            acct.hydratedSize,
+                            acct.pendingSize,
                             acct.lastSync,
                         )
                     println(colorize(acctLine, acctColor))
