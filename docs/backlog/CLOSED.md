@@ -9734,3 +9734,64 @@ log with `provider.id`. Drop the per-provider lines.
 ## Effort / agent-ability
 
 **XS effort**, agent-able fully.
+
+---
+id: UD-345
+title: Lift Snapshot data-class wrapper (entries+timestamp+Base64 JSON cursor) to :app:sync
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 94622af. Generic Snapshot<E> wrapper in :app:sync replaces six per-provider classes. Byte-identity gate verified — existing state.db cursors round-trip clean.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.** Highest-volume
+duplication in the codebase by line count.
+
+Six providers each have a `XxxSnapshotEntry` + `XxxSnapshot` data-class
+pair with `entries: Map<String, ...>`, `timestamp: Long`, and
+`encode(): String` / `decode(cursor: String): XxxSnapshot` doing
+Base64-of-JSON. The entry fields differ (etag/size/mtime/chash/hash)
+but the wrapping structure and encode/decode are identical line-by-line.
+
+- `core/providers/hidrive/.../DeltaSnapshot.kt:1-33`
+- `core/providers/s3/.../S3Snapshot.kt:1-37`
+- `core/providers/sftp/.../SftpSnapshot.kt:1-36`
+- `core/providers/webdav/.../WebDavSnapshot.kt:1-37`
+- `core/providers/rclone/.../RcloneSnapshot.kt:1-43` — adds `hasChanged`
+  helper (sibling finding 3.2).
+- `core/providers/localfs/.../LocalFsSnapshot.kt:1-36`
+
+## Proposal
+
+`:app:sync/DeltaSnapshot.kt`:
+
+```kotlin
+@Serializable
+class Snapshot<E>(val entries: Map<String, E>, val timestamp: Long) {
+    fun encode(serializer: KSerializer<E>): String
+    companion object {
+        fun <E> decode(cursor: String, serializer: KSerializer<E>): Snapshot<E>
+    }
+}
+```
+
+Per-provider `XxxSnapshotEntry` types stay where they are.
+
+## Acceptance
+
+- All six providers consume the shared `Snapshot<E>`.
+- Round-trip test: encode a fixture, decode, assert entries equal.
+- Existing snapshot-version compatibility preserved — no on-disk
+  cursor format change.
+
+## Effort / agent-ability
+
+**S effort**, agent-able fully. Pairs naturally with finding 3.2
+(snapshot-delta-compute).
+
+## Related
+
+- **3.2 snapshot-delta-compute** (sibling) — the diff loop that
+  consumes these snapshots.
