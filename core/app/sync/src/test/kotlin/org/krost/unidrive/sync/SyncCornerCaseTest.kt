@@ -5,14 +5,34 @@ import org.junit.Assume.assumeFalse
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.krost.unidrive.sync.model.SyncEntry
-import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.time.Instant
 import kotlin.test.*
 
 // UD-209: sparse-file production support missing on Windows — affected tests skip there.
 private val IS_WINDOWS_CORNER = System.getProperty("os.name", "").lowercase().contains("win")
+
+/**
+ * UD-209a: produce a sparse file of [size] bytes via FileChannel + write-1-byte-at-N-1.
+ * On JDK 21 jbrsdk on Linux, RandomAccessFile.setLength(N) on a fresh file emits
+ * ftruncate(0) + write(zeros, N) — densely allocating the file. The FileChannel
+ * pattern emits ftruncate(0) + a single 1-byte write at position N-1, allocating
+ * only the trailing page. Mirror of the production fix in PlaceholderManager.dehydrate.
+ */
+private fun createSparsePlaceholder(file: Path, size: Long) {
+    Files.deleteIfExists(file)
+    Files.createFile(file)
+    if (size > 0L) {
+        FileChannel.open(file, StandardOpenOption.WRITE).use { ch ->
+            ch.position(size - 1L)
+            ch.write(ByteBuffer.wrap(byteArrayOf(0)))
+        }
+    }
+}
 
 /**
  * Corner-case tests for interrupted sync, daemon crash recovery,
@@ -71,15 +91,18 @@ class SyncCornerCaseTest {
     fun `sparse placeholder from interrupted sync is replaced by real download`() =
         runTest {
             assumeFalse("Requires sparse-file semantics — UD-209 tracks Windows support", IS_WINDOWS_CORNER)
-            // Simulate interrupted first sync: sparse placeholders exist but no DB entries
+            // Simulate interrupted first sync: sparse placeholders exist but no DB entries.
+            // UD-209a: size must exceed one filesystem page (4 KiB on tmpfs/ext4) so the
+            // sparse-vs-dense distinction in isSparse(blocks*512 < expectedSize) is observable.
             val placeholder = syncRoot.resolve("doc.txt")
             Files.createDirectories(placeholder.parent)
-            RandomAccessFile(placeholder.toFile(), "rw").use { it.setLength(1024) }
-            assertEquals(1024, Files.size(placeholder))
+            val placeholderSize = 16_384L
+            createSparsePlaceholder(placeholder, placeholderSize)
+            assertEquals(placeholderSize, Files.size(placeholder))
 
-            // Now run a "real" first sync — remote has same file with size 1024
-            provider.files["/doc.txt"] = ByteArray(1024) { 0x41 }
-            provider.deltaItems = listOf(cloudItem("/doc.txt", size = 1024))
+            // Now run a "real" first sync — remote has same file with size 16384
+            provider.files["/doc.txt"] = ByteArray(placeholderSize.toInt()) { 0x41 }
+            provider.deltaItems = listOf(cloudItem("/doc.txt", size = placeholderSize))
             engine().syncOnce()
 
             val entry = db.getEntry("/doc.txt")
@@ -88,7 +111,7 @@ class SyncCornerCaseTest {
             // default-hydrate policy downloads real bytes over the stub. Entry becomes hydrated.
             assertTrue(entry.isHydrated, "Sparse placeholder should be replaced by real download")
             val content = Files.readAllBytes(placeholder)
-            assertEquals(1024, content.size)
+            assertEquals(placeholderSize.toInt(), content.size)
             assertTrue(content.all { it == 0x41.toByte() }, "Local file should hold downloaded content")
         }
 
@@ -111,14 +134,16 @@ class SyncCornerCaseTest {
     fun `pinned file downloaded even if sparse placeholder exists`() =
         runTest {
             assumeFalse("Requires sparse-file semantics — UD-209", IS_WINDOWS_CORNER)
-            // Sparse placeholder left from interrupted sync
+            // Sparse placeholder left from interrupted sync. UD-209a: size must exceed
+            // one filesystem page so isSparse(blocks*512 < expectedSize) actually fires.
             val placeholder = syncRoot.resolve("pinned.txt")
             Files.createDirectories(placeholder.parent)
-            RandomAccessFile(placeholder.toFile(), "rw").use { it.setLength(500) }
+            val placeholderSize = 16_384L
+            createSparsePlaceholder(placeholder, placeholderSize)
 
             // Remote has same size, and it's pinned
-            val realContent = "real content here!".repeat(28).take(500).toByteArray()
-            provider.deltaItems = listOf(cloudItem("/pinned.txt", size = 500))
+            val realContent = ByteArray(placeholderSize.toInt()) { 0x42 }
+            provider.deltaItems = listOf(cloudItem("/pinned.txt", size = placeholderSize))
             provider.files["/pinned.txt"] = realContent
             db.addPinRule("*.txt", pinned = true)
 

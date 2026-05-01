@@ -59,10 +59,16 @@ class LocalScanner(
                         changes[relativePath] = ChangeState.NEW
                         // UD-901: write a pending-upload row immediately so the file's
                         // localSize is visible to `status` before the upload completes.
-                        // remoteId=null marks "not yet uploaded"; isHydrated=true because
-                        // the bytes are physically on disk. applyUpload() later upserts
-                        // the same path, promoting the row to a fully-synced state once
-                        // the byte transfer succeeds.
+                        // remoteId=null marks "not yet uploaded"; applyUpload() later
+                        // upserts the same path, promoting the row to a fully-synced
+                        // state once the byte transfer succeeds.
+                        //
+                        // UD-209b: don't claim isHydrated=true for a sparse leftover
+                        // (interrupted-sync placeholder physically present but with no
+                        // real bytes). Without this guard, the engine adopts the file
+                        // as fully synced and never re-downloads — UD-222 invariant
+                        // silently regressed by UD-901 otherwise.
+                        val sparseLeftover = isSparseLeftover(file, attrs.size())
                         db.upsertEntry(
                             SyncEntry(
                                 path = relativePath,
@@ -74,7 +80,7 @@ class LocalScanner(
                                 localSize = attrs.size(),
                                 isFolder = false,
                                 isPinned = false,
-                                isHydrated = true,
+                                isHydrated = !sparseLeftover,
                                 lastSynced = Instant.EPOCH,
                             ),
                         )
@@ -144,5 +150,36 @@ class LocalScanner(
         }
 
         return changes
+    }
+
+    // UD-209b: detect sparse-file leftovers (interrupted-sync placeholders) so they
+    // don't get classified as fully-hydrated. Posix-only, returns false on Windows
+    // and on any error so the safer "assume hydrated" default applies. Only worth
+    // checking files larger than one filesystem page (4 KiB), since smaller files
+    // can't be reliably detected as sparse on tmpfs/ext4 (minimum allocation unit).
+    // Mirrors the production check in PlaceholderManager.isSparse.
+    private fun isSparseLeftover(
+        path: Path,
+        size: Long,
+    ): Boolean {
+        if (size <= 4096L) return false
+        val os = System.getProperty("os.name", "").lowercase()
+        if (os.contains("win")) return false
+        return try {
+            val proc =
+                ProcessBuilder("stat", "--format=%b", path.toAbsolutePath().toString())
+                    .redirectErrorStream(true)
+                    .start()
+            val output =
+                proc.inputStream
+                    .bufferedReader()
+                    .readLine()
+                    ?.trim() ?: return false
+            proc.waitFor()
+            val blocks = output.toLongOrNull() ?: return false
+            blocks * 512 < size
+        } catch (_: Exception) {
+            false
+        }
     }
 }

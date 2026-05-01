@@ -32,6 +32,12 @@ class Reconciler(
                     remoteItem == null -> ChangeState.UNCHANGED
                     remoteItem.deleted -> ChangeState.DELETED
                     entry == null -> ChangeState.NEW
+                    // UD-209b: a UD-901 pending-upload row (remoteId=null, no remote
+                    // metadata yet) is not a "remote-modified" signal — the remote side
+                    // hasn't been observed before. Treat as remote-NEW so the "both new"
+                    // branch can adopt-or-download instead of falling through to the
+                    // unhandled (NEW, MODIFIED) case and silently dropping the action.
+                    entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
                     remoteItem.hash != entry.remoteHash ||
                         remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
