@@ -9912,3 +9912,82 @@ pure with great test coverage; `openBrowser` is 17 lines pure utility.
 - **UD-351** (closed, 2026-04-30, b3f5755) — was originally surveyed
   as 2.7 oauth-pkce-helpers; now lives at `:app:core/auth/Pkce.kt`,
   same package this ticket targets for the callback server.
+
+---
+id: UD-344
+title: Lift token-file load/save helper (with UD-312 atomic write) to :app:core/auth
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 6bcf534. Lifted to :app:core/auth/CredentialStore.kt with UD-312 atomic-move and validate(T) hook baked in. OneDrive wires hasPlausibleAccessTokenShape via validate; HiDrive and Internxt inherit UD-312 atomic-write for free, closing the pre-lift race window. UD-347 chmod helper consumed via :app:core/io.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+Three providers persist credentials with the same shape:
+
+- Load: `Files.exists() ->Files.readString ->json.decodeFromString`.
+- Save: `Files.createDirectories ->setPosixPermissionsIfSupported(rwx)
+  ->writeString ->chmod 600`.
+
+OneDrive added UD-312 (atomic-move + shape guard) on top. HiDrive and
+Internxt copied the basic flow **without UD-312** — both have a real
+(small) crash-window race the UD-312 OneDrive comment explicitly
+identifies.
+
+`setPosixPermissionsIfSupported` itself is duplicated **3 times** with
+internal-fun visibility (one per provider), each copy explicitly
+commenting `See [org.krost.unidrive.onedrive.setPosixPermissionsIfSupported]`.
+
+- `core/providers/onedrive/.../OAuthService.kt:39-94, 422-443`
+- `core/providers/hidrive/.../OAuthService.kt:26-45, 167-189`
+- `core/providers/internxt/.../AuthService.kt:238-257, 264-287`
+
+## Proposal
+
+`:app:core/auth/CredentialStore.kt`:
+
+```kotlin
+class CredentialStore<T>(
+    private val dir: Path,
+    private val fileName: String,
+    private val serializer: KSerializer<T>,
+) {
+    fun load(): T?
+    fun save(value: T)
+    fun delete()
+}
+```
+
+- UD-312 atomic-move + POSIX chmod baked in.
+- `setPosixPermissionsIfSupported` lifts to its own
+  `:app:core/io/PosixPermissions.kt` (sub-finding 3.3 — covered here).
+
+## Acceptance
+
+- All three providers consume `CredentialStore`.
+- HiDrive + Internxt inherit UD-312 atomic-write — partial-write
+  crashes no longer leave corrupted token files.
+- ~60 lines of cross-package "see other module" comment-references
+  deleted.
+
+## Effort / agent-ability
+
+**S effort**, agent-able fully.
+
+**2026-04-30 update:** UD-347 (the posix-permissions-helper sub-finding
+3.3) shipped independently in commit `b3f5755` — `:app:core/io/PosixPermissions.kt`
+now exists, three providers consume it. UD-344's remaining work is
+just the `CredentialStore<T>` lift + UD-312 atomic-write adoption in
+HiDrive/Internxt; the chmod helper is already lifted. Drop ~30 lines
+from the original scope estimate.
+
+## Related
+
+- **UD-312** (closed) — OneDrive atomic-write + shape guard.
+- **UD-336** (closed, sibling) — same package destination.
+- **UD-347** (closed, 2026-04-30, b3f5755) — posix-permissions-helper
+  shipped ahead of UD-344; remaining UD-344 scope is `CredentialStore`
+  + atomic-write adoption only.
