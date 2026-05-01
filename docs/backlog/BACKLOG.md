@@ -2924,3 +2924,72 @@ These are the failure modes that today only surface during PR review or session 
 ## Provenance
 
 Discussed 2026-05-01 with maintainer. Highest leverage/effort ratio in the tree because: (a) script + wrapper already exist, (b) checks every PR + every push to `main`, (c) catches 6 distinct drift classes simultaneously.
+---
+id: UD-003
+title: ADR-0014 consolidating ADR-0008/0011/0012/0013 — v0.1.0 surface
+category: architecture
+priority: high
+effort: XS
+status: open
+code_refs:
+  - docs/adr/
+opened: 2026-05-01
+---
+**Write ADR-0014 consolidating the v0.1.0 surface as it stands after ADR-0008 + 0011 + 0012 + 0013.**
+
+A new contributor reading the ADR set today must mentally compose four documents to answer "what's actually shipping?":
+
+- ADR-0008 (greenfield restart): "v0.1.0 = core-only, ui/ + shell-win/ at preview"
+- ADR-0011 (remove shell-win): "actually, shell-win/ is gone"
+- ADR-0012 (Linux-only MVP + protocol/ removal): "actually, protocol/ + named pipes are gone too"
+- ADR-0013 (remove ui/): "actually, ui/ is also gone"
+
+ADR-0008's stated trade-offs ("no tray, no Explorer integration") are now the actual shipped state, not a temporary acceptance. Each amendment ADR explicitly cross-references the others (see the `amends` / `amended_by` frontmatter chain). The chain is faithfully recorded but not summarised.
+
+## Why a consolidator is the right shape (not a rewrite)
+
+ADR-0008..0013 are **historical** — they record decisions and the context at the time. ADR rule of thumb: never rewrite history; instead supersede with a new ADR that captures the *current* decision surface. ADR-0014 is that consolidation.
+
+It does **not** invalidate the four it consolidates. They stay accepted; ADR-0014 cites them as `consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013` and is the **single answer** to "what's shipping in v0.1.0?"
+
+## Acceptance
+
+`docs/adr/0014-v0_1_0-surface.md`, ~half a page, frontmatter:
+
+```yaml
+---
+id: ADR-0014
+title: v0.1.0 release surface, post-amendments
+status: accepted
+date: 2026-05-01    # or whatever date this is filed
+consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013
+related: ADR-0001, ADR-0003, ADR-0006, ADR-0009
+---
+```
+
+Body sections (each one paragraph max — ADR-0014 is a summary, not a redo):
+
+1. **Context (1 paragraph):** The amendment chain ADR-0008 → 0011 → 0012 → 0013 settled into a coherent shape; this ADR records the consolidated surface.
+2. **What ships in v0.1.0:**
+   - **Tiers:** `core/` only (CLI + MCP + sync engine + 8 provider adapters).
+   - **Platform:** Linux-only.
+   - **IPC:** UDS broadcast (`IpcServer.kt`, `IpcProgressReporter.kt`). NDJSON push-only.
+   - **Providers in the v0.1.0 quality gate:** `localfs`, `s3`, `sftp`. Others (OneDrive, WebDAV, HiDrive, Internxt, Rclone) present but at `status: preview` per ADR-0008.
+   - **What's gone:** `ui/`, `shell-win/`, `protocol/`, `NamedPipeServer.kt`, `PipeSecurity.kt`, all CFAPI plumbing.
+3. **Out of v0.1.0 (one-liners pointing at the right home):**
+   - Windows / macOS support → ADR-0012 plus `BACKLOG_IDEAS_UI.md` for distribution-channel design (jpackage, Scoop, WinGet).
+   - Tray UI / system-tray indicator → `BACKLOG_IDEAS_UI.md` (W11, W12).
+   - Shell-extension overlays (Windows Explorer / Nautilus / Dolphin) → `BACKLOG_IDEAS_UI.md` (W14).
+   - File-manager context menus (Linux) → `BACKLOG.md` UD-760 (in scope, just not yet salvaged).
+4. **Consequences (1 paragraph):** New contributors get one ADR to read for the "what's shipping" question. The four amendment ADRs remain authoritative for the *why*.
+5. **References:** Link each consolidated ADR + `BACKLOG_IDEAS_UI.md` + the `BACKLOG.md` salvage tickets (UD-759..765).
+
+## Out of scope
+
+- Rewriting any of ADR-0008..0013. They stay as-is.
+- Defining v0.2.0 or later — separate ADR when that scope crystallises.
+- Updating `ARCHITECTURE.md` or `SPECS.md` — those already reflect the post-amendment state via their own update path.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Identified during the post-CHANGELOG-audit retrospective as the highest-leverage doc fix for new-contributor onboarding.
