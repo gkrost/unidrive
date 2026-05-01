@@ -10247,3 +10247,52 @@ Scanning remote changes...
 - `CliProgressReporter.kt:44` — current renderer.
 - UD-747 / UD-748 — historical-hint side channel.
 - `IpcProgressReporterTest` for testing-pattern reference.
+
+---
+id: UD-353
+title: Internxt: OVH PUT timeout — pass pessimistic minThroughputBytesPerSecond to UploadTimeoutPolicy
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit f3d29ae. OVH_PUT_MIN_THROUGHPUT_BPS = 10 KiB/s passed as minThroughputBytesPerSecond override at both putEncryptedShard call sites. Sub-floor files unchanged; 5–30 MiB files now get 8.5–51 min wall-clock budget against OVH instead of the 600 s default that tore down legitimate progress.
+opened: 2026-05-01
+---
+**Symptom (2026-04-30 sync, `inxt_gernot_krost_posteo`).** Five video uploads to Internxt failed with Ktor `HttpRequestTimeoutException` at exactly the 600 s timeout floor:
+
+```
+Upload failed for /19notte78/Videos/BellaCandyland2160p4k.mp4:
+HttpRequestTimeoutException: Request timeout has expired
+[url=https://s3.gra.io.cloud.ovh.net/temporal-uploads-bucket/...,
+ request_timeout=600000 ms]
+```
+
+All on `s3.gra.io.cloud.ovh.net/temporal-uploads-bucket/...` — Internxt's third-party OVH-backed staging bucket.
+
+**Root cause.** `UploadTimeoutPolicy.computeRequestTimeoutMs(size)` with default `minThroughputBytesPerSecond = 50 KiB/s` returns the 600 s floor for any file ≤ ~30 MiB. The five failed videos are post-encryption ≤ 30 MiB tempfiles (small clips). Observed OVH throughput during congestion was ~30–50 KB/s — right at the edge of the policy's "half-decent link" assumption. Upload legitimately took > 600 s; client tore it down while OVH was still receiving.
+
+UploadTimeoutPolicy's defaults are tuned for **Internxt's own API**, where 50 KB/s is a reasonable floor. OVH's third-party staging bucket has no such SLA — it's commodity S3-compatible storage and routinely sits at the slow tail.
+
+**Fix.** Both shard-PUT call sites in `InternxtApiService.kt` (the OVH PUT, not Internxt's API) pass a **more pessimistic** `minThroughputBytesPerSecond` override:
+- `putEncryptedShard` at line 358-379 (in-memory variant)
+- `putEncryptedShardFromFile` at line 381-403 (streaming variant — this is the one that fired in the incident)
+
+Suggested override: 10 KiB/s. That maps:
+- 5 MiB file → 512 s → floor (600 s) wins (unchanged)
+- 30 MiB file → 3072 s ≈ 51 min (vs current 600 s)
+- 100 MiB file → 10240 s ≈ 2.8 h
+- 1 GiB file → ~28 h (`socketTimeoutMillis = 60s` watchdog still catches dead connections)
+
+The slow-loris exposure is unchanged: the 60 s socket-timeout watchdog still fires if no bytes flow between reads. We're only granting more total wall-clock for legitimately-progressing uploads.
+
+**Acceptance criteria.**
+1. Both `putEncryptedShard` and `putEncryptedShardFromFile` pass `minThroughputBytesPerSecond = OVH_MIN_THROUGHPUT_BPS` (10 KiB/s constant) to `UploadTimeoutPolicy.computeRequestTimeoutMs`.
+2. Internxt's own API calls (createFile / createFolder / moveFile / moveFolder via `retryOnTransient`) keep the default floor — they're against `drive-server.internxt.com`, not OVH.
+3. Test: a 30 MiB file produces a request-timeout > 600 s with the OVH override, and = 600 s without.
+4. Test: per-call override is plumbed correctly through `UploadTimeoutPolicy.computeRequestTimeoutMs`.
+
+**References.**
+- Pre-existing helper: `core/app/core/.../http/UploadTimeoutPolicy.kt` already supports `minThroughputBytesPerSecond` per-call override (UD-337's design).
+- Symptom log: `unidrive.2026-04-30.0.log` 13:54:47 / 14:06:02 / 14:17:01 / 14:56:00 / 15:08:23 / 15:09:01.
+- Related: UD-337 (the original lift of UploadTimeoutPolicy from WebDavTimeoutPolicy).
