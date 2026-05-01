@@ -10114,3 +10114,61 @@ Today's `StatusCommand.kt:315` sums both into LOCAL via `entries.filter { isHydr
 - 2026-05-01 design discussion in handover.
 - `StatusCommand.kt:254-356` — `buildAccountRow` + render.
 - UD-901 — the data dependency.
+
+---
+id: UD-352
+title: Provider remote-scan heartbeat: periodic onScanProgress during delta() walk
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 690a4d4. Shape A: optional onPageProgress callback on CloudProvider.delta(). Heartbeat math lifted into shared ScanHeartbeat helper in :app:sync; LocalScanner refactored to use it (behaviour unchanged). Per-provider hooks: Internxt+S3+SFTP+WebDAV+HiDrive thread the heartbeat into their listing pipelines (highest leverage on Internxt's silent-for-minutes window). OneDrive paginates at the engine level; Rclone is a single subprocess; LocalFs is fast — these keep the signature but no internal tick. ARCHITECTURE.md shared-utilities table updated. New ScanHeartbeatTest in :app:sync covers item / time / both / reset paths.
+opened: 2026-05-01
+---
+**Problem.** During `unidrive sync`, the user-facing line is "Scanning remote changes..." with no count, no elapsed time, and no folder/file split. On a large remote (Internxt, 63,658 items, 287 GiB), this can sit silent for many minutes while the provider walks the delta. The user has no way to tell whether sync is making progress or stuck.
+
+**Where the progress hooks already exist.**
+- `ProgressReporter.onScanProgress(phase: String, count: Int)` — interface is already wired.
+- `SyncEngine.kt:160` calls it with count=0 at the start of remote scan, `:169` calls it with the final count once the gather finishes.
+- `LocalScanner.kt:35-53` already implements a heartbeat (every 5,000 items OR every 10 s wall-clock since last fire) — the **local** scan therefore reports periodic counts. The **remote** scan does not.
+
+**Fix.** Each provider's `delta()` should fire `reporter.onScanProgress("remote", running_count)` at the same heartbeat cadence as `LocalScanner`. The simplest implementation: wrap the per-page accumulation in a small `RemoteScanHeartbeat` helper in `:app:sync` that takes `(reporter, intervalItems = 5000, intervalMs = 10_000L)` and exposes a `tick(deltaCount: Int)` method. Each provider invokes `heartbeat.tick(page.items.size)` after appending a page.
+
+**Cleanest call-site shape (per-provider):**
+
+```kotlin
+override suspend fun delta(prevCursor: String?): DeltaPage {
+    val heartbeat = RemoteScanHeartbeat(reporter, profile)
+    var cursor = prevCursor
+    val items = mutableListOf<CloudItem>()
+    do {
+        val page = api.deltaPage(cursor)
+        items += page.items
+        heartbeat.tick(items.size)
+        cursor = page.nextCursor
+    } while (page.hasMore)
+    return DeltaPage(items, cursor, hasMore = false)
+}
+```
+
+Note: providers don't currently hold a `ProgressReporter` reference. The cleanest plumbing is to have the **sync engine** wrap the provider with a delta-progress shim before calling — i.e. the engine knows the reporter and the provider; passing the heartbeat callback as an optional argument on `delta()` is one shape. Discuss in PR.
+
+**Affects all 6 snapshot/delta providers:** OneDrive (`GraphApiService.kt`), HiDrive, S3, SFTP, WebDAV, Rclone, Internxt, LocalFS. (LocalFS uses `Files.walk` and is fast enough to skip.)
+
+**Acceptance criteria.**
+1. During a remote scan that exceeds 5,000 items or 10 s, `onScanProgress("remote", N)` fires periodically with N increasing.
+2. The heartbeat does not fire faster than `intervalItems` items or `intervalMs` ms — whichever comes first.
+3. New test in `:app:sync` verifies the heartbeat math (mirrors `LocalScannerHeartbeatTest` pattern).
+4. Field test: a real Internxt sync with > 50 k items shows a count climbing during the remote-scan phase, not just at start and end.
+
+**Non-goals.**
+- ETA computation. Already wired via `onScanHistoricalHint` / `onScanCountHint` (UD-747/UD-748). The renderer reads those — see UD-757.
+- Provider-side parallelism / pagination optimization. Pure observability ticket.
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `SyncEngine.kt:160,169,183-188` — current scan-phase progress wiring.
+- `LocalScanner.kt:35-53` — the heartbeat math to mirror.
+- UD-747, UD-748 — historical-hint plumbing already in place.
+- UD-757 — paired ticket for the renderer.
