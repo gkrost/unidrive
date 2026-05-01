@@ -6,6 +6,9 @@ import java.util.Locale
 class CliProgressReporter(
     private val verbose: Boolean = false,
     private val dryRun: Boolean = false,
+    // UD-757: injectable clock so unit tests can assert M:SS elapsed +
+    // ETA strings deterministically. Default delegates to System.
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressReporter {
     var lastDownloaded = 0
         private set
@@ -45,43 +48,45 @@ class CliProgressReporter(
         phase: String,
         count: Int,
     ) {
-        val now = System.currentTimeMillis()
+        val now = clock()
         if (count == 0) {
             scanStartTimes[phase] = now
-            printInline("Scanning $phase changes...")
+            printInline("Scanning ${phaseLabel(phase)}...")
         } else {
             val start = scanStartTimes[phase] ?: now
             val elapsedSecs = (now - start) / 1000
-            // UD-742: heartbeat overwrites in-place via printInline so a 113k
-            // remote scan emits 2k+ updates without scrolling the terminal.
-            // The final fire from SyncEngine after the loop has the same
-            // shape; the next phase's println will commit a newline first.
+            // UD-757: render `<count> items · <elapsed> · ETA <eta>`.
+            // Comma-grouped count, M:SS / H:MM:SS times. ETA is suppressed
+            // when historical hints are absent (first sync / `--reset`),
+            // when the math says the run has already overrun last time, or
+            // when count == 0 (handled above as the bare-label baseline).
             //
-            // UD-713: append items/min throughput once we've collected enough
-            // signal (>= 5s elapsed AND >= 100 items). Full bucketed ETA
-            // depends on knowing the *total* upfront, which neither LocalScanner
-            // nor most remote-delta APIs expose without a separate count probe;
-            // throughput alone is the "should I go to lunch?" signal.
-            //
-            // UD-747: append bucketed ETA when state.db has a previous
-            // wall-clock timing for this phase (second sync onwards). Pure
-            // historical extrapolation — no count probe required.
-            //
-            // UD-748: when both hints exist (lastSecs + lastCount), the
-            // bucket helper prefers a progress-fraction-based ETA so that
-            // a faster-than-last run reports a shorter remaining time
-            // instead of waiting for the wall-clock to catch up.
-            val rateSuffix = formatThroughput(count, elapsedSecs)
-            val etaSuffix =
-                formatEtaBucket(
+            // The ETA math is the bucket helper from UD-747/UD-748 — count-
+            // aware extrapolation when both hints exist and progress >= 5%
+            // of last run, otherwise wall-clock subtraction. The bucket
+            // boundaries from the previous renderer are dropped: UD-757
+            // prefers a concrete time string over `<5m / 5-15m / 15-60m /
+            // >1h` so the user can read the trend run-over-run.
+            val countStr = formatCount(count)
+            val elapsedStr = formatTime(elapsedSecs)
+            val etaSecs =
+                computeEtaSecs(
                     lastSecs = historicalScanSecs[phase],
                     elapsedSecs = elapsedSecs,
                     lastCount = historicalScanCount[phase],
                     currentCount = count,
                 )
-            printInline("Scanning $phase changes... $count items (${formatElapsed(elapsedSecs)} elapsed$rateSuffix$etaSuffix)")
+            val etaSuffix = if (etaSecs != null && etaSecs > 0) " · ETA ${formatTime(etaSecs)}" else ""
+            printInline("Scanning ${phaseLabel(phase)}... $countStr items · $elapsedStr$etaSuffix")
         }
     }
+
+    private fun phaseLabel(phase: String): String =
+        when (phase) {
+            "remote" -> "remote changes"
+            "local" -> "local files"
+            else -> "$phase changes"
+        }
 
     override fun onScanHistoricalHint(
         phase: String,
@@ -176,63 +181,60 @@ class CliProgressReporter(
         }
     }
 
-    // UD-742: compact human-readable elapsed seconds for scan heartbeats —
-    // "47s", "5m 12s", "1h 23m". Drops the seconds field at hour granularity
-    // since by then the user only cares about whole minutes.
-    private fun formatElapsed(totalSecs: Long): String =
-        when {
-            totalSecs < 60 -> "${totalSecs}s"
-            totalSecs < 3600 -> "${totalSecs / 60}m ${totalSecs % 60}s"
-            else -> "${totalSecs / 3600}h ${(totalSecs / 60) % 60}m"
+    // UD-757: format M:SS for under one hour, H:MM:SS above. Shared by both
+    // the elapsed and ETA segments of the scan-progress line so the two
+    // numbers are visually parallel ("0:18 · ETA 1:02").
+    internal fun formatTime(totalSecs: Long): String {
+        val s = if (totalSecs < 0) 0L else totalSecs
+        val secs = s % 60
+        val mins = (s / 60) % 60
+        val hours = s / 3600
+        return if (hours > 0) {
+            String.format(Locale.ROOT, "%d:%02d:%02d", hours, mins, secs)
+        } else {
+            String.format(Locale.ROOT, "%d:%02d", mins, secs)
         }
-
-    // UD-713: items-per-minute throughput suffix for scan heartbeats. Returns
-    // ", ~N items/min" once we have a stable signal (>= 5s elapsed AND >= 100
-    // items observed), or "" otherwise. The leading comma+space lets callers
-    // append directly inside the existing parenthesised metadata.
-    private fun formatThroughput(
-        items: Int,
-        elapsedSecs: Long,
-    ): String {
-        if (elapsedSecs < 5 || items < 100) return ""
-        val perMin = (items.toLong() * 60) / elapsedSecs
-        return ", ~$perMin items/min"
     }
 
-    // UD-747 / UD-748 (UD-744 slices): bucketed ETA suffix.
-    //
-    // Two paths:
-    //
-    // - **Wall-clock-only (UD-747).** When only [lastSecs] is known,
-    //   `remainingSecs = lastSecs - elapsedSecs`. Robust but blind to
-    //   the actual progress speed of THIS run.
-    //
-    // - **Count-aware (UD-748).** When both [lastSecs] and [lastCount]
-    //   exist AND the current run has accumulated ≥ 5% of last run's
-    //   count, derive the ETA from progress fraction:
-    //       progressFraction  = currentCount / lastCount
-    //       estimatedTotalSec = elapsedSecs / progressFraction
-    //       remainingSecs     = estimatedTotalSec - elapsedSecs
-    //   Sanity clamp: if the count-based estimate diverges by > 4× from
-    //   `lastSecs - elapsedSecs`, fall back to the wall-clock path —
-    //   the run isn't following last run's shape and we shouldn't
-    //   overcommit either way.
-    //
-    // Buckets per UD-713 spec. Suppressed when:
-    //   - [lastSecs] is null/zero/negative (first run, no foundation)
-    //   - the chosen estimate's remainingSecs ≤ 0 (don't lie about a
-    //     stale estimate)
-    internal fun formatEtaBucket(
+    // UD-757: comma-grouped item count ("12,450 items"). Locale.ROOT so the
+    // separator is stable across en-US / de-DE / fr-FR (de uses '.' as
+    // thousands separator, fr uses NBSP — neither is parser-friendly).
+    internal fun formatCount(count: Int): String = String.format(Locale.ROOT, "%,d", count)
+
+    /**
+     * UD-747 / UD-748 (UD-744 slices) → UD-757: ETA-in-seconds for the
+     * scan-progress line. Renderer formats this with [formatTime].
+     *
+     * Two paths:
+     *
+     * - **Wall-clock-only (UD-747).** When only [lastSecs] is known,
+     *   `remainingSecs = lastSecs - elapsedSecs`. Robust but blind to
+     *   the actual progress speed of THIS run.
+     *
+     * - **Count-aware (UD-748).** When both [lastSecs] and [lastCount]
+     *   exist AND the current run has accumulated >= 5% of last run's
+     *   count, derive the ETA from progress fraction:
+     *       progressFraction  = currentCount / lastCount
+     *       estimatedTotalSec = elapsedSecs / progressFraction
+     *       remainingSecs     = estimatedTotalSec - elapsedSecs
+     *   Sanity clamp: if the count-based estimate diverges by > 4x from
+     *   `lastSecs - elapsedSecs`, fall back to the wall-clock path —
+     *   the run isn't following last run's shape and we shouldn't
+     *   overcommit either way.
+     *
+     * Returns `null` (rendered as "no ETA segment") when:
+     *   - [lastSecs] is null/zero/negative (first run, no foundation), or
+     *   - the chosen estimate's remainingSecs <= 0 (overrun — don't lie).
+     */
+    internal fun computeEtaSecs(
         lastSecs: Long?,
         elapsedSecs: Long,
         lastCount: Int? = null,
         currentCount: Int = 0,
-    ): String {
-        if (lastSecs == null || lastSecs <= 0) return ""
+    ): Long? {
+        if (lastSecs == null || lastSecs <= 0) return null
         val wallClockRemaining = lastSecs - elapsedSecs
 
-        // UD-748: prefer count-aware extrapolation when both hints exist
-        // and we have ≥ 5% of last run's count for stability.
         val countAwareRemaining: Long? =
             if (
                 lastCount != null &&
@@ -248,9 +250,6 @@ class CliProgressReporter(
                 null
             }
 
-        // Sanity clamp: only trust the count-aware estimate if it's
-        // within 4× of the wall-clock reading. If it diverges wildly,
-        // the run isn't following last run's shape and we revert.
         val remainingSecs =
             if (countAwareRemaining != null && wallClockRemaining > 0) {
                 val ratio = countAwareRemaining.toDouble() / wallClockRemaining
@@ -259,15 +258,7 @@ class CliProgressReporter(
                 countAwareRemaining ?: wallClockRemaining
             }
 
-        if (remainingSecs <= 0) return ""
-        val bucket =
-            when {
-                remainingSecs < 5 * 60 -> "<5m"
-                remainingSecs < 15 * 60 -> "5-15m"
-                remainingSecs < 60 * 60 -> "15-60m"
-                else -> ">1h"
-            }
-        return ", ETA: $bucket"
+        return if (remainingSecs <= 0) null else remainingSecs
     }
 
     private val cols: Int = terminalWidth()

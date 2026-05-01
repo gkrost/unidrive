@@ -114,24 +114,27 @@ class CliProgressReporterTest {
         assertEquals("", CliProgressReporter.truncateForWidth("anything", -5))
     }
 
-    // UD-742 — scan-phase heartbeat with elapsed time + commitInline newline
+    // UD-742 / UD-757 — scan-phase heartbeat shape & commitInline newline.
+    // The line format is "Scanning <phase-label>... <N> items · <M:SS>[ · ETA <M:SS>]".
+    // Phase labels per UD-757: remote → "remote changes", local → "local files".
 
     @Test
-    fun `UD-742 scan progress with count gt 0 includes elapsed time text`() {
+    fun `UD-742 UD-757 scan progress with count gt 0 shows count and M_SS elapsed`() {
         val reporter = CliProgressReporter()
         reporter.onScanProgress("local", 0)
-        Thread.sleep(30) // ensure elapsed >= 0; format will say "0s" but rendering is the point
+        Thread.sleep(30) // small jitter; elapsed will format as 0:00 here
         reporter.onScanProgress("local", 1234)
-        // Force the inline state to commit so anything pending is in the buffer.
         reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
         val output = captured.toString(Charsets.UTF_8)
+        // UD-757 phase label: local → "local files".
         assertTrue(
-            output.contains("Scanning local changes...") && output.contains("1234 items"),
+            output.contains("Scanning local files...") && output.contains("1,234 items"),
             "expected scan line with count, got: $output",
         )
+        // M:SS elapsed segment — at minimum the literal "0:00" from a fast tick.
         assertTrue(
-            output.contains("elapsed"),
-            "expected 'elapsed' marker in heartbeat output, got: $output",
+            output.contains("· 0:") || output.contains("· 1:") || output.contains("· 2:"),
+            "expected M:SS elapsed marker; got: $output",
         )
     }
 
@@ -146,17 +149,11 @@ class CliProgressReporterTest {
         // bug from 2026-04-30).
         reporter.onSyncComplete(0, 0, 0, 1500L, emptyMap())
         val output = captured.toString(Charsets.UTF_8)
-        // Output should contain BOTH the scan-progress text AND the dry-run line,
-        // with a newline between them. We don't care about exact byte positions
-        // (TTY/non-TTY paths differ), only that they're not directly concatenated.
         val dryRunIdx = output.indexOf("Dry-run:")
         assertTrue(dryRunIdx >= 0, "expected Dry-run output, got: $output")
-        // The character immediately preceding "Dry-run:" must be a newline OR the
-        // scan output must have used println (non-TTY path), in which case the
-        // line just before is a newline anyway. The key invariant: NO scan-line
-        // characters glued directly to "Dry-run:".
+        // The key invariant: NO scan-line characters glued directly to "Dry-run:".
         assertFalse(
-            output.contains("itemsDry-run:") || output.contains("100 items elapsed)Dry-run:"),
+            output.contains("itemsDry-run:") || output.contains(" 0:00Dry-run:"),
             "scan and Dry-run lines must not glue together; got: $output",
         )
     }
@@ -173,37 +170,6 @@ class CliProgressReporterTest {
         assertFalse(
             output.contains("itemsReconciled:"),
             "scan and Reconciled lines must not glue together; got: $output",
-        )
-    }
-
-    // UD-713 — throughput suffix once enough signal has accumulated.
-
-    @Test
-    fun `UD-713 scan heartbeat omits throughput when too few items`() {
-        val reporter = CliProgressReporter()
-        reporter.onScanProgress("local", 0)
-        // count below 100 items threshold — no items/min line yet.
-        reporter.onScanProgress("local", 50)
-        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
-        val output = captured.toString(Charsets.UTF_8)
-        assertFalse(
-            output.contains("items/min"),
-            "throughput suffix must not appear with <100 items; got: $output",
-        )
-    }
-
-    @Test
-    fun `UD-713 scan heartbeat omits throughput when elapsed too short`() {
-        val reporter = CliProgressReporter()
-        reporter.onScanProgress("local", 0)
-        // 200 items but virtually no time elapsed — throughput would be wildly
-        // unstable. Should be suppressed by the 5s elapsed gate.
-        reporter.onScanProgress("local", 200)
-        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
-        val output = captured.toString(Charsets.UTF_8)
-        assertFalse(
-            output.contains("items/min"),
-            "throughput suffix must not appear before 5s elapsed; got: $output",
         )
     }
 
@@ -236,169 +202,226 @@ class CliProgressReporterTest {
         assertFalse(output.contains("failed"), "dry-run summary should not include failed segment; got: $output")
     }
 
-    // UD-747 (UD-744 slice) — bucketed ETA from historical scan timings.
-    // formatEtaBucket is internal so tests pin its bucket boundaries
-    // directly; the integration assertion below exercises the end-to-end
-    // heartbeat-string shape via the reporter.
+    // UD-747 / UD-748 / UD-757 — ETA seconds from historical scan timings.
+    // computeEtaSecs returns Long? (null = no ETA segment); the renderer
+    // formats with formatTime as M:SS / H:MM:SS.
 
     @Test
-    fun `UD-747 formatEtaBucket returns empty when no historical data`() {
+    fun `UD-747 computeEtaSecs returns null when no historical data`() {
         val reporter = CliProgressReporter()
-        assertEquals("", reporter.formatEtaBucket(null, 10L))
+        assertEquals(null, reporter.computeEtaSecs(null, 10L))
     }
 
     @Test
-    fun `UD-747 formatEtaBucket returns empty when historical data is zero or negative`() {
+    fun `UD-747 computeEtaSecs returns null when historical data is zero or negative`() {
         val reporter = CliProgressReporter()
-        assertEquals("", reporter.formatEtaBucket(0L, 10L))
-        assertEquals("", reporter.formatEtaBucket(-5L, 10L))
+        assertEquals(null, reporter.computeEtaSecs(0L, 10L))
+        assertEquals(null, reporter.computeEtaSecs(-5L, 10L))
     }
 
     @Test
-    fun `UD-747 formatEtaBucket returns empty when elapsed exceeds historical estimate`() {
+    fun `UD-747 computeEtaSecs returns null when elapsed exceeds historical estimate`() {
         // Previous scan took 60s; current run is already at 90s. Don't lie
-        // with "ETA: <5m" — the previous estimate is stale.
+        // with a positive ETA — the previous estimate is stale.
         val reporter = CliProgressReporter()
-        assertEquals("", reporter.formatEtaBucket(60L, 90L))
+        assertEquals(null, reporter.computeEtaSecs(60L, 90L))
         // Edge: exactly equal — we have no remaining time to suggest.
-        assertEquals("", reporter.formatEtaBucket(60L, 60L))
+        assertEquals(null, reporter.computeEtaSecs(60L, 60L))
     }
 
     @Test
-    fun `UD-747 formatEtaBucket bucket boundaries`() {
+    fun `UD-747 computeEtaSecs returns wall-clock remaining seconds`() {
         val reporter = CliProgressReporter()
-        // <5m bucket: 1s..299s remaining
-        assertEquals(", ETA: <5m", reporter.formatEtaBucket(100L, 0L))
-        assertEquals(", ETA: <5m", reporter.formatEtaBucket(300L, 1L)) // 299s remaining
-        // 5-15m bucket: 300s..899s remaining
-        assertEquals(", ETA: 5-15m", reporter.formatEtaBucket(300L, 0L)) // exactly 5m
-        assertEquals(", ETA: 5-15m", reporter.formatEtaBucket(900L, 1L)) // 899s
-        // 15-60m bucket: 900s..3599s remaining
-        assertEquals(", ETA: 15-60m", reporter.formatEtaBucket(900L, 0L))
-        assertEquals(", ETA: 15-60m", reporter.formatEtaBucket(3600L, 1L)) // 3599s
-        // >1h bucket: ≥3600s remaining
-        assertEquals(", ETA: >1h", reporter.formatEtaBucket(3600L, 0L))
-        assertEquals(", ETA: >1h", reporter.formatEtaBucket(7200L, 0L))
+        // 100s budget, 0s elapsed → 100s remaining.
+        assertEquals(100L, reporter.computeEtaSecs(100L, 0L))
+        // 300s budget, 1s elapsed → 299s remaining.
+        assertEquals(299L, reporter.computeEtaSecs(300L, 1L))
+        // 3600s budget, 0s elapsed → 3600s.
+        assertEquals(3600L, reporter.computeEtaSecs(3600L, 0L))
+    }
+
+    // UD-757 — formatTime renders M:SS for under 1h, H:MM:SS above.
+
+    @Test
+    fun `UD-757 formatTime under 1 hour renders M_SS`() {
+        val reporter = CliProgressReporter()
+        assertEquals("0:00", reporter.formatTime(0L))
+        assertEquals("0:18", reporter.formatTime(18L))
+        assertEquals("1:02", reporter.formatTime(62L))
+        assertEquals("9:59", reporter.formatTime(599L))
+        assertEquals("59:59", reporter.formatTime(3599L))
     }
 
     @Test
-    fun `UD-747 scan heartbeat shows ETA bucket when historical hint provided`() {
-        // Simulates the second sync run where state.db has a prior scan
-        // timing. The hint is fed in BEFORE onScanProgress(_, 0) — the
-        // typical SyncEngine call order.
+    fun `UD-757 formatTime at 1 hour and above renders H_MM_SS`() {
         val reporter = CliProgressReporter()
-        reporter.onScanHistoricalHint("local", lastSecs = 600L) // 10m last time
-        reporter.onScanProgress("local", 0)
-        // The heartbeat itself fires synchronously off onScanProgress;
-        // elapsed will be ~0s, so remainingSecs ≈ 600s → 5-15m bucket.
-        reporter.onScanProgress("local", 1234)
+        assertEquals("1:00:00", reporter.formatTime(3600L))
+        assertEquals("1:23:45", reporter.formatTime(5025L))
+        assertEquals("10:00:00", reporter.formatTime(36000L))
+    }
+
+    @Test
+    fun `UD-757 formatTime negative input clamps to 0_00`() {
+        val reporter = CliProgressReporter()
+        assertEquals("0:00", reporter.formatTime(-7L))
+    }
+
+    // UD-757 — formatCount comma-grouped under Locale.ROOT (locale-independent).
+
+    @Test
+    fun `UD-757 formatCount uses comma thousands separator regardless of locale`() {
+        Locale.setDefault(Locale.GERMAN) // would normally render '12.450'
+        val reporter = CliProgressReporter()
+        assertEquals("0", reporter.formatCount(0))
+        assertEquals("999", reporter.formatCount(999))
+        assertEquals("1,000", reporter.formatCount(1000))
+        assertEquals("12,450", reporter.formatCount(12_450))
+        assertEquals("63,658", reporter.formatCount(63_658))
+    }
+
+    // UD-757 — end-to-end scan-progress line shape with a fake clock so the
+    // M:SS elapsed and ETA strings are deterministic.
+
+    private class FakeClock(
+        var nowMs: Long = 0L,
+    ) {
+        fun advanceSecs(s: Long) {
+            nowMs += s * 1000L
+        }
+    }
+
+    @Test
+    fun `UD-757 scan progress count_zero renders bare label`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanProgress("remote", 0)
         reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
         val output = captured.toString(Charsets.UTF_8)
-        assertTrue(
-            output.contains("ETA: 5-15m"),
-            "expected ETA bucket suffix in heartbeat; got: $output",
-        )
+        assertTrue(output.contains("Scanning remote changes..."), "expected bare label; got: $output")
+        assertFalse(output.contains("items"), "no items segment when count == 0; got: $output")
+        assertFalse(output.contains("· "), "no separator when count == 0; got: $output")
     }
 
     @Test
-    fun `UD-747 scan heartbeat omits ETA on first run`() {
-        // No onScanHistoricalHint called — the reporter has no historical
-        // data and must suppress the ETA segment cleanly.
-        val reporter = CliProgressReporter()
-        reporter.onScanProgress("local", 0)
-        reporter.onScanProgress("local", 1234)
+    fun `UD-757 scan progress no history renders count and elapsed but no ETA`() {
+        val clock = FakeClock()
+        val reporter = CliProgressReporter(clock = { clock.nowMs })
+        reporter.onScanProgress("remote", 0)
+        clock.advanceSecs(18)
+        reporter.onScanProgress("remote", 12_450)
         reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
         val output = captured.toString(Charsets.UTF_8)
-        assertFalse(
-            output.contains("ETA:"),
-            "first-run heartbeat must not include ETA segment; got: $output",
-        )
-    }
-
-    // UD-748 (UD-744 slice 2) — count-aware ETA refinement.
-
-    @Test
-    fun `UD-748 formatEtaBucket falls back to wall-clock when count hint missing`() {
-        // Same shape as the UD-747 tests — count parameters omitted, so
-        // the bucket helper must use the wall-clock subtraction path.
-        val reporter = CliProgressReporter()
-        assertEquals(
-            ", ETA: 5-15m",
-            reporter.formatEtaBucket(lastSecs = 600L, elapsedSecs = 0L),
-        )
+        // Comma-grouped count + M:SS elapsed.
+        assertTrue(output.contains("12,450 items"), "expected '12,450 items'; got: $output")
+        assertTrue(output.contains(" · 0:18"), "expected ' · 0:18' elapsed; got: $output")
+        assertFalse(output.contains("ETA"), "no ETA without historical hints; got: $output")
     }
 
     @Test
-    fun `UD-748 formatEtaBucket uses count-aware path when both hints exist and progress past 5 percent`() {
-        // Last run: 1000 items in 600s. This run: 500 items in 100s
-        // (50% progress, but only 100s elapsed → much faster pace).
-        // Count-aware: estimatedTotal = 100 / 0.5 = 200s; remaining =
-        // 200 - 100 = 100s → "<5m".
-        // Wall-clock would say: 600 - 100 = 500s → "5-15m".
-        // Sanity clamp: ratio = 100/500 = 0.2 → BELOW 0.25 threshold,
-        // so the count-aware estimate is rejected and we fall back to
-        // wall-clock. Pin that explicit boundary.
+    fun `UD-757 scan progress with history on track renders count, elapsed, and ETA`() {
+        val clock = FakeClock()
+        val reporter = CliProgressReporter(clock = { clock.nowMs })
+        // Last run: 100k items in 80s. Count-aware: at 12,450 (12.45%)
+        // after 18s, estimatedTotal = 18 / 0.1245 ≈ 144s; remaining ≈ 126s
+        // → ETA ≈ 2:06. Wall-clock: 80 - 18 = 62s → "1:02". Sanity clamp:
+        // ratio = 126/62 ≈ 2.03 → within 0.25..4.0 → count-aware wins.
+        // Pin the count-aware result.
+        reporter.onScanHistoricalHint("remote", lastSecs = 80L)
+        reporter.onScanCountHint("remote", lastCount = 100_000)
+        reporter.onScanProgress("remote", 0)
+        clock.advanceSecs(18)
+        reporter.onScanProgress("remote", 12_450)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("12,450 items"), "expected count; got: $output")
+        assertTrue(output.contains(" · 0:18"), "expected elapsed 0:18; got: $output")
+        assertTrue(output.contains(" · ETA "), "expected ETA segment; got: $output")
+        // Count-aware estimate: 144 - 18 = 126s → 2:06.
+        assertTrue(output.contains("ETA 2:06"), "expected ETA 2:06 (count-aware); got: $output")
+    }
+
+    @Test
+    fun `UD-757 scan progress with history overrun clamps ETA to absent`() {
+        // Last run took 60s; this run is at 90s and well past 5% of last
+        // count (so the count-aware path also fires). Both produce
+        // negative remaining → segment must be absent rather than "ETA 0:00".
+        val clock = FakeClock()
+        val reporter = CliProgressReporter(clock = { clock.nowMs })
+        reporter.onScanHistoricalHint("remote", lastSecs = 60L)
+        reporter.onScanCountHint("remote", lastCount = 1_000)
+        reporter.onScanProgress("remote", 0)
+        clock.advanceSecs(90)
+        reporter.onScanProgress("remote", 1_500) // 150% of last → overrun
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("1,500 items"), "expected count; got: $output")
+        assertTrue(output.contains(" · 1:30"), "expected elapsed 1:30; got: $output")
+        assertFalse(output.contains("ETA"), "ETA must be absent on overrun; got: $output")
+    }
+
+    @Test
+    fun `UD-757 phase transition resets phaseStartMs so elapsed restarts at zero`() {
+        val clock = FakeClock()
+        val reporter = CliProgressReporter(clock = { clock.nowMs })
+        // Remote phase: 0 → 30s → emit count.
+        reporter.onScanProgress("remote", 0)
+        clock.advanceSecs(30)
+        reporter.onScanProgress("remote", 1_000)
+        // Local phase starts now — must NOT inherit the remote phase's start time.
+        reporter.onScanProgress("local", 0)
+        clock.advanceSecs(5)
+        reporter.onScanProgress("local", 200)
+        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
+        val output = captured.toString(Charsets.UTF_8)
+        // Remote line shows 0:30 elapsed, local line shows 0:05 elapsed.
+        assertTrue(output.contains("Scanning remote changes...") && output.contains(" · 0:30"))
+        assertTrue(output.contains("Scanning local files...") && output.contains(" · 0:05"))
+    }
+
+    @Test
+    fun `UD-748 computeEtaSecs uses count-aware path when within sanity range`() {
+        // Last run: 1000 items in 600s. This run: 500 items in 250s.
+        // Count-aware: estimatedTotal = 250 / 0.5 = 500s; remaining = 250s.
+        // Wall-clock: 600 - 250 = 350s. Ratio 250/350 ≈ 0.71 → count-aware wins.
         val reporter = CliProgressReporter()
         val result =
-            reporter.formatEtaBucket(
-                lastSecs = 600L,
-                elapsedSecs = 100L,
-                lastCount = 1000,
-                currentCount = 500,
-            )
-        assertEquals(", ETA: 5-15m", result, "expected wall-clock fallback when count-aware diverges 4×+")
-    }
-
-    @Test
-    fun `UD-748 formatEtaBucket count-aware path picks bucket when within sanity range`() {
-        // Last run: 1000 items in 600s. This run: 500 items in 250s
-        // (50% progress, half the time → on track).
-        // Count-aware: estimatedTotal = 250 / 0.5 = 500s; remaining =
-        // 500 - 250 = 250s → "<5m" (under 300).
-        // Wall-clock: 600 - 250 = 350s → "5-15m".
-        // Ratio = 250/350 ≈ 0.71 → in 0.25..4.0 range → count-aware wins.
-        val reporter = CliProgressReporter()
-        val result =
-            reporter.formatEtaBucket(
+            reporter.computeEtaSecs(
                 lastSecs = 600L,
                 elapsedSecs = 250L,
                 lastCount = 1000,
                 currentCount = 500,
             )
-        assertEquals(", ETA: <5m", result)
+        assertEquals(250L, result)
     }
 
     @Test
-    fun `UD-748 formatEtaBucket suppresses count-aware path when progress under 5 percent`() {
-        // Only 4% of last run's count → too unstable; fall back to
-        // wall-clock-only ETA. lastSecs=600, elapsed=10 → 590s → 5-15m.
+    fun `UD-748 computeEtaSecs falls back to wall-clock when count-aware diverges 4x`() {
+        // Last run: 1000 items in 600s. This run: 500 items in 100s
+        // (very fast pace). Count-aware: 100/0.5 = 200; remaining 100s.
+        // Wall-clock: 600 - 100 = 500s. Ratio 100/500 = 0.2 → below 0.25
+        // sanity floor → wall-clock wins.
         val reporter = CliProgressReporter()
         val result =
-            reporter.formatEtaBucket(
+            reporter.computeEtaSecs(
+                lastSecs = 600L,
+                elapsedSecs = 100L,
+                lastCount = 1000,
+                currentCount = 500,
+            )
+        assertEquals(500L, result, "expected wall-clock fallback when count-aware diverges 4x+")
+    }
+
+    @Test
+    fun `UD-748 computeEtaSecs suppresses count-aware path when progress under 5 percent`() {
+        // Only 4% of last run's count → too unstable; fall back to
+        // wall-clock-only ETA. lastSecs=600, elapsed=10 → 590s remaining.
+        val reporter = CliProgressReporter()
+        val result =
+            reporter.computeEtaSecs(
                 lastSecs = 600L,
                 elapsedSecs = 10L,
                 lastCount = 1000,
-                currentCount = 40, // 4% — below threshold
+                currentCount = 40,
             )
-        assertEquals(", ETA: 5-15m", result)
-    }
-
-    @Test
-    fun `UD-748 scan heartbeat uses count-aware path when both hints provided`() {
-        // Integration: SyncEngine fires both hints, then onScanProgress.
-        // We can't easily control the wall-clock elapsed in this test, but
-        // we can verify that the heartbeat output contains an ETA segment
-        // and is consistent with count-aware extrapolation.
-        val reporter = CliProgressReporter()
-        reporter.onScanHistoricalHint("local", lastSecs = 1200L) // 20m last
-        reporter.onScanCountHint("local", lastCount = 5000)
-        reporter.onScanProgress("local", 0)
-        reporter.onScanProgress("local", 2500) // 50% of last
-        reporter.onSyncComplete(0, 0, 0, 100L, emptyMap())
-        val output = captured.toString(Charsets.UTF_8)
-        assertTrue(
-            output.contains("ETA:"),
-            "expected ETA segment in count-aware heartbeat; got: $output",
-        )
+        assertEquals(590L, result)
     }
 }
