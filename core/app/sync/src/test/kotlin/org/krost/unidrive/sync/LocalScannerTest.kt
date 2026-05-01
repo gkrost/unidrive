@@ -191,6 +191,67 @@ class LocalScannerTest {
         )
     }
 
+    // UD-901 — LocalScanner writes a pending-upload state.db row on first sight of a NEW path
+
+    @Test
+    fun `UD-901 NEW file produces pending-upload entry in state db`() {
+        val file = syncRoot.resolve("pending.txt")
+        Files.writeString(file, "hello")
+        val expectedSize = Files.size(file)
+        val expectedMtime = Files.getLastModifiedTime(file).toMillis()
+
+        val changes = scanner.scan()
+
+        assertEquals(ChangeState.NEW, changes["/pending.txt"])
+        val stored = db.getEntry("/pending.txt")
+        assertNotNull(stored, "pending-upload row should exist after scan")
+        assertNull(stored.remoteId, "remoteId must be null for pending upload")
+        assertNull(stored.remoteHash)
+        assertEquals(0L, stored.remoteSize)
+        assertNull(stored.remoteModified)
+        assertEquals(expectedSize, stored.localSize)
+        assertEquals(expectedMtime, stored.localMtime)
+        assertTrue(stored.isHydrated, "bytes are on disk so isHydrated=true")
+        assertEquals(Instant.EPOCH, stored.lastSynced, "never roundtripped")
+    }
+
+    @Test
+    fun `UD-901 second scan on unchanged pending file does not duplicate-emit NEW`() {
+        val file = syncRoot.resolve("pending.txt")
+        Files.writeString(file, "hello")
+
+        // First scan establishes the pending-upload row + emits NEW
+        val first = scanner.scan()
+        assertEquals(ChangeState.NEW, first["/pending.txt"])
+
+        // Second scan: row already present, file unchanged → no change emitted
+        val second = scanner.scan()
+        assertNull(
+            second["/pending.txt"],
+            "second scan must not duplicate-emit NEW; got ${second["/pending.txt"]}",
+        )
+        // Row is still present
+        assertNotNull(db.getEntry("/pending.txt"))
+    }
+
+    @Test
+    fun `UD-901 pending row + delete-before-sync emits DELETED on next scan`() {
+        val file = syncRoot.resolve("pending.txt")
+        Files.writeString(file, "hello")
+
+        scanner.scan() // creates pending row
+        assertNotNull(db.getEntry("/pending.txt"))
+
+        Files.delete(file)
+
+        val second = scanner.scan()
+        assertEquals(
+            ChangeState.DELETED,
+            second["/pending.txt"],
+            "removed pending file must emit DELETED",
+        )
+    }
+
     @Test
     fun `UD-736 visitFileFailed continues walk and increments skipped count`() {
         // POSIX-only: make a subdirectory unreadable so walkFileTree's attempt

@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import org.krost.unidrive.sync.model.ChangeState
+import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.nio.file.FileVisitResult
@@ -8,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
+import java.time.Instant
 
 class LocalScanner(
     private val syncRoot: Path,
@@ -68,6 +70,27 @@ class LocalScanner(
                     val entry = dbEntries[relativePath]
                     if (entry == null) {
                         changes[relativePath] = ChangeState.NEW
+                        // UD-901: write a pending-upload row immediately so the file's
+                        // localSize is visible to `status` before the upload completes.
+                        // remoteId=null marks "not yet uploaded"; isHydrated=true because
+                        // the bytes are physically on disk. applyUpload() later upserts
+                        // the same path, promoting the row to a fully-synced state once
+                        // the byte transfer succeeds.
+                        db.upsertEntry(
+                            SyncEntry(
+                                path = relativePath,
+                                remoteId = null,
+                                remoteHash = null,
+                                remoteSize = 0,
+                                remoteModified = null,
+                                localMtime = attrs.lastModifiedTime().toMillis(),
+                                localSize = attrs.size(),
+                                isFolder = false,
+                                isPinned = false,
+                                isHydrated = true,
+                                lastSynced = Instant.EPOCH,
+                            ),
+                        )
                     } else if (entry.isHydrated) {
                         val currentMtime = attrs.lastModifiedTime().toMillis()
                         val currentSize = attrs.size()

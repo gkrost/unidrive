@@ -111,6 +111,24 @@ class Reconciler(
             actions.add(SyncAction.DownloadContent(entry.path, remoteItem))
         }
 
+        // UD-901: previously-interrupted uploads leave DB entries with remoteId=null and
+        // isHydrated=true (LocalScanner's pending-upload placeholder). On the first scan the
+        // path also fires ChangeState.NEW so resolveAction emits Upload. On subsequent scans,
+        // the file exists with no mtime/size delta — scanner reports nothing, the
+        // UNCHANGED+UNCHANGED skip drops the path, and the upload never retries. Synthesise
+        // an Upload here so the next sync cycle picks up where the last one left off. Mirrors
+        // the UD-225 download-recovery loop above.
+        for (entry in db.getAllEntries()) {
+            if (entry.isFolder) continue
+            if (entry.remoteId != null) continue
+            if (!entry.isHydrated) continue
+            if (entry.path in coveredPaths) continue
+            if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+            val localPath = safeResolveLocal(syncRoot, entry.path)
+            if (!Files.isRegularFile(localPath)) continue
+            actions.add(SyncAction.Upload(entry.path))
+        }
+
         detectMoves(actions)
         detectRemoteRenames(actions, remoteChanges)
 
@@ -193,7 +211,14 @@ class Reconciler(
             localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED ->
                 SyncAction.Upload(path)
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
-                SyncAction.DeleteRemote(path)
+                // UD-901: a pending-upload row (entry.remoteId == null) that vanished
+                // before its first upload has nothing to delete on the remote side —
+                // just drop the placeholder row. Otherwise propagate the deletion.
+                if (entry != null && entry.remoteId == null) {
+                    SyncAction.RemoveEntry(path)
+                } else {
+                    SyncAction.DeleteRemote(path)
+                }
 
             else -> null
         }

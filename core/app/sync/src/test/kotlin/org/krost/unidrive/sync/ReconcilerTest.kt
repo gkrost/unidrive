@@ -417,4 +417,96 @@ class ReconcilerTest {
         val actions = r.reconcile(remoteChanges, emptyMap())
         assertEquals(2, actions.size)
     }
+
+    // UD-901 — pending-upload row interactions
+
+    private fun pendingEntry(
+        path: String,
+        size: Long = 100,
+    ) = SyncEntry(
+        path = path,
+        remoteId = null,
+        remoteHash = null,
+        remoteSize = 0,
+        remoteModified = null,
+        localMtime = 1711627200000,
+        localSize = size,
+        isFolder = false,
+        isPinned = false,
+        isHydrated = true,
+        lastSynced = Instant.EPOCH,
+    )
+
+    @Test
+    fun `UD-901 NEW path with existing pending row still emits Upload`() {
+        // Mirrors the scanner's first-pass behaviour: scan upserts a pending row
+        // AND emits ChangeState.NEW. Reconciler must still produce SyncAction.Upload
+        // even though entry != null at lookup time.
+        db.upsertEntry(pendingEntry("/new.txt"))
+        Files.writeString(syncRoot.resolve("new.txt"), "x")
+
+        val actions =
+            reconciler.reconcile(
+                emptyMap(),
+                mapOf("/new.txt" to ChangeState.NEW),
+            )
+
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.Upload>(actions[0])
+        assertEquals("/new.txt", actions[0].path)
+    }
+
+    @Test
+    fun `UD-901 deleted pending row emits RemoveEntry not DeleteRemote`() {
+        // Pending-upload row never reached the remote, so deletion has nothing to
+        // propagate to the cloud. Must emit RemoveEntry (DB cleanup only).
+        db.upsertEntry(pendingEntry("/abandoned.txt"))
+
+        val actions =
+            reconciler.reconcile(
+                emptyMap(),
+                mapOf("/abandoned.txt" to ChangeState.DELETED),
+            )
+
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.RemoveEntry>(actions[0])
+        assertEquals("/abandoned.txt", actions[0].path)
+    }
+
+    @Test
+    fun `UD-901 interrupted upload retries on next reconcile`() {
+        // Pending row exists, file still on disk, scanner emits no change (mtime/size
+        // unchanged). The synthesis loop must promote it to a fresh Upload action so
+        // the next sync cycle picks the upload back up.
+        Files.writeString(syncRoot.resolve("retry.txt"), "still here")
+        db.upsertEntry(pendingEntry("/retry.txt"))
+
+        val actions =
+            reconciler.reconcile(
+                emptyMap(),
+                emptyMap(),
+            )
+
+        val upload = actions.firstOrNull { it.path == "/retry.txt" }
+        assertIs<SyncAction.Upload>(
+            upload,
+            "expected synthesised Upload for pending row with on-disk bytes; got $actions",
+        )
+    }
+
+    @Test
+    fun `UD-901 synthesis loop skips pending row whose local file vanished`() {
+        // No bytes on disk → no point uploading. The DELETED-detection path runs
+        // through the scanner; absent that, the synthesis loop must not emit a
+        // doomed Upload (provider has nothing to upload from).
+        db.upsertEntry(pendingEntry("/ghost.txt"))
+        // file does not exist in syncRoot
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+
+        assertTrue(
+            actions.none { it.path == "/ghost.txt" },
+            "synthesis loop must skip pending rows with no on-disk bytes; got $actions",
+        )
+    }
 }
