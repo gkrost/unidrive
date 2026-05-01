@@ -2660,3 +2660,54 @@ A standalone `install.sh` that consumes a pre-built fat JAR is the natural artef
 ## Provenance
 
 `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `dist/`.
+---
+id: UD-762
+title: Salvage lightweight doc-drift checker (check-docs.sh)
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - scripts/ci/
+opened: 2026-05-01
+---
+**Salvage the lightweight doc-drift checker `check-docs.sh` from the pre-greenfield repo.**
+
+The old repo's `check-docs.sh` is a 67-line shell script with 6 grep+regex checks for the most common drift patterns between docs and code. Cheap pre-commit hook material.
+
+## What's there
+
+`check-docs.sh` in the old repo, with these specific checks:
+
+1. **Kotlin version** in `gradle/libs.versions.toml` matches `ARCHITECTURE.md`.
+2. **Module count** in `CLAUDE.md` ("Eight Gradle modules", etc.) matches `settings.gradle.kts`.
+3. **CLI subcommand list** in `CLAUDE.md` matches `@Command(name=...)` annotations in `Main.kt`.
+4. **`SyncAction` sealed-subtypes count** matches the number cited in `CLAUDE.md`.
+5. **Provider modules** in `settings.gradle.kts` match `CLAUDE.md` provider list.
+6. **Logback version** in `gradle/libs.versions.toml` matches `ARCHITECTURE.md`.
+
+Each check that fails prints a one-line `FAIL: ...` with the mismatch. Total error count printed at the end. Exit code is the count of failures.
+
+## Why we want it back
+
+Current public has `scripts/dev/` with proper MCP servers (`backlog-mcp`, `gradle-mcp`, etc.) and `scripts/ci/` with deeper checks. But there's no lightweight pre-commit-friendly script for the cheap-to-detect doc drifts. The old script catches the "I bumped Kotlin in `libs.versions.toml` but `ARCHITECTURE.md` still says 2.0.21" class of drift in <1 second with no Gradle invocation.
+
+This complements (not replaces) the heavier MCP checks. The right home is a pre-commit hook + a `scripts/ci/` companion.
+
+## Acceptance
+
+- `scripts/ci/check-docs.sh` (or similar location, agree on placement) re-imported and adapted to current repo layout:
+  - JAR path now `core/app/cli/build/libs/` not `cli/build/libs/`.
+  - Module count check should match `settings.gradle.kts` includes including all 13 current modules.
+  - Add a check for `docs/AGENT-SYNC.md` ID-range table consistency with what `scripts/dev/backlog.py` knows about.
+- Wired into `scripts/dev/pre-commit/` if appropriate.
+- Run in CI as part of the lint pass.
+
+## Out of scope
+
+- Replacing the existing MCP-based doc tooling — this is an addition, not a replacement.
+- KDoc/Javadoc consistency — out of scope of the original script.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `check-docs.sh`.
