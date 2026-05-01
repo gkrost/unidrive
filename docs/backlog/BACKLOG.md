@@ -2510,3 +2510,59 @@ cheaply and pick whichever ships fastest.
 - **UD-754** (open) — auto-format Kotlin codebase. Sibling
   developer-ergonomics ticket.
 - **UD-728** (closed) — backlog tooling automation. Same spirit.
+---
+id: UD-759
+title: Salvage benchmark observatory pipeline (scripts/benchmark/) from pre-greenfield repo
+category: tooling
+priority: medium
+effort: M
+status: open
+code_refs:
+  - scripts/benchmark/
+opened: 2026-05-01
+---
+**Salvage the multi-source benchmark observatory pipeline from the pre-greenfield repo (`logic-arts-official/unidrive` HEAD `b8e4223`, 2026-04-16).**
+
+The old repo shipped a complete public-cloud-speed-ranking pipeline that produced the rankings displayed at `unidrive.krost.org`. The pipeline was lost during the greenfield restart (ADR-0008) and is currently absent from public.
+
+## What's there
+
+`scripts/benchmark/` in the old repo (Python + bash, no Kotlin coupling):
+
+| File | Purpose |
+|------|---------|
+| `benchmark-collect.sh` | Cron-driven collector. Runs `unidrive provider benchmark`, reshapes JSON into a per-provider median structure, uploads to remote SFTP drop. |
+| `benchmark-aggregate.py` | Aggregates collector JSONs from many machines/locations into `rankings.json`. Assigns A/B/C grades. 7-day rolling window with janitor for stale drops. |
+| `benchmark-publish.py` | Renders rankings as HTML table with affiliate-tagged "Sign up" CTAs. Posts to WordPress via REST API. |
+| `benchmark-healthcheck.py` | Standalone health probe. |
+| `unidrive-benchmark.{service,timer}` | Daily 03:00 systemd timer, randomised 600 s jitter. |
+| `providers.json` | 14-provider catalogue with country, GDPR status, free-tier, pricing, signup/affiliate URLs. |
+| `tests/fixtures/` | Real captured collector output (hetzner-dc, kubuntu-home) — useful as integration-test fixtures. |
+| `source.conf.example` | Per-source config (location, ISP, profile→provider_id map). |
+| `tests/test_aggregator.py` | pytest covering aggregator. |
+| `tests/test_publisher.py` | pytest covering publisher. |
+
+## Why we want it back
+
+The current public `ProviderMetadata` data class still has `userRating`, `benchmarkGrade`, `affiliateUrl` fields — these are **read** by `unidrive provider list` and `unidrive provider info` for display. But the **engine that produces the grades** is gone.
+
+Today these fields are static defaults in each `ProviderFactory` subclass. The old pipeline pushed measured grades back via WordPress publish — that monetisation/marketing surface was real and worked.
+
+Note: the current backlog has a separate, narrower ticket for "cross-provider benchmark harness" (synthetic Gradle task, single source) — different shape. The observatory pipeline is the multi-source aggregator + publisher, not the one-shot Gradle harness.
+
+## Acceptance
+
+- `scripts/benchmark/` re-imported 1:1 from old repo (5 Python files, 1 shell, 2 systemd unit files, 1 providers.json, fixtures).
+- `scripts/benchmark/README.md` updated for current repo paths (e.g. `core/` instead of root for the JAR).
+- The `unidrive provider benchmark` CLI subcommand it depends on lives in `unidrive-closed:benchmark` — verify the JSON shape it emits still matches what `benchmark-collect.sh` reshapes.
+- Optional: regenerate `providers.json` against current `ProviderMetadata` fields rather than the snapshot.
+
+## Out of scope
+
+- Re-deploying the cron to sg5 — this ticket is only about getting the code back into the repo.
+- Re-validating the WordPress endpoint (`unidrive.krost.org`) — separate operational concern.
+- Closed-side benchmark code (lives in `unidrive-closed:benchmark`).
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/benchmark/`. Pre-dates ADR-0008 greenfield restart by ~2 weeks.
