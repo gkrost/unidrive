@@ -1,7 +1,7 @@
 package org.krost.unidrive.localfs
 
 import org.krost.unidrive.*
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.FileStore
 import java.nio.file.Files
@@ -152,52 +152,33 @@ class LocalFsProvider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentEntries = walkRoot()
-        val currentSnapshot = buildSnapshot(currentEntries)
-
-        if (cursor == null) {
-            return DeltaPage(
-                items = currentEntries.map { (rel, attrs) -> attrsToCloudItem(rel, attrs) },
-                cursor = currentSnapshot.encode(LocalFsSnapshotEntry.serializer()),
-                hasMore = false,
-            )
-        }
-
-        val previousSnapshot = Snapshot.decode(cursor, LocalFsSnapshotEntry.serializer())
-        val changes = mutableListOf<CloudItem>()
-
-        // New and modified entries
-        for ((path, entry) in currentSnapshot.entries) {
-            val prev = previousSnapshot.entries[path]
-            if (prev == null || prev.size != entry.size || prev.mtimeMillis != entry.mtimeMillis) {
-                val attrs = currentEntries.firstOrNull { it.first == path }?.second
-                if (attrs != null) changes.add(attrsToCloudItem(path, attrs))
+        val snapshotEntries = buildSnapshotEntries(currentEntries)
+        val itemsByPath =
+            currentEntries.associate { (rel, attrs) ->
+                rel to attrsToCloudItem(rel, attrs)
             }
-        }
-
-        // Deleted entries
-        for ((path, entry) in previousSnapshot.entries) {
-            if (path !in currentSnapshot.entries) {
-                changes.add(
-                    CloudItem(
-                        id = path,
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    ),
+        return computeSnapshotDelta(
+            currentEntries = snapshotEntries,
+            currentItemsByPath = itemsByPath,
+            prevCursor = cursor,
+            entrySerializer = LocalFsSnapshotEntry.serializer(),
+            hasChanged = { prev, curr ->
+                prev.size != curr.size || prev.mtimeMillis != curr.mtimeMillis
+            },
+            deletedItem = { path, entry ->
+                CloudItem(
+                    id = path,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
                 )
-            }
-        }
-
-        return DeltaPage(
-            items = changes,
-            cursor = currentSnapshot.encode(LocalFsSnapshotEntry.serializer()),
-            hasMore = false,
+            },
         )
     }
 
@@ -250,18 +231,15 @@ class LocalFsProvider(
         }
     }
 
-    private fun buildSnapshot(entries: List<Pair<String, BasicFileAttributes>>): LocalFsSnapshot {
-        val map =
-            entries.associate { (rel, attrs) ->
-                rel to
-                    LocalFsSnapshotEntry(
-                        size = attrs.size(),
-                        mtimeMillis = attrs.lastModifiedTime().toMillis(),
-                        isFolder = attrs.isDirectory,
-                    )
-            }
-        return LocalFsSnapshot(entries = map)
-    }
+    private fun buildSnapshotEntries(entries: List<Pair<String, BasicFileAttributes>>): Map<String, LocalFsSnapshotEntry> =
+        entries.associate { (rel, attrs) ->
+            rel to
+                LocalFsSnapshotEntry(
+                    size = attrs.size(),
+                    mtimeMillis = attrs.lastModifiedTime().toMillis(),
+                    isFolder = attrs.isDirectory,
+                )
+        }
 
     private fun fileToCloudItem(
         file: Path,

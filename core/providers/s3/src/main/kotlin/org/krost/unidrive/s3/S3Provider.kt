@@ -1,7 +1,7 @@
 package org.krost.unidrive.s3
 
 import org.krost.unidrive.*
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.time.Instant
@@ -174,52 +174,31 @@ class S3Provider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentObjects = api.listAll()
-        val currentSnapshot = buildSnapshot(currentObjects)
-
-        if (cursor == null) {
-            return DeltaPage(
-                items = currentObjects.map { it.toCloudItem() },
-                cursor = currentSnapshot.encode(S3SnapshotEntry.serializer()),
-                hasMore = false,
-            )
-        }
-
-        val previousSnapshot = Snapshot.decode(cursor, S3SnapshotEntry.serializer())
-        val changes = mutableListOf<CloudItem>()
-
-        // New and modified objects
-        for ((path, entry) in currentSnapshot.entries) {
-            val prev = previousSnapshot.entries[path]
-            if (prev == null || prev.etag != entry.etag || prev.size != entry.size) {
-                val obj = currentObjects.firstOrNull { api.keyToPath(it.key) == path }
-                if (obj != null) changes.add(obj.toCloudItem())
+        val snapshotEntries = buildSnapshotEntries(currentObjects)
+        val itemsByPath =
+            currentObjects.associate { obj ->
+                api.keyToPath(obj.key).trimEnd('/') to obj.toCloudItem()
             }
-        }
-
-        // Deleted objects
-        for ((path, entry) in previousSnapshot.entries) {
-            if (path !in currentSnapshot.entries) {
-                changes.add(
-                    CloudItem(
-                        id = api.pathToKey(path),
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    ),
+        return computeSnapshotDelta(
+            currentEntries = snapshotEntries,
+            currentItemsByPath = itemsByPath,
+            prevCursor = cursor,
+            entrySerializer = S3SnapshotEntry.serializer(),
+            hasChanged = { prev, curr -> prev.etag != curr.etag || prev.size != curr.size },
+            deletedItem = { path, entry ->
+                CloudItem(
+                    id = api.pathToKey(path),
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
                 )
-            }
-        }
-
-        return DeltaPage(
-            items = changes,
-            cursor = currentSnapshot.encode(S3SnapshotEntry.serializer()),
-            hasMore = false,
+            },
         )
     }
 
@@ -232,20 +211,17 @@ class S3Provider(
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private fun buildSnapshot(objects: List<S3Object>): S3Snapshot {
-        val entries =
-            objects.associate { obj ->
-                val path = api.keyToPath(obj.key).trimEnd('/')
-                path to
-                    S3SnapshotEntry(
-                        etag = obj.etag,
-                        size = obj.size,
-                        lastModified = obj.lastModified,
-                        isFolder = obj.isFolder,
-                    )
-            }
-        return S3Snapshot(entries = entries)
-    }
+    private fun buildSnapshotEntries(objects: List<S3Object>): Map<String, S3SnapshotEntry> =
+        objects.associate { obj ->
+            val path = api.keyToPath(obj.key).trimEnd('/')
+            path to
+                S3SnapshotEntry(
+                    etag = obj.etag,
+                    size = obj.size,
+                    lastModified = obj.lastModified,
+                    isFolder = obj.isFolder,
+                )
+        }
 
     private fun S3Object.toCloudItem(): CloudItem {
         val path = api.keyToPath(this.key).trimEnd('/')

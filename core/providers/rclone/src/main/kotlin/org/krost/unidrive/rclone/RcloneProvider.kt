@@ -5,7 +5,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 
@@ -100,72 +100,43 @@ class RcloneProvider(
             cursor: String?,
             basePath: String,
         ): DeltaPage {
-            val currentSnapshot = buildSnapshot(currentEntries, basePath)
-
-            if (cursor == null) {
-                return DeltaPage(
-                    items = currentEntries.map { RcloneCliService.toCloudItem(it, basePath) },
-                    cursor = currentSnapshot.encode(RcloneSnapshotEntry.serializer()),
-                    hasMore = false,
-                )
-            }
-
-            val previousSnapshot = Snapshot.decode(cursor, RcloneSnapshotEntry.serializer())
-            val changes = mutableListOf<CloudItem>()
-
-            for ((path, entry) in currentSnapshot.entries) {
-                val prev = previousSnapshot.entries[path]
-                if (prev == null || rcloneHasChanged(prev, entry)) {
-                    val found =
-                        currentEntries.firstOrNull {
-                            "/${it.path}" == path
-                        }
-                    if (found != null) changes.add(RcloneCliService.toCloudItem(found, basePath))
+            val snapshotEntries = buildSnapshotEntries(currentEntries)
+            val itemsByPath =
+                currentEntries.associate { entry ->
+                    "/${entry.path}" to RcloneCliService.toCloudItem(entry, basePath)
                 }
-            }
-
-            for ((path, entry) in previousSnapshot.entries) {
-                if (path !in currentSnapshot.entries) {
-                    changes.add(
-                        CloudItem(
-                            id = path,
-                            name = path.substringAfterLast("/"),
-                            path = path,
-                            size = 0,
-                            isFolder = entry.isFolder,
-                            modified = null,
-                            created = null,
-                            hash = null,
-                            mimeType = null,
-                            deleted = true,
-                        ),
+            return computeSnapshotDelta(
+                currentEntries = snapshotEntries,
+                currentItemsByPath = itemsByPath,
+                prevCursor = cursor,
+                entrySerializer = RcloneSnapshotEntry.serializer(),
+                hasChanged = ::rcloneHasChanged,
+                deletedItem = { path, entry ->
+                    CloudItem(
+                        id = path,
+                        name = path.substringAfterLast("/"),
+                        path = path,
+                        size = 0,
+                        isFolder = entry.isFolder,
+                        modified = null,
+                        created = null,
+                        hash = null,
+                        mimeType = null,
+                        deleted = true,
                     )
-                }
-            }
-
-            return DeltaPage(
-                items = changes,
-                cursor = currentSnapshot.encode(RcloneSnapshotEntry.serializer()),
-                hasMore = false,
+                },
             )
         }
 
-        private fun buildSnapshot(
-            entries: List<RcloneEntry>,
-            @Suppress("UNUSED_PARAMETER") basePath: String,
-        ): RcloneSnapshot {
-            val map =
-                entries.associate { entry ->
-                    val virtualPath = "/${entry.path}"
-                    virtualPath to
-                        RcloneSnapshotEntry(
-                            size = entry.size,
-                            modTime = entry.modTime,
-                            isFolder = entry.isDir,
-                            hash = entry.hashes?.values?.firstOrNull(),
-                        )
-                }
-            return RcloneSnapshot(entries = map)
-        }
+        private fun buildSnapshotEntries(entries: List<RcloneEntry>): Map<String, RcloneSnapshotEntry> =
+            entries.associate { entry ->
+                "/${entry.path}" to
+                    RcloneSnapshotEntry(
+                        size = entry.size,
+                        modTime = entry.modTime,
+                        isFolder = entry.isDir,
+                        hash = entry.hashes?.values?.firstOrNull(),
+                    )
+            }
     }
 }

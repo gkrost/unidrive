@@ -2,7 +2,7 @@ package org.krost.unidrive.hidrive
 
 import org.krost.unidrive.*
 import org.krost.unidrive.hidrive.model.HiDriveItem
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import java.nio.file.Path
 import java.time.Instant
 
@@ -111,54 +111,33 @@ class HiDriveProvider(
     override suspend fun delta(cursor: String?): DeltaPage {
         val home = api.getHome()
         val currentItems = api.listRecursive("/")
-        val currentSnapshot = buildSnapshot(currentItems, home)
-
-        if (cursor == null) {
-            return DeltaPage(
-                items = currentItems.map { it.toCloudItem(home) },
-                cursor = currentSnapshot.encode(SnapshotEntry.serializer()),
-                hasMore = false,
-            )
-        }
-
-        val previousSnapshot = Snapshot.decode(cursor, SnapshotEntry.serializer())
-        val changes = mutableListOf<CloudItem>()
-
-        // New and modified items
-        for ((path, entry) in currentSnapshot.entries) {
-            val prev = previousSnapshot.entries[path]
-            if (prev == null || prev.chash != entry.chash || prev.size != entry.size || prev.mtime != entry.mtime) {
-                val item = currentItems.find { api.toRelativePath(it.path ?: "", home) == path }
-                if (item != null) {
-                    changes.add(item.toCloudItem(home))
-                }
+        val snapshotEntries = buildSnapshotEntries(currentItems, home)
+        val itemsByPath =
+            currentItems.associate { item ->
+                api.toRelativePath(item.path ?: "", home) to item.toCloudItem(home)
             }
-        }
-
-        // Deleted items
-        for ((path, entry) in previousSnapshot.entries) {
-            if (path !in currentSnapshot.entries) {
-                changes.add(
-                    CloudItem(
-                        id = entry.id,
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    ),
+        return computeSnapshotDelta(
+            currentEntries = snapshotEntries,
+            currentItemsByPath = itemsByPath,
+            prevCursor = cursor,
+            entrySerializer = SnapshotEntry.serializer(),
+            hasChanged = { prev, curr ->
+                prev.chash != curr.chash || prev.size != curr.size || prev.mtime != curr.mtime
+            },
+            deletedItem = { path, entry ->
+                CloudItem(
+                    id = entry.id,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
                 )
-            }
-        }
-
-        return DeltaPage(
-            items = changes,
-            cursor = currentSnapshot.encode(SnapshotEntry.serializer()),
-            hasMore = false,
+            },
         )
     }
 
@@ -168,10 +147,10 @@ class HiDriveProvider(
         oauthService.close()
     }
 
-    private fun buildSnapshot(
+    private fun buildSnapshotEntries(
         items: List<HiDriveItem>,
         home: String,
-    ): DeltaSnapshot {
+    ): Map<String, SnapshotEntry> {
         val entries =
             items.associate { item ->
                 val relativePath = api.toRelativePath(item.path ?: "", home)
@@ -184,7 +163,7 @@ class HiDriveProvider(
                         isFolder = item.type == "dir",
                     )
             }
-        return DeltaSnapshot(entries = entries)
+        return entries
     }
 
     private fun HiDriveItem.toCloudItem(home: String): CloudItem {

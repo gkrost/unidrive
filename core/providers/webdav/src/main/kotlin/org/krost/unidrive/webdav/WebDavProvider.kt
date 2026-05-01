@@ -2,7 +2,7 @@ package org.krost.unidrive.webdav
 
 import kotlinx.coroutines.CancellationException
 import org.krost.unidrive.*
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.time.Instant
@@ -136,57 +136,32 @@ class WebDavProvider internal constructor(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentEntries = api.listAll()
-        val currentSnapshot = buildSnapshot(currentEntries)
-
-        if (cursor == null) {
-            return DeltaPage(
-                items = currentEntries.map { it.toCloudItem() },
-                cursor = currentSnapshot.encode(WebDavSnapshotEntry.serializer()),
-                hasMore = false,
-            )
-        }
-
-        val previousSnapshot = Snapshot.decode(cursor, WebDavSnapshotEntry.serializer())
-        val changes = mutableListOf<CloudItem>()
-
-        // New and modified entries
-        for ((path, entry) in currentSnapshot.entries) {
-            val prev = previousSnapshot.entries[path]
-            val changed =
-                prev == null ||
-                    prev.size != entry.size ||
-                    (entry.etag != null && prev.etag != entry.etag) ||
-                    (entry.etag == null && prev.lastModified != entry.lastModified)
-            if (changed) {
-                val found = currentEntries.firstOrNull { it.path == path }
-                if (found != null) changes.add(found.toCloudItem())
-            }
-        }
-
-        // Deleted entries
-        for ((path, entry) in previousSnapshot.entries) {
-            if (path !in currentSnapshot.entries) {
-                changes.add(
-                    CloudItem(
-                        id = path,
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    ),
+        val snapshotEntries = buildSnapshotEntries(currentEntries)
+        val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
+        return computeSnapshotDelta(
+            currentEntries = snapshotEntries,
+            currentItemsByPath = itemsByPath,
+            prevCursor = cursor,
+            entrySerializer = WebDavSnapshotEntry.serializer(),
+            hasChanged = { prev, curr ->
+                prev.size != curr.size ||
+                    (curr.etag != null && prev.etag != curr.etag) ||
+                    (curr.etag == null && prev.lastModified != curr.lastModified)
+            },
+            deletedItem = { path, entry ->
+                CloudItem(
+                    id = path,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
                 )
-            }
-        }
-
-        return DeltaPage(
-            items = changes,
-            cursor = currentSnapshot.encode(WebDavSnapshotEntry.serializer()),
-            hasMore = false,
+            },
         )
     }
 
@@ -226,19 +201,16 @@ class WebDavProvider internal constructor(
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private fun buildSnapshot(entries: List<WebDavEntry>): WebDavSnapshot {
-        val map =
-            entries.associate { entry ->
-                entry.path to
-                    WebDavSnapshotEntry(
-                        size = entry.size,
-                        lastModified = entry.lastModified?.toString(),
-                        etag = entry.etag,
-                        isFolder = entry.isFolder,
-                    )
-            }
-        return WebDavSnapshot(entries = map)
-    }
+    private fun buildSnapshotEntries(entries: List<WebDavEntry>): Map<String, WebDavSnapshotEntry> =
+        entries.associate { entry ->
+            entry.path to
+                WebDavSnapshotEntry(
+                    size = entry.size,
+                    lastModified = entry.lastModified?.toString(),
+                    etag = entry.etag,
+                    isFolder = entry.isFolder,
+                )
+        }
 
     private fun WebDavEntry.toCloudItem(): CloudItem =
         CloudItem(

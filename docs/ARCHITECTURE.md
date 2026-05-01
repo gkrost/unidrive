@@ -107,6 +107,7 @@ lift it here and update this list.
 | `org.krost.unidrive.io` | `PosixPermissions.kt` | `setPosixPermissionsIfSupported` for token-file storage | UD-347 |
 | `org.krost.unidrive` (root) | `SharedJson.kt` | `UnidriveJson` — `Json { ignoreUnknownKeys; isLenient }` | UD-343 |
 | `org.krost.unidrive.sync` (`:app:sync`) | `Snapshot.kt` | Generic `Snapshot<E>` snapshot-cursor wrapper (`entries: Map<String, E>` + `timestamp: Long` + Base64-of-JSON encode/decode); on-disk-compatible with the pre-UD-345 per-provider classes | UD-345 |
+| `org.krost.unidrive.sync` (`:app:sync`) | `SnapshotDeltaEngine.kt` | `computeSnapshotDelta(currentEntries, currentItemsByPath, prevCursor, entrySerializer, hasChanged, deletedItem)` — shared diff loop for snapshot-based providers | UD-346 |
 
 Adoption status: every Ktor-using provider (OneDrive, HiDrive,
 Internxt, S3, WebDAV) installs the helpers above where applicable.

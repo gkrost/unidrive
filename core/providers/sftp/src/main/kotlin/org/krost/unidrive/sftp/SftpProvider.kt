@@ -1,7 +1,7 @@
 package org.krost.unidrive.sftp
 
 import org.krost.unidrive.*
-import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.computeSnapshotDelta
 import java.nio.file.Path
 import java.time.Instant
 
@@ -115,52 +115,30 @@ class SftpProvider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentEntries = api.listAll()
-        val currentSnapshot = buildSnapshot(currentEntries)
-
-        if (cursor == null) {
-            return DeltaPage(
-                items = currentEntries.map { it.toCloudItem() },
-                cursor = currentSnapshot.encode(SftpSnapshotEntry.serializer()),
-                hasMore = false,
-            )
-        }
-
-        val previousSnapshot = Snapshot.decode(cursor, SftpSnapshotEntry.serializer())
-        val changes = mutableListOf<CloudItem>()
-
-        // New and modified entries
-        for ((path, entry) in currentSnapshot.entries) {
-            val prev = previousSnapshot.entries[path]
-            if (prev == null || prev.size != entry.size || prev.mtimeSeconds != entry.mtimeSeconds) {
-                val found = currentEntries.firstOrNull { it.path == path }
-                if (found != null) changes.add(found.toCloudItem())
-            }
-        }
-
-        // Deleted entries
-        for ((path, entry) in previousSnapshot.entries) {
-            if (path !in currentSnapshot.entries) {
-                changes.add(
-                    CloudItem(
-                        id = path,
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    ),
+        val snapshotEntries = buildSnapshotEntries(currentEntries)
+        val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
+        return computeSnapshotDelta(
+            currentEntries = snapshotEntries,
+            currentItemsByPath = itemsByPath,
+            prevCursor = cursor,
+            entrySerializer = SftpSnapshotEntry.serializer(),
+            hasChanged = { prev, curr ->
+                prev.size != curr.size || prev.mtimeSeconds != curr.mtimeSeconds
+            },
+            deletedItem = { path, entry ->
+                CloudItem(
+                    id = path,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = entry.isFolder,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
                 )
-            }
-        }
-
-        return DeltaPage(
-            items = changes,
-            cursor = currentSnapshot.encode(SftpSnapshotEntry.serializer()),
-            hasMore = false,
+            },
         )
     }
 
@@ -173,18 +151,15 @@ class SftpProvider(
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private fun buildSnapshot(entries: List<SftpEntry>): SftpSnapshot {
-        val map =
-            entries.associate { entry ->
-                entry.path to
-                    SftpSnapshotEntry(
-                        size = entry.size,
-                        mtimeSeconds = entry.mtimeSeconds,
-                        isFolder = entry.isFolder,
-                    )
-            }
-        return SftpSnapshot(entries = map)
-    }
+    private fun buildSnapshotEntries(entries: List<SftpEntry>): Map<String, SftpSnapshotEntry> =
+        entries.associate { entry ->
+            entry.path to
+                SftpSnapshotEntry(
+                    size = entry.size,
+                    mtimeSeconds = entry.mtimeSeconds,
+                    isFolder = entry.isFolder,
+                )
+        }
 
     private fun SftpEntry.toCloudItem(): CloudItem =
         CloudItem(
