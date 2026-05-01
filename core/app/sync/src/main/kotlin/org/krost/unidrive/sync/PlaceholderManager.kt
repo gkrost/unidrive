@@ -1,10 +1,12 @@
 package org.krost.unidrive.sync
 
-import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.time.Instant
@@ -96,15 +98,23 @@ open class PlaceholderManager(
         }
     }
 
+    // UD-209a: produce a sparse file via FileChannel.truncate(0) + write-1-byte-at-N-1
+    // instead of RandomAccessFile.setLength(0) + setLength(N). On JDK 21 jbrsdk on Linux,
+    // the latter pattern emits ftruncate(0) + write(zeros, N) — a real page-allocating write —
+    // not the ftruncate(N) hole-punch that JDK 25 emits. Strace evidence captured 2026-05-01.
+    // The new pattern allocates only the trailing page (blocks=8 for any size that rounds up
+    // to a single 4 KiB page), matching the isSparse(blocks * 512 < expectedSize) contract.
     open fun dehydrate(
         remotePath: String,
         remoteSize: Long,
         remoteModified: Instant?,
     ) {
         val local = resolveLocal(remotePath)
-        RandomAccessFile(local.toFile(), "rw").use { raf ->
-            raf.setLength(0)
-            raf.setLength(remoteSize)
+        FileChannel.open(local, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING).use { ch ->
+            if (remoteSize > 0L) {
+                ch.position(remoteSize - 1L)
+                ch.write(ByteBuffer.wrap(byteArrayOf(0)))
+            }
         }
         if (remoteModified != null) {
             Files.setLastModifiedTime(local, FileTime.from(remoteModified))
