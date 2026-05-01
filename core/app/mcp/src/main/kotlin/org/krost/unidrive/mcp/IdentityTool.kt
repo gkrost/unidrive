@@ -2,6 +2,7 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.onedrive.OneDriveProvider
 
 /**
@@ -51,7 +52,7 @@ private fun handleIdentity(
     }
 
     return try {
-        runBlocking { provider.authenticate() }
+        runBlocking { provider.authenticateAndLog() }
         val me = runBlocking { provider.getIdentity() }
         buildToolResult(
             buildJsonObject {

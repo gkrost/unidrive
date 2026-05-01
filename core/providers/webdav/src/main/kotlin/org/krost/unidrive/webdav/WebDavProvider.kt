@@ -135,7 +135,6 @@ class WebDavProvider internal constructor(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentEntries = api.listAll()
-        log.debug("Delta: {} items", currentEntries.size)
         val currentSnapshot = buildSnapshot(currentEntries)
 
         if (cursor == null) {

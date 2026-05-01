@@ -2,7 +2,6 @@ package org.krost.unidrive.hidrive
 
 import org.krost.unidrive.*
 import org.krost.unidrive.hidrive.model.HiDriveItem
-import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.time.Instant
 
@@ -12,7 +11,6 @@ class HiDriveProvider(
     override val id = "hidrive"
     override val displayName = "IONOS HiDrive"
 
-    private val log = LoggerFactory.getLogger(HiDriveProvider::class.java)
     private val oauthService = OAuthService(config)
     private val tokenManager = TokenManager(config, oauthService)
     private val api = HiDriveApiService(config) { tokenManager.getValidToken().accessToken }
@@ -35,11 +33,7 @@ class HiDriveProvider(
         if (!tokenManager.isAuthenticated) {
             tokenManager.authenticateWithBrowser()
         }
-        if (tokenManager.isAuthenticated) {
-            log.debug("Auth: HiDrive authenticated")
-        } else {
-            log.warn("Auth: HiDrive not authenticated after initialize")
-        }
+        // UD-752: post-authenticate debug log lifted to authenticateAndLog wrapper.
     }
 
     override suspend fun logout() = tokenManager.logout()
@@ -116,8 +110,6 @@ class HiDriveProvider(
     override suspend fun delta(cursor: String?): DeltaPage {
         val home = api.getHome()
         val currentItems = api.listRecursive("/")
-        log.debug("Delta: {} items (snapshot comparison)", currentItems.size)
-
         val currentSnapshot = buildSnapshot(currentItems, home)
 
         if (cursor == null) {

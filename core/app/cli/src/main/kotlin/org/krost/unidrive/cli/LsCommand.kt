@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
+import org.krost.unidrive.authenticateAndLog
 import picocli.CommandLine.Command
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
@@ -31,7 +32,7 @@ class LsCommand : Runnable {
 
         try {
             runBlocking {
-                provider.authenticate()
+                provider.authenticateAndLog()
                 val children = provider.listChildren(normalized)
                 printChildren(children)
             }

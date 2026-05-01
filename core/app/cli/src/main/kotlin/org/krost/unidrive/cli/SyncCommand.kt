@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.slf4j.MDCContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.onedrive.OneDriveProvider
 import org.krost.unidrive.sync.ConflictLog
 import org.krost.unidrive.sync.IpcProgressReporter
@@ -355,7 +356,7 @@ class SyncCommand : Runnable {
             // from worker threads lose the profile tag.
             runBlocking(MDCContext()) {
                 ipcServer.start(this)
-                provider.authenticate()
+                provider.authenticateAndLog()
 
                 // Ensure webhook subscription if configured
                 val rpConfig = profile.rawProvider

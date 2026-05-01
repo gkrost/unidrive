@@ -445,10 +445,7 @@ class InternxtApiService(
 
     private fun HttpRequestBuilder.applyAuth(creds: InternxtCredentials) {
         bearerAuth(creds.jwt)
-        header("internxt-client", InternxtConfig.CLIENT_NAME)
-        header("internxt-version", InternxtConfig.CLIENT_VERSION)
-        header("x-internxt-desktop-header", InternxtConfig.DESKTOP_HEADER)
-        accept(ContentType.Application.Json)
+        applyInternxtHeaders()
     }
 
     private suspend fun checkResponse(response: HttpResponse) {

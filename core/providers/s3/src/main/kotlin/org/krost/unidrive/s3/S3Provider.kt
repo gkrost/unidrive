@@ -173,7 +173,6 @@ class S3Provider(
 
     override suspend fun delta(cursor: String?): DeltaPage {
         val currentObjects = api.listAll()
-        log.debug("Delta: {} items", currentObjects.size)
         val currentSnapshot = buildSnapshot(currentObjects)
 
         if (cursor == null) {

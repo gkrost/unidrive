@@ -7,6 +7,7 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
@@ -633,15 +634,21 @@ class SyncEngine(
             includeShared &&
                 Capability.DeltaShared in provider.capabilities()
 
-        suspend fun nextPage(c: String?) =
-            if (useShared) {
-                when (val r = provider.deltaWithShared(c)) {
-                    is CapabilityResult.Success -> r.value
-                    is CapabilityResult.Unsupported -> provider.delta(c)
+        suspend fun nextPage(c: String?): DeltaPage {
+            val page =
+                if (useShared) {
+                    when (val r = provider.deltaWithShared(c)) {
+                        is CapabilityResult.Success -> r.value
+                        is CapabilityResult.Unsupported -> provider.delta(c)
+                    }
+                } else {
+                    provider.delta(c)
                 }
-            } else {
-                provider.delta(c)
-            }
+            // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
+            // of the five providers that used to emit the same data per-page.
+            log.debug("Delta: {} items, hasMore={}", page.items.size, page.hasMore)
+            return page
+        }
 
         var page = nextPage(cursor)
         for (item in page.items) {

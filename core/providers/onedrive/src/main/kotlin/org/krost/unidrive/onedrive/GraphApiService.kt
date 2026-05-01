@@ -172,7 +172,6 @@ class GraphApiService(
                 val response = authenticatedRequest(url)
                 val body = response.bodyAsText()
                 val parsed = json.decodeFromString<DriveItemCollectionResponse>(body)
-                log.debug("Delta: {} items, hasMore={}", parsed.value.size, parsed.nextLink != null)
                 return DeltaResult(
                     items = parsed.value,
                     nextLink = parsed.nextLink,
