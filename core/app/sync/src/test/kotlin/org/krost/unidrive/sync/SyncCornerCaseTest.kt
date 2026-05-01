@@ -23,7 +23,10 @@ private val IS_WINDOWS_CORNER = System.getProperty("os.name", "").lowercase().co
  * pattern emits ftruncate(0) + a single 1-byte write at position N-1, allocating
  * only the trailing page. Mirror of the production fix in PlaceholderManager.dehydrate.
  */
-private fun createSparsePlaceholder(file: Path, size: Long) {
+private fun createSparsePlaceholder(
+    file: Path,
+    size: Long,
+) {
     Files.deleteIfExists(file)
     Files.createFile(file)
     if (size > 0L) {
