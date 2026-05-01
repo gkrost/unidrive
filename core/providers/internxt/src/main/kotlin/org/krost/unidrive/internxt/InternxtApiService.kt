@@ -39,6 +39,18 @@ class InternxtApiService(
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
+
+        // UD-353: throughput floor for OVH temporal-uploads-bucket PUTs.
+        // Internxt's shard-upload backend is `s3.gra.io.cloud.ovh.net`,
+        // a third-party S3-compatible endpoint with no Internxt-side SLA.
+        // Observed at 30–50 KB/s during congestion (2026-04-30 incident:
+        // 5 ~30 MiB videos torn down at the 600 s floor while OVH was
+        // still receiving). Override the UploadTimeoutPolicy default
+        // (50 KiB/s) with a more pessimistic 10 KiB/s for OVH PUTs only;
+        // Internxt's own API calls keep the default. The 60 s
+        // socketTimeoutMillis still fires on stalled connections, so
+        // slow-loris exposure is unchanged.
+        private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
     }
 
     private val httpClient =
@@ -361,14 +373,15 @@ class InternxtApiService(
     ) {
         val response =
             httpClient.put(url) {
-                // UD-337: size-adaptive request timeout. The default
-                // HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat cap was
-                // tearing down legitimate long uploads against OVH S3
-                // (Internxt's bucket backend), reported as fatal in the
-                // 2026-04-30 user session — 6 large MP4 PUTs aborted
-                // client-side while the remote was still willing.
+                // UD-337 + UD-353: size-adaptive request timeout against
+                // OVH (Internxt's shard backend) with a pessimistic
+                // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
                 timeout {
-                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(data.size.toLong())
+                    requestTimeoutMillis =
+                        UploadTimeoutPolicy.computeRequestTimeoutMs(
+                            fileSize = data.size.toLong(),
+                            minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
+                        )
                 }
                 header("Content-Type", "application/octet-stream")
                 setBody(data)
@@ -388,11 +401,15 @@ class InternxtApiService(
         // pool corruption on cancellation).
         val response =
             httpClient.put(url) {
-                // UD-337: size-adaptive request timeout — see
-                // putEncryptedShard above. This is the streaming variant
-                // that actually triggered the user's report.
+                // UD-337 + UD-353: streaming variant that actually triggered
+                // the 2026-04-30 incident. Same pessimistic OVH floor — see
+                // OVH_PUT_MIN_THROUGHPUT_BPS.
                 timeout {
-                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(size)
+                    requestTimeoutMillis =
+                        UploadTimeoutPolicy.computeRequestTimeoutMs(
+                            fileSize = size,
+                            minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
+                        )
                 }
                 header("Content-Type", "application/octet-stream")
                 setBody(streamingFileBody(file, size))

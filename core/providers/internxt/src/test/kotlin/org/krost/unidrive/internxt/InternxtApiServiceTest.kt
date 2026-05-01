@@ -157,4 +157,57 @@ class InternxtApiServiceTest {
             }
             assertEquals(3, attempts)
         }
+
+    // UD-353: OVH PUT timeout floor — documents the regression that the
+    // default UploadTimeoutPolicy.computeRequestTimeoutMs floor (50 KiB/s)
+    // produced for the 2026-04-30 incident, and the fix shape (10 KiB/s
+    // OVH-specific override) without exposing the private constant.
+
+    @Test
+    fun `UD-353 default 50 KiB-s floor pins a 10 MiB file to 600s — the regression`() {
+        // Pre-fix behaviour: 10 MiB / 50 KiB/s = 204 s → floor (600 s) wins.
+        // The 2026-04-30 incident's failed clips fell in the 5–30 MiB band
+        // exactly here. OVH observed at ~30 KB/s during congestion makes a
+        // 10 MiB upload legitimately need ~340 s; with TCP slow-start +
+        // connection setup it routinely exceeds 600 s and the client tears
+        // the still-progressing connection down. This test pins that bug.
+        val sizeBytes = 10L * 1024 * 1024
+        val timeoutMs =
+            org.krost.unidrive.http.UploadTimeoutPolicy
+                .computeRequestTimeoutMs(sizeBytes)
+        assertEquals(600_000L, timeoutMs)
+    }
+
+    @Test
+    fun `UD-353 OVH-pessimistic 10 KiB-s floor grants a 10 MiB file 17 minutes`() {
+        // Post-fix behaviour: same 10 MiB shard with the OVH-specific
+        // 10 KiB/s override returns 1024 s ≈ 17 min — easily covers the
+        // 1000 s legitimate-progress upper bound. The 60 s
+        // socketTimeoutMillis watchdog still catches stalled connections,
+        // so slow-loris exposure is unchanged; we only grant more
+        // wall-clock for actual byte-flowing uploads against OVH's slow
+        // third-party endpoint.
+        val sizeBytes = 10L * 1024 * 1024
+        val ovhMinThroughputBps = 10L * 1024 // mirrors InternxtApiService.OVH_PUT_MIN_THROUGHPUT_BPS
+        val timeoutMs =
+            org.krost.unidrive.http.UploadTimeoutPolicy.computeRequestTimeoutMs(
+                fileSize = sizeBytes,
+                minThroughputBytesPerSecond = ovhMinThroughputBps,
+            )
+        assertEquals(1024_000L, timeoutMs)
+    }
+
+    @Test
+    fun `UD-353 sub-floor files still get the 600s floor under the OVH override`() {
+        // A 2 MiB shard at 10 KiB/s = 205 s, below the 600 s floor. Floor
+        // wins — sub-floor files are unchanged from the default behaviour.
+        val sizeBytes = 2L * 1024 * 1024
+        val ovhMinThroughputBps = 10L * 1024
+        val timeoutMs =
+            org.krost.unidrive.http.UploadTimeoutPolicy.computeRequestTimeoutMs(
+                fileSize = sizeBytes,
+                minThroughputBytesPerSecond = ovhMinThroughputBps,
+            )
+        assertEquals(600_000L, timeoutMs)
+    }
 }
