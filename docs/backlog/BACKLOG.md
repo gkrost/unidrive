@@ -2610,3 +2610,53 @@ The CLI commands it depends on (`get`, `free`, `pin`, `unpin`) all survived the 
 ## Provenance
 
 `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/nautilus/` + `scripts/install-menus.sh`.
+---
+id: UD-761
+title: Salvage end-user installer (dist/install.sh + systemd unit)
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - dist/install.sh
+  - dist/unidrive.service
+opened: 2026-05-01
+---
+**Salvage the end-user one-shot installer (`dist/install.sh` + `dist/unidrive.service`) from the pre-greenfield repo.**
+
+Current public has the `:app:cli:deploy` Gradle task which works for developers, but no end-user-facing installer. `git clone && ./gradlew :app:cli:deploy` requires JDK + Gradle + understanding the toolchain, which is friction for the "I just want to try this" path.
+
+## What's there
+
+Old repo's `dist/`:
+
+| File | Purpose |
+|------|---------|
+| `dist/install.sh` | 57-line bash. Drops fat JAR into `~/.local/lib/unidrive/`, generates `~/.local/bin/unidrive` wrapper, mkdirs `~/.local/share/unidrive/`, copies systemd unit, runs `systemctl --user daemon-reload`. Prints next-steps including `systemctl --user enable --now unidrive` and the vault-env recipe. |
+| `dist/unidrive.service` | systemd user unit. `ExecStart=%h/.local/bin/unidrive sync --watch`, `Restart=on-failure`, `RestartSec=30`, `EnvironmentFile=-%h/.config/unidrive/vault-env`. |
+| `dist/uninstall.sh` | Symmetric uninstaller (referenced in CHANGELOG, content unverified). |
+
+## Why we want it back
+
+`./gradlew :app:cli:deploy` is fine for the dev loop but it:
+1. Requires JDK on the user's machine just to install (they only need a JRE to run).
+2. Couples installation to the source tree.
+3. Doesn't print clear next-steps.
+
+A standalone `install.sh` that consumes a pre-built fat JAR is the natural artefact for a future GitHub release (`gh release download v0.1.0 unidrive.jar && ./install.sh unidrive.jar`).
+
+## Acceptance
+
+- `dist/install.sh` and `dist/unidrive.service` re-imported, paths updated for current repo layout (the old script assumes JAR at `cli/build/libs/`; current is `core/app/cli/build/libs/`).
+- Optional: the script accepts a JAR path argument so it works against a downloaded release artefact, not just a local build.
+- Smoke test on a clean Ubuntu container.
+- Document at `docs/user-guide/install.md` (or wiki page).
+
+## Out of scope
+
+- Distribution packaging (deb/rpm/AppImage/snap) — separate tickets if needed.
+- Windows installer — see `BACKLOG_IDEAS_UI.md` W16 (jpackage MSI).
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `dist/`.
