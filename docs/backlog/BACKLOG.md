@@ -2799,3 +2799,72 @@ Why this matters: when a user reports a sync bug we ask them for `unidrive log`.
 ## Provenance
 
 CHANGELOG audit 2026-05-01. Old: `logic-arts-official/unidrive`@`b8e4223`, CHANGELOG entry `#122`. Confirmed missing in current via grep on `LogCommand.kt` for `commit|BuildInfo`.
+---
+id: UD-765
+title: Comprehensive CHANGELOG audit: pre-greenfield vs current code
+category: tooling
+priority: medium
+effort: M
+status: open
+code_refs:
+  - docs/CHANGELOG.md
+  - docs/backlog/CLOSED.md
+opened: 2026-05-01
+---
+**Track the systematic audit of the pre-greenfield CHANGELOG against current public code, and any follow-ups it surfaces.**
+
+The CHANGELOG of `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16) has 90+ "Added" / "Changed" / "Fixed" bullets representing work that was shipped and tested before the greenfield restart (ADR-0008). On 2026-05-01 a sample-based audit was run; this ticket tracks completing it comprehensively + filing fix tickets for anything that regressed.
+
+## Audit mechanics
+
+For each CHANGELOG bullet, grep current public code for the canonical symbols / config keys / CLI subcommand names and confirm:
+
+1. **Symbol present** — class/function exists at expected path.
+2. **Wired** — referenced by SyncEngine / CLI / MCP somewhere, not orphaned.
+3. **Tested** — there's a test class with `Test` suffix referring to it.
+
+If any of (1)(2)(3) fails: file a follow-up ticket, link it here.
+
+## Sample audit done 2026-05-01 (positive coverage)
+
+These are confirmed surviving (symbol present + wired + tested):
+
+`#1, #5, #24, #25, #26, #27, #28, #33, #34, #35, #36, #37, #41, #42, #43, #44, #46, #47, #48, #49, #52, #54, #57, #66, #73, #74-grade-fields, #75, #76, #78, #79, #82, #88, #89, #90, #91, #92, #94, #96, #97, #98, #99, #100, #101, #102, #103, #104, #105, #111, #115, #116, #118, #120, #121, #123, #129, #130, #131, #132, #133, #136, #137, #143, #144, #145, #146, #147` plus `SubscriptionRenewalScheduler` (new post-snapshot, supersedes the old "auto-renewal not implemented" caveat).
+
+## Sample audit found regressed (filed)
+
+- **UD-764** — `#122` git commit hash in `unidrive log` entries lost.
+
+## Sample audit found intentionally moved
+
+- **`#74` — `provider benchmark` CLI subcommand** is in `unidrive-closed:benchmark` module, not public. Closed-source by design (benchmark CLI is part of the closed CLI bundle). Not a regression.
+- **`#37` — `xtra-init` / `xtra-status`** moved from top-level CLI to `vault xtra-init` / `vault xtra-status` subcommands. Behaviour preserved.
+
+## Remaining work
+
+Comprehensive sweep — not the sample. Focus areas:
+
+1. Walk every "Added" entry in `[Unreleased]` (60+ items) and `[0.1.0]` (40+ items).
+2. For each, identify the load-bearing symbol/key and grep current code.
+3. Cross-check with `docs/backlog/CLOSED.md` — many entries map to closed UD-### tickets and may have been re-implemented under a different name.
+4. File regression tickets for losses, file "moved" notes here for re-orgs that aren't true losses.
+
+Useful starting points:
+- `git log --oneline main..origin/main` — but won't help (greenfield commit is the floor).
+- `git log --all --grep='UD-2..\|UD-3..'` — see how many tickets came from re-implementation vs new design.
+- `docs/SPECS.md` "Intent vs code" matrix — already does adjacent work.
+
+## Acceptance
+
+- A `docs/dev/2026-05-changelog-audit.md` report with one row per old CHANGELOG entry: status `present | regressed | moved | replaced | obsolete`, link to current code path or successor ticket.
+- Every `regressed` entry has a follow-up UD-### filed (priority calibrated to actual user impact, not just feature parity).
+- Audit report committed; this ticket closes pointing at the report.
+
+## Out of scope
+
+- Re-implementing every regressed feature — that's per-ticket work.
+- The closed-source `provider benchmark` subcommand — out of scope, lives in `unidrive-closed`.
+
+## Provenance
+
+Sample audit 2026-05-01. Source: `logic-arts-official/unidrive`@`b8e4223`, `docs/CHANGELOG.md`.
