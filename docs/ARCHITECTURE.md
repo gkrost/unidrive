@@ -104,7 +104,9 @@ lift it here and update this list.
 | `org.krost.unidrive.http` | `StreamingUpload.kt` | `streamingFileBody(localPath, fileSize)` with UD-287 finally-flushAndClose | UD-342 |
 | `org.krost.unidrive.http` | `HtmlBodySniffGuard.kt` | `assertNotHtml(response, contextMsg?)` — captive-portal / throttle-redirect guard | UD-340 |
 | `org.krost.unidrive.auth` | `Pkce.kt` | RFC 7636 verifier + challenge | UD-351 |
+| `org.krost.unidrive.auth` | `OAuthCallbackServer.kt` | `awaitOAuthCallback(port, expectedState, providerLabel, timeout)` — single-shot loopback `ServerSocket` + parse-and-validate the redirect | UD-348 |
 | `org.krost.unidrive.io` | `PosixPermissions.kt` | `setPosixPermissionsIfSupported` for token-file storage | UD-347 |
+| `org.krost.unidrive.io` | `OpenBrowser.kt` | `openBrowser(url)` — `Desktop.browse` with `xdg-open` / `open` / `start` fallback | UD-348 |
 | `org.krost.unidrive` (root) | `SharedJson.kt` | `UnidriveJson` — `Json { ignoreUnknownKeys; isLenient }` | UD-343 |
 | `org.krost.unidrive.sync` (`:app:sync`) | `Snapshot.kt` | Generic `Snapshot<E>` snapshot-cursor wrapper (`entries: Map<String, E>` + `timestamp: Long` + Base64-of-JSON encode/decode); on-disk-compatible with the pre-UD-345 per-provider classes | UD-345 |
 | `org.krost.unidrive.sync` (`:app:sync`) | `SnapshotDeltaEngine.kt` | `computeSnapshotDelta(currentEntries, currentItemsByPath, prevCursor, entrySerializer, hasChanged, deletedItem)` — shared diff loop for snapshot-based providers | UD-346 |
