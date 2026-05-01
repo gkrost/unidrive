@@ -2711,3 +2711,47 @@ This complements (not replaces) the heavier MCP checks. The right home is a pre-
 ## Provenance
 
 `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `check-docs.sh`.
+---
+id: UD-763
+title: Restore lost reference docs (WEBHOOKS, IPC-PROTOCOL, TEST-CHECKLIST)
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - docs/dev/
+opened: 2026-05-01
+---
+**Restore the three operational reference docs that didn't survive the greenfield restart: `WEBHOOKS.md`, `IPC-PROTOCOL.md`, `TEST-CHECKLIST.md`.**
+
+Each was a self-contained reference doc, not a backlog or session note, so they're salvage candidates rather than archival.
+
+## What's missing
+
+| Old path | Size | Why we want it |
+|----------|------|----------------|
+| `docs/WEBHOOKS.md` | 4.5 KB | OneDrive Graph webhook NAT setup recipes (ngrok, cloudflared quick + named tunnels, serveo, production reverse proxy), troubleshooting steps, security notes. The current SubscriptionRenewalScheduler is in code but the user-facing setup doc is gone. |
+| `docs/IPC-PROTOCOL.md` | 2.3 KB | Full NDJSON event schema with every field documented + a minimal Kotlin client snippet. Useful as the public contract for any third-party tray/UI that subscribes to the daemon socket — relevant given ADR-0013 deliberately keeps that surface open for community tools. |
+| `docs/TEST-CHECKLIST.md` | 8.6 KB | 53-step manual ADD-friendly test checklist organised in 9 parts (automated → CLI smoke → localfs roundtrip → trash/versioning → OneDrive share+webhook → relocate → vault → profiles → backup wizard). Pre-release sweep scaffolding. |
+
+## What changed since they were written
+
+- WEBHOOKS.md mentions auto-renewal as TODO. Current code has `SubscriptionRenewalScheduler` (closed: see CLOSED.md). Update the doc to reflect that.
+- IPC-PROTOCOL.md describes the event schema as it was 2026-04-16. Verify current `IpcProgressReporter` events match; update if they diverged.
+- TEST-CHECKLIST.md references the closed `BenchmarkCommand` and `provider benchmark` CLI which now lives in `unidrive-closed`. Either skip those steps or document the unidrive-closed dependency.
+
+## Acceptance
+
+- `docs/dev/webhooks-nat-setup.md` — port `WEBHOOKS.md`. Add a "current state" section noting auto-renewal works.
+- `docs/dev/ipc-protocol.md` — port `IPC-PROTOCOL.md`. Verify event field list against `IpcProgressReporter.kt` and `SyncReason.kt`. Mark as the contract for third-party tray clients.
+- `docs/dev/manual-test-checklist.md` — port `TEST-CHECKLIST.md`. Trim the OneDrive-specific parts that no longer make sense, or mark them as "requires `unidrive-closed`".
+- Cross-link from `docs/SPECS.md` and `docs/ARCHITECTURE.md`.
+
+## Out of scope
+
+- `WINDOWS-BACKLOG.md` — see `BACKLOG_IDEAS_UI.md` (lives there because all of W11–W16 are UI/Desktop concerns).
+- Pure changelogs and session-handover docs — those are tied to the old repo's commit history; not salvage candidates.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `docs/{WEBHOOKS,IPC-PROTOCOL,TEST-CHECKLIST}.md`.
