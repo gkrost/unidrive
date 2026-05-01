@@ -10296,3 +10296,88 @@ The slow-loris exposure is unchanged: the 60 s socket-timeout watchdog still fir
 - Pre-existing helper: `core/app/core/.../http/UploadTimeoutPolicy.kt` already supports `minThroughputBytesPerSecond` per-call override (UD-337's design).
 - Symptom log: `unidrive.2026-04-30.0.log` 13:54:47 / 14:06:02 / 14:17:01 / 14:56:00 / 15:08:23 / 15:09:01.
 - Related: UD-337 (the original lift of UploadTimeoutPolicy from WebDavTimeoutPolicy).
+
+---
+id: UD-209a
+title: PlaceholderManager.dehydrate non-sparse on JDK 21 jbrsdk Linux (sibling of UD-209)
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 939c070. FileChannel.position(N-1)+write(0) replaces RandomAccessFile.setLength on JDK 21 jbrsdk Linux
+opened: 2026-05-01
+---
+**Sibling of UD-209.** UD-209 covers the Windows side of placeholder
+sparseness. This ticket covers a parallel Linux issue surfaced 2026-05-01
+on sg5 during `./gradlew build`.
+
+## Symptom
+
+`PlaceholderManager.dehydrate()` ([PlaceholderManager.kt:99-112](../../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/PlaceholderManager.kt#L99))
+uses `RandomAccessFile.setLength(0); setLength(remoteSize)` to produce
+a sparse stub. On JDK 21 jbrsdk_jcef-21.0.10 (the toolchain Gradle
+resolves under `core/app/sync`), the second `setLength(N)` after a
+`setLength(0)` does NOT punch a hole — it issues a real
+`write(fd, "\0" * N)` syscall. The file is fully allocated.
+
+Strace evidence (JDK 21):
+```
+ftruncate(6, 0)       = 0
+write(6, "\0\0\0\0..."*5000, 5000) = 5000
+```
+
+JDK 25-ea (Ubuntu system `java`) does the right thing:
+```
+ftruncate(6, 0)       = 0
+ftruncate(6, 5000)    = 0
+```
+
+## Production impact
+
+Linux users on JDK 21 — including every machine using the JetBrains
+runtime that Gradle defaults to — get fully-allocated zero-byte files
+for every dehydrated stub. SPECS.md §1.1 currently claims "on Linux
+where setLength IS sparse" — the claim is false on JDK 21.
+
+UD-712 class of problem (346 GB of NULs on disk on the OneDrive
+adopt incident), but on Linux + JDK 21 instead of NTFS.
+
+Three tests fail in `:app:sync:test` because of this:
+
+- `PlaceholderManagerTest.dehydrated file detected as sparse`
+- `SyncCornerCaseTest.sparse placeholder from interrupted sync is replaced by real download`
+- `SyncCornerCaseTest.pinned file downloaded even if sparse placeholder exists`
+
+## Proposed fix
+
+Replace the `RandomAccessFile.setLength(0); setLength(N)` pattern with
+`FileChannel`-based truncate + position-past-EOF + close:
+
+```kotlin
+FileChannel.open(local, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING).use { ch ->
+    ch.position(remoteSize)  // moving past EOF + close grows the file as a hole
+}
+```
+
+Setting position past EOF and closing the channel produces a sparse
+hole on every JVM (verified via `ftruncate(N)` syscall under JDK 21 +
+JDK 25). Same pattern Apache Commons IO uses for
+`createSparseFile`. No JNA, no native FFM, ~5 lines.
+
+## Acceptance
+
+- After `mgr.dehydrate("/foo", remoteSize=5000, …)`, `stat --format=%b`
+  on the file returns 0 (or any value such that `blocks * 512 < 5000`).
+- The 3 test failures listed above turn green on JDK 21 jbrsdk on Linux.
+- `isSparse()` returns true for the dehydrated file.
+- SPECS.md §1.1 claim about "Linux setLength IS sparse" is removed
+  (covered by the docs-sweep ticket UD-758).
+
+## Related
+
+- UD-209 (open) — Windows sparse-file support; sibling.
+- UD-712 (closed) — original UD-222 zeroing-on-NTFS incident; same
+  failure shape on a different OS.
+- UD-758 (open) — docs sweep removing the now-falsified setLength
+  claim from SPECS.md.
