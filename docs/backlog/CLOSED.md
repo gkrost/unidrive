@@ -9853,3 +9853,62 @@ Rclone `"/${it.path}" == path`). Indexing pre-pass needs design.
 
 - **3.1 snapshot-base64-json-cursor** (sibling) — the storage layer
   this consumes.
+
+---
+id: UD-348
+title: Lift OAuth loopback callback server (waitForCallback + parse + openBrowser) to :app:core/auth
+category: providers
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit b8ea60f. Lifted to :app:core/auth/OAuthCallbackServer.kt + :app:core/io/OpenBrowser.kt. OneDrive and HiDrive TokenManager consume the shared helpers; six duplicate parser tests fold into one OAuthCallbackServerTest plus a seventh pinning the providerLabel prefix invariant.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+OneDrive and HiDrive `TokenManager` each implement a 35-line
+`waitForCallback(expectedState)` opening
+`ServerSocket(port, 0, 127.0.0.1)`, accepting one connection, calling
+a 25-line `parseAndValidateCallback`, writing a hardcoded HTML
+success/error page, returning the auth code.
+
+`parseAndValidateCallback` is itself duplicated, including the same
+load-bearing comment about provider-error-vs-state-vs-code regex
+ordering.
+
+- `core/providers/onedrive/.../TokenManager.kt:157-191, 204-227, 234-250`
+- `core/providers/hidrive/.../TokenManager.kt:97-131, 144-167, 174-189`
+
+## Proposal
+
+`:app:core/auth/OAuthCallbackServer.kt`:
+
+```kotlin
+suspend fun awaitOAuthCallback(
+    port: Int,
+    expectedState: String,
+    providerLabel: String,    // parameterises the success-page HTML
+    timeout: Duration,
+): String  // auth code
+```
+
+Plus `:app:core/io/OpenBrowser.kt` for the 17-line `openBrowser` util.
+`parseAndValidateCallback` lifts internal to the callback module.
+
+## Acceptance
+
+- OneDrive + HiDrive `TokenManager` consume the shared helper.
+- HTML success page differs only by `providerLabel` substitution.
+- Future S3/WebDAV/Internxt OAuth flavour gets the helper for free.
+
+## Effort / agent-ability
+
+**S effort**, agent-able fully — `parseAndValidateCallback` is already
+pure with great test coverage; `openBrowser` is 17 lines pure utility.
+
+## Related
+
+- **UD-351** (closed, 2026-04-30, b3f5755) — was originally surveyed
+  as 2.7 oauth-pkce-helpers; now lives at `:app:core/auth/Pkce.kt`,
+  same package this ticket targets for the callback server.
