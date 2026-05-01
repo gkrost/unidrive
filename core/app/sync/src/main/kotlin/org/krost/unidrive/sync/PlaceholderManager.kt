@@ -102,9 +102,29 @@ open class PlaceholderManager(
         remoteModified: Instant?,
     ) {
         val local = resolveLocal(remotePath)
-        RandomAccessFile(local.toFile(), "rw").use { raf ->
-            raf.setLength(0)
-            raf.setLength(remoteSize)
+        // UD-???: JVM 21 on Linux has broken RandomAccessFile.setLength() sparse-file
+        // semantics — it fully allocates blocks instead of creating holes. JVM 25 fixes
+        // this, but we need a workaround for the 21 series. Use `truncate` on Linux
+        // (reliable sparse-file creation), fall back to RandomAccessFile elsewhere.
+        val os = System.getProperty("os.name", "").lowercase()
+        if (os.contains("nix") || os.contains("nux")) {
+            try {
+                ProcessBuilder("truncate", "-s", remoteSize.toString(), local.toAbsolutePath().toString())
+                    .redirectErrorStream(true)
+                    .start()
+                    .waitFor()
+            } catch (_: Exception) {
+                // fallback: original RandomAccessFile approach
+                RandomAccessFile(local.toFile(), "rw").use { raf ->
+                    raf.setLength(0)
+                    raf.setLength(remoteSize)
+                }
+            }
+        } else {
+            RandomAccessFile(local.toFile(), "rw").use { raf ->
+                raf.setLength(0)
+                raf.setLength(remoteSize)
+            }
         }
         if (remoteModified != null) {
             Files.setLastModifiedTime(local, FileTime.from(remoteModified))
