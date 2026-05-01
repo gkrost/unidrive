@@ -507,7 +507,7 @@ Read before bigger changes:
 
 - **General / partnership / naming:** `unidrive@krost.org`
 - **Security:** `unidrive@krost.org` with subject prefix
-  `[SECURITY]` (see [SECURITY.md](SECURITY.md))
+  `[SECURITY]`
 - **Bug reports / feature requests:** GitHub Issues at
   <https://github.com/gkrost/unidrive/issues> — please include
   the `[<short-sha>]` prefix from your `unidrive.log` so the daemon
