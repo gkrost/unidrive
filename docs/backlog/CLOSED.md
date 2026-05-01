@@ -10063,3 +10063,54 @@ SyncEntry(
 - `StatusCommand.kt:315` — current `totalLocalSize` calculation.
 - `LocalScanner.kt:69-70` — current NEW-path emission point.
 - `SyncEngine.kt:803-826` — current applyUpload write-site.
+
+---
+id: UD-756
+title: Status table: split LOCAL into HYDRATED + PENDING columns
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit 6bf9279. Status table renders HYDRATED + PENDING; FILES dropped to keep width; bucket math testable via computeLocalSizeBuckets helper
+opened: 2026-05-01
+---
+**Problem.** The `unidrive status` table has one LOCAL column today that conflates two different signals:
+- (a) bytes downloaded from the cloud and physically present locally (hydrated entries that came from a `download`)
+- (b) bytes added locally that have not been uploaded yet (after UD-901 lands, these have a row with `remoteId=null` and `isHydrated=true`)
+
+Today's `StatusCommand.kt:315` sums both into LOCAL via `entries.filter { isHydrated }.sumOf { localSize }`. The user can't tell from the table whether 25 GiB of LOCAL means "downloaded from cloud" or "waiting to upload" — the two scenarios have very different actionable implications.
+
+**Fix (Option 4 from the 2026-05-01 design discussion).** Split LOCAL into two columns:
+
+| FILES | SPARSE | CLOUD | HYDRATED | PENDING | LAST SYNC |
+|---|---|---|---|---|---|
+| 66,208 | 63,658 | 313 GiB | 0 B | 25 GiB | 30 Apr 11:26 |
+
+- HYDRATED = `entries.filter { isHydrated && remoteId != null }.sumOf { localSize }` — bytes known on both sides.
+- PENDING = `entries.filter { isHydrated && remoteId == null }.sumOf { localSize }` — bytes only on local, awaiting upload.
+- SPARSE stays as-is (placeholder count).
+- FILES = HYDRATED-rows + SPARSE-rows + PENDING-rows. Could be dropped if the table gets too wide; keep for now.
+
+**Depends on:** UD-901 (the PENDING bucket only has rows once LocalScanner writes pending-upload entries). Until UD-901 lands this ticket has no data to show.
+
+**Layout concern.** Today's status table is 7 columns at width ~100. Adding an 8th column may push to ~110, marginal on an 80-col terminal. Mitigations to consider:
+1. Drop FILES (it's derivable from the others).
+2. Add `--wide` or `--narrow` flag.
+3. Reduce LAST SYNC width by using a more compact format ("30 Apr" not "30 Apr. 11:26" when over a day old).
+
+**Acceptance criteria.**
+1. Status table renders HYDRATED + PENDING as separate columns.
+2. PENDING shows non-zero only for entries whose `remoteId == null` and `isHydrated == true`.
+3. Existing `StatusCommandTest` fixtures updated for the new column count.
+4. New test: a profile with mixed hydrated + pending entries renders both columns correctly.
+5. Decision logged in commit message: keep FILES vs drop FILES, and width handling.
+
+**Non-goals.**
+- Adding a per-state breakdown beyond what's listed (e.g. FAILED_DOWNLOAD count). Tracked separately if needed.
+- Changing `--audit` output. UD-316's `status --audit` is a different surface.
+
+**References.**
+- 2026-05-01 design discussion in handover.
+- `StatusCommand.kt:254-356` — `buildAccountRow` + render.
+- UD-901 — the data dependency.
