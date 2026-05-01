@@ -10489,3 +10489,96 @@ engine uses. Tests remain:
   silently broken.
 - UD-712 (closed) — the prior 346 GB-of-NUL-bytes incident on NTFS;
   same class of failure on a different OS.
+
+---
+id: UD-816
+title: IpcServerTest broadcast races runTest virtual time vs real UDS I/O
+category: tests
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-01
+resolved_by: commit b545158. runBlocking(Dispatchers.IO) + serverScope.cancel for 4 data-flow tests; follow-up 0cb3542
+opened: 2026-05-01
+---
+**Surfaced 2026-05-01 on sg5 during `./gradlew build`.**
+
+## Symptom
+
+`IpcServerTest.broadcast sends message to connected client` fails on
+sg5 (JDK 21 jbrsdk on Linux) with an empty assertion:
+
+```
+AssertionError: Expected event in:
+        at IpcServerTest.kt:78
+```
+
+## Root cause
+
+The test wraps real Unix-domain-socket I/O inside `runTest { ... }`:
+
+```kotlin
+runTest {
+    server = IpcServer(socketPath)
+    server!!.start(backgroundScope)
+    delay(100)
+    val client = connectClient()
+    delay(100)
+    server!!.emit("""{"event":"test"}""")
+    val received = readFromClient(client)
+    assertTrue(received.contains(...))
+}
+```
+
+`runTest` skips `delay(100)` in virtual time. The real UDS plumbing —
+`AFUNIXSocketAddress`, `Channel<String>`-backed broadcast pump,
+client-side `readFromClient` (which itself has `delay(50)` polls) — runs
+in real wall-clock. Server fires `emit()`, client's read races the
+broadcast.
+
+CLAUDE.md global guidance line: *"`runTest` with real NIO operations
+will hang; use virtual time or mocks."* Here it doesn't hang, it races.
+
+## Proposed fix
+
+Replace `runTest` with `runBlocking(Dispatchers.IO)` for tests that
+exercise real UDS I/O. Use condition-based waiting (poll the client
+read until expected event appears or wall-clock timeout fires) instead
+of `delay()` time-based fudging. ~6 tests in IpcServerTest.kt likely
+need the same treatment.
+
+```kotlin
+@Test
+fun `broadcast sends message to connected client`() = runBlocking(Dispatchers.IO) {
+    server = IpcServer(socketPath)
+    server!!.start(this)
+    awaitCondition { Files.exists(socketPath) }
+    val client = connectClient()
+    server!!.emit("""{"event":"test","data":"hello"}""")
+    val received = awaitCondition(timeout = 2.seconds) {
+        readFromClient(client).takeIf { it.contains(""""event":"test"""") }
+    }
+    assertNotNull(received)
+    client.close()
+}
+```
+
+## Acceptance
+
+- All `IpcServerTest` tests pass deterministically on sg5 + the
+  Windows machine (current Linux red, Windows green per handover).
+- No `runTest` use in any test that opens a real socket.
+- A small `awaitCondition(timeout) { … }` helper in the test file
+  (or lifted to `:app:core/test-fixtures` if other modules need it).
+
+## Out of scope
+
+- The other `runTest`-based tests in the module (most use only virtual
+  time or fakes — not affected). Audit them as part of the fix but
+  don't refactor unless they actually break.
+
+## Related
+
+- CLAUDE.md "Build System (Gradle/Kotlin)" line about runTest + NIO.
+- UD-209a (open) — sibling test fixes also surfaced by same build.
+- UD-817 (open) — sibling: CloudRelocator UD-286 cancel test race.
