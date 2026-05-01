@@ -3,6 +3,7 @@
 **One CLI and one MCP server for eight cloud-storage providers — multi platform design
 tested and developed for Linux, auditable, Apache-2.0.**
 
+[![Build](https://github.com/gkrost/unidrive/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/gkrost/unidrive/actions/workflows/build.yml?query=branch%3Amain)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Status: v0.0.1 preview](https://img.shields.io/badge/status-v0.0.1%20preview-orange.svg)](docs/CHANGELOG.md)
 [![Toolchain: JVM 21](https://img.shields.io/badge/JVM-21%20LTS-success.svg)](docs/adr/0006-toolchain.md)
