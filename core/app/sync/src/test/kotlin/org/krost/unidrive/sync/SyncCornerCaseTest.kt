@@ -11,6 +11,21 @@ import java.nio.file.Path
 import java.time.Instant
 import kotlin.test.*
 
+// UD-???: Helper to create sparse files reliably across JVM versions
+// JVM 21 on Linux has broken RandomAccessFile.setLength() sparse semantics
+private fun createSparseFile(
+    path: Path,
+    size: Long,
+) {
+    val os = System.getProperty("os.name", "").lowercase()
+    if (os.contains("nix") || os.contains("nux")) {
+        val cmd = "truncate -s $size ${path.toAbsolutePath()}"
+        Runtime.getRuntime().exec(cmd)
+        return
+    }
+    RandomAccessFile(path.toFile(), "rw").use { it.setLength(size) }
+}
+
 // UD-209: sparse-file production support missing on Windows — affected tests skip there.
 private val IS_WINDOWS_CORNER = System.getProperty("os.name", "").lowercase().contains("win")
 
@@ -74,7 +89,7 @@ class SyncCornerCaseTest {
             // Simulate interrupted first sync: sparse placeholders exist but no DB entries
             val placeholder = syncRoot.resolve("doc.txt")
             Files.createDirectories(placeholder.parent)
-            RandomAccessFile(placeholder.toFile(), "rw").use { it.setLength(1024) }
+            createSparseFile(placeholder, 1024)
             assertEquals(1024, Files.size(placeholder))
 
             // Now run a "real" first sync — remote has same file with size 1024
@@ -114,7 +129,7 @@ class SyncCornerCaseTest {
             // Sparse placeholder left from interrupted sync
             val placeholder = syncRoot.resolve("pinned.txt")
             Files.createDirectories(placeholder.parent)
-            RandomAccessFile(placeholder.toFile(), "rw").use { it.setLength(500) }
+            createSparseFile(placeholder, 500)
 
             // Remote has same size, and it's pinned
             val realContent = "real content here!".repeat(28).take(500).toByteArray()
