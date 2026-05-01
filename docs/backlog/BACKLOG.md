@@ -2566,3 +2566,47 @@ Note: the current backlog has a separate, narrower ticket for "cross-provider be
 ## Provenance
 
 `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/benchmark/`. Pre-dates ADR-0008 greenfield restart by ~2 weeks.
+---
+id: UD-760
+title: Salvage Nautilus/Nemo/Dolphin context-menu integration
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - scripts/nautilus/
+  - scripts/install-menus.sh
+opened: 2026-05-01
+---
+**Salvage the file-manager context-menu integration from the pre-greenfield repo.**
+
+Old `unidrive` (CHANGELOG #110) shipped right-click → UniDrive → Hydrate / Dehydrate / Pin / Unpin for Nautilus (GNOME Files), Nemo (Cinnamon), and Dolphin (KDE). All three file managers, one dispatcher script.
+
+## What's there
+
+`scripts/nautilus/` and `scripts/install-menus.sh` in the old repo:
+
+| File | Purpose |
+|------|---------|
+| `scripts/nautilus/unidrive-menu.sh` | Dispatcher (~190 lines). Parses `config.toml`, resolves which profile a path belongs to (sync_root match), computes remote path, invokes `unidrive -p <name> {get|free|pin|unpin} <remote-path>`. Handles all three FM selection conventions: `$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS`, `$NEMO_SCRIPT_SELECTED_FILE_PATHS`, Dolphin positional `%F`. |
+| `scripts/nautilus/UniDrive — Hydrate` | Thin wrapper script (~5 lines) calling dispatcher with `hydrate` action. |
+| `scripts/nautilus/UniDrive — Dehydrate` | Same pattern, `dehydrate` action. |
+| `scripts/nautilus/UniDrive — Pin` | Same pattern, `pin` action. |
+| `scripts/nautilus/UniDrive — Unpin` | Same pattern, `unpin` action. |
+| `scripts/install-menus.sh` | One-shot installer. Drops Nautilus + Nemo entries under `~/.local/share/{nautilus,nemo}/scripts/UniDrive/`. Generates Dolphin `unidrive.desktop` ServiceMenu in `$XDG_DATA_HOME/kio/servicemenus/`. Auto-detects which FMs are installed. |
+
+## Why we want it back
+
+This is desktop polish that closes a real UX gap on placeholder-based sync: most users want point-and-click hydration. The dispatcher is non-trivial — it correctly resolves a local file path to its `(profile, remote_path)` tuple by parsing TOML, which is the only reason it works for arbitrary multi-profile setups.
+
+The CLI commands it depends on (`get`, `free`, `pin`, `unpin`) all survived the greenfield restart, so the dispatcher should still work as-is.
+
+## Acceptance
+
+- `scripts/nautilus/` and `scripts/install-menus.sh` re-imported 1:1.
+- Smoke test: install on the dev machine, right-click a placeholder, hydrate, verify file content downloads.
+- Optional: Nautilus's "Open Sync Folder" extension (separate from the menus) — out of scope for this ticket.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/nautilus/` + `scripts/install-menus.sh`.
