@@ -212,8 +212,8 @@ Flow:
 1. User sets `webhook = true` per-profile in `config.toml`.
 2. Daemon calls `GraphApiService.createSubscription(notificationUrl, expirationDateTime)` — 💻 verified at `core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt:556`.
 3. Graph API expires after 4230 minutes (~3 days).
-4. **Auto-renewal is partially wired:** `renewSubscription()` is called from [`SyncCommand.kt:344`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L344) inside `ensureSubscription()`, invoked on every poll cycle when `watch && webhook == true`. What's missing is the *scheduled* renewal policy (renew ≤24 h before expiry); today the cycle creates a new subscription if the old one lapsed, which works but trades one round-trip per sync cycle for correctness.
-5. `SubscriptionStore` exists and **is consumed** by [`SyncCommand.kt:224,235,258`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L224) — not by `SyncEngine` directly, but by the CLI-level orchestrator that drives the engine. My earlier "orphan" framing in the pre-verification draft of this doc was wrong; [UD-303](backlog/BACKLOG.md#ud-303) was refined during the verification sweep to reflect "scheduler-level auto-renewal policy missing, not consumer-missing".
+4. **Auto-renewal is fully wired ([UD-303](backlog/CLOSED.md#ud-303), closed):** `SubscriptionRenewalScheduler` arms a `(expiry − 24h)` callback that drives a single `renewSubscription()` Graph call per subscription lifetime. Per-cycle `ensureSubscription()` short-circuits via `scheduler.isScheduledAndValid(profileName)` when the scheduler is armed and the persisted subscription still has >24h left. See [`SyncCommand.kt:480-541`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L480) for the renewal logic (KDoc on `ensureSubscription` documents the fast-path).
+5. `SubscriptionStore` is consumed by `SyncCommand` (the CLI-level orchestrator drives both the store and the scheduler). The pre-verification "orphan" framing in earlier drafts of this doc was wrong.
 
 **Tunneling for NAT traversal:** ngrok, cloudflared, serveo.net, or production VPS with public IP + reverse proxy. Doc-only; no automation.
 
@@ -265,12 +265,11 @@ Items where the spec assumes behaviour the current code does not yet exhibit. Ro
 
 | # | Topic | Doc assumption | Current reality | Tracked as |
 |---|-------|----------------|-----------------|-----------|
-| 1 | Webhook auto-renewal | subscriptions renewed ≤24 h before expiry on a scheduled cadence | `renewSubscription()` runs every poll cycle inside `ensureSubscription()`; works but trades a round-trip per cycle for correctness — no scheduled policy yet | [UD-303](backlog/BACKLOG.md#ud-303) |
-| 2 | JDK target | (older docs assumed JDK 25) | JDK 21 LTS | [ADR-0006](adr/0006-toolchain.md) |
-| 3 | Provider capability defaults | silent `null/empty/false` | same (legacy); to be replaced by `Capability.Unsupported(reason)` | [UD-301](backlog/BACKLOG.md#ud-301) |
-| 4 | Audit log per sync action | not yet specced; doc-speculative pipe to MCP | not implemented | [UD-113](backlog/BACKLOG.md#ud-113) |
-| 5 | Pass-2 transfer atomicity | concurrent transfers happen outside the metadata batch; SIGKILL-during-transfer recovery not audited | structural gap confirmed but not yet exercised by a fault-injection test | [UD-205](backlog/BACKLOG.md#ud-205) |
-| 6 | OS-level placeholder hydration | (legacy doc — implied OneDrive-on-Linux semantics) | reverted to 0-byte stubs in UD-222; shell-tier work cut by [ADR-0011](adr/0011-shell-win-removal.md). Re-opens only under that ADR's criteria | n/a |
+| 1 | JDK target | (older docs assumed JDK 25) | JDK 21 LTS | [ADR-0006](adr/0006-toolchain.md) |
+| 2 | Provider capability defaults | silent `null/empty/false` | same (legacy); to be replaced by `Capability.Unsupported(reason)` | [UD-301](backlog/BACKLOG.md#ud-301) |
+| 3 | Audit log per sync action | not yet specced; doc-speculative pipe to MCP | not implemented | [UD-113](backlog/BACKLOG.md#ud-113) |
+| 4 | Pass-2 transfer atomicity | concurrent transfers happen outside the metadata batch; SIGKILL-during-transfer recovery not audited | structural gap confirmed but not yet exercised by a fault-injection test | [UD-205](backlog/BACKLOG.md#ud-205) |
+| 5 | OS-level placeholder hydration | (legacy doc — implied OneDrive-on-Linux semantics) | reverted to 0-byte stubs in UD-222; shell-tier work cut by [ADR-0011](adr/0011-shell-win-removal.md). Re-opens only under that ADR's criteria | n/a |
 
 
 ## 10. Open questions
