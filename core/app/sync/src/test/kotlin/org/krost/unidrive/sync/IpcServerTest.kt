@@ -1,6 +1,11 @@
 package org.krost.unidrive.sync
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -62,21 +67,34 @@ class IpcServerTest {
         return sb.toString()
     }
 
+    // UD-816: real Unix-domain-socket I/O races runTest's virtual-time delays.
+    // CLAUDE.md: "runTest with real NIO operations will hang; use virtual time
+    // or mocks." Here it doesn't hang — it races and the assertion fails
+    // because the broadcast hadn't reached the client by the read deadline.
+    // Switch to runBlocking(Dispatchers.IO) + an explicit serverScope so all
+    // delay()s are real wall-clock and the server's accept loop is terminated
+    // by serverScope.cancel() at test end (otherwise runBlocking would wait on
+    // the still-running accept loop forever).
     @Test
     fun `broadcast sends message to connected client`() =
-        runTest {
-            server = IpcServer(socketPath)
-            server!!.start(backgroundScope)
-            delay(100)
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
 
-            val client = connectClient()
-            delay(100)
+                val client = connectClient()
+                delay(100)
 
-            server!!.emit("""{"event":"test","data":"hello"}""")
-            val received = readFromClient(client)
+                server!!.emit("""{"event":"test","data":"hello"}""")
+                val received = readFromClient(client)
 
-            assertTrue(received.contains(""""event":"test""""), "Expected event in: $received")
-            client.close()
+                assertTrue(received.contains(""""event":"test""""), "Expected event in: $received")
+                client.close()
+            } finally {
+                serverScope.cancel()
+            }
         }
 
     @Test
