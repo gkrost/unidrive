@@ -1,6 +1,7 @@
 package org.krost.unidrive.s3
 
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
@@ -172,8 +173,13 @@ class S3Provider(
 
     // ── Delta ─────────────────────────────────────────────────────────────────
 
-    override suspend fun delta(cursor: String?): DeltaPage {
-        val currentObjects = api.listAll()
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: thread per-page progress through the bucket-listing pagination.
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+        val currentObjects = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
         val snapshotEntries = buildSnapshotEntries(currentObjects)
         val itemsByPath =
             currentObjects.associate { obj ->

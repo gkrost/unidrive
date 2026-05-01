@@ -1,6 +1,7 @@
 package org.krost.unidrive.sftp
 
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
 import java.nio.file.Path
 import java.time.Instant
@@ -113,8 +114,13 @@ class SftpProvider(
 
     // ── Delta ─────────────────────────────────────────────────────────────────
 
-    override suspend fun delta(cursor: String?): DeltaPage {
-        val currentEntries = api.listAll()
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: thread per-directory progress through the BFS readdir walk.
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+        val currentEntries = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
         val snapshotEntries = buildSnapshotEntries(currentEntries)
         val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
         return computeSnapshotDelta(

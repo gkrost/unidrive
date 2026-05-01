@@ -204,7 +204,10 @@ class SyncExceptionStormTest {
             toPath: String,
         ) = createFolder(toPath)
 
-        override suspend fun delta(cursor: String?): DeltaPage = DeltaPage(items = deltaItems, cursor = deltaCursor, hasMore = false)
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        ): DeltaPage = DeltaPage(items = deltaItems, cursor = deltaCursor, hasMore = false)
 
         override suspend fun quota() = org.krost.unidrive.QuotaInfo(total = 1000, used = 0, remaining = 1000)
     }

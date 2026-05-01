@@ -34,7 +34,10 @@ class S3ProviderTest {
         var presignResult: String = "https://presigned.example.com/obj"
         var authThrows: Exception? = null
 
-        override suspend fun listAll(prefix: String): List<S3Object> {
+        override suspend fun listAll(
+            prefix: String,
+            onProgress: ((itemsSoFar: Int) -> Unit)?,
+        ): List<S3Object> {
             if (authThrows != null && prefix.contains("auth-check")) throw authThrows!!
             return if (prefix.isEmpty()) {
                 listAllResult.toList()

@@ -163,7 +163,10 @@ private class InMemoryProvider(
         to: String,
     ) = CloudItem("1", to, to, 0, false, null, null, null, null)
 
-    override suspend fun delta(cursor: String?) = DeltaPage(emptyList(), "", false)
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ) = DeltaPage(emptyList(), "", false)
 
     override suspend fun quota() = QuotaInfo(0, 0, 0)
 }

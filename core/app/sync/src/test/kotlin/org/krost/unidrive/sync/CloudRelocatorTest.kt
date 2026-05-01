@@ -874,7 +874,10 @@ class CloudRelocatorTest {
             toPath: String,
         ) = createFolder(toPath)
 
-        override suspend fun delta(cursor: String?) = DeltaPage(items = emptyList(), cursor = "c", hasMore = false)
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        ) = DeltaPage(items = emptyList(), cursor = "c", hasMore = false)
 
         override suspend fun quota() = QuotaInfo(total = 10_000_000, used = 0, remaining = 10_000_000)
     }

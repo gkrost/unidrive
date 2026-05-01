@@ -70,7 +70,10 @@ class CapabilityContractTest {
             toPath: String,
         ) = throw UnsupportedOperationException()
 
-        override suspend fun delta(cursor: String?) = DeltaPage(emptyList(), "", false)
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        ) = DeltaPage(emptyList(), "", false)
 
         override suspend fun quota() = QuotaInfo(0, 0, 0)
 

@@ -179,7 +179,13 @@ open class S3ApiService(
      * List all objects in the bucket using ListObjectsV2 with pagination.
      * Returns a list of [S3Object] for files and synthetic folder entries.
      */
-    open suspend fun listAll(prefix: String = ""): List<S3Object> {
+    open suspend fun listAll(
+        prefix: String = "",
+        // UD-352: invoked after each ListObjectsV2 page is appended so the
+        // engine can fire scan progress during very long bucket walks.
+        // Optional; existing callers omit it for unchanged behaviour.
+        onProgress: ((itemsSoFar: Int) -> Unit)? = null,
+    ): List<S3Object> {
         val objects = mutableListOf<S3Object>()
         var continuationToken: String? = null
 
@@ -204,6 +210,7 @@ open class S3ApiService(
             val body = response.bodyAsText()
             objects.addAll(parseListObjectsV2(body))
             log.debug("ListObjectsV2: {} items so far", objects.size)
+            onProgress?.invoke(objects.size)
             continuationToken = xmlValue(body, "NextContinuationToken")
         } while (continuationToken != null)
 

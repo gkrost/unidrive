@@ -150,7 +150,12 @@ class LocalFsProvider(
 
     // -- Delta (snapshot-based) ---------------------------------------------------
 
-    override suspend fun delta(cursor: String?): DeltaPage {
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: LocalFs uses Files.walk and is fast enough that the
+        // silent-during-gather window doesn't bite. onPageProgress unused.
         val currentEntries = walkRoot()
         val snapshotEntries = buildSnapshotEntries(currentEntries)
         val itemsByPath =

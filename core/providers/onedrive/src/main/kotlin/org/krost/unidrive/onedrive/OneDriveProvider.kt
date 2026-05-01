@@ -149,7 +149,14 @@ class OneDriveProvider(
         return graphApi.moveItem(item.id, toPath, fromPath).toCloudItem()
     }
 
-    override suspend fun delta(cursor: String?): DeltaPage {
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: OneDrive returns a single Graph delta page per delta() call;
+        // the engine's outer pagination loop already emits scan progress after
+        // every nextPage() return, so the per-call heartbeat would be redundant.
+        // Signature kept aligned with the interface; onPageProgress unused.
         val result = graphApi.getDelta(cursor)
 
         // Filter out the drive root item itself — it appears in delta responses

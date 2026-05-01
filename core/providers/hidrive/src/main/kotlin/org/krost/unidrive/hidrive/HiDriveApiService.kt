@@ -327,9 +327,16 @@ class HiDriveApiService(
         )
     }
 
-    suspend fun listRecursive(relativePath: String = "/"): List<HiDriveItem> {
+    suspend fun listRecursive(
+        relativePath: String = "/",
+        // UD-352: invoked after each directory's children are appended so the
+        // engine's heartbeat fires during long walks of deep trees instead of
+        // only at the end. Optional; defaults to no-op for callers that just
+        // want the materialised list.
+        onProgress: ((itemsSoFar: Int) -> Unit)? = null,
+    ): List<HiDriveItem> {
         val items = mutableListOf<HiDriveItem>()
-        listRecursiveInternal(relativePath, items)
+        listRecursiveInternal(relativePath, items, onProgress)
         log.debug("Listing: {} items total", items.size)
         return items
     }
@@ -337,6 +344,7 @@ class HiDriveApiService(
     private suspend fun listRecursiveInternal(
         relativePath: String,
         accumulator: MutableList<HiDriveItem>,
+        onProgress: ((itemsSoFar: Int) -> Unit)?,
     ) {
         val children = listDirectory(relativePath)
         val home = getHome()
@@ -344,9 +352,10 @@ class HiDriveApiService(
             accumulator.add(child)
             if (child.type == "dir") {
                 val childRelative = toRelativePath(child.path ?: "", home)
-                listRecursiveInternal(childRelative, accumulator)
+                listRecursiveInternal(childRelative, accumulator, onProgress)
             }
         }
+        onProgress?.invoke(accumulator.size)
     }
 
     private suspend fun authenticatedGet(

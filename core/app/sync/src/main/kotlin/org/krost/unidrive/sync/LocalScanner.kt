@@ -34,25 +34,12 @@ class LocalScanner(
         // Load all DB entries once — avoids N+1 queries during file tree walk
         val dbEntries = db.getAllEntries().associateBy { it.path }
 
-        // UD-742: heartbeat — fire onProgress every 5000 items OR every 10s
-        // wall-clock since the last fire, whichever comes first. Both thresholds
-        // are relative to the previous fire so a fast walk fires by item-count
-        // and a slow walk fires by wall-clock.
+        // UD-742 / UD-352: heartbeat — fire onProgress every 5000 items OR
+        // every 10s wall-clock since the last fire, whichever comes first.
+        // Math lives in the shared ScanHeartbeat helper so the local + remote
+        // scan paths stay in lockstep.
         var visited = 0
-        var lastFireItems = 0
-        var lastFireMs = System.currentTimeMillis()
-        val heartbeatIntervalMs = 10_000L
-        val heartbeatItemThreshold = 5_000
-
-        fun maybeFireHeartbeat() {
-            if (onProgress == null) return
-            val now = System.currentTimeMillis()
-            if (visited - lastFireItems >= heartbeatItemThreshold || now - lastFireMs >= heartbeatIntervalMs) {
-                onProgress.invoke(visited)
-                lastFireItems = visited
-                lastFireMs = now
-            }
-        }
+        val heartbeat = onProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Walk local filesystem
         Files.walkFileTree(
@@ -100,7 +87,7 @@ class LocalScanner(
                     }
                     // Skip dehydrated files for modification check (mtime is synthetic)
 
-                    maybeFireHeartbeat()
+                    heartbeat?.tick(visited)
                     return FileVisitResult.CONTINUE
                 }
 

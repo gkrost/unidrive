@@ -73,7 +73,10 @@ class OneDriveShareManageTest {
                         toPath: String,
                     ) = throw UnsupportedOperationException()
 
-                    override suspend fun delta(cursor: String?) = throw UnsupportedOperationException()
+                    override suspend fun delta(
+                        cursor: String?,
+                        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+                    ) = throw UnsupportedOperationException()
 
                     override suspend fun quota() = throw UnsupportedOperationException()
                 }
@@ -121,7 +124,10 @@ class OneDriveShareManageTest {
                         toPath: String,
                     ) = throw UnsupportedOperationException()
 
-                    override suspend fun delta(cursor: String?) = throw UnsupportedOperationException()
+                    override suspend fun delta(
+                        cursor: String?,
+                        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+                    ) = throw UnsupportedOperationException()
 
                     override suspend fun quota() = throw UnsupportedOperationException()
                 }

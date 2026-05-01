@@ -2,6 +2,7 @@ package org.krost.unidrive.webdav
 
 import kotlinx.coroutines.CancellationException
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
@@ -134,8 +135,13 @@ class WebDavProvider internal constructor(
 
     // ── Delta ─────────────────────────────────────────────────────────────────
 
-    override suspend fun delta(cursor: String?): DeltaPage {
-        val currentEntries = api.listAll()
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: thread per-PROPFIND-batch progress through the BFS walk.
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+        val currentEntries = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
         val snapshotEntries = buildSnapshotEntries(currentEntries)
         val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
         return computeSnapshotDelta(

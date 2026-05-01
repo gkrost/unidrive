@@ -980,7 +980,10 @@ class SyncEngineTest {
             return createFolder(toPath)
         }
 
-        override suspend fun delta(cursor: String?): DeltaPage {
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        ): DeltaPage {
             deltaCalls++
             if (deltaFailCount > 0) {
                 deltaFailCount--

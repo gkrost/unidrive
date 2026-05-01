@@ -54,7 +54,24 @@ interface CloudProvider {
         toPath: String,
     ): CloudItem
 
-    suspend fun delta(cursor: String?): DeltaPage
+    /**
+     * Walk the remote and return the change set since [cursor].
+     *
+     * UD-352: [onPageProgress], when supplied, fires periodically as pages
+     * are accumulated so the engine can render a count-climbing heartbeat
+     * during long delta walks (Internxt's 63 k-item profile sat silent for
+     * minutes pre-fix). Providers paginate at very different granularities;
+     * the contract is "fire often enough that a 10 s+ scan emits at least
+     * once" — see [ScanHeartbeat] for the canonical math. Providers whose
+     * remote-listing API is a single all-at-once call (rclone subprocess,
+     * HiDrive's recursive endpoint) may legitimately leave this null — the
+     * engine still emits a final-count tick once `delta()` returns. Default
+     * argument keeps existing call sites and test stubs source-compatible.
+     */
+    suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)? = null,
+    ): DeltaPage
 
     /**
      * Delta that includes shared items. Providers that declare

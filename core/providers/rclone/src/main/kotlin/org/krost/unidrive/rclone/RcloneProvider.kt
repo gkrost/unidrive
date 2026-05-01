@@ -72,7 +72,15 @@ class RcloneProvider(
 
     // ── Delta ───────────────────────────────────────────────────────────────
 
-    override suspend fun delta(cursor: String?): DeltaPage {
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        // UD-352: rclone's listAllRecursive is a single subprocess invocation
+        // that returns the entire tree as one JSON blob — no per-batch hook
+        // is exposed. The engine still fires a final-count tick once delta()
+        // returns, so the silent-during-gather window is intrinsic to this
+        // adapter's listing shape. onPageProgress unused.
         val currentEntries = cli.listAllRecursive()
         return computeDelta(currentEntries, cursor, config.path)
     }

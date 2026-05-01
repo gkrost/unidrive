@@ -2,6 +2,7 @@ package org.krost.unidrive.hidrive
 
 import org.krost.unidrive.*
 import org.krost.unidrive.hidrive.model.HiDriveItem
+import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
 import java.nio.file.Path
 import java.time.Instant
@@ -108,9 +109,15 @@ class HiDriveProvider(
         }
     }
 
-    override suspend fun delta(cursor: String?): DeltaPage {
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
         val home = api.getHome()
-        val currentItems = api.listRecursive("/")
+        // UD-352: thread a ScanHeartbeat through listRecursive so the engine's
+        // per-page progress fires every 5k items / 10s during deep tree walks.
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+        val currentItems = api.listRecursive("/", onProgress = { count -> heartbeat?.tick(count) })
         val snapshotEntries = buildSnapshotEntries(currentItems, home)
         val itemsByPath =
             currentItems.associate { item ->

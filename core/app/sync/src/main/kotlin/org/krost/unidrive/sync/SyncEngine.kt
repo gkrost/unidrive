@@ -634,15 +634,29 @@ class SyncEngine(
             includeShared &&
                 Capability.DeltaShared in provider.capabilities()
 
+        // UD-352: forward per-page progress to reporter.onScanProgress("remote", N).
+        // The provider's delta() invokes this callback on each accumulated page
+        // (where supported); the engine just fans it out to the reporter so the
+        // heartbeat fires inside the gather loop instead of only at start/end.
+        // Snapshot/all-at-once providers (HiDrive, rclone) leave this unused —
+        // the engine still emits a final tick once gather returns. Note that
+        // [provider.deltaWithShared] does not yet accept the callback (its
+        // pagination path is OneDrive-only and ALREADY emits progress via the
+        // outer loop in this method); only the plain [provider.delta] path
+        // forwards it.
+        val onPageProgress: (Int) -> Unit = { itemsSoFar ->
+            reporter.onScanProgress("remote", itemsSoFar)
+        }
+
         suspend fun nextPage(c: String?): DeltaPage {
             val page =
                 if (useShared) {
                     when (val r = provider.deltaWithShared(c)) {
                         is CapabilityResult.Success -> r.value
-                        is CapabilityResult.Unsupported -> provider.delta(c)
+                        is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress)
                     }
                 } else {
-                    provider.delta(c)
+                    provider.delta(c, onPageProgress)
                 }
             // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
             // of the five providers that used to emit the same data per-page.

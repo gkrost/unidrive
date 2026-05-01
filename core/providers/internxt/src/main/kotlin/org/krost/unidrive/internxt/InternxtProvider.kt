@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
+import org.krost.unidrive.sync.ScanHeartbeat
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -266,12 +267,23 @@ class InternxtProvider(
         }
     }
 
-    override suspend fun delta(cursor: String?): DeltaPage {
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
         foldersScanned.set(0)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
         val limit = 50
+
+        // UD-352: this delta() loops internally over both /files and /folders
+        // pagination, accumulating *all* pages before returning a single
+        // DeltaPage. The engine's outer post-delta tick fires only at the
+        // end — for a 63 k-item profile that's many minutes of silence. Hook
+        // the heartbeat here so onScanProgress fires every 5k items / 10s
+        // wall-clock during the gather.
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Paginate files (may be unavailable — 503)
         try {
@@ -280,6 +292,7 @@ class InternxtProvider(
                 val batch = api.listFiles(adjustedCursor, limit, offset)
                 allFiles.addAll(batch)
                 log.debug("Scanning files: {}", allFiles.size)
+                heartbeat?.tick(allFiles.size + allFolders.size)
                 if (batch.size < limit) break
                 offset += limit
             }
@@ -298,6 +311,7 @@ class InternxtProvider(
             val batch = api.listFolders(adjustedCursor, limit, offset)
             allFolders.addAll(batch)
             log.debug("Scanning folders: {}", allFolders.size)
+            heartbeat?.tick(allFiles.size + allFolders.size)
             if (batch.size < limit) break
             offset += limit
         }

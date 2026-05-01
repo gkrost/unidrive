@@ -33,7 +33,10 @@ class ThrottledProviderTest {
 
         override suspend fun getMetadata(path: String) = error("not used")
 
-        override suspend fun delta(cursor: String?) = DeltaPage(emptyList(), "", false)
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        ) = DeltaPage(emptyList(), "", false)
 
         override suspend fun quota() = QuotaInfo(0, 0, 0)
 

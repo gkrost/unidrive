@@ -297,7 +297,12 @@ class SftpApiService(
      * Recursively list all files and directories under [remotePath].
      * Breadth-first traversal; returns every entry (files and folders).
      */
-    suspend fun listAll(remotePath: String = ""): List<SftpEntry> =
+    suspend fun listAll(
+        remotePath: String = "",
+        // UD-352: invoked after each directory's readdir batch is appended.
+        // Optional; existing callers omit it for unchanged behaviour.
+        onProgress: ((itemsSoFar: Int) -> Unit)? = null,
+    ): List<SftpEntry> =
         withContext(Dispatchers.IO) {
             withSftp { sftp ->
                 val root = serverPath(remotePath)
@@ -331,6 +336,7 @@ class SftpApiService(
                         )
                         if (isDir) queue.add(fullPath)
                     }
+                    onProgress?.invoke(results.size)
                 }
                 results
             }

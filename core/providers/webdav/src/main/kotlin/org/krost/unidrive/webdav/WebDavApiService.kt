@@ -458,7 +458,12 @@ open class WebDavApiService(
      * Recursively list all resources under [remotePath] using BFS with Depth-1 PROPFIND.
      * Returns files and folder entries.
      */
-    suspend fun listAll(remotePath: String = ""): List<WebDavEntry> {
+    suspend fun listAll(
+        remotePath: String = "",
+        // UD-352: invoked after each PROPFIND-batch is appended so the engine
+        // can fire scan progress during long BFS walks. Optional.
+        onProgress: ((itemsSoFar: Int) -> Unit)? = null,
+    ): List<WebDavEntry> {
         val results = mutableListOf<WebDavEntry>()
         val queue = ArrayDeque<String>()
         queue.add(remotePath.ifEmpty { "/" })
@@ -477,6 +482,7 @@ open class WebDavApiService(
                 results.add(entry)
                 if (entry.isFolder) queue.add(entry.path)
             }
+            onProgress?.invoke(results.size)
         }
         return results
     }
