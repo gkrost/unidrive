@@ -1,7 +1,7 @@
 # UniDrive
 
-**One CLI and one MCP server for eight cloud-storage providers — built
-for Linux, auditable, Apache-2.0.**
+**One CLI and one MCP server for eight cloud-storage providers — multi platform design
+tested and developed for Linux, auditable, Apache-2.0.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Status: v0.0.1 preview](https://img.shields.io/badge/status-v0.0.1%20preview-orange.svg)](docs/CHANGELOG.md)
@@ -13,7 +13,7 @@ for Linux, auditable, Apache-2.0.**
 
 UniDrive aggregates multiple cloud-storage backends behind a single
 sync engine. One config file. One CLI. One MCP server an LLM can
-drive. Eight providers in tree, swappable per profile, with a SQLite
+drive. Multiple providers in tree, swappable per profile, with a SQLite
 state database and structured sync events over a Unix-domain socket.
 
 > **Status: v0.0.1 — early public preview.** MVP target is **Linux**;
@@ -132,8 +132,8 @@ Toolchain requirements (per [ADR-0006](docs/adr/0006-toolchain.md)):
 
 The build produces shadow jars at:
 
-- `core/app/cli/build/libs/unidrive-0.0.0-greenfield.jar` — the CLI.
-- `core/app/mcp/build/libs/unidrive-mcp-0.0.0-greenfield.jar` — the
+- `core/app/cli/build/libs/unidrive-x.y.z-suffix.jar` — the CLI.
+- `core/app/mcp/build/libs/unidrive-mcp-x.y.z-suffix.jar` — the
   MCP server.
 
 ### Smoke-test the build
@@ -257,7 +257,7 @@ operations as JSON-RPC tools so an MCP-aware LLM client can drive it.
       "command": "java",
       "args": [
         "-jar",
-        "/absolute/path/to/unidrive-mcp-0.0.0-greenfield.jar"
+        "/absolute/path/to/unidrive-mcp-x.y.z-suffix.jar"
       ]
     }
   }

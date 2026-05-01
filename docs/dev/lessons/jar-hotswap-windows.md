@@ -14,7 +14,7 @@ already-open file handle then hits corrupted or shifted data.
 
 ## Worked failure (UD-222 marathon, 2026-04-19)
 
-A new `unidrive-0.0.0-greenfield.jar` was deployed while a sync
+A new `unidrive.jar` was deployed while a sync
 process still held the previous jar loaded. Sync then threw
 
 ```

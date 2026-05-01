@@ -4,7 +4,7 @@ UniDrive (also rendered "unidrive") is the project name.
 
 ## Use in your projects
 
-Apache 2.0 ([LICENSE](LICENSE)) governs the source code. The "UniDrive"
+Apache 2.0 ([LICENSE](LICENSE)) governs the source code. The "unidrive"
 name itself is **unprotected** project naming. You may use the name according to local and/or german law.
 
 ## Apache 2.0 and proprietary derivatives

@@ -1,7 +1,7 @@
 # Contributing to UniDrive
 
 Thanks for considering a contribution. UniDrive is in early-stage public
-preview (v0.0.1) — APIs, IPC, and on-disk layout are still moving. Expect
+preview — APIs, IPC, and on-disk layout are still moving. Expect
 breakage; expect strong opinions about provenance and trust.
 
 ## Before you open a pull request
