@@ -5,7 +5,7 @@
 [![Build](https://github.com/gkrost/unidrive/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/gkrost/unidrive/actions/workflows/build.yml?query=branch%3Amain)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**Why** — your data lives across half a dozen clouds and no two vendors agree on what "sync" means. UniDrive is one Kotlin daemon that knows about all of them: one config, one CLI, one MCP server an LLM can drive, one SQLite state DB per profile, structured sync events over a Unix-domain socket. No telemetry, no hidden control plane.
+**Why** — your data lives across multiple clouds and no two vendors agree on what "sync" means. UniDrive is one Kotlin daemon that knows about all of them: one config, one CLI, one MCP server an LLM can drive, one SQLite state DB per profile, structured sync events over a Unix-domain socket. No telemetry, no hidden control plane.
 
 **What** — a Kotlin/JVM monorepo at [`core/`](core/) with provider plugins discovered via SPI (`META-INF/services/org.krost.unidrive.ProviderFactory`). Adapters in tree: localfs, s3, sftp, onedrive, webdav, rclone, internxt. The reconciler ([`Reconciler.kt`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt)) is provider-agnostic; adapters supply truth via `/delta` where the API exposes one, `walk + mtime/size/etag` snapshots where it doesn't. Capability matrix at [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
