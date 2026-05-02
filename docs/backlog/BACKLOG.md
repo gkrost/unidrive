@@ -4928,3 +4928,95 @@ No data-loss path exists: nothing about disabling stores state outside the toggl
 ## Surfaced
 
 2026-05-02 session, after the UD-240g + UD-240i sequence (4 successive `./gradlew build` invocations totalling ~6 minutes of which ktlint was ~30 % of wall time). User explicitly asked to disable in-session.
+
+---
+id: UD-240i
+title: Reconciler.detectMoves O(D×U) Files.isRegularFile syscall storm
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:301
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:309
+opened: 2026-05-02
+---
+**`Reconciler.detectMoves` runs an O(D × U) `Files.isRegularFile` + `Files.size` syscall storm — D = DeleteRemote actions, U = Upload actions. On a real 67k-upload first-sync this stalls the engine for ~4 minutes of pure CPU and ~5 million native filesystem syscalls.**
+
+## Captured live (2026-05-02 17:48, jstack PID 12764)
+
+The running daemon — same workload that motivated UD-240g — was sampled mid-stall. Every jstack frame three seconds apart showed:
+
+```
+"main" runnable, cpu=334s elapsed=564s
+  at sun.nio.fs.WindowsNativeDispatcher.GetFileAttributesEx0  (native)
+  at java.nio.file.Files.isRegularFile
+  at org.krost.unidrive.sync.Reconciler.detectMoves          (Reconciler.kt:309)
+  at org.krost.unidrive.sync.Reconciler.reconcile            (Reconciler.kt:138)
+  at org.krost.unidrive.sync.SyncEngine.doSyncOnce           (SyncEngine.kt:221)
+```
+
+Process at 98 % CPU, **0 B/s IO** — pure syscall thrash against the OS file-attribute cache (the local tree was just walked seconds ago by `LocalScanner`, so everything was hot).
+
+## Root cause
+
+[Reconciler.kt:301-345](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt#L301) — file-move detection:
+
+```kotlin
+for (del in deletes) {              // outer: ~75 DeleteRemote actions
+    val entry = entryByPath[del.path] ?: continue
+    if (entry.isFolder || entry.remoteId == null) continue
+
+    for (up in uploads) {            // inner: ~67,000 Upload actions
+        ...
+        val localPath = resolveLocal(up.path)
+        if (!Files.isRegularFile(localPath)) continue   // ← line 309
+        if (Files.size(localPath) == entry.remoteSize) {
+            ...
+            break
+        }
+    }
+}
+```
+
+For each `(delete, upload)` pair we issue at least one `Files.isRegularFile` (and `Files.size` on hits). Worst case: D × U syscalls. With D ≈ 75 and U ≈ 67,000 → ~5 M Windows file-attribute syscalls at ~50 µs each = ~4 min wall-clock. UD-240g's bulk-load fix does **not** address this — the storm is in syscalls, not DB calls — so even with UD-240g landed the user still sees the same multi-minute silent hang on this workload (the heartbeat from UD-240g would fire from the main path-walk loop *before* `detectMoves`, but `detectMoves` itself remains heartbeat-free and silent).
+
+## Proposal
+
+Pre-pass uploads **once**, building a `Map<sizeBytes, MutableList<SyncAction.Upload>>` keyed by file size (only entries that pass `Files.isRegularFile`). Then for each delete look up `bySize[entry.remoteSize]` in O(1) and pick the first un-matched candidate.
+
+```kotlin
+// One pass, U syscalls total
+val uploadsBySize: Map<Long, List<SyncAction.Upload>> = uploads
+    .mapNotNull { up ->
+        val p = resolveLocal(up.path)
+        val info = probeLocalFile(p) ?: return@mapNotNull null  // null on non-regular
+        Triple(up, p, info.size)
+    }
+    .groupBy({ it.third }, { it.first })
+
+for (del in deletes) {                         // D iterations
+    val entry = entryByPath[del.path] ?: continue
+    val candidates = uploadsBySize[entry.remoteSize] ?: continue   // O(1)
+    val match = candidates.firstOrNull { it.path !in matchedUploads } ?: continue
+    // ... emit MoveRemote ...
+}
+```
+
+Total syscalls drop from D × U (~5,000,000) to U (~67,000) — purely linear. Wall-clock at ~50 µs/syscall: **3.4 s** instead of ~4 min on the same workload.
+
+## Acceptance
+
+- `Reconciler.detectMoves` issues at most one `isRegularFile` + at most one `size` per Upload action, regardless of how many DeleteRemote actions exist.
+- New `ReconcilerTest` injects a syscall-counting `localFsProbe` and asserts the bound holds for D = 100 deletes × U = 1000 uploads with no matches: **probe calls ≤ 1000**, not 100,000.
+- New correctness test asserts that a real (delete + same-sized upload) pair still produces a `MoveRemote` action — no behaviour regression.
+- Existing `Reconciler` tests, including the case-collision and folder-move paths, still pass.
+- Wall-time on the user's 2026-05-02 67k+19k workload drops from ~4 min in `detectMoves` to single-digit seconds.
+
+## Why filed as 240i
+
+Sibling of UD-240g and UD-240h; same first-sync-pain class, same workload, but the bottleneck is filesystem syscalls, not DB calls. Stacks on the UD-240g branch because both touch `Reconciler.detectMoves` (UD-240g changed its signature to take `entryByPath`); UD-240i builds on that signature.
+
+## Surfaced
+
+2026-05-02 17:48 — running daemon was sampled live with `jstack` while the operator was deciding whether to wait or kill. Three samples 3 s apart all showed the identical `Reconciler.detectMoves(Reconciler.kt:309)` frame. The CPU vs IO split (98 % CPU / 0 B/s IO) confirmed it was a syscall loop against the OS attribute cache, not a SQLite read.
