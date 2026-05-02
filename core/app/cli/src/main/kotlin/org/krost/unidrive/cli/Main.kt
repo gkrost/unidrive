@@ -351,19 +351,7 @@ class Main : Runnable {
         properties: Map<String, String?>,
     ): List<String> {
         val warnings = mutableListOf<String>()
-        val envMappings =
-            when (type) {
-                "s3" ->
-                    mapOf(
-                        "S3_BUCKET" to "bucket",
-                        "AWS_ACCESS_KEY_ID" to "access_key_id",
-                        "AWS_SECRET_ACCESS_KEY" to "secret_access_key",
-                    )
-                "sftp" -> mapOf("SFTP_HOST" to "host", "SFTP_USER" to "user", "SFTP_PASSWORD" to "password")
-                "webdav" -> mapOf("WEBDAV_URL" to "url", "WEBDAV_USER" to "user", "WEBDAV_PASSWORD" to "password")
-                "rclone" -> mapOf("RCLONE_REMOTE" to "rclone_remote")
-                else -> emptyMap()
-            }
+        val envMappings = org.krost.unidrive.ProviderRegistry.get(type)?.envVarMappings() ?: emptyMap()
         for ((envVar, key) in envMappings) {
             if (System.getenv(envVar) != null && properties[key] != null) {
                 warnings.add("Warning: Profile has credentials in config.toml. Ignoring $envVar environment variable.")
