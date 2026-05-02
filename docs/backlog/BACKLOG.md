@@ -3872,3 +3872,62 @@ retirement and is one click away.
 Broader ADR-0007 review (release cadence, conventional-commit
 enforcement, etc.) — this ticket is **only** the
 `shell-win-v0.3.0` line. Don't scope-creep.
+---
+id: UD-404
+title: CLI-Architektur: 3-Ebenen Command-Baum mit Single-Responsibility-Klassen
+category: cli
+priority: medium
+effort: M
+status: open
+opened: 2026-05-02
+---
+### Die Architektur (Clean Code im CLI-Design)
+
+Wenn man die CLI über eine moderne Bibliothek wie `picocli` (oder `clikt` falls Kotlin bevorzugt wird) aufbaut, lässt sich diese 3-Ebenen-Struktur perfekt in kleine, isolierte Klassen zerlegen. Das verhindert die typischen "Gott-Klassen", in denen hunderte Zeilen Argument-Parsing stattfinden.
+
+Die Paketstruktur spiegelt dabei exakt den CLI-Baum wider:
+
+```text
+org.krost.unidrive.cli
+├── UnidriveCommand         (Top-Level: unidrive)
+├── commands
+│   ├── show
+│   │   ├── ShowCommand     (Level 2: show)
+│   │   ├── StatusCommand   (Level 3: status)
+│   │   └── QuotaCommand    (Level 3: quota)
+│   ├── manage
+│   │   ├── ManageCommand   (Level 2: manage)
+│   │   ├── AuthCommand     (Level 3: auth)
+│   │   └── ProfileCommand  (Level 3: profile)
+│   └── run                 (Level 2: run / do)
+│       ├── RunCommand
+│       └── SyncCommand     (Level 3: sync)
+```
+
+Jedes Kommando ist nach dem Single-Responsibility-Prinzip nur für genau *eine* Aufgabe zuständig.
+
+### Umsetzung der Kombination aus Ansatz 5 und 3
+
+Du baust den Baum nach Ansatz 5 auf, nutzt aber die Annotations-Features deiner CLI-Library, um die Hilfe-Ausgabe (Ansatz 3) zu stylen. Hier ist ein Beispiel, wie so etwas konzeptionell aussieht:
+
+```java
+@Command(
+    name = "unidrive",
+    mixinStandardHelpOptions = true,
+    version = "1.0.0",
+    description = "The universal cloud drive synchronization engine.",
+    commandListHeading = "%n🚀 ACTIONS%n",
+    subcommands = {
+        ShowCommand.class,
+        ManageCommand.class,
+        RunCommand.class
+    }
+)
+public class UnidriveCommand implements Runnable { ... }
+```
+
+### Vorteile für den Entwicklungs-Workflow
+
+1. **Wartbarkeit:** Neues Feature → neue Klasse, keine bestehenden Klassen anfassen.
+2. **Git & Teamwork:** Jeder Befehl in eigener Datei → kaum Merge-Konflikte.
+3. **Kontext-Sensitivität:** Subcommands können validieren ob der Nutzer sich in einem aktiven `sync_root` befindet.
