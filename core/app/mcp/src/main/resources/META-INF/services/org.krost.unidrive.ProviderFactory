@@ -1,4 +1,3 @@
-org.krost.unidrive.hidrive.HiDriveProviderFactory
 org.krost.unidrive.internxt.InternxtProviderFactory
 org.krost.unidrive.localfs.LocalFsProviderFactory
 org.krost.unidrive.onedrive.OneDriveProviderFactory

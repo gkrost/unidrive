@@ -35,7 +35,6 @@ class ProviderInfoCommandTest {
                 "S3" to "s3",
                 "SFTP" to "sftp",
                 "WebDAV" to "webdav",
-                "HiDrive" to "hidrive",
                 "Internxt" to "internxt",
                 "LocalFS" to "localfs",
                 "RClone" to "rclone",
@@ -68,7 +67,8 @@ class ProviderInfoCommandTest {
     fun `knownTypes contains every runtime ServiceLoader provider`() {
         // This list must match the set of providers that ProviderFactory
         // actually constructs (see META-INF/services under core/providers/*).
-        val expected = setOf("hidrive", "internxt", "localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
+        // HiDrive archived 8d3c622 — IONOS no longer issues dev-app-IDs.
+        val expected = setOf("internxt", "localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
         assertEquals(expected, ProviderRegistry.knownTypes)
     }
 

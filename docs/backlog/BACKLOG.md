@@ -2510,3 +2510,971 @@ cheaply and pick whichever ships fastest.
 - **UD-754** (open) — auto-format Kotlin codebase. Sibling
   developer-ergonomics ticket.
 - **UD-728** (closed) — backlog tooling automation. Same spirit.
+---
+id: UD-759
+title: Salvage benchmark observatory pipeline (scripts/benchmark/) from pre-greenfield repo
+category: tooling
+priority: medium
+effort: M
+status: open
+code_refs:
+  - scripts/benchmark/
+opened: 2026-05-01
+---
+**Salvage the multi-source benchmark observatory pipeline from the pre-greenfield repo (`logic-arts-official/unidrive` HEAD `b8e4223`, 2026-04-16).**
+
+The old repo shipped a complete public-cloud-speed-ranking pipeline that produced the rankings displayed at `unidrive.krost.org`. The pipeline was lost during the greenfield restart (ADR-0008) and is currently absent from public.
+
+## What's there
+
+`scripts/benchmark/` in the old repo (Python + bash, no Kotlin coupling):
+
+| File | Purpose |
+|------|---------|
+| `benchmark-collect.sh` | Cron-driven collector. Runs `unidrive provider benchmark`, reshapes JSON into a per-provider median structure, uploads to remote SFTP drop. |
+| `benchmark-aggregate.py` | Aggregates collector JSONs from many machines/locations into `rankings.json`. Assigns A/B/C grades. 7-day rolling window with janitor for stale drops. |
+| `benchmark-publish.py` | Renders rankings as HTML table with affiliate-tagged "Sign up" CTAs. Posts to WordPress via REST API. |
+| `benchmark-healthcheck.py` | Standalone health probe. |
+| `unidrive-benchmark.{service,timer}` | Daily 03:00 systemd timer, randomised 600 s jitter. |
+| `providers.json` | 14-provider catalogue with country, GDPR status, free-tier, pricing, signup/affiliate URLs. |
+| `tests/fixtures/` | Real captured collector output (hetzner-dc, kubuntu-home) — useful as integration-test fixtures. |
+| `source.conf.example` | Per-source config (location, ISP, profile→provider_id map). |
+| `tests/test_aggregator.py` | pytest covering aggregator. |
+| `tests/test_publisher.py` | pytest covering publisher. |
+
+## Why we want it back
+
+The current public `ProviderMetadata` data class still has `userRating`, `benchmarkGrade`, `affiliateUrl` fields — these are **read** by `unidrive provider list` and `unidrive provider info` for display. But the **engine that produces the grades** is gone.
+
+Today these fields are static defaults in each `ProviderFactory` subclass. The old pipeline pushed measured grades back via WordPress publish — that monetisation/marketing surface was real and worked.
+
+Note: the current backlog has a separate, narrower ticket for "cross-provider benchmark harness" (synthetic Gradle task, single source) — different shape. The observatory pipeline is the multi-source aggregator + publisher, not the one-shot Gradle harness.
+
+## Acceptance
+
+- `scripts/benchmark/` re-imported 1:1 from old repo (5 Python files, 1 shell, 2 systemd unit files, 1 providers.json, fixtures).
+- `scripts/benchmark/README.md` updated for current repo paths (e.g. `core/` instead of root for the JAR).
+- The `unidrive provider benchmark` CLI subcommand it depends on lives in `unidrive-closed:benchmark` — verify the JSON shape it emits still matches what `benchmark-collect.sh` reshapes.
+- Optional: regenerate `providers.json` against current `ProviderMetadata` fields rather than the snapshot.
+
+## Out of scope
+
+- Re-deploying the cron to sg5 — this ticket is only about getting the code back into the repo.
+- Re-validating the WordPress endpoint (`unidrive.krost.org`) — separate operational concern.
+- Closed-side benchmark code (lives in `unidrive-closed:benchmark`).
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/benchmark/`. Pre-dates ADR-0008 greenfield restart by ~2 weeks.
+---
+id: UD-760
+title: Salvage Nautilus/Nemo/Dolphin context-menu integration
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - scripts/nautilus/
+  - scripts/install-menus.sh
+opened: 2026-05-01
+---
+**Salvage the file-manager context-menu integration from the pre-greenfield repo.**
+
+Old `unidrive` (CHANGELOG #110) shipped right-click → UniDrive → Hydrate / Dehydrate / Pin / Unpin for Nautilus (GNOME Files), Nemo (Cinnamon), and Dolphin (KDE). All three file managers, one dispatcher script.
+
+## What's there
+
+`scripts/nautilus/` and `scripts/install-menus.sh` in the old repo:
+
+| File | Purpose |
+|------|---------|
+| `scripts/nautilus/unidrive-menu.sh` | Dispatcher (~190 lines). Parses `config.toml`, resolves which profile a path belongs to (sync_root match), computes remote path, invokes `unidrive -p <name> {get|free|pin|unpin} <remote-path>`. Handles all three FM selection conventions: `$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS`, `$NEMO_SCRIPT_SELECTED_FILE_PATHS`, Dolphin positional `%F`. |
+| `scripts/nautilus/UniDrive — Hydrate` | Thin wrapper script (~5 lines) calling dispatcher with `hydrate` action. |
+| `scripts/nautilus/UniDrive — Dehydrate` | Same pattern, `dehydrate` action. |
+| `scripts/nautilus/UniDrive — Pin` | Same pattern, `pin` action. |
+| `scripts/nautilus/UniDrive — Unpin` | Same pattern, `unpin` action. |
+| `scripts/install-menus.sh` | One-shot installer. Drops Nautilus + Nemo entries under `~/.local/share/{nautilus,nemo}/scripts/UniDrive/`. Generates Dolphin `unidrive.desktop` ServiceMenu in `$XDG_DATA_HOME/kio/servicemenus/`. Auto-detects which FMs are installed. |
+
+## Why we want it back
+
+This is desktop polish that closes a real UX gap on placeholder-based sync: most users want point-and-click hydration. The dispatcher is non-trivial — it correctly resolves a local file path to its `(profile, remote_path)` tuple by parsing TOML, which is the only reason it works for arbitrary multi-profile setups.
+
+The CLI commands it depends on (`get`, `free`, `pin`, `unpin`) all survived the greenfield restart, so the dispatcher should still work as-is.
+
+## Acceptance
+
+- `scripts/nautilus/` and `scripts/install-menus.sh` re-imported 1:1.
+- Smoke test: install on the dev machine, right-click a placeholder, hydrate, verify file content downloads.
+- Optional: Nautilus's "Open Sync Folder" extension (separate from the menus) — out of scope for this ticket.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `scripts/nautilus/` + `scripts/install-menus.sh`.
+---
+id: UD-761
+title: Salvage end-user installer (dist/install.sh + systemd unit)
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - dist/install.sh
+  - dist/unidrive.service
+opened: 2026-05-01
+---
+**Salvage the end-user one-shot installer (`dist/install.sh` + `dist/unidrive.service`) from the pre-greenfield repo.**
+
+Current public has the `:app:cli:deploy` Gradle task which works for developers, but no end-user-facing installer. `git clone && ./gradlew :app:cli:deploy` requires JDK + Gradle + understanding the toolchain, which is friction for the "I just want to try this" path.
+
+## What's there
+
+Old repo's `dist/`:
+
+| File | Purpose |
+|------|---------|
+| `dist/install.sh` | 57-line bash. Drops fat JAR into `~/.local/lib/unidrive/`, generates `~/.local/bin/unidrive` wrapper, mkdirs `~/.local/share/unidrive/`, copies systemd unit, runs `systemctl --user daemon-reload`. Prints next-steps including `systemctl --user enable --now unidrive` and the vault-env recipe. |
+| `dist/unidrive.service` | systemd user unit. `ExecStart=%h/.local/bin/unidrive sync --watch`, `Restart=on-failure`, `RestartSec=30`, `EnvironmentFile=-%h/.config/unidrive/vault-env`. |
+| `dist/uninstall.sh` | Symmetric uninstaller (referenced in CHANGELOG, content unverified). |
+
+## Why we want it back
+
+`./gradlew :app:cli:deploy` is fine for the dev loop but it:
+1. Requires JDK on the user's machine just to install (they only need a JRE to run).
+2. Couples installation to the source tree.
+3. Doesn't print clear next-steps.
+
+A standalone `install.sh` that consumes a pre-built fat JAR is the natural artefact for a future GitHub release (`gh release download v0.1.0 unidrive.jar && ./install.sh unidrive.jar`).
+
+## Acceptance
+
+- `dist/install.sh` and `dist/unidrive.service` re-imported, paths updated for current repo layout (the old script assumes JAR at `cli/build/libs/`; current is `core/app/cli/build/libs/`).
+- Optional: the script accepts a JAR path argument so it works against a downloaded release artefact, not just a local build.
+- Smoke test on a clean Ubuntu container.
+- Document at `docs/user-guide/install.md` (or wiki page).
+
+## Out of scope
+
+- Distribution packaging (deb/rpm/AppImage/snap) — separate tickets if needed.
+- Windows installer — see `BACKLOG_IDEAS_UI.md` W16 (jpackage MSI).
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `dist/`.
+---
+id: UD-762
+title: Salvage lightweight doc-drift checker (check-docs.sh)
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - scripts/ci/
+opened: 2026-05-01
+---
+**Salvage the lightweight doc-drift checker `check-docs.sh` from the pre-greenfield repo.**
+
+The old repo's `check-docs.sh` is a 67-line shell script with 6 grep+regex checks for the most common drift patterns between docs and code. Cheap pre-commit hook material.
+
+## What's there
+
+`check-docs.sh` in the old repo, with these specific checks:
+
+1. **Kotlin version** in `gradle/libs.versions.toml` matches `ARCHITECTURE.md`.
+2. **Module count** in `CLAUDE.md` ("Eight Gradle modules", etc.) matches `settings.gradle.kts`.
+3. **CLI subcommand list** in `CLAUDE.md` matches `@Command(name=...)` annotations in `Main.kt`.
+4. **`SyncAction` sealed-subtypes count** matches the number cited in `CLAUDE.md`.
+5. **Provider modules** in `settings.gradle.kts` match `CLAUDE.md` provider list.
+6. **Logback version** in `gradle/libs.versions.toml` matches `ARCHITECTURE.md`.
+
+Each check that fails prints a one-line `FAIL: ...` with the mismatch. Total error count printed at the end. Exit code is the count of failures.
+
+## Why we want it back
+
+Current public has `scripts/dev/` with proper MCP servers (`backlog-mcp`, `gradle-mcp`, etc.) and `scripts/ci/` with deeper checks. But there's no lightweight pre-commit-friendly script for the cheap-to-detect doc drifts. The old script catches the "I bumped Kotlin in `libs.versions.toml` but `ARCHITECTURE.md` still says 2.0.21" class of drift in <1 second with no Gradle invocation.
+
+This complements (not replaces) the heavier MCP checks. The right home is a pre-commit hook + a `scripts/ci/` companion.
+
+## Acceptance
+
+- `scripts/ci/check-docs.sh` (or similar location, agree on placement) re-imported and adapted to current repo layout:
+  - JAR path now `core/app/cli/build/libs/` not `cli/build/libs/`.
+  - Module count check should match `settings.gradle.kts` includes including all 13 current modules.
+  - Add a check for `docs/AGENT-SYNC.md` ID-range table consistency with what `scripts/dev/backlog.py` knows about.
+- Wired into `scripts/dev/pre-commit/` if appropriate.
+- Run in CI as part of the lint pass.
+
+## Out of scope
+
+- Replacing the existing MCP-based doc tooling — this is an addition, not a replacement.
+- KDoc/Javadoc consistency — out of scope of the original script.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `check-docs.sh`.
+---
+id: UD-763
+title: Restore lost reference docs (WEBHOOKS, IPC-PROTOCOL, TEST-CHECKLIST)
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - docs/dev/
+opened: 2026-05-01
+---
+**Restore the three operational reference docs that didn't survive the greenfield restart: `WEBHOOKS.md`, `IPC-PROTOCOL.md`, `TEST-CHECKLIST.md`.**
+
+Each was a self-contained reference doc, not a backlog or session note, so they're salvage candidates rather than archival.
+
+## What's missing
+
+| Old path | Size | Why we want it |
+|----------|------|----------------|
+| `docs/WEBHOOKS.md` | 4.5 KB | OneDrive Graph webhook NAT setup recipes (ngrok, cloudflared quick + named tunnels, serveo, production reverse proxy), troubleshooting steps, security notes. The current SubscriptionRenewalScheduler is in code but the user-facing setup doc is gone. |
+| `docs/IPC-PROTOCOL.md` | 2.3 KB | Full NDJSON event schema with every field documented + a minimal Kotlin client snippet. Useful as the public contract for any third-party tray/UI that subscribes to the daemon socket — relevant given ADR-0013 deliberately keeps that surface open for community tools. |
+| `docs/TEST-CHECKLIST.md` | 8.6 KB | 53-step manual ADD-friendly test checklist organised in 9 parts (automated → CLI smoke → localfs roundtrip → trash/versioning → OneDrive share+webhook → relocate → vault → profiles → backup wizard). Pre-release sweep scaffolding. |
+
+## What changed since they were written
+
+- WEBHOOKS.md mentions auto-renewal as TODO. Current code has `SubscriptionRenewalScheduler` (closed: see CLOSED.md). Update the doc to reflect that.
+- IPC-PROTOCOL.md describes the event schema as it was 2026-04-16. Verify current `IpcProgressReporter` events match; update if they diverged.
+- TEST-CHECKLIST.md references the closed `BenchmarkCommand` and `provider benchmark` CLI which now lives in `unidrive-closed`. Either skip those steps or document the unidrive-closed dependency.
+
+## Acceptance
+
+- `docs/dev/webhooks-nat-setup.md` — port `WEBHOOKS.md`. Add a "current state" section noting auto-renewal works.
+- `docs/dev/ipc-protocol.md` — port `IPC-PROTOCOL.md`. Verify event field list against `IpcProgressReporter.kt` and `SyncReason.kt`. Mark as the contract for third-party tray clients.
+- `docs/dev/manual-test-checklist.md` — port `TEST-CHECKLIST.md`. Trim the OneDrive-specific parts that no longer make sense, or mark them as "requires `unidrive-closed`".
+- Cross-link from `docs/SPECS.md` and `docs/ARCHITECTURE.md`.
+
+## Out of scope
+
+- `WINDOWS-BACKLOG.md` — see `BACKLOG_IDEAS_UI.md` (lives there because all of W11–W16 are UI/Desktop concerns).
+- Pure changelogs and session-handover docs — those are tied to the old repo's commit history; not salvage candidates.
+
+## Provenance
+
+`logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `docs/{WEBHOOKS,IPC-PROTOCOL,TEST-CHECKLIST}.md`.
+---
+id: UD-764
+title: Regression: unidrive log doesn't print git commit hash per entry (was #122)
+category: tooling
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt
+opened: 2026-05-01
+---
+**`unidrive log` no longer prints the git commit hash per entry — regression from old #122.**
+
+CHANGELOG audit on 2026-05-01 against the pre-greenfield repo (`logic-arts-official/unidrive` HEAD `b8e4223`) found this entry:
+
+> **#122**: Git commit hash included in log entries for traceability
+
+Then verified against current `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt` — no `commit`, `commitId`, or `BuildInfo`-derived field is emitted per log line. The build-info object is only used by `--version` (verified in `Main.kt`).
+
+Why this matters: when a user reports a sync bug we ask them for `unidrive log`. Without the commit hash, we don't know which build their daemon was running when the symptoms occurred — even if they ran multiple sync cycles across a deploy boundary.
+
+## Failure mode this regression enables
+
+1. User runs daemon for a week.
+2. We push a fix to main, they `:app:cli:deploy`, daemon restarts on the new build.
+3. They report "sync was wrong yesterday".
+4. We ask for `unidrive log`. The log shows actions from yesterday, but no commit. We can't tell if those actions came from the buggy old build or the fixed new build.
+
+## Acceptance
+
+- `LogCommand.kt` injects the value of `BuildInfo.versionString()` (or just `BuildInfo.commit`) into each emitted log line. Either:
+  - **Option A:** add a `commit:` column to the rendered output table.
+  - **Option B:** prefix each line with `[<commit>]` like systemd journal does for unit names.
+- The unit test for `LogCommand` asserts a representative commit-hash format (`[a-f0-9]{7,40}`) appears in output.
+- For the JSON log output (`unidrive log --json` if it exists, otherwise NDJSON via IPC), add a `commit` field to each event.
+
+## Out of scope
+
+- Backfilling the field for entries written by old daemon builds — those entries simply have no commit, marked as `<unknown>`.
+- Rewriting the on-disk log format — additive change only.
+
+## Provenance
+
+CHANGELOG audit 2026-05-01. Old: `logic-arts-official/unidrive`@`b8e4223`, CHANGELOG entry `#122`. Confirmed missing in current via grep on `LogCommand.kt` for `commit|BuildInfo`.
+---
+id: UD-765
+title: Comprehensive CHANGELOG audit: pre-greenfield vs current code
+category: tooling
+priority: medium
+effort: M
+status: open
+code_refs:
+  - docs/CHANGELOG.md
+  - docs/backlog/CLOSED.md
+opened: 2026-05-01
+---
+**Track the systematic audit of the pre-greenfield CHANGELOG against current public code, and any follow-ups it surfaces.**
+
+The CHANGELOG of `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16) has 90+ "Added" / "Changed" / "Fixed" bullets representing work that was shipped and tested before the greenfield restart (ADR-0008). On 2026-05-01 a sample-based audit was run; this ticket tracks completing it comprehensively + filing fix tickets for anything that regressed.
+
+## Audit mechanics
+
+For each CHANGELOG bullet, grep current public code for the canonical symbols / config keys / CLI subcommand names and confirm:
+
+1. **Symbol present** — class/function exists at expected path.
+2. **Wired** — referenced by SyncEngine / CLI / MCP somewhere, not orphaned.
+3. **Tested** — there's a test class with `Test` suffix referring to it.
+
+If any of (1)(2)(3) fails: file a follow-up ticket, link it here.
+
+## Sample audit done 2026-05-01 (positive coverage)
+
+These are confirmed surviving (symbol present + wired + tested):
+
+`#1, #5, #24, #25, #26, #27, #28, #33, #34, #35, #36, #37, #41, #42, #43, #44, #46, #47, #48, #49, #52, #54, #57, #66, #73, #74-grade-fields, #75, #76, #78, #79, #82, #88, #89, #90, #91, #92, #94, #96, #97, #98, #99, #100, #101, #102, #103, #104, #105, #111, #115, #116, #118, #120, #121, #123, #129, #130, #131, #132, #133, #136, #137, #143, #144, #145, #146, #147` plus `SubscriptionRenewalScheduler` (new post-snapshot, supersedes the old "auto-renewal not implemented" caveat).
+
+## Sample audit found regressed (filed)
+
+- **UD-764** — `#122` git commit hash in `unidrive log` entries lost.
+
+## Sample audit found intentionally moved
+
+- **`#74` — `provider benchmark` CLI subcommand** is in `unidrive-closed:benchmark` module, not public. Closed-source by design (benchmark CLI is part of the closed CLI bundle). Not a regression.
+- **`#37` — `xtra-init` / `xtra-status`** moved from top-level CLI to `vault xtra-init` / `vault xtra-status` subcommands. Behaviour preserved.
+
+## Remaining work
+
+Comprehensive sweep — not the sample. Focus areas:
+
+1. Walk every "Added" entry in `[Unreleased]` (60+ items) and `[0.1.0]` (40+ items).
+2. For each, identify the load-bearing symbol/key and grep current code.
+3. Cross-check with `docs/backlog/CLOSED.md` — many entries map to closed UD-### tickets and may have been re-implemented under a different name.
+4. File regression tickets for losses, file "moved" notes here for re-orgs that aren't true losses.
+
+Useful starting points:
+- `git log --oneline main..origin/main` — but won't help (greenfield commit is the floor).
+- `git log --all --grep='UD-2..\|UD-3..'` — see how many tickets came from re-implementation vs new design.
+- `docs/SPECS.md` "Intent vs code" matrix — already does adjacent work.
+
+## Acceptance
+
+- A `docs/dev/2026-05-changelog-audit.md` report with one row per old CHANGELOG entry: status `present | regressed | moved | replaced | obsolete`, link to current code path or successor ticket.
+- Every `regressed` entry has a follow-up UD-### filed (priority calibrated to actual user impact, not just feature parity).
+- Audit report committed; this ticket closes pointing at the report.
+
+## Out of scope
+
+- Re-implementing every regressed feature — that's per-ticket work.
+- The closed-source `provider benchmark` subcommand — out of scope, lives in `unidrive-closed`.
+
+## Provenance
+
+Sample audit 2026-05-01. Source: `logic-arts-official/unidrive`@`b8e4223`, `docs/CHANGELOG.md`.
+---
+id: UD-766
+title: Wire backlog-sync.kts into CI (build.yml)
+category: tooling
+priority: high
+effort: XS
+status: open
+code_refs:
+  - scripts/backlog-sync.kts
+  - scripts/ci/backlog-sync.sh
+  - .github/workflows/build.yml
+opened: 2026-05-01
+---
+**Wire `scripts/backlog-sync.kts` into `.github/workflows/build.yml` as a CI step. Best leverage-to-effort ratio in the tree.**
+
+The script and shell wrapper both already exist (`scripts/backlog-sync.kts`, 179 lines; `scripts/ci/backlog-sync.sh`, 6 lines), but no CI job invokes them — drift goes uncaught until someone runs `kotlinc -script` locally, and most contributors don't.
+
+## What's already there
+
+- `scripts/backlog-sync.kts` — canonical orphan/stale/anchorless/abandoned checker per AGENT-SYNC.md. Exit 0 on clean (or warnings only); exit 1 on hard errors (orphan code refs, stale closed items).
+- `scripts/ci/backlog-sync.sh` — already exists as the CI wrapper. Three lines: `cd` to repo root, `exec kotlinc -script scripts/backlog-sync.kts`. Ready to call.
+- `docs/AGENT-SYNC.md` — already documents that this script is the contract. The contract just isn't enforced.
+
+## What gets caught the moment we wire it
+
+In one shot:
+- **Orphan code refs** — `// UD-xyz` in source with no matching block in `BACKLOG.md`/`CLOSED.md`.
+- **Stale closed** — IDs in `CLOSED.md` still referenced in source.
+- **Non-canonical statuses** — frontmatter `status:` outside `open|in-progress|blocked|closed`.
+- **Anchorless open** (warning) — `code_refs:` pointing at non-existent files.
+- **Abandoned** (warning) — `status: open`, no `code_refs`, opened > 30 d ago.
+- **Source-vs-CLOSED drift** — entries that disagree between BACKLOG and CLOSED.
+
+These are the failure modes that today only surface during PR review or session handover. Wiring catches them at push time.
+
+## Acceptance
+
+- New job `backlog` in `.github/workflows/build.yml` running on `ubuntu-latest` only (kotlinc-only — no JDK build needed):
+  - Checkout
+  - Set up JDK 21 (kotlinc needs it)
+  - Install kotlinc (`curl` from GitHub releases, or use a marketplace action — pick whichever is cheaper)
+  - `bash scripts/ci/backlog-sync.sh`
+- Job runs on push to `main` and on PRs (same triggers as `core`).
+- Job is **fast** — script reads docs + greps `core/` for `UD-###` patterns, no Gradle invocation. Should be < 30 s including kotlinc warmup.
+- `concurrency:` group shared with the existing `core` group so PRs don't queue duplicates.
+- Failure surfaces in the PR check list with a useful summary (the script's stderr is already shaped for humans).
+
+## Out of scope
+
+- Re-using the existing Gradle daemon — kotlinc is fine standalone for a 179-line script.
+- Strict mode for warnings — keep "anchorless open" + "abandoned" as warnings only (script default). If we want to escalate later, that's a separate ticket.
+- Running this in a pre-commit hook — separate ticket, related to UD-762's `check-docs.sh` salvage.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Highest leverage/effort ratio in the tree because: (a) script + wrapper already exist, (b) checks every PR + every push to `main`, (c) catches 6 distinct drift classes simultaneously.
+---
+id: UD-003
+title: ADR-0014 consolidating ADR-0008/0011/0012/0013 — v0.1.0 surface
+category: architecture
+priority: high
+effort: XS
+status: open
+code_refs:
+  - docs/adr/
+opened: 2026-05-01
+---
+**Write ADR-0014 consolidating the v0.1.0 surface as it stands after ADR-0008 + 0011 + 0012 + 0013.**
+
+A new contributor reading the ADR set today must mentally compose four documents to answer "what's actually shipping?":
+
+- ADR-0008 (greenfield restart): "v0.1.0 = core-only, ui/ + shell-win/ at preview"
+- ADR-0011 (remove shell-win): "actually, shell-win/ is gone"
+- ADR-0012 (Linux-only MVP + protocol/ removal): "actually, protocol/ + named pipes are gone too"
+- ADR-0013 (remove ui/): "actually, ui/ is also gone"
+
+ADR-0008's stated trade-offs ("no tray, no Explorer integration") are now the actual shipped state, not a temporary acceptance. Each amendment ADR explicitly cross-references the others (see the `amends` / `amended_by` frontmatter chain). The chain is faithfully recorded but not summarised.
+
+## Why a consolidator is the right shape (not a rewrite)
+
+ADR-0008..0013 are **historical** — they record decisions and the context at the time. ADR rule of thumb: never rewrite history; instead supersede with a new ADR that captures the *current* decision surface. ADR-0014 is that consolidation.
+
+It does **not** invalidate the four it consolidates. They stay accepted; ADR-0014 cites them as `consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013` and is the **single answer** to "what's shipping in v0.1.0?"
+
+## Acceptance
+
+`docs/adr/0014-v0_1_0-surface.md`, ~half a page, frontmatter:
+
+```yaml
+---
+id: ADR-0014
+title: v0.1.0 release surface, post-amendments
+status: accepted
+date: 2026-05-01    # or whatever date this is filed
+consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013
+related: ADR-0001, ADR-0003, ADR-0006, ADR-0009
+---
+```
+
+Body sections (each one paragraph max — ADR-0014 is a summary, not a redo):
+
+1. **Context (1 paragraph):** The amendment chain ADR-0008 → 0011 → 0012 → 0013 settled into a coherent shape; this ADR records the consolidated surface.
+2. **What ships in v0.1.0:**
+   - **Tiers:** `core/` only (CLI + MCP + sync engine + 8 provider adapters).
+   - **Platform:** Linux-only.
+   - **IPC:** UDS broadcast (`IpcServer.kt`, `IpcProgressReporter.kt`). NDJSON push-only.
+   - **Providers in the v0.1.0 quality gate:** `localfs`, `s3`, `sftp`. Others (OneDrive, WebDAV, HiDrive, Internxt, Rclone) present but at `status: preview` per ADR-0008.
+   - **What's gone:** `ui/`, `shell-win/`, `protocol/`, `NamedPipeServer.kt`, `PipeSecurity.kt`, all CFAPI plumbing.
+3. **Out of v0.1.0 (one-liners pointing at the right home):**
+   - Windows / macOS support → ADR-0012 plus `BACKLOG_IDEAS_UI.md` for distribution-channel design (jpackage, Scoop, WinGet).
+   - Tray UI / system-tray indicator → `BACKLOG_IDEAS_UI.md` (W11, W12).
+   - Shell-extension overlays (Windows Explorer / Nautilus / Dolphin) → `BACKLOG_IDEAS_UI.md` (W14).
+   - File-manager context menus (Linux) → `BACKLOG.md` UD-760 (in scope, just not yet salvaged).
+4. **Consequences (1 paragraph):** New contributors get one ADR to read for the "what's shipping" question. The four amendment ADRs remain authoritative for the *why*.
+5. **References:** Link each consolidated ADR + `BACKLOG_IDEAS_UI.md` + the `BACKLOG.md` salvage tickets (UD-759..765).
+
+## Out of scope
+
+- Rewriting any of ADR-0008..0013. They stay as-is.
+- Defining v0.2.0 or later — separate ADR when that scope crystallises.
+- Updating `ARCHITECTURE.md` or `SPECS.md` — those already reflect the post-amendment state via their own update path.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Identified during the post-CHANGELOG-audit retrospective as the highest-leverage doc fix for new-contributor onboarding.
+---
+id: UD-767
+title: Add docs/ROADMAP.md + docs/NON-GOALS.md (half page each)
+category: tooling
+priority: high
+effort: XS
+status: open
+code_refs:
+  - docs/ROADMAP.md
+  - docs/NON-GOALS.md
+  - README.md
+opened: 2026-05-01
+---
+**Add `docs/ROADMAP.md` and `docs/NON-GOALS.md` — half a page each. Raises the project from "preview with strong opinions" to "preview with discoverable strategy."**
+
+The current public has rigorous tactical docs (`SPECS.md`, `ARCHITECTURE.md`, `AGENT-SYNC.md`, `BACKLOG.md`, 13 ADRs, lessons-learned files) but no single document that answers a contributor's first two questions:
+
+1. **"Where is this going?"** — answered today only by reading 13 ADRs + the BACKLOG.md (90+ tickets) + the wiki. That's a 30-minute reading task, and even after it the answer is implicit.
+2. **"What is this *not* trying to be?"** — answered today only by ADR-0011/0012/0013 (each phrased as "we removed X"), which is hard to discover proactively.
+
+Both gaps are common in open-source previews. Closing them is a half-day of writing that pays off every time someone asks "does it support Y?", "will it ever do Z?", "should I file this as a feature request?"
+
+## What goes where
+
+### `docs/ROADMAP.md` (~half a page)
+
+**Audience:** prospective contributor, prospective user, prospective sponsor.
+
+**Shape:** time-anchored milestones, not a feature list. Each milestone is one paragraph.
+
+```markdown
+# Roadmap
+
+## v0.1.0 — first release (Linux MVP)
+Quality-gated providers: localfs, s3, sftp. CLI + MCP + sync engine.
+Linux-only. Outstanding gates: <link to BACKLOG.md milestone:v0.1.0>.
+
+## v0.2.0 — preview providers graduate
+OneDrive, WebDAV, HiDrive, Internxt, Rclone leave preview status. Each
+needs: live-integration test in CI, capability-contract round-trip
+(ADR-0005), parallelism budget tuned in `ProviderMetadata`. Likely Q3.
+
+## v0.3.0 — release artefacts
+Standalone installer (`dist/install.sh`, UD-761), GitHub Releases with
+fat JAR, Scoop bucket / WinGet manifest if community appetite exists.
+Webhook-driven sync exits experimental status (UD-???).
+
+## Beyond v0.3.0 — not committed
+- Shell-extension overlays (Linux: Nautilus + Dolphin; Windows: depends
+  on appetite). See `BACKLOG_IDEAS_UI.md`.
+- Companion projects: `unidrive-android` (in flight in adjacent repo),
+  `unidrive-tray` (community).
+- Provider expansion to Google Drive, Dropbox, Box (currently only via
+  rclone gateway).
+```
+
+Cross-links into `BACKLOG.md`'s `milestone:v0.1.0` field. If we don't currently use the `milestone:` field consistently, the ROADMAP creation forces that audit.
+
+### `docs/NON-GOALS.md` (~half a page)
+
+**Audience:** anyone about to file a feature request that won't land.
+
+**Shape:** explicit list with one-line "why not" for each. Doesn't need numbering.
+
+```markdown
+# Non-goals
+
+unidrive-cli explicitly does NOT aim to:
+
+- **Be a backup tool.** Sync ≠ backup. We sync deltas; we do not snapshot
+  history-aware archives. Use restic/borg/duplicacy for that. (We do
+  retain `unidrive backup add` for one-way replication, which is
+  different from a backup tool.)
+- **Run on Windows or macOS in v0.1.0.** ADR-0012 is the authority. Both
+  are post-v0.3.0 candidates per `BACKLOG_IDEAS_UI.md`.
+- **Ship a system-tray UI in core.** ADR-0013 moved that to companion
+  projects; the daemon's UDS broadcast surface is the contract for
+  third-party trays. See `BACKLOG_IDEAS_UI.md` W11/W12.
+- **Implement provider-specific features that don't generalise.** The
+  `CloudProvider` interface is deliberately minimal; provider quirks
+  hide behind capabilities (ADR-0005). "OneDrive shared notebooks" or
+  "Dropbox Paper documents" are out unless they map to a generalisable
+  capability.
+- **Be a sync conflict resolver.** We surface conflicts (`unidrive
+  conflicts`) and offer two policies (`keep_both`, `last_writer_wins`),
+  but we do not auto-merge document contents. Document-merge tooling is
+  a different product.
+- **Replace native cloud storage clients.** OneDrive's official client
+  has features we won't replicate (cloud streams in Office, embedded
+  Teams sharing, etc.). We're a **second-class citizen** for any single
+  provider, but a **first-class citizen** for the multi-provider use
+  case. That's the trade.
+```
+
+Each non-goal cites either an ADR, a BACKLOG_IDEAS_UI section, or a "why" sentence. The list isn't fixed — adding a non-goal as the project matures is fine, and gets a date footer (`Updated YYYY-MM-DD`).
+
+## Why both, not just one
+
+A roadmap without non-goals reads as "all the things, eventually, just be patient" — which is what every preview looks like and trains contributors to file maximalist requests. Non-goals constrain expectations bidirectionally: contributors know what won't land, users know what to look elsewhere for, sponsors know the scope they're actually backing.
+
+## Acceptance
+
+- `docs/ROADMAP.md` exists, ~half a page, links to BACKLOG.md milestone field + ADR-0014 (when filed under UD-003).
+- `docs/NON-GOALS.md` exists, ~half a page, references ADR-0011/0012/0013 + ADR-0005 + `BACKLOG_IDEAS_UI.md`.
+- `README.md` adds two links in the docs section pointing at both.
+- Wiki Home page (built 2026-05-01) gets a "What's next" section with a one-liner pointer to ROADMAP.md.
+- If `BACKLOG.md` items don't currently have `milestone:` set, populate it for the ones in v0.1.0 / v0.2.0 / v0.3.0 buckets — keeps ROADMAP.md and BACKLOG.md in sync via the milestone field.
+
+## Out of scope
+
+- Detailed feature specs for v0.2.0 or v0.3.0 — those ship as separate spec files in `docs/specs/` when the time comes.
+- Marketing copy / pitch deck — different artefact, different audience.
+
+## Provenance
+
+Discussed 2026-05-01 with maintainer. Pairs with UD-003 (ADR-0014 surface consolidator) — together they make the project navigable for new contributors without reading 13 ADRs + 90 tickets.
+---
+id: UD-004
+title: Decompose SyncEngine.kt into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor; enforce single-flight-per-profile in code
+category: architecture
+priority: high
+effort: XL
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+is 1249 LoC with 28 methods. The single function `doSyncOnce` is
+467 lines. The class is the central reconciliation engine.
+
+Concurrency footprint today: 8 atomic primitives
+(`AtomicInteger`/`AtomicReference`) used to track per-pass progress
+counters during a single sync. There are **no `synchronized` blocks,
+no `Mutex`, no `@Volatile` fields** on the engine's state machine.
+
+This is currently safe because `ProcessLock` serialises `syncOnce` per
+profile (one in-flight sync per profile, enforced at the OS-pidfile
+level outside SyncEngine itself). The "no engine-internal locking
+needed" invariant lives only in the comment that introduces
+`ProcessLock`. Nothing in SyncEngine fails loudly if that comment
+ever stops being true.
+
+## Risk
+
+Any future change that:
+- parallelises a scan pass (e.g. fanning out provider listings),
+- introduces a second invocation surface that bypasses `ProcessLock`
+  (e.g. an MCP tool that calls `doSyncOnce` directly without going
+  through the CLI's `SyncCommand` path),
+- or splits SyncEngine across multiple coroutine scopes,
+
+…would race silently. The atomics in place catch counter contention,
+not state-machine contention.
+
+## Proposed split (to be designed in an ADR before any refactor)
+
+A reasonable decomposition into smaller units with explicit
+boundaries:
+
+- **Reconciler** (already exists at
+  `core/app/sync/.../Reconciler.kt`) — pure 3-way merge, no I/O.
+  Already isolated; keep.
+- **ScanCoordinator** — owns provider-side delta/snapshot fetch +
+  local-side `LocalScanner` walk. Currently spread across
+  `doSyncOnce` lines ~150-350 (approx; needs survey).
+- **ActionPlanner** — turns reconciled diff into the action list
+  (upload / download / conflict). Currently inline in `doSyncOnce`
+  around lines 350-450 (approx).
+- **ActionExecutor** — runs the planned actions, owns the retry /
+  failure-collection state. Currently inline in `doSyncOnce` after
+  line ~450 (approx).
+- **SyncEngine** thin orchestrator — wires the above together,
+  enforces the single-flight invariant in code (not in a sibling
+  comment).
+
+Each unit has one clear responsibility, communicates through a
+typed interface, and can be tested independently with fakes.
+
+## Acceptance criteria
+
+- [ ] ADR (architecture range, e.g. ADR-0015) lays out the boundary
+      contract for the four units above before any code moves.
+- [ ] `SyncEngine.kt` < 300 LoC, no method > 100 LoC.
+- [ ] Single-flight-per-profile invariant is enforced *in code*
+      (e.g. private `Mutex` per profile, or a typestate that prevents
+      reentry), not by a comment about `ProcessLock`.
+- [ ] No regressions in `:app:sync:test` and the localfs round-trip
+      smoke.
+- [ ] Existing 1450-test suite still green, no test removed.
+
+## Why this is a separate ticket, not done in PR #7
+
+PR #7 is salvage + cleanup. This is a multi-week structural refactor
+behind an ADR. Conflating them would obscure the salvage commits,
+balloon the diff, and put real regression risk on a PR whose value
+is "land what's already there cleanly".
+
+## Out of scope
+
+- Threading model overhaul (coroutine scope topology, cancellation
+  contracts) — separate ADR if needed.
+- Provider-side concurrency primitives — those live in each
+  `*ApiService.kt`, not here.
+---
+id: UD-400
+title: Sweep 10 os.name branches from non-test code; honour Linux-MVP per ADR-0011/0012; add CI guard
+category: cli
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:586
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:719
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:286
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt:19
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ConflictsTool.kt:25
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt:52
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:252
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:166
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/PlaceholderManager.kt:194
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1202
+opened: 2026-05-02
+---
+## Problem
+
+ADR-0011 + ADR-0012 narrowed the MVP to **Linux**. Yet 10
+`os.name` / `System.getProperty("os.name")` branches survive in
+non-test code:
+
+| File | Line |
+|---|---|
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` | 586 |
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` | 719 |
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt` | 286 |
+| `core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt` | 19 |
+| `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ConflictsTool.kt` | 25 |
+| `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt` | 52 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt` | 252 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt` | 166 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/PlaceholderManager.kt` | 194 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt` | 1202 |
+
+Each branch typically guards a Windows-specific path (named-pipe
+fallback, `chcp`, Win-only `OpenBrowser` shell-out, etc.).
+
+Most of the protocol-level Windows surface was removed in
+ADR-0012 (named-pipe transport gone), but these per-callsite
+branches remained as defensive code "just in case the JVM happens
+to be on Windows." That's not honest: the rest of the build
+(launcher scripts, smoke test, CI matrix, documentation) treats
+Windows as community-best-effort.
+
+## Risk
+
+- **Documentation drift.** ADR-0012 says Linux MVP; the code
+  reads as if it serves three platforms.
+- **Dead-code maintenance burden.** Every Windows branch is a
+  thing future readers must understand and reviewers must
+  consider when changing the surrounding code.
+- **False-positive test scenarios.** A few of these branches
+  (e.g. `IpcServer.kt:252`, `LocalScanner.kt:166`) sit on hot
+  paths; their existence implies they're tested, but there is no
+  Windows runtime in CI for the protocol/IPC layers.
+
+## Proposed action
+
+For each of the 10 sites:
+
+1. Read the branch. Classify as one of:
+   - **Pure Windows specifics with no Linux behaviour** → delete.
+     Add `// removed in UD-XXX (Linux MVP per ADR-0012); restore
+     when re-opening Windows tier per ADR-0012 §re-opening
+     criteria.` if the deletion is non-obvious.
+   - **Genuine cross-platform dispatch where Linux happens to
+     share a branch** → keep, but rewrite to make Linux the
+     happy path and Windows the unsupported fallback (e.g.
+     `error("Windows is not supported in v0.1.0; see ADR-0012")`).
+   - **Stale defensive guard from before ADR-0012** → delete
+     unconditionally.
+2. After the sweep, add a check to `scripts/ci/check-boundaries.sh`
+   (or a new `scripts/ci/check-os-branches.sh`) that fails CI
+   on any new `os.name` branch added to non-test code outside
+   an explicitly allow-listed file (e.g. the Windows-specific
+   parts of the launcher generator, if any).
+
+## Acceptance criteria
+
+- [ ] All 10 sites triaged, decisions documented either in
+      individual commit messages or in this ticket's resolution.
+- [ ] After cleanup, `grep -rE 'os\.name|System\.getProperty\("os'
+      core --include="*.kt" | grep -v /test/` returns ≤ 2 hits,
+      and each surviving hit has a comment justifying it.
+- [ ] CI guard script wired into `.github/workflows/build.yml`
+      (host-neutral fragment first, per `scripts/ci/README.md`).
+- [ ] No behaviour change on Linux. Smoke test (`scripts/smoke.sh`)
+      still passes after the sweep.
+
+## Why this is a separate ticket
+
+Each branch deletion is a small judgement call; bundling them
+into a single sweep keeps the cognitive surface small per commit.
+PR #7 is salvage scope; OS-cleanup is its own pass.
+---
+id: UD-354
+title: Verify Internxt does not call computeSnapshotDelta; if confirmed, adopt or document exemption
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - docs/ARCHITECTURE.md
+opened: 2026-05-02
+---
+## Problem
+
+`docs/ARCHITECTURE.md` documents `computeSnapshotDelta` as the
+shared cross-provider helper for snapshot-mode delta computation
+(every provider whose API does not expose `/delta` natively is
+expected to use it). An external code-review pass flagged that
+**Internxt does not call `computeSnapshotDelta`** despite being
+a snapshot-mode provider, and that no exemption is documented.
+
+This ticket has two parts: (a) verify the claim against current
+code (the auditor's snapshot may pre-date refactors); (b) if the
+claim holds, decide whether Internxt should adopt the helper or
+whether its custom path needs an explicit ADR-level exemption.
+
+## Verification gap
+
+At ticket-filing time the gap was not personally re-verified
+against current `:app:sync` code. Before any fix:
+
+```bash
+grep -rn "computeSnapshotDelta" core/app/sync/src/main/
+grep -rn "computeSnapshotDelta\|InternxtSnapshot\|InternxtDelta" \
+    core/providers/internxt/src/main/
+```
+
+…to confirm whether Internxt actually opts out, or whether the
+helper is invoked from a layer the auditor didn't trace.
+
+If verification disproves the claim, **close as wontfix** with a
+note pointing at the call-site that proves the helper is used.
+
+## If verified
+
+Two acceptable resolutions:
+
+1. **Adopt the helper.** Refactor `InternxtProvider` (or its
+   `Snapshot.kt` peer) to call `computeSnapshotDelta`, deleting
+   the duplicate implementation. Behaviour-preserving;
+   golden-file test on a sample snapshot pair to lock parity.
+2. **Document the exemption.** Add a short ADR (or a
+   `docs/providers/internxt.md` § "Why Internxt does not use
+   computeSnapshotDelta") explaining the technical reason
+   (e.g. Internxt's API returns deltas in a non-snapshot shape
+   that doesn't fit the helper's contract). Update
+   ARCHITECTURE.md to acknowledge the exemption alongside the
+   helper's documentation.
+
+## Acceptance criteria
+
+- [ ] Verification step run; result documented in this ticket.
+- [ ] Either: helper adoption merged with a parity test, OR
+      exemption documented in the right place
+      (`docs/providers/internxt.md` + ARCHITECTURE.md cross-link).
+- [ ] No regression in `InternxtIntegrationTest` and
+      `InternxtNameSanitizationTest`.
+
+## Context
+
+Internxt test ratio at filing time was 0.46 (915 test LoC over
+1968 main LoC) — second-lowest in the repo after the now-archived
+HiDrive. Encryption is in scope (`InternxtCrypto.kt`), which
+makes any silent semantic drift in the snapshot path
+particularly costly to debug after the fact.
+---
+id: UD-355
+title: Install RequestId + HttpRetryBudget in S3ApiService and WebDavApiService; replace ARCHITECTURE.md 'where applicable' with adoption table
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - docs/ARCHITECTURE.md
+opened: 2026-05-02
+---
+## Problem
+
+`docs/ARCHITECTURE.md` documents `RequestId` and `HttpRetryBudget`
+as the shared cross-provider helpers Ktor-using providers install
+"where applicable." Verified at filing time:
+
+```
+$ grep -rln "RequestId\|HttpRetryBudget" core/providers/*/src/main/
+core/providers/internxt/src/main/kotlin/.../InternxtApiService.kt
+core/providers/onedrive/src/main/kotlin/.../OneDriveProviderFactory.kt
+core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt
+core/providers/onedrive/src/main/kotlin/.../model/ApiResponse.kt
+```
+
+So **only `onedrive` and `internxt` actually install them.**
+`s3`, `webdav` (and `sftp`, `rclone`, `localfs`) do not.
+
+For `localfs`, `sftp`, `rclone` the absence is justified — they
+either don't use Ktor or don't speak HTTP at all. **For `s3` and
+`webdav` the absence is a real gap:**
+
+- `s3` (or any S3-compatible endpoint, e.g. AWS S3, MinIO,
+  Cloudflare R2, Synology C2) returns 503 / `SlowDown` /
+  `RequestTimeout` under load. No retry-budget circuit means
+  the daemon will hammer a degraded endpoint and either get
+  rate-limited harder or amplify a brief outage into a sustained
+  one.
+- `webdav` servers (NextCloud, Synology WebDAV, hoster
+  webdrives) similarly return 429 / 503 under congestion.
+  Without `RequestId` correlation, a multi-request failure
+  cluster can't be tied to a single root cause in
+  `unidrive.log`.
+
+## Why this isn't caught today
+
+The "where applicable" hedge in ARCHITECTURE.md is doing all the
+load-bearing work. The only test that would catch the gap is a
+live integration test against a throttling endpoint, and:
+- `s3` integration tests use MinIO which doesn't simulate 503
+  storms.
+- `webdav` integration tests use a local Apache instance with no
+  rate-limit path.
+
+So the gap is silent in CI. It would surface as a user-visible
+"sync stuck on retries" report against a real provider, with no
+correlatable log lines.
+
+## Proposed action
+
+1. Update ARCHITECTURE.md "shared cross-provider utilities" §
+   to drop the "where applicable" hedge and instead enumerate
+   per-provider adoption status:
+   ```
+   | Provider | RequestId | HttpRetryBudget | Justification |
+   |---|---|---|---|
+   | localfs | n/a | n/a | local FS, no HTTP |
+   | sftp    | n/a | n/a | SFTP transport |
+   | rclone  | n/a | n/a | shells out to rclone binary |
+   | s3      | TODO | TODO | UD-XXX |
+   | webdav  | TODO | TODO | UD-XXX |
+   | onedrive | ✓  | ✓  | adopted UD-XXX |
+   | internxt | ✓  | ✓  | adopted UD-XXX |
+   ```
+2. Implement `RequestId` + `HttpRetryBudget` installation in
+   `S3ApiService` and `WebDavApiService`. Pattern is already
+   established in `GraphApiService` and `InternxtApiService`;
+   lift to `:app:core/http` if that lift hasn't already
+   happened (check the cross-provider duplication audit
+   2026-04-30 referenced in CLAUDE.md).
+3. Add a unit test per provider that asserts `RequestId` is
+   present in outgoing request headers and that
+   `HttpRetryBudget` opens the circuit after N synthetic 503s.
+   Pattern: see `ThrottleBudgetTest` in onedrive.
+
+## Acceptance criteria
+
+- [ ] ARCHITECTURE.md "where applicable" replaced with per-provider
+      adoption table.
+- [ ] `S3ApiService` and `WebDavApiService` install both helpers.
+- [ ] Unit tests assert presence (not implementation) — per
+      `challenge-test-assertion`, the invariant is "outgoing
+      requests are correlatable and retries are bounded", not
+      "exactly N retries occur".
+- [ ] No regression in S3 / WebDAV integration tests.
+
+## Why this is a separate ticket
+
+Adding retry budgets to two providers is a 2-3 file change per
+provider plus a doc edit. Doable in one session, but distinct
+from PR #7's salvage scope and worth its own atomic commit so
+the rationale survives in `git log`.

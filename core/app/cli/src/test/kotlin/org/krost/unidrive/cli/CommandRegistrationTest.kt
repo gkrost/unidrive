@@ -29,10 +29,14 @@ class CommandRegistrationTest {
     }
 
     @Test
-    fun `ServiceLoader discovers all 8 providers`() {
+    fun `ServiceLoader discovers all in-tree providers`() {
+        // Invariant: every provider module that ships in tree must be SPI-discoverable
+        // via ProviderRegistry.knownTypes (its META-INF/services/...ProviderFactory
+        // file must register cleanly). Silent SPI registration failure shows up at
+        // user runtime as "unknown provider type X"; we want it to fail at CI time.
+        // HiDrive archived 8d3c622 — IONOS no longer issues dev-app-IDs.
         val types = org.krost.unidrive.ProviderRegistry.knownTypes
         assertTrue("onedrive" in types, "onedrive missing")
-        assertTrue("hidrive" in types, "hidrive missing")
         assertTrue("internxt" in types, "internxt missing")
         assertTrue("rclone" in types, "rclone missing")
         assertTrue("s3" in types, "s3 missing")
