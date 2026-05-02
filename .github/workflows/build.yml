@@ -57,6 +57,11 @@ jobs:
         shell: bash
         run: bash scripts/ci/test-hygiene.sh
 
+      - name: SPI dispatch boundary check
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: bash scripts/ci/check-no-provider-string-dispatch.sh
+
       - name: Semgrep security scan
         if: matrix.os == 'ubuntu-latest'
         run: pip install semgrep && semgrep scan --config .semgrep.yml --error

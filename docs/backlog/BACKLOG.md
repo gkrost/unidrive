@@ -4508,3 +4508,76 @@ It's a test-architecture refactor.
 ## Out of scope
 
 Other test patterns (the wizard tests, integration tests, capability-matrix tests). This is just the missing-field assertion family.
+---
+id: UD-012
+title: Replace 8x "onedrive" historical default in SyncConfig.kt with ProviderRegistry-driven default (or document via ADR)
+category: architecture
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:304
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:313
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:359
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:433
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:436
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:441
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:461
+opened: 2026-05-02
+---
+## Problem
+
+`SyncConfig.kt` hardcodes `"onedrive"` as the universal fallback default at 8 sites (verified 2026-05-02 against the post-refactor/provider-spi-contract tree):
+
+| Line | Role |
+|---|---|
+| 304 | `providerId: String = "onedrive"` (default param of `RawProvider.defaults`-helper-style ctor) |
+| 313 | `"onedrive" to "OneDrive"` — display-name override map |
+| 359 | `fun defaults(providerId: String = "onedrive")` |
+| 433 | `if (!Files.exists(configFile)) return "onedrive"` (resolveDefaultProfile waterfall) |
+| 436 | `raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive"` |
+| 441 | `"onedrive"` (last fallback in resolveDefaultProfile) |
+| 461 | `profileName: String = "onedrive"` (default param) |
+
+Plus one help-text reference:
+- `core/app/cli/src/main/kotlin/.../Main.kt:474` — `RCLONE_BINARY ... default: "rclone"` (refers to the rclone *binary* on PATH, not the provider id; mentioned for completeness).
+
+The `SyncConfig` references are the "single-provider-era" artefact: the project had only OneDrive when this default was chosen. With 7 in-tree providers today, the choice is undocumented and inconsistent (display-name map at 313 only covers one provider; the rest get their default-display from elsewhere).
+
+## Proposed action
+
+Replace with a registry-driven default. Two acceptable shapes:
+
+**A) `ProviderRegistry.defaultProvider()`** that returns either:
+- the first SPI-discovered provider (deterministic by classpath order, usually `localfs` since it's pure-Java); or
+- a config-driven choice (`general.default_provider_when_none` in `config.toml`).
+
+Then `SyncConfig.kt` calls `ProviderRegistry.defaultProvider()` instead of literal `"onedrive"`. Display-name map at line 313 is removed in favour of `ProviderRegistry.getMetadata(id)?.displayName`.
+
+**B) Keep "onedrive" but document why** in an ADR. If OneDrive is genuinely the canonical default for the project's target audience, that's a defensible position — but it should be a deliberate choice with `// allow: per ADR-XXXX` markers on each site.
+
+Recommend **A**. The architecture has moved on; the literal hasn't. A registry-driven choice is also testable (parametric tests can swap the default per-test).
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented (ideally in a short ADR, e.g. ADR-0015 "default provider resolution").
+- [ ] If A: `SyncConfig.kt` has zero `"onedrive"` literals; all 8 sites consult `ProviderRegistry.defaultProvider()` or `ProviderRegistry.getMetadata`.
+- [ ] If B: each surviving literal has `// allow: per ADR-XXXX` marker (CI guard's allow-list mechanism).
+- [ ] Either way, `bash scripts/ci/check-no-provider-string-dispatch.sh` passes.
+- [ ] No regression in `resolveDefaultProfile` waterfall semantics; existing tests still green.
+
+## Why architecture-range
+
+It's a structural decision (what is the project's default provider?) with cross-module implications. UD-004 / UD-008 / UD-011 are all architecture-range; this fits.
+
+## Out of scope
+
+XDG-config-honouring resolution, multi-default support (different default per environment), profile-cycling. Those are independent later work.
+
+## Status of the CI guard
+
+`scripts/ci/check-no-provider-string-dispatch.sh` (added in
+refactor/provider-spi-contract) currently flags these 8 sites. Until
+this ticket is resolved, **the lines are tagged with `// allow:
+UD-012` markers** so CI doesn't fail on pre-existing technical debt.
+Removing those markers is part of this ticket's done-criterion.
