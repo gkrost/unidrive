@@ -104,10 +104,10 @@ class AdminToolsTest {
     // ── unidrive_auth_begin ───────────────────────────────────────────────────
 
     @Test
-    fun `auth_begin rejects non-onedrive providers`() {
+    fun `auth_begin rejects providers that do not support interactive auth`() {
         val result = authBeginTool.handler(buildJsonObject {}, ctx(providerType = "localfs"))
         assertTrue(isError(result))
-        assertTrue(resultText(result).contains("onedrive"))
+        assertTrue(resultText(result).contains("does not support interactive auth"))
     }
 
     // ── unidrive_auth_complete ────────────────────────────────────────────────

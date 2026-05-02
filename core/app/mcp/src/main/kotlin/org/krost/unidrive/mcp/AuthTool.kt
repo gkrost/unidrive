@@ -77,10 +77,11 @@ private fun handleAuthBegin(
     args: JsonObject,
     ctx: ProfileContext,
 ): JsonElement {
-    if (ctx.profileInfo.type != "onedrive") {
+    val factory = org.krost.unidrive.ProviderRegistry.get(ctx.profileInfo.type)
+    if (factory == null || !factory.supportsInteractiveAuth()) {
         return buildToolResult(
-            "unidrive_auth_begin currently supports only provider type 'onedrive' " +
-                "(got '${ctx.profileInfo.type}').",
+            "Provider '${ctx.profileInfo.type}' does not support interactive auth " +
+                "(unidrive_auth_begin / unidrive_auth_complete).",
             isError = true,
         )
     }
