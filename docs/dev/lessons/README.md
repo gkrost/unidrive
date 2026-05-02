@@ -28,6 +28,7 @@ for the gitignore policy.
 | [jfr-internal-noSuchMethodError.md](jfr-internal-noSuchMethodError.md) | JFR captures internal `NoSuchMethodError`s the JVM uses as control flow | Triaging a JFR's `JavaErrorThrow` events without filtering |
 | [one-truth-sync-discipline.md](one-truth-sync-discipline.md) | Code change ↔ docs / open tickets / lessons must move together | Refactoring; lifting helpers; renaming public symbols |
 | [crlf-autocrlf-gitattributes.md](crlf-autocrlf-gitattributes.md) | Phantom diffs from `core.autocrlf=true` fighting `.gitattributes` | First-time Windows contributor; or any time `git status` shows a file modified whose bytes match HEAD |
+| [silent-phases-look-like-hangs.md](silent-phases-look-like-hangs.md) | A long-running engine phase with no log/heartbeat is indistinguishable from a deadlock | Adding or auditing any pass inside `SyncEngine.doSyncOnce` |
 
 ## Adding new lessons
 
