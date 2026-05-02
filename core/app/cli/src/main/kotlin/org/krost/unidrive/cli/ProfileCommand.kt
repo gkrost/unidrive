@@ -112,16 +112,19 @@ class ProfileAddCommand : Runnable {
 
         // Step 4: Credential prompts per type — driven by SPI capability
         val creds = mutableMapOf<String, String>()
-        val factory = org.krost.unidrive.ProviderRegistry.get(type)
-            ?: error("ProviderRegistry returned null for type=$type after resolveId; impossible state.")
+        val factory =
+            org.krost.unidrive.ProviderRegistry
+                .get(type)
+                ?: error("ProviderRegistry returned null for type=$type after resolveId; impossible state.")
         for (prompt in factory.credentialPrompts()) {
             val default = prompt.default
-            val value = when {
-                prompt.isMasked -> String(console.readPassword("${prompt.label}: ") ?: charArrayOf())
-                default != null -> promptOptional(console, prompt.label, default)
-                prompt.required -> promptRequired(console, prompt.label)
-                else -> promptOptional(console, prompt.label, "")
-            }
+            val value =
+                when {
+                    prompt.isMasked -> String(console.readPassword("${prompt.label}: ") ?: charArrayOf())
+                    default != null -> promptOptional(console, prompt.label, default)
+                    prompt.required -> promptRequired(console, prompt.label)
+                    else -> promptOptional(console, prompt.label, "")
+                }
             if (prompt.required && value.isBlank()) {
                 System.err.println("Error: ${prompt.label} is required.")
                 System.exit(1)

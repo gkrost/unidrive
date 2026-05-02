@@ -351,7 +351,11 @@ class Main : Runnable {
         properties: Map<String, String?>,
     ): List<String> {
         val warnings = mutableListOf<String>()
-        val envMappings = org.krost.unidrive.ProviderRegistry.get(type)?.envVarMappings() ?: emptyMap()
+        val envMappings =
+            org.krost.unidrive.ProviderRegistry
+                .get(type)
+                ?.envVarMappings()
+                ?: emptyMap()
         for ((envVar, key) in envMappings) {
             if (System.getenv(envVar) != null && properties[key] != null) {
                 warnings.add("Warning: Profile has credentials in config.toml. Ignoring $envVar environment variable.")
