@@ -223,7 +223,6 @@ fun deployLinux(
 
 dependencies {
     implementation(project(":app:core"))
-    implementation(project(":providers:hidrive"))
     implementation(project(":providers:internxt"))
     implementation(project(":providers:localfs"))
     implementation(project(":providers:onedrive"))
