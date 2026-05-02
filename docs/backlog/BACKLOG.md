@@ -4824,6 +4824,65 @@ Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is t
 
 Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
 ---
+id: UD-240g
+title: Reconciler progress + perf — silence and 86k single-row SELECTs on first-sync
+category: core
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProgressReporter.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt
+opened: 2026-05-02
+---
+**Reconcile phase emits no log line and no reporter event between local-scan completion and `onActionCount`. On a 67k-local + 19k-remote first-sync the daemon goes silent for many seconds while running ~86k single-row SELECTs against state.db, looking exactly like a hang.**
+
+## Failure mode (2026-05-02 session)
+
+User ran `unidrive -p inxt_gernot_krost_posteo sync --upload-only` on a 67,458-file local tree against a 19,508-item Internxt drive (first sync, no `delta_cursor`). Sequence observed:
+
+1. Daemon log up to **15:40:38.799 — `Delta: 19508 items, hasMore=false`** ([SyncEngine.kt:663](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:663))
+2. CLI showed `Scanning local files... 67,458 items · 0:07` and froze there.
+3. **No further log output, no CLI update.** User assumed hang and cancelled with Ctrl+C.
+
+## Root cause
+
+After `gatherRemoteChanges()` returns ([SyncEngine.kt:161](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:161)) and `scanner.scan` finishes ([SyncEngine.kt:184](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:184)), the next user-visible event is `reporter.onActionCount(actions.size)` ([SyncEngine.kt:258](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:258)) → `"Reconciled: N actions"`. Between these two points runs `Reconciler.reconcile(remote, local)` ([Reconciler.kt:15](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:15)), which:
+
+- Calls `db.getEntry(path)` once per path in `(remoteChanges.keys + localChanges.keys)` ([Reconciler.kt:28](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:28)) → ~86,000 single-row SELECTs.
+- Calls `db.getAllEntries()` twice (full table scans, [Reconciler.kt:100](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:100), [Reconciler.kt:127](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127)).
+- `detectMoves` and `detectRemoteRenames` make further per-action `db.getEntry`/`db.getEntryByRemoteId` lookups.
+- Emits **zero log lines and zero `reporter.*` calls** for the duration.
+
+Two separable problems hit the same code path:
+
+1. **Silence** — no breadcrumb in the log file, no progress event for the CLI / UI / progress.json. From the operator's perspective the daemon is hung. This is the UD-240f failure class for the reconcile phase specifically.
+2. **Latency** — 86k point-lookups + 2 full-table scans is O(N) on the DB but with a ~1ms per-row overhead on Windows SQLite this dominates wall time. Bulk-load + map lookup is the standard fix; [LocalScanner.kt:35](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:35) already does the same trick (`db.getAllEntries().associateBy { it.path }`).
+
+## Acceptance
+
+- `Reconciler.reconcile` emits at minimum:
+  - `log.info("Reconcile started: {} remote, {} local", remote.size, local.size)` at entry
+  - `log.info("Reconcile complete: {} actions in {}ms", actions.size, elapsed)` at exit
+- `ProgressReporter` gets an `onReconcileProgress(processed: Int, total: Int)` event, fired at 5k-item / 10s heartbeat intervals (mirroring the UD-742 ScanHeartbeat helper) from inside the main reconcile loop. `CliProgressReporter` paints `Reconciling... N / M items · 0:XX` analogous to the scan phase.
+- Bulk-load `db.getAllEntries().associateBy { it.path }` once at the top of `reconcile`; replace the per-path `db.getEntry(...)` with map lookups. Same for `db.getEntryByRemoteId` lookups in `detectRemoteRenames` (build a `remoteId -> SyncEntry` map). The `db.getAllEntries()` calls at lines 100/127 reuse the same map.
+- On first-sync of the user's 67k+19k workload, time-from-`Delta: ... hasMore=false` to `Reconciled: N actions` drops to single-digit seconds, and the operator sees movement in both the log file and the CLI throughout.
+- Existing `ReconcilerTest` cases still pass (this is a perf + observability change, not a behaviour change).
+
+## Related
+
+- **Parent:** UD-240 (umbrella for long-running-action feedback). This ticket implements the reconcile-phase slice of UD-240f.
+- **Pattern source:** UD-352 / UD-742 / UD-757 — the scan-phase heartbeat already does exactly what reconcile needs. Lift `ScanHeartbeat` (or a sibling `ReconcileHeartbeat`) and reuse.
+- **DB-bulk-load precedent:** UD-901 introduced the pending-upload row writes in `LocalScanner`; the same scanner already pre-loads the entries map ([LocalScanner.kt:35](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:35)). Apply the same pattern.
+- UD-247 (open) — cross-provider benchmark harness will need a stable reconcile baseline; doing this fix first means the harness measures the post-fix shape.
+
+## Priority
+
+**High** because the silent-hang UX failure is misleading enough that users cancel mid-operation (as happened in the 2026-05-02 session). The breadcrumb log lines alone (S-effort slice) close the worst of the UX gap; the bulk-load is M effort and a clear win on top.
+
+---
 id: UD-774
 title: Temporarily disable ktlint plugin to speed up session iteration
 category: tooling
