@@ -4823,3 +4823,49 @@ Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is t
 ## Why this wasn't done in PR #9
 
 Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
+---
+id: UD-774
+title: Temporarily disable ktlint plugin to speed up session iteration
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/build.gradle.kts
+  - core/gradle/libs.versions.toml
+opened: 2026-05-02
+---
+**Disable the ktlint plugin's `apply` block in [core/build.gradle.kts](core/build.gradle.kts) across all subprojects, behind a single boolean toggle. ktlint adds ~20–30 s to every full `./gradlew build` and was the dominant cost in tight edit-test loops during multi-fix sessions (e.g. the UD-240g/UD-240i sequence on 2026-05-02). Re-enable is one line.**
+
+## Why temporary
+
+Long term, ktlint stays. The discipline of consistent formatting + the baseline mechanism for legacy violations is load-bearing for the project's "agents and humans share the codebase" model ([CODE-STYLE.md](docs/dev/CODE-STYLE.md), [docs/dev/lessons/ktlint-baseline-drift.md](docs/dev/lessons/ktlint-baseline-drift.md)).
+
+Short term, when iterating on a single module's `.kt` files (typical session shape: edit → run module test → repeat), ktlint runs on the full project's main + test source sets every time, even when only one file changed. On a 9-module composite that's the longest task in the build graph, by a wide margin.
+
+The toggle is intentionally crude — flip a `val ktlintEnabled = false` to `true` and the plugin lights up everywhere. This trades zero re-enable friction for zero per-invocation flexibility, which is the right tradeoff for a session-pace-of-work concern.
+
+## Acceptance
+
+- `core/build.gradle.kts` has a clearly-named compile-time toggle at the top of the `subprojects { ... }` block. When `false` (the new default after this ticket), no `ktlintCheck` / `ktlintFormat` / `ktlintMainSourceSetCheck` / `ktlintTestSourceSetCheck` tasks register on any subproject.
+- `./gradlew tasks --all` no longer lists ktlint tasks.
+- `./gradlew build` runs ~20–30 s faster on a warm daemon. Spot-check.
+- `./gradlew :app:sync:test` (single-module) runs end-to-end with no ktlint dependency.
+- The plugin declaration in [core/gradle/libs.versions.toml](core/gradle/libs.versions.toml) is left in place — only the *application* in `core/build.gradle.kts` is gated. Re-enable is one line of code.
+- Existing `<module>/config/ktlint/baseline.xml` files stay where they are. They become unused-but-harmless while the toggle is off; they snap back into use on re-enable.
+- [scripts/dev/ktlint-sync.sh](scripts/dev/ktlint-sync.sh) is left as-is. It will fail with "task not found" while the toggle is off — expected and acceptable for a temporary disable. A user re-enabling ktlint also re-enables the sync script in the same flip.
+- [scripts/dev/pre-commit/scope-check.sh](scripts/dev/pre-commit/scope-check.sh)'s `chore(ktlint)` rule (which restricts ktlint scope commits to `baseline.xml` only) is left as-is. The rule fires only on `chore(ktlint)`-scoped commits, which won't happen while the toggle is off.
+
+## Re-enable plan
+
+When session-pace work settles, flip the toggle back to `true` and:
+
+1. Run `scripts/dev/ktlint-sync.sh` to absorb any drift in baselines from the disable window.
+2. Verify `./gradlew build` is fully green (ktlint + tests).
+3. Close UD-774 with a `resolved_by: commit <sha>` referencing the re-enable commit.
+
+No data-loss path exists: nothing about disabling stores state outside the toggle line, so re-enable is reversible at any time.
+
+## Surfaced
+
+2026-05-02 session, after the UD-240g + UD-240i sequence (4 successive `./gradlew build` invocations totalling ~6 minutes of which ktlint was ~30 % of wall time). User explicitly asked to disable in-session.
