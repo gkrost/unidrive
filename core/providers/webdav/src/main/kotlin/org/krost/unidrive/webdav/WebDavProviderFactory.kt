@@ -111,6 +111,20 @@ class WebDavProviderFactory : ProviderFactory {
         return CredentialHealth.Ok
     }
 
+    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+        listOf(
+            org.krost.unidrive.PromptSpec(key = "url", label = "WebDAV URL"),
+            org.krost.unidrive.PromptSpec(key = "user", label = "Username"),
+            org.krost.unidrive.PromptSpec(key = "password", label = "Password", isMasked = true),
+        )
+
+    override fun envVarMappings(): Map<String, String> =
+        mapOf(
+            "WEBDAV_URL" to "url",
+            "WEBDAV_USER" to "user",
+            "WEBDAV_PASSWORD" to "password",
+        )
+
     private fun isLanUrl(url: String): Boolean {
         val host =
             url

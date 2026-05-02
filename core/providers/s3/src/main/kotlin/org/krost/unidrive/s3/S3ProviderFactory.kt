@@ -96,4 +96,25 @@ class S3ProviderFactory : ProviderFactory {
         }
         return CredentialHealth.Ok
     }
+
+    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+        listOf(
+            org.krost.unidrive.PromptSpec(key = "bucket", label = "S3 bucket"),
+            org.krost.unidrive.PromptSpec(key = "region", label = "S3 region", default = "auto", required = false),
+            org.krost.unidrive.PromptSpec(
+                key = "endpoint",
+                label = "S3 endpoint",
+                default = "https://s3.amazonaws.com",
+                required = false,
+            ),
+            org.krost.unidrive.PromptSpec(key = "access_key_id", label = "Access key ID"),
+            org.krost.unidrive.PromptSpec(key = "secret_access_key", label = "Secret access key", isMasked = true),
+        )
+
+    override fun envVarMappings(): Map<String, String> =
+        mapOf(
+            "S3_BUCKET" to "bucket",
+            "AWS_ACCESS_KEY_ID" to "access_key_id",
+            "AWS_SECRET_ACCESS_KEY" to "secret_access_key",
+        )
 }

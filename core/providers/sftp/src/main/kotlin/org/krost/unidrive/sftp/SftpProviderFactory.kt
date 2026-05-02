@@ -116,4 +116,30 @@ class SftpProviderFactory : ProviderFactory {
         }
         return CredentialHealth.Ok
     }
+
+    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+        listOf(
+            org.krost.unidrive.PromptSpec(key = "host", label = "SFTP host"),
+            org.krost.unidrive.PromptSpec(key = "port", label = "Port", default = "22", required = false),
+            org.krost.unidrive.PromptSpec(
+                key = "user",
+                label = "Username",
+                default = System.getProperty("user.name") ?: "root",
+                required = false,
+            ),
+            org.krost.unidrive.PromptSpec(key = "remote_path", label = "Remote path", default = "", required = false),
+            org.krost.unidrive.PromptSpec(
+                key = "identity",
+                label = "Identity file",
+                default = "~/.ssh/id_ed25519",
+                required = false,
+            ),
+        )
+
+    override fun envVarMappings(): Map<String, String> =
+        mapOf(
+            "SFTP_HOST" to "host",
+            "SFTP_USER" to "user",
+            "SFTP_PASSWORD" to "password",
+        )
 }
