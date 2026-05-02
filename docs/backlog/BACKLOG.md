@@ -4721,3 +4721,105 @@ The SPI-contract PR (UD-???-equivalent, the spec
 explicitly listed this in its §6 "out-of-scope follow-ups" along
 with three other small cleanups, but did not file a ticket for it
 at the time. This ticket closes that gap.
+---
+id: UD-014
+title: Make MCP auth_begin/complete provider-agnostic via ProviderFactory.beginInteractiveAuth(); drop OneDrive-narrowing guard in AuthTool
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt:80-101
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt`'s `handleAuthBegin` (and `handleAuthComplete`) currently has a two-step gate:
+
+1. **Capability check** (post-refactor/provider-spi-contract): `if (factory == null || !factory.supportsInteractiveAuth()) return error`. Long-term contract; correct semantically.
+2. **OneDrive-specific narrowing** (added 2026-05-02 by Codex review on PR #9): `if (ctx.profileInfo.type != "onedrive") return "handler is currently OneDrive-specific"`. **Temporary** — the body below the gate hardcodes `OneDriveConfig`, `OAuthService`, `DeviceCodeResponse` etc.
+
+Without step 2, any future provider whose factory returns `true` from `supportsInteractiveAuth()` (e.g. Internxt, hypothetical OAuth providers) would enter the handler and **execute OneDrive's OAuth flow against a non-OneDrive profile**. The Codex reviewer caught this on PR #9; step 2 was added as a stopgap with a `// allow: UD-014` marker.
+
+The proper fix: make the auth flow itself provider-agnostic in the SPI, then drop step 2.
+
+## Proposed action
+
+Extend `ProviderFactory` (or `CloudProvider`) with two new SPI methods:
+
+```kotlin
+interface ProviderFactory {
+    // … existing capabilities including supportsInteractiveAuth()
+
+    /**
+     * Begin an interactive auth flow. Returns a [BeginAuthResult]
+     * describing what the user must do next (visit URL, enter code,
+     * etc.) and a [continuationHandle] that the corresponding
+     * completeAuth() call will use to resume.
+     *
+     * Only invoked when supportsInteractiveAuth() returns true.
+     * Default throws UnsupportedOperationException — the gate
+     * should prevent that path being reached.
+     */
+    suspend fun beginInteractiveAuth(profileDir: Path): BeginAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+
+    /**
+     * Resume an interactive auth flow with the user-provided handle.
+     * Returns success/error; on success the credentials should now
+     * be persisted under profileDir.
+     */
+    suspend fun completeInteractiveAuth(profileDir: Path, continuationHandle: String): CompleteAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+}
+
+data class BeginAuthResult(
+    val userMessage: String,           // "Go to https://… and enter code XYZ"
+    val continuationHandle: String,    // opaque token the user passes to completeAuth
+    val pollableEndpoint: String? = null, // optional: for device-flow polling
+    val expiresAt: Instant? = null,
+)
+
+sealed class CompleteAuthResult {
+    object Success : CompleteAuthResult()
+    data class Pending(val message: String) : CompleteAuthResult()  // user hasn't completed in browser yet
+    data class Error(val message: String) : CompleteAuthResult()
+}
+```
+
+Then:
+
+1. **OneDrive** implements both methods, lifting the existing `OneDriveConfig` + `OAuthService` + `DeviceCodeResponse` plumbing inside the override. Existing `OneDriveProvider` keeps the OAuth-flow code where it belongs (with the provider).
+2. **`AuthTool.handleAuthBegin`** becomes provider-agnostic:
+   ```kotlin
+   if (factory == null || !factory.supportsInteractiveAuth()) return error("…")
+   val result = runBlocking { factory.beginInteractiveAuth(ctx.profileDir) }
+   storeContinuation(result.continuationHandle, ctx.profileInfo.name)
+   return buildToolResult(result.userMessage)
+   ```
+3. **Drop the UD-014 narrowing guard** in `AuthTool.kt`.
+4. **Internxt** can then implement `beginInteractiveAuth` (it does have OAuth) without touching `AuthTool.kt`.
+
+## Acceptance criteria
+
+- [ ] `BeginAuthResult` / `CompleteAuthResult` types added in `:app:core`.
+- [ ] `ProviderFactory.beginInteractiveAuth` + `completeInteractiveAuth` added with throwing defaults.
+- [ ] OneDrive overrides both, lifting current `AuthTool` body internals.
+- [ ] `AuthTool.handleAuthBegin`/`handleAuthComplete` no longer mention `OneDriveConfig` / `OAuthService` / `"onedrive"`.
+- [ ] `// allow: UD-014` marker + the narrowing `if (type != "onedrive")` block deleted from `AuthTool.kt`.
+- [ ] Existing `AdminToolsTest` cases still pass (the capability-rejection invariant is preserved).
+- [ ] Add a contract test asserting OneDrive's `beginInteractiveAuth()` returns a non-empty `userMessage` and a non-empty `continuationHandle` (without doing live network — fixture-driven).
+
+## Why architecture-range
+
+API change to the SPI (two new methods). Architecture range fits.
+
+## Out of scope
+
+Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is the lift target, not a rewrite). Internxt's `beginInteractiveAuth` impl (separate ticket if/when Internxt's interactive flow ships).
+
+## Why this wasn't done in PR #9
+
+Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
