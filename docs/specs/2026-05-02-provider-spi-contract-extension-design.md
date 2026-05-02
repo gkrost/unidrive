@@ -1,10 +1,14 @@
 # Spec: Extend Provider SPI contract; remove provider-name string-equality dispatch from `:app:cli`, `:app:mcp`, `:app:sync`
 
-- **Version:** 0.1.0
+- **Version:** 0.2.0
 - **Date:** 2026-05-02
-- **Status:** Draft → awaiting user review
-- **Author:** brainstormed in collaboration with Claude
+- **Status:** Reviewed → ready for implementation plan
+- **Author:** brainstormed in collaboration with Claude; reviewed by user
 - **Branch:** `refactor/provider-spi-contract` off `dev` off `main`
+- **Changes since 0.1.0:** added 7th dispatch site
+  (`ProfileCommand.kt:157`); expanded §3.3 with `AuditReport` /
+  `StatusAudit` migration surface; renamed `PromptSpec.masked` →
+  `isMasked`.
 
 ## 1. Problem
 
@@ -13,18 +17,19 @@ The README sells the SPI promise:
 > Adding a ninth provider is one module, not a fork.
 
 Audit of `:app:cli`, `:app:mcp`, `:app:sync` (this session, 2026-05-02)
-shows **6 critical sites** that contradict the promise by dispatching
+shows **7 critical sites** that contradict the promise by dispatching
 behaviour from a hardcoded provider-name string-equality check. To add
-a ninth provider today you'd edit those 6 files in three modules in
+a ninth provider today you'd edit those 7 files in three modules in
 addition to dropping in the `:providers:nine` module. That is a fork
 in everything but name.
 
-The 6 sites:
+The 7 sites:
 
 | Site | What it dispatches on `id` |
 |---|---|
 | [`HashVerifier.kt:24-28`](../../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/HashVerifier.kt) | Hash-verification algorithm — `"onedrive"` → QuickXorHash, `"s3"` → MD5/ETag, else → unverified pass |
 | [`ProfileCommand.kt:115-144`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ProfileCommand.kt) | Credential prompt schema — `"s3"` / `"sftp"` / `"webdav"` each have hardcoded `when` arms; other providers silently get no prompts |
+| [`ProfileCommand.kt:157`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ProfileCommand.kt) | Post-add UX hint — `if (type in setOf("onedrive")) println("  Next: run unidrive -p $name auth")`. Any future interactive-auth provider would silently miss the hint. |
 | [`Main.kt:355-365`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt) | Env-var → config-key mapping — `"s3"` → `AWS_ACCESS_KEY_ID` etc. |
 | [`AuthTool.kt:80`](../../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt) | "Only OneDrive supports OAuth begin" — refuses Internxt and any future OAuth provider |
 | [`StatusCommand.kt:165`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt) | OneDrive-specific "include shared folders" status decoration |
@@ -134,8 +139,8 @@ data class PromptSpec(
     val key: String,
     /** Human-readable label shown to the user (e.g. "S3 bucket"). */
     val label: String,
-    /** True for free-text, false for password-style (no echo). */
-    val masked: Boolean = false,
+    /** True for password-style (no echo), false for free-text. */
+    val isMasked: Boolean = false,
     /** Optional default suggested in the prompt (e.g. "auto"). */
     val default: String? = null,
     /** Whether the user MUST supply a value (true) or may skip (false). */
@@ -165,16 +170,66 @@ sealed class HashAlgorithm {
 `HashAlgorithm` and a path + remote-hash string, returns true/false.
 No provider-name knowledge.
 
-### 3.3 Migration of the 6 sites
+### 3.3 Migration of the 7 sites
 
 | Site | Before | After |
 |---|---|---|
 | `HashVerifier.kt:24-28` | `when(providerId) { "onedrive" → … }` | `verifier.verify(provider.hashAlgorithm(), localPath, remoteHash)` |
 | `ProfileCommand.kt:115-144` | Three hardcoded `when` arms with prompts | `factory.credentialPrompts().forEach { prompt(it) }` |
+| `ProfileCommand.kt:157` | `if (type in setOf("onedrive")) println("  Next: run … auth")` | `if (factory.supportsInteractiveAuth()) println("  Next: run … auth")` — same capability used by AuthTool migration; one source of truth |
 | `Main.kt:355-365` | Hardcoded env-var maps per `when(type)` | `factory.envVarMappings().forEach { (env, key) → check(env, key) }` |
 | `AuthTool.kt:80` | `if (type != "onedrive") return error` | `if (!factory.supportsInteractiveAuth()) return error` (with a clearer message: "Provider 'X' does not support interactive auth") |
-| `StatusCommand.kt:165` | `if (type == "onedrive") includeShared = …` | `provider.statusFields().forEach { render(it) }` (OneDrive contributes the "shared folders: yes/no" field) |
+| `StatusCommand.kt:165` | `if (type == "onedrive") includeShared = …` | See §3.3.1 below — multi-file change, not a one-line swap |
 | `RelocateCommand.kt:191` | `if (toProvider.id == "webdav" && size > 50 GiB) warn(...)` | `toProvider.transportWarning(size)?.let { warn(it) }` (WebDAV implements its own 50 GiB nginx-mod_dav check) |
+
+#### 3.3.1 StatusCommand / AuditReport / StatusAudit migration (multi-file)
+
+The `includeShared` field is not a one-line swap because the
+rendering chain is typed end-to-end:
+
+- **`StatusAudit.kt:26`** — `data class AuditReport` has a dedicated
+  `val includeShared: Boolean?` field.
+- **`StatusAudit.kt:122-124`** — renderer prints
+  `"Include shared:   ${report.includeShared}"` with a typed label.
+- **`StatusAuditTest.kt`** — five fixtures pass `includeShared`
+  explicitly.
+- **`StatusCommand.kt:164-169`** — `buildAuditReport` computes the
+  value separately (from `profile.rawProvider?.include_shared`)
+  before constructing the report.
+
+Migration shape (chosen to preserve the testable-pure-data pattern):
+
+1. **Add `extraFields: List<StatusField> = emptyList()` to `AuditReport`.**
+   Keep `includeShared: Boolean?` for one release as `@Deprecated`
+   alias that delegates to `extraFields.find { it.label == "Include shared" }?.value?.toBoolean()`.
+   *Actually — no.* This is a v0.0.x preview project; deprecation
+   ladders aren't owed. Replace `includeShared` outright with
+   `extraFields: List<StatusField>`.
+2. **Rewrite renderer** to iterate `extraFields` after the fixed
+   fields; each entry renders as `"${field.label}:".padEnd(18) + field.value`.
+3. **Update `buildAuditReport`** to collect extras from
+   `provider.statusFields()` instead of computing `includeShared`
+   inline. The `provider.statusFields()` call is on the
+   already-instantiated `CloudProvider`, so OneDrive's instance
+   reads its own `includeShared` flag (received at `create()` time
+   from `properties["include_shared"]`).
+4. **Update `StatusAuditTest.kt`** — the five fixtures that pass
+   `includeShared` become fixtures that pass
+   `extraFields = listOf(StatusField("Include shared", "true"))`
+   (or empty list for the negative cases). Test count and assertions
+   per fixture unchanged in shape; only the field name and one
+   constructor arg shift.
+5. **OneDrive provider** owns its `includeShared: Boolean` constructor
+   arg (already does today via `OneDriveProviderFactory.create()` reading
+   `properties["include_shared"]`); its `statusFields()` returns
+   `listOf(StatusField("Include shared", includeShared.toString()))`
+   when the flag was explicitly configured, empty list otherwise.
+
+This is still a focused change (one data class field, one renderer,
+one test file, one provider) — but it is **5 file edits, not 1**.
+Implementation plan must call this out.
+
+#### 3.3.2 Anti-regression grep result expectation
 
 After migration, **`grep -nE '"(localfs\|onedrive\|rclone\|s3\|sftp\|webdav\|internxt)"' core/app/{cli,mcp,sync}/src/main/`** should return only:
 - string-literal CONSTANTS in factory-internal code (none expected),
