@@ -37,7 +37,7 @@
         <error line="18" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/sync/HashVerifierTest.kt">
-        <error line="5" column="1" source="standard:no-wildcard-imports" />
+        <error line="6" column="1" source="standard:no-wildcard-imports" />
     </file>
     <file name="src/test/kotlin/org/krost/unidrive/sync/IpcProgressReporterTest.kt">
         <error line="16" column="1" source="standard:no-wildcard-imports" />

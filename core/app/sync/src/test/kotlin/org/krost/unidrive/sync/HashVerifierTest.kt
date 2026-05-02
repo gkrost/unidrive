@@ -74,17 +74,22 @@ class HashVerifierTest {
 
     @org.junit.Test
     fun `null algorithm is treated as skip-verification`() {
-        val tempFile = java.nio.file.Files.createTempFile("hashverifier-null", ".bin")
-        java.nio.file.Files.write(tempFile, byteArrayOf(0x00, 0x01, 0x02))
+        val tempFile =
+            java.nio.file.Files
+                .createTempFile("hashverifier-null", ".bin")
+        java.nio.file.Files
+            .write(tempFile, byteArrayOf(0x00, 0x01, 0x02))
         try {
-            val result = HashVerifier.verify(
-                localPath = tempFile,
-                remoteHash = "ignored-because-no-algorithm",
-                algorithm = null,
-            )
+            val result =
+                HashVerifier.verify(
+                    localPath = tempFile,
+                    remoteHash = "ignored-because-no-algorithm",
+                    algorithm = null,
+                )
             kotlin.test.assertTrue(result, "null algorithm must skip verification (return true)")
         } finally {
-            java.nio.file.Files.deleteIfExists(tempFile)
+            java.nio.file.Files
+                .deleteIfExists(tempFile)
         }
     }
 
