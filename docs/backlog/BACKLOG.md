@@ -5020,3 +5020,51 @@ Sibling of UD-240g and UD-240h; same first-sync-pain class, same workload, but t
 ## Surfaced
 
 2026-05-02 17:48 — running daemon was sampled live with `jstack` while the operator was deciding whether to wait or kill. Three samples 3 s apart all showed the identical `Reconciler.detectMoves(Reconciler.kt:309)` frame. The CPU vs IO split (98 % CPU / 0 B/s IO) confirmed it was a syscall loop against the OS attribute cache, not a SQLite read.
+---
+id: UD-772
+title: log-stats.py crashes on Windows under cp1252 — '→' arrow at line 173
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - scripts/dev/log-stats.py
+opened: 2026-05-02
+---
+**`scripts/dev/log-stats.py` crashes on Windows under default cp1252 stdout because it prints the literal `→` arrow.**
+
+## Repro
+
+```bash
+python scripts/dev/log-stats.py %LOCALAPPDATA%\unidrive\unidrive.log
+```
+
+```
+=== files: 6; total lines: 238,331 ===
+Traceback (most recent call last):
+  File "scripts/dev/log-stats.py", line 266, in <module>
+    main(paths)
+  File "scripts/dev/log-stats.py", line 173, in main
+    print(f"window: {first_ts} → {last_ts}  ...")
+UnicodeEncodeError: 'charmap' codec can't encode character '→' in position 35: character maps to <undefined>
+```
+
+The arrows mirror the `→ req=` / `← req=` log convention but stdout under PowerShell defaults to cp1252.
+
+## Fix
+
+One of:
+
+- `import sys; sys.stdout.reconfigure(encoding='utf-8')` at the top of `main()` — three lines, no behavioural cost (already what the user sets via `PYTHONIOENCODING=utf-8` to work around it).
+- Replace `→` / `←` with ASCII (`->` / `<-`) in print formatting — preserves cp1252 compatibility but loses the visual symmetry with log lines.
+
+Pick the `reconfigure` route — keeps the script's output visually consistent with the log file.
+
+## Acceptance
+
+- `python scripts/dev/log-stats.py <log>` runs to completion on Windows under PowerShell 7+ with no `UnicodeEncodeError`, and emits the same percentile / per-minute / Graph-latency tables that the Linux path already does.
+- Add a one-line note in [docs/dev/TOOLS.md](docs/dev/TOOLS.md) §"log-stats.py" if the fix is non-obvious; if it's just `reconfigure(encoding='utf-8')` at the top, the diff speaks for itself.
+
+## Why now
+
+Surfaced 2026-05-02 by a session that needed log-stats output and had to fall back to `PYTHONIOENCODING=utf-8 python ...` as a workaround. The fix is XS effort; the bug just hasn't been hit before because most prior runs were on Linux.
