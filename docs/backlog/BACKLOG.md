@@ -3931,3 +3931,580 @@ public class UnidriveCommand implements Runnable { ... }
 1. **Wartbarkeit:** Neues Feature → neue Klasse, keine bestehenden Klassen anfassen.
 2. **Git & Teamwork:** Jeder Befehl in eigener Datei → kaum Merge-Konflikte.
 3. **Kontext-Sensitivität:** Subcommands können validieren ob der Nutzer sich in einem aktiven `sync_root` befindet.
+---
+id: UD-006
+title: Lift formatSize/formatBytes (IEC byte formatting) into :app:core/io; eliminate 5+ duplicates
+category: architecture
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:284
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt:53
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:49
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:374
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:46
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+`formatSize` / `formatBytes` (IEC-binary byte formatting: `B`/`KiB`/`MiB`/`GiB`/`TiB`) is duplicated across 5 files:
+
+| File | Line | Status |
+|---|---|---|
+| `core/app/cli/src/main/kotlin/.../CliProgressReporter.kt` | 284 (companion) | canonical |
+| `core/app/cli/src/main/kotlin/.../VersionsCommand.kt` | 53 | duplicate |
+| `core/app/cli/src/main/kotlin/.../TrashCommand.kt` | 49 | duplicate |
+| `core/app/cli/src/main/kotlin/.../RelocateCommand.kt` | 374 | duplicate |
+| `core/app/cli/src/main/kotlin/.../StatusAudit.kt` | 46 | duplicate |
+| `core/providers/webdav/src/main/kotlin/.../WebDavProvider.kt` | (added by UD-???) | duplicate (this PR added a 6th, deliberately, per the SPI-contract spec §3.5) |
+
+All implement the same algorithm. Highest-ROI cleanup: lift to `:app:core` and replace 5 (or 6, including the WebDAV one this PR introduced) call-sites.
+
+## Proposed action
+
+1. Create `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt`:
+
+   ```kotlin
+   package org.krost.unidrive.io
+
+   /**
+    * Format a byte count using IEC binary prefixes (KiB, MiB, ...).
+    * One decimal place above the 1 KiB threshold.
+    */
+   fun formatSize(bytes: Long): String {
+       val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
+       var size = bytes.toDouble()
+       var unit = 0
+       while (size >= 1024 && unit < units.lastIndex) {
+           size /= 1024
+           unit++
+       }
+       return "%.1f %s".format(size, units[unit])
+   }
+   ```
+
+2. Replace each duplicate with `import org.krost.unidrive.io.formatSize`.
+
+3. Verify byte-identical output for representative sizes (1, 1023, 1024, 999_999_999, 50 GiB) before deleting any duplicate.
+
+## Why architecture-range
+
+This is a cross-module helper lift; the tooling category is for build/CI scripts. Architecture range fits cross-module API surface.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt` exists.
+- [ ] All 5 (or 6) duplicates replaced with `import org.krost.unidrive.io.formatSize`.
+- [ ] Output byte-identical for the 5 fixture sizes above (verify via test).
+- [ ] Build green; `./gradlew build test` reports the same baseline.
+
+## Out of scope
+
+Locale-aware formatting, decimal-prefix variants (KB vs KiB), or any
+behaviour change to the algorithm itself.
+---
+id: UD-007
+title: Default logout() on CloudProvider; remove 4-provider boilerplate (WebDAV, S3, Rclone, LocalFs)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+4 of 7 in-tree providers (WebDAV, S3, Rclone, LocalFs) implement `logout()` as the same boilerplate:
+
+```kotlin
+override suspend fun logout() { isAuthenticated = false }
+```
+
+The `CloudProvider` interface should provide this as the default. SFTP, OneDrive, and Internxt would override to add `api.close()` / `tokenManager.logout()` etc.
+
+## Proposed action
+
+1. In `CloudProvider.kt`, change `logout()` from abstract to default-implemented:
+
+   ```kotlin
+   /**
+    * Forget any cached credentials / authenticated state. Default
+    * implementation flips the in-memory flag; providers that own
+    * external resources (token files, network connections) override
+    * to release them.
+    */
+   suspend fun logout() {
+       // Default no-op; subclasses override to release resources.
+       // Note: subclasses that track an in-memory `isAuthenticated`
+       // flag must reset it themselves in their override.
+   }
+   ```
+
+2. Decide: should `isAuthenticated` be lifted into `CloudProvider`? If yes, the default `logout()` can flip it. If not, keep the default a no-op and let each provider's override handle its own state.
+
+3. Delete the boilerplate `override suspend fun logout() { isAuthenticated = false }` in WebDAV, S3, Rclone, LocalFs.
+
+4. Verify SFTP, OneDrive, Internxt overrides still do the right thing (they'll need to set `isAuthenticated = false` themselves now if it was previously inherited from the boilerplate; depends on §2 decision).
+
+## Acceptance criteria
+
+- [ ] `logout()` has a default implementation in `CloudProvider`.
+- [ ] WebDAV, S3, Rclone, LocalFs no longer override `logout()`.
+- [ ] SFTP, OneDrive, Internxt overrides still close their external
+      resources.
+- [ ] Existing `logout`-related tests still pass; no test weakened.
+
+## Out of scope
+
+Lifting `isAuthenticated` is a separate decision that can be made
+inside this ticket OR deferred. Document the choice in the ticket
+resolution note.
+---
+id: UD-008
+title: Abstract SnapshotDeltaProvider helper (or base class) — eliminate 5x deletedItem lambda duplication and shared delta() boilerplate
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngine.kt
+opened: 2026-05-02
+---
+## Problem
+
+All 5 snapshot-based providers (SFTP, WebDAV, S3, Rclone, LocalFs) follow an identical `delta()` structure:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage {
+    val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+    val currentEntries = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
+    val snapshotEntries = buildSnapshotEntries(currentEntries)
+    val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
+    return computeSnapshotDelta(
+        currentEntries = snapshotEntries,
+        currentItemsByPath = itemsByPath,
+        prevCursor = cursor,
+        entrySerializer = XxxSnapshotEntry.serializer(),
+        hasChanged = { prev, curr -> /* provider-specific */ },
+        deletedItem = { path, entry ->
+            CloudItem(id = path, name = path.substringAfterLast("/"), path = path,
+                      size = 0, isFolder = entry.isFolder, modified = null,
+                      created = null, hash = null, mimeType = null, deleted = true)
+        },
+    )
+}
+```
+
+Per-provider variations:
+- `listAll()` — API call shape
+- `buildSnapshotEntries()` — entry-type mapping
+- `toCloudItem()` — `CloudItem` mapping
+- `hasChanged` — change-detection predicate
+
+The `deletedItem` lambda is **byte-identical across all 5** providers.
+
+## Proposed action
+
+Two options:
+
+**A) Abstract base class `SnapshotDeltaProvider<E>`** that captures the boilerplate. Concrete providers implement only the four variations:
+
+```kotlin
+abstract class SnapshotDeltaProvider<E>(
+    private val entrySerializer: KSerializer<E>,
+) : CloudProvider {
+    protected abstract suspend fun listAll(heartbeat: ScanHeartbeat?): List<RawEntry<E>>
+    protected abstract fun hasChanged(prev: E, curr: E): Boolean
+
+    final override suspend fun delta(cursor: String?, onPageProgress: ((Int) -> Unit)?): DeltaPage {
+        // shared boilerplate — calls listAll, builds maps, calls computeSnapshotDelta
+    }
+}
+```
+
+**B) Standalone helper function `snapshotDelta(...)`** that takes the four variation points as lambda parameters. Providers retain their flat structure but call into the helper:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage =
+    snapshotDelta(
+        cursor = cursor,
+        progress = onPageProgress,
+        listAll = { hb -> api.listAll(...) },
+        toEntry = ::buildSnapshotEntry,
+        toCloudItem = RawEntry<E>::toCloudItem,
+        hasChanged = ::hasChanged,
+        entrySerializer = MySnapshotEntry.serializer(),
+    )
+```
+
+Recommend **B** (helper function) over **A** (abstract base): `CloudProvider` is already an interface, and Kotlin doesn't love abstract-class diamond inheritance when interfaces gain abstract methods. Helper-function pattern keeps providers as plain classes.
+
+Lift `deletedItem` into the helper; per-provider duplicates disappear.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented in the ticket resolution.
+- [ ] `deletedItem` lambda exists once (in the helper or the base class), zero duplicates across providers.
+- [ ] All 5 snapshot providers' `delta()` methods shrink to ≤10 lines, mostly delegating.
+- [ ] No test regressions; existing `Reconciler` / `delta` tests still pass.
+
+## Why architecture-range
+
+It's a structural change to how snapshot providers compose with the
+sync engine. Architecture range; needs an ADR or short design doc
+before any code moves (decision A vs B is the kind of thing future
+readers will ask about).
+
+## Out of scope
+
+Refactoring OneDrive (it uses `/delta` natively, not snapshot mode)
+or Internxt (its delta path is also custom and is being audited
+separately under UD-354).
+---
+id: UD-009
+title: Lift defaultTokenPath() into :app:core/io; eliminate 5-provider duplicate (SFTP/WebDAV/S3/OneDrive/Internxt)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProviderFactory.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 providers (SFTP, WebDAV, S3, OneDrive, Internxt) each define an identical helper:
+
+```kotlin
+fun defaultTokenPath(): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", "<provider-id>")
+}
+```
+
+Only the last path segment varies by provider id.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt
+package org.krost.unidrive.io
+
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * Default per-profile token storage directory:
+ *   $HOME/.config/unidrive/<providerId>
+ *
+ * The caller passes its own `id` (typically `factory.id`) so this
+ * function does not need to know which providers exist.
+ */
+fun defaultTokenPath(providerId: String): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", providerId)
+}
+```
+
+Replace the 5 duplicates with `org.krost.unidrive.io.defaultTokenPath(id)`.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt` exists.
+- [ ] All 5 duplicates removed.
+- [ ] Behaviour byte-identical: `defaultTokenPath("onedrive")` produces the same path string the old `OneDrive`-specific helper did.
+- [ ] No test regressions.
+
+## Why architecture-range
+
+Cross-module helper lift. Same category as UD-006.
+
+## Out of scope
+
+Honouring `XDG_CONFIG_HOME` (currently the helper hardcodes `~/.config`; that's a separate ticket if/when XDG compliance becomes a goal).
+---
+id: UD-010
+title: Lift extractJwtClaim() into :app:core/auth; eliminate 3-site duplicate (OneDrive + 2x Internxt)
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt:49
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt:64-65
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:42-48
+opened: 2026-05-02
+---
+## Problem
+
+JWT body claim extraction is duplicated:
+
+| File | Function | Lines |
+|---|---|---|
+| `core/providers/onedrive/.../OneDriveProviderFactory.kt:49` | `extractJwtClaim()` (private) | ~10 |
+| `core/providers/internxt/.../InternxtProviderFactory.kt:64-65` | inline | ~5 |
+| `core/providers/internxt/.../AuthService.kt:42-48` | inline | ~7 |
+
+All three do: split JWT on `.`, Base64-decode middle segment, find claim by key in JSON body.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt
+package org.krost.unidrive.auth
+
+import kotlinx.serialization.json.*
+import java.util.Base64
+
+/**
+ * Extract a string claim from a JWT body without verifying the signature.
+ *
+ * For unidrive's purposes (sub-claim from a freshly minted refresh-token,
+ * tenant-id from an access-token, etc.) we trust the issuer and just need
+ * the claim value. Signature verification happens at the API layer when
+ * the token is actually used.
+ *
+ * Returns null if the JWT is malformed, the body is unparsable, or the
+ * claim is absent.
+ */
+fun extractJwtClaim(jwt: String, claim: String): String? {
+    val parts = jwt.split(".")
+    if (parts.size < 2) return null
+    val body = try {
+        String(Base64.getUrlDecoder().decode(parts[1]))
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    val json = try {
+        Json.parseToJsonElement(body).jsonObject
+    } catch (_: Exception) {
+        return null
+    }
+    return json[claim]?.jsonPrimitive?.contentOrNull
+}
+```
+
+Replace the three duplicates.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt` exists.
+- [ ] OneDrive's `extractJwtClaim` private helper deleted; calls migrated to the new public helper.
+- [ ] Internxt's two inline JWT parses migrated.
+- [ ] Behaviour byte-identical for representative valid + malformed JWTs (verify via test).
+
+## Security note
+
+This helper does NOT verify the JWT signature. Document this in the
+helper's KDoc (already done above) so a future caller doesn't
+mistakenly use it for trust decisions.
+
+## Out of scope
+
+JWT signature verification, JWKS fetching, expiration checking. Each of those is its own ticket.
+---
+id: UD-011
+title: EPIC: refactor 6 god classes (GraphApiService, Main, WebDavApiService, SyncCommand, StatusCommand, InternxtProvider) — UD-004 already covers SyncEngine
+category: architecture
+priority: medium
+effort: XL
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+Audit (2026-05-02) measured 7 god classes by line count + methods per file:
+
+| Class | Lines | Methods | Lines/method |
+|---|---|---|---|
+| `SyncEngine` | 1249 | 16 | 78 |
+| `GraphApiService` (OneDrive) | 1080 | 26 | 42 |
+| `Main` (CLI) | 839 | 30 | 28 |
+| `WebDavApiService` | 699 | 22 | 32 |
+| `SyncCommand` | 647 | 9 | 72 |
+| `StatusCommand` | 646 | 18 | 36 |
+| `InternxtProvider` | 538 | 15 | 36 |
+
+`SyncEngine` already filed (UD-004 — decompose into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor).
+
+This ticket tracks the **remaining 6 god classes** as a single epic so they show up together in any prioritisation, but each will need its own ADR/sub-ticket before refactor lands.
+
+## Per-class quick triage
+
+### `GraphApiService` (1080 LoC, 26 methods, OneDrive HTTP monolith)
+Delta queries, upload/download, share management, retry budgets, error handling all in one. Natural split: `GraphDeltaService`, `GraphUploadService`, `GraphShareService`, with `GraphApiService` as a thin facade. Effort: M-L.
+
+### `Main` (CLI, 839 LoC, 30 methods)
+Picocli annotations, subcommand registration, provider creation, MDC context all inline. The picocli `@Command` annotations on subcommands force a flat shape; the real win is extracting the helper functions (`profilesOfType`, `buildEnvWarnings` (T8), MDC bootstrap) into focused files. Effort: S.
+
+### `WebDavApiService` (699 LoC, 22 methods)
+PROPFIND, upload/download, chunked uploads, quota, auth in one. Mirrors GraphApiService's shape. Same split pattern: `WebDavListService`, `WebDavUploadService`, `WebDavQuotaService`. Effort: M.
+
+### `SyncCommand` (647 LoC, 9 methods, 72 lines/method — second-highest)
+Provider construction, SyncEngine lifecycle, IPC loop, encryption wrapping. The methods are large because each one orchestrates a phase. Splitting into a `SyncOrchestrator` class that `SyncCommand` consumes would shrink `SyncCommand` to a thin CLI shell. Effort: M.
+
+### `StatusCommand` (646 LoC, 18 methods)
+Status rendering, table building, audit reports, credential checks. T11 already migrated some logic to `provider.statusFields()`; further wins from extracting `StatusRenderer` (table building) into its own file. Effort: S.
+
+### `InternxtProvider` (538 LoC, 15 methods, 2× the next-largest provider at 336)
+Multiple `toCloudItem` variants (file/folder × regular/delta) suggest a mapping layer worth extracting. UD-354 (Internxt computeSnapshotDelta verification) overlaps; consider doing both together. Effort: M.
+
+## Proposed sequencing
+
+Recommend tackling in this order:
+
+1. **`Main` (CLI)** — easiest, biggest readability win for newcomers.
+2. **`StatusCommand`** — T11 already cleaned the worst dispatch site; extracting `StatusRenderer` is straightforward.
+3. **`WebDavApiService`** — same pattern as Graph but smaller; rehearse the split shape here.
+4. **`GraphApiService`** — apply the rehearsed pattern.
+5. **`SyncCommand`** — depends on `SyncEngine` decomposition (UD-004) being at least partway through.
+6. **`InternxtProvider`** — couple with UD-354.
+
+## Acceptance criteria for this epic
+
+This is an EPIC; it does not have its own done-criterion. Done when each of the 6 sub-decisions above has its own UD-### ticket and its own ADR (where structural). The completion of each sub-ticket should reference back to this one.
+
+## Why architecture-range
+
+Structural concern across multiple modules. Each child ticket may go
+to its specific category range when filed.
+
+## Out of scope
+
+`SyncEngine` (UD-004 already exists), provider-name-equality dispatch (just resolved by refactor/provider-spi-contract).
+---
+id: UD-356
+title: Lift duplicated Snapshot test boilerplate (empty-snapshot + invalid-base64) up to :app:sync; keep round-trip tests per-provider
+category: providers
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsSnapshotTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpSnapshotTest.kt
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3SnapshotTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavSnapshotTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneSnapshotTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 snapshot test files contain the same 3 tests with provider-specific data:
+
+| File | Tests duplicated |
+|---|---|
+| `core/providers/localfs/src/test/.../LocalFsSnapshotTest.kt` | round-trip encode/decode, empty snapshot, reject invalid base64 |
+| `core/providers/sftp/src/test/.../SftpSnapshotTest.kt` | same 3 |
+| `core/providers/s3/src/test/.../S3SnapshotTest.kt` | same 3 |
+| `core/providers/webdav/src/test/.../WebDavSnapshotTest.kt` | same 3 |
+| `core/providers/rclone/src/test/.../RcloneSnapshotTest.kt` | same 3 |
+
+The empty-snapshot and invalid-base64 tests are **byte-identical** — they don't exercise any provider-specific data, just the generic `Snapshot<E>` wrapper's parse/encode contract.
+
+## Proposed action
+
+1. **Move the two byte-identical tests up to `:app:sync`** (where `Snapshot<E>` is defined). Replace the 5 per-provider duplicates with imports of the shared test (or just delete them — the contract being tested is the `Snapshot` wrapper's, not any provider-specific behaviour).
+
+2. **Keep round-trip tests per-provider** — those use real provider-specific entry types and DO test something provider-specific. Possibly parameterise via a base class or `@TestFactory`-style discovery, but per-provider is acceptable.
+
+## Per-`challenge-test-assertion` skill
+
+Before deleting the 4 duplicates of `empty snapshot returns null`, verify:
+1. **Invariant?** "An empty `Snapshot<E>` round-trips through encode/decode and stays empty" — generic, provider-independent.
+2. **Reasonable alternative impl?** Any implementation of `Snapshot.encode/decode` that handles the empty case. Test asserts the contract.
+3. **Delete harm?** If `:app:sync` has the same test asserting the same invariant, none. Otherwise, hold the test where the contract is most reachable.
+
+## Acceptance criteria
+
+- [ ] Tests moved up where appropriate; per-provider files don't carry generic-contract tests.
+- [ ] Provider-specific round-trip tests remain (or are parameterised; user choice).
+- [ ] Total test count goes down or stays flat; no invariant lost.
+- [ ] CHANGELOG note that 4 tests were deleted as duplicates (with the kept location named).
+
+## Why providers-range
+
+The work is in `:providers:*/src/test/`. Providers range fits.
+
+## Out of scope
+
+Lifting the snapshot wrapper itself (already done; see UD-008's notes on `Snapshot<E>` already shared via `:app:sync`).
+---
+id: UD-818
+title: Replace 5x duplicate ProviderFactory required-fields tests with parameterised TestFactory driven by ProviderRegistry + credentialPrompts() (post UD-006/spi-contract)
+category: tests
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3ProviderFactoryTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderFactoryTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderFactoryTest.kt
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsProviderFactoryTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneProviderFactoryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 provider-factory test files follow the same shape:
+
+| File | Pattern |
+|---|---|
+| `S3ProviderFactoryTest.kt` | `fullProps()` helper → for each required field: test it missing → test it blank → assert `ConfigurationException` |
+| `SftpProviderFactoryTest.kt` | same |
+| `WebDavProviderFactoryTest.kt` | same |
+| `LocalFsProviderFactoryTest.kt` | same |
+| `RcloneProviderFactoryTest.kt` | same |
+
+Each test class is ~5-15 lines of unique-per-provider data wrapped in identical assertion scaffolding.
+
+## Proposed action
+
+Two options:
+
+**A) Parametric base class.** A `ProviderFactoryRequiredFieldsTestBase<F : ProviderFactory>` in `:app:core/src/testFixtures/` that takes `(factory, requiredKeys, fullProps)` and drives the same tests. Each provider's test class extends it with a 5-line constructor.
+
+**B) JUnit 5 `@TestFactory` style.** A single test in `:app:core/src/test/` that iterates over `ProviderRegistry.all()`, queries each factory's `credentialPrompts()` (now the SPI capability — see UD-006 / refactor-provider-spi-contract), filters to required prompts, and runs the missing-field assertions.
+
+Recommend **B** (TestFactory pattern) — it leverages the new SPI capability `credentialPrompts()` introduced in this session's refactor, so the test stays current as new providers are added without requiring a new test-class subclass per provider. Adding a 9th provider gets free coverage.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented.
+- [ ] Per-provider factory test classes shrink dramatically OR are deleted.
+- [ ] Coverage of "required field missing/blank → ConfigurationException" still in place for all providers (verify by running coverage report).
+- [ ] No new provider can be added without automatically getting required-field coverage.
+
+## Why tests-range
+
+It's a test-architecture refactor.
+
+## Out of scope
+
+Other test patterns (the wizard tests, integration tests, capability-matrix tests). This is just the missing-field assertion family.
