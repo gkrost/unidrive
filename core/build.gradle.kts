@@ -23,21 +23,30 @@ allprojects {
     }
 }
 
+// UD-774: temporary disable. ktlint costs ~20–30 s per `./gradlew build` and
+// was the dominant per-iteration cost during the UD-240g/UD-240i sessions on
+// 2026-05-02. Flip back to `true` to restore the UD-706 / UD-706b setup.
+// Re-enable plan: run `scripts/dev/ktlint-sync.sh` after flip to absorb any
+// baseline drift, then `./gradlew build` to confirm green, then close UD-774.
+val ktlintEnabled = false
+
 subprojects {
     apply(plugin = "jacoco")
     // UD-706: ktlint lint + format tasks on every subproject (warn-only).
-    apply(plugin = "org.jlleitschuh.gradle.ktlint")
+    if (ktlintEnabled) {
+        apply(plugin = "org.jlleitschuh.gradle.ktlint")
 
-    extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension> {
-        android.set(false)
-        // UD-706b: strict — per-project baseline.xml (under <project>/config/ktlint/)
-        // freezes the current set of violations so `ktlintCheck` fails only on
-        // *new* violations. Gradual-improvement path: delete baseline entries
-        // once the underlying file is cleaned up.
-        ignoreFailures.set(false)
-        reporters {
-            reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.PLAIN)
-            reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.CHECKSTYLE)
+        extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension> {
+            android.set(false)
+            // UD-706b: strict — per-project baseline.xml (under <project>/config/ktlint/)
+            // freezes the current set of violations so `ktlintCheck` fails only on
+            // *new* violations. Gradual-improvement path: delete baseline entries
+            // once the underlying file is cleaned up.
+            ignoreFailures.set(false)
+            reporters {
+                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.PLAIN)
+                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.CHECKSTYLE)
+            }
         }
     }
 
