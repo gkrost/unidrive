@@ -5,7 +5,17 @@ import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
+
+/**
+ * UD-240i: lightweight stand-in for `Files.isRegularFile` + `Files.size`
+ * that combines both into a single Windows `GetFileAttributesEx` syscall.
+ * Returning `null` means "not a regular file" (or stat failed) — the
+ * same negative outcome as `!Files.isRegularFile`. Tests inject a
+ * counting / synthetic probe; production calls [Reconciler.probeRealFs].
+ */
+data class LocalFileInfo(val size: Long)
 
 class Reconciler(
     private val db: StateDatabase,
@@ -13,6 +23,13 @@ class Reconciler(
     private val defaultPolicy: ConflictPolicy,
     private val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
     private val excludePatterns: List<String> = emptyList(),
+    // UD-240i: seam for tests + future caching. detectMoves used to call
+    // `Files.isRegularFile` + `Files.size` directly inside an O(D × U)
+    // double loop — on a 67k-upload first-sync that was ~5M Windows
+    // GetFileAttributesEx syscalls. Routing through this probe lets the
+    // regression test inject a counting stub and assert the bound, and
+    // the algorithm fix groups uploads by size from a single pre-pass.
+    private val localFsProbe: (Path) -> LocalFileInfo? = ::probeRealFs,
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
@@ -366,8 +383,8 @@ class Reconciler(
             for (up in uploads) {
                 if (up.path in matchedUploads) continue
                 val localPath = resolveLocal(up.path)
-                if (!Files.isRegularFile(localPath)) continue
-                if (Files.size(localPath) == entry.remoteSize) {
+                val info = localFsProbe(localPath) ?: continue
+                if (info.size == entry.remoteSize) {
                     actions.remove(del)
                     actions.remove(up)
                     actions.add(
@@ -456,6 +473,24 @@ class Reconciler(
     private fun resolveLocal(remotePath: String): java.nio.file.Path = safeResolveLocal(syncRoot, remotePath)
 
     companion object {
+        /**
+         * UD-240i: combined isRegularFile + size in a single
+         * `Files.readAttributes` call (one Windows GetFileAttributesEx
+         * syscall). Mirrors the previous `if (!Files.isRegularFile(p))
+         * continue; Files.size(p)` pair without changing behaviour:
+         *   - returns null on non-regular path, ENOENT, or any IOException
+         *     (matches the old "skip on bad path" semantic)
+         *   - returns size for regular files only
+         * Production default for [Reconciler.localFsProbe].
+         */
+        fun probeRealFs(p: Path): LocalFileInfo? =
+            try {
+                val attrs = Files.readAttributes(p, BasicFileAttributes::class.java)
+                if (attrs.isRegularFile) LocalFileInfo(attrs.size()) else null
+            } catch (_: java.io.IOException) {
+                null
+            }
+
         fun matchesGlob(
             path: String,
             pattern: String,

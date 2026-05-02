@@ -5,6 +5,7 @@ import org.krost.unidrive.sync.model.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 class ReconcilerTest {
@@ -323,6 +324,99 @@ class ReconcilerTest {
         val action = assertIs<SyncAction.Conflict>(actions[0])
         assertEquals(ChangeState.DELETED, action.localState)
         assertEquals(ChangeState.MODIFIED, action.remoteState)
+    }
+
+    // ── UD-240i: detectMoves perf bound + file-move correctness ─────────────
+    // Pre-fix detectMoves did Files.isRegularFile + Files.size on every
+    // (DeleteRemote, Upload) pair — O(D × U) Windows GetFileAttributesEx
+    // syscalls. Captured live 2026-05-02 17:48 via jstack on PID 12764: ~5M
+    // syscalls / ~4 min wall-clock on a 67k-upload first-sync. Post-fix the
+    // probe is invoked at most once per Upload, regardless of how many
+    // DeleteRemote actions the reconcile pass generates.
+
+    @Test
+    fun `UD-240i detectMoves probe is bounded by upload count, not delete x upload`() {
+        val probeCount = AtomicInteger(0)
+        val countingProbe: (Path) -> LocalFileInfo? = { _ ->
+            probeCount.incrementAndGet()
+            null // every upload "doesn't exist" so the inner loop runs to completion pre-fix
+        }
+        val r =
+            Reconciler(
+                db,
+                syncRoot,
+                ConflictPolicy.KEEP_BOTH,
+                localFsProbe = countingProbe,
+            )
+
+        // Seed DB with 50 entries that resolveAction will turn into DeleteRemote
+        // (DB has them, remote no longer reports them, local marks them DELETED).
+        val deleteCount = 50
+        repeat(deleteCount) { i ->
+            db.upsertEntry(dbEntry("/old$i.bin"))
+        }
+        val uploadCount = 500
+        val localChanges = buildMap<String, ChangeState> {
+            repeat(deleteCount) { i -> put("/old$i.bin", ChangeState.DELETED) }
+            repeat(uploadCount) { i -> put("/new$i.bin", ChangeState.NEW) }
+        }
+        val remoteChanges = emptyMap<String, CloudItem>()
+
+        r.reconcile(remoteChanges, localChanges)
+
+        // Pre-fix this would be deleteCount × uploadCount = 25,000.
+        // Post-fix: <= uploadCount (one probe per upload, in a single pre-pass).
+        assertTrue(
+            probeCount.get() <= uploadCount,
+            "UD-240i: detectMoves should issue at most $uploadCount probe calls " +
+                "(one per Upload), got ${probeCount.get()} — algorithm regressed " +
+                "to O(D × U) syscalls. With D=$deleteCount and U=$uploadCount that " +
+                "extrapolates to a ~5M-syscall storm on a real 67k-upload first-sync.",
+        )
+    }
+
+    @Test
+    fun `UD-240i detectMoves still produces MoveRemote on size match`() {
+        // Correctness regression: a (DeleteRemote + same-sized Upload) pair must
+        // still resolve to MoveRemote after the bySize-map refactor.
+        db.upsertEntry(dbEntry("/old.bin"))
+        Files.writeString(syncRoot.resolve("new.bin"), "x".repeat(100))
+
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges =
+            mapOf(
+                "/old.bin" to ChangeState.DELETED,
+                "/new.bin" to ChangeState.NEW,
+            )
+
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size, "expected one MoveRemote, got: $actions")
+        assertEquals("/new.bin", moves[0].path)
+        assertEquals("/old.bin", moves[0].fromPath)
+        // The Delete + Upload should have been removed from the action list.
+        assertTrue(actions.none { it is SyncAction.DeleteRemote && it.path == "/old.bin" })
+        assertTrue(actions.none { it is SyncAction.Upload && it.path == "/new.bin" })
+    }
+
+    @Test
+    fun `UD-240i detectMoves does not match different-size upload`() {
+        // Negative case: size mismatch must NOT produce a move; the original
+        // DeleteRemote and Upload survive the pass.
+        db.upsertEntry(dbEntry("/old.bin"))
+        Files.writeString(syncRoot.resolve("new.bin"), "x".repeat(42)) // dbEntry is 100 bytes
+
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges =
+            mapOf(
+                "/old.bin" to ChangeState.DELETED,
+                "/new.bin" to ChangeState.NEW,
+            )
+
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertTrue(actions.none { it is SyncAction.MoveRemote }, "no move expected: $actions")
+        assertTrue(actions.any { it is SyncAction.DeleteRemote && it.path == "/old.bin" })
+        assertTrue(actions.any { it is SyncAction.Upload && it.path == "/new.bin" })
     }
 
     @Test
