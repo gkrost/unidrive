@@ -144,4 +144,6 @@ class OneDriveProviderFactory : ProviderFactory {
             CredentialHealth.Warning("token.json exists but could not be parsed")
         }
     }
+
+    override fun supportsInteractiveAuth(): Boolean = true
 }
