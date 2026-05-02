@@ -2,6 +2,7 @@ package org.krost.unidrive.sync
 
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.sync.model.*
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -12,10 +13,24 @@ class Reconciler(
     private val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
     private val excludePatterns: List<String> = emptyList(),
 ) {
+    private val log = LoggerFactory.getLogger(Reconciler::class.java)
+
     fun reconcile(
         remoteChanges: Map<String, CloudItem>,
         localChanges: Map<String, ChangeState>,
     ): List<SyncAction> {
+        // UD-240g: bookend the reconcile pass with log breadcrumbs. Before this,
+        // the phase between `Delta: N items, hasMore=false` (gatherRemoteChanges)
+        // and `reporter.onActionCount` (post-reconcile) emitted ZERO log lines —
+        // a 67k-local + 19k-remote first-sync looked like a hang for many seconds
+        // while ~86k single-row SELECTs ran. The duration line at exit gives
+        // operators a baseline to spot future regressions.
+        val reconcileStart = System.currentTimeMillis()
+        log.info(
+            "Reconcile started: {} remote, {} local",
+            remoteChanges.size,
+            localChanges.size,
+        )
         val actions = mutableListOf<SyncAction>()
         val allPaths =
             (remoteChanges.keys + localChanges.keys)
@@ -138,7 +153,13 @@ class Reconciler(
         detectMoves(actions)
         detectRemoteRenames(actions, remoteChanges)
 
-        return sortActions(actions)
+        val sorted = sortActions(actions)
+        log.info(
+            "Reconcile complete: {} actions in {}ms",
+            sorted.size,
+            System.currentTimeMillis() - reconcileStart,
+        )
+        return sorted
     }
 
     private fun resolveAction(
