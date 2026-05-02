@@ -659,7 +659,7 @@ chunk: ipc-ui
 
 ## Observed failure mode that motivated this ticket
 
-2026-04-19 session: daemon PID 10792 ran `unidrive -c <config> -p inxt_gernot_krost_posteo sync` (one-shot, no `--watch`) for ~50 min. The UI tray reported "no daemon" the whole time, which read as broken. Root cause is structural, not a UI bug per se.
+2026-04-19 session: daemon PID 10792 ran `unidrive -c <config> -p inxt_user sync` (one-shot, no `--watch`) for ~50 min. The UI tray reported "no daemon" the whole time, which read as broken. Root cause is structural, not a UI bug per se.
 
 ## Root cause
 
@@ -1498,7 +1498,7 @@ isn't running (or has been uninstalled), the read fails.
 **Real-case (UD-296/297/299 thread, 2026-04-30):** user pointed
 `sync_root` at `C:\Users\gerno\InternxtDrive - <UUID>\` (Internxt
 official-client mount). Opening a file like
-`/dev/zvg/ZVG FileRepo/3A0C20B4...` produced
+`/mnt/nas/nas_share/3A0C20B4...` produced
 > "Die Datei kann nicht geöffnet werden. Stellen Sie Sicher, dass
 > Internxt Drive auf Ihrem Computer ausgeführt wird."
 
@@ -1657,7 +1657,7 @@ side and the remote side may not match, and the planner mis-classifies
 the file as `Upload` (`localState=NEW + remoteState=UNCHANGED`).
 
 **Real-case (2026-04-30, post-UD-296/297/299 dry-run on
-inxt_gernot_krost_posteo):** dry-run plan included 29 spurious uploads
+inxt_user):** dry-run plan included 29 spurious uploads
 of files known to exist on both sides. Example:
 
 * Local path: `/Documents/Calibre/Calibre-Import/Elektroinstallation in
@@ -1776,7 +1776,7 @@ User-supplied mockup:
    Local Windows File System                          Internxt Cloud Drive
    (Profile: gerno)                                   (Profile: inxt_gernot...)
    -------------------------                          -------------------------
-   C:\Users\gerno\InternxtDrive                       /19notte78
+   C:\Users\gerno\InternxtDrive                       /userhome
          |                                                 ^
          |                                                 |
          |--------------- UPLOAD-ONLY SYNC -----------------|
@@ -1790,7 +1790,7 @@ Because you used `--reset` combined with `--upload-only`, the tool ignores
 previous sync history (state.db) and evaluates everything from scratch as a
 one-way push from Local to Remote:
 
- [F] NEW/MODIFIED LOCALLY  ====== COPY/UPLOAD ======>  Added to /19notte78
+ [F] NEW/MODIFIED LOCALLY  ====== COPY/UPLOAD ======>  Added to /userhome
  [X] DELETED LOCALLY       ====== DO NOTHING =======>  Retained on Remote
  [=] IDENTICAL FILES       ====== DO NOTHING =======>  Skipped
 
@@ -4841,7 +4841,7 @@ opened: 2026-05-02
 
 ## Failure mode (2026-05-02 session)
 
-User ran `unidrive -p inxt_gernot_krost_posteo sync --upload-only` on a 67,458-file local tree against a 19,508-item Internxt drive (first sync, no `delta_cursor`). Sequence observed:
+User ran `unidrive -p inxt_user sync --upload-only` on a 67,458-file local tree against a 19,508-item Internxt drive (first sync, no `delta_cursor`). Sequence observed:
 
 1. Daemon log up to **15:40:38.799 — `Delta: 19508 items, hasMore=false`** ([SyncEngine.kt:663](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:663))
 2. CLI showed `Scanning local files... 67,458 items · 0:07` and froze there.
@@ -5178,3 +5178,107 @@ Sibling of UD-240g: same first-sync-pain class, same symptom (long silent stretc
 ## Surfaced
 
 2026-05-02 session, while diagnosing UD-240g. Code reading made the pattern visible; not yet validated by direct profiling. The acceptance criterion above (`5×` wall-clock reduction) is the measurable test.
+---
+id: UD-254a
+title: MDC clone storm under MDCContext — 80 percent of JFR allocation pressure
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - docs/dev/lessons/mdc-in-suspend.md
+opened: 2026-05-02
+---
+**Every coroutine context switch clones the SLF4J MDC map. Captured live via JFR (60-s recording, 17:27:37–17:28:37 UTC, 2026-05-02): `LogbackMDCAdapter.getPropertyMap()` accounts for **80.63 % of all allocation pressure** in the JVM. The cause is `kotlinx.coroutines.slf4j.MDCContext.updateThreadContext(...)` calling `MDC.getCopyOfContextMap()` on every dispatched task — a fresh `HashMap<String, String>` per coroutine resume.**
+
+## Captured live (jfr.exe view allocation-by-class on flight_recording_…15780.jfr)
+
+```
+                                     Allocation by Class
+Object Type                                                              Allocation Pressure
+------------------------------------------------------------------------ -------------------
+java.util.HashMap                                                                      80,63%
+byte[]                                                                                 10,72%
+kotlinx.coroutines.JobSupport$Finishing                                                 2,73%
+java.io.EOFException                                                                    2,15%
+kotlin.Result$Failure                                                                   1,14%
+java.nio.HeapByteBuffer                                                                 1,01%
+…
+```
+
+Stack-traced via `jfr.exe print --events ObjectAllocationSample --stack-depth 12`:
+
+```
+ch.qos.logback.classic.util.LogbackMDCAdapter.getPropertyMap()           ← 80% of allocation
+LogbackMDCAdapter.getCopyOfContextMap()
+org.slf4j.MDC.getCopyOfContextMap()
+kotlinx.coroutines.slf4j.MDCContext.updateThreadContext(...)
+kotlinx.coroutines.internal.ThreadContextKt.updateThreadContext(...)
+kotlinx.coroutines.DispatchedTask.run()
+kotlinx.coroutines.EventLoopImplBase.processNextEvent()
+kotlinx.coroutines.BlockingCoroutine.joinBlocking()
+kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(...)
+org.krost.unidrive.cli.SyncCommand.run() line: 357
+```
+
+The companion stack (`MDC.setContextMap`) shows the symmetric write side, fired from the `DefaultDispatcher-worker-*` runWorker loop on every task. The pattern is bidirectional — read on save, write on restore — so each coroutine resume costs **2 HashMap clones**, not 1.
+
+## Root cause
+
+`SyncEngine.syncOnce` in [core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:80-105](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt) pushes a `scan` MDC slot for the duration of one sync pass (UD-254). The CLI / providers add `commit` (build hash) + `profile` (config profile) + `thread` slots, populated at process start (logback.xml pattern `[%X{commit:--------}] [%X{profile:--------}] [%X{scan:--------}]`).
+
+While the sync is running, `kotlinx-coroutines-slf4j`'s `MDCContext` is in the coroutine context (added so log lines emitted inside `launch { }` / `async { }` blocks inherit the MDC). The integration's contract:
+
+> `updateThreadContext` → `MDC.getCopyOfContextMap()` (one HashMap allocation, snapshotting old MDC)
+> *coroutine body runs with the right MDC*
+> `restoreThreadContext` → `MDC.setContextMap(savedMap)` (one HashMap allocation, restoring old MDC)
+
+Every `DispatchedTask.run()` does both. With thousands of upload coroutines × per-PUT continuation suspensions × Ktor's HTTP/2 callback chains, the count goes into the millions.
+
+## Why this matters
+
+- **80 % of allocation pressure** means GC frequency tracks coroutine churn, not actual work. The post-fix daemon (UD-240g + UD-240i deployed) sustains many concurrent uploads precisely because the algorithmic fixes work — but each of those uploads is paying a 2-HashMap-per-suspend tax.
+- The recording showed only **0.53 % avg JVM CPU** — the daemon is mostly waiting on network. So the user isn't feeling this *as throughput*, only as memory churn. The cost is real but masked by I/O dominance.
+- **At larger scale** (e.g. UD-247's cross-provider benchmark workload) or with a faster network this allocation rate becomes a throughput cliff — see UD-742 / UD-757 ETA renderer that fires per scan tick; same pattern.
+- The project's existing [`docs/dev/lessons/mdc-in-suspend.md`](docs/dev/lessons/mdc-in-suspend.md) lesson already names this hazard ("MDC inside a suspend function doesn't survive MDCContext re-apply on resume — for cross-coroutine correlation prefer id-in-message"). The lesson is correct; we just kept using `MDCContext` on the hot path anyway.
+
+## Proposal — two slices
+
+### Slice A — clear `scan` from MDC at coroutine boundaries (S effort, low risk)
+
+The `scan` slot is the most expensive: it's set at `syncOnce` entry and held for the lifetime of one sync pass (the longest live MDC entry by far). Inside the long-lived coroutines launched from `syncOnce` (Pass 2 transfer slots, the IPC accept loop, etc.) the `scan` slot is rarely *needed* in log output — the per-action lines already carry path info. Drop it from the MDC scope, keep it as a banner-only field on the `Scan started`/`Scan ended` log lines.
+
+This alone should cut HashMap allocation by ~half — every map clone after entering the sync pass currently carries 4 entries; cutting `scan` makes it 3 (and the dominant size driver is the values, not the count, but the alloc count drops uniformly).
+
+### Slice B — drop `MDCContext` from coroutine context on hot paths (M effort, behavioural change)
+
+Stop installing `MDCContext()` in the coroutine context for `Pass 2: Apply` (the per-action upload/download workers) and the IPC server's accept loop. Replace with id-in-message logging:
+
+- `log.info("Upload {} ({} bytes) action={}", path, size, scanId)` instead of relying on MDC `[scan]` interpolation
+- Provider code already does this for `req=ID` (via UD-255's Ktor plugin) — extend the pattern
+
+Per the lessons file:
+> *MDC inside a suspend function doesn't survive MDCContext() re-apply on resume. For cross-coroutine correlation prefer id-in-message over MDC.*
+
+This is the canonical implementation of that guidance.
+
+## Acceptance
+
+- New JFR recording over the same workload shape shows `LogbackMDCAdapter.getPropertyMap` < 10 % of allocation pressure (down from 80.63 %).
+- `byte[]` (Internxt encrypt + S3 PUT) becomes the dominant allocation source, as JMC's rule originally suggested — confirms we've drained the MDC noise and what's left is intrinsic.
+- Log lines on the upload hot path still carry scan-id correlation (via inline format, not MDC) so a single `grep "scan=<id>"` still slices a sync pass.
+- No regression in `IpcProgressReporter` events — IPC clients already get `profile` in the JSON body (not via MDC).
+- `logback.xml`'s `%X{scan:--------}` pattern is left in place for the synchronous main-thread paths that still benefit (the `Scan started`/`Scan ended` banners).
+
+## Related
+
+- **UD-254** (closed) — introduced the `scan` MDC slot. This ticket undoes the scope of that change for hot-path coroutines while keeping the diagnostic value at the start/end banners.
+- **UD-255** (closed) — HTTP `req=ID` correlation. Set the precedent for id-in-message over MDC.
+- **lessons/mdc-in-suspend.md** — the project already named this hazard. UD-254a is the perf-evidence-driven fix.
+- **UD-247** (open) — cross-provider benchmark harness; doing this fix first means the harness measures the post-fix shape and gives a stable baseline.
+
+## Surfaced
+
+2026-05-02 19:27 — JFR recording on the running daemon (post-UD-240g/i deploy at 18:41) examined with `jfr.exe view allocation-by-class` and `jfr.exe print --events ObjectAllocationSample`. The signal was only visible because JMC's overview report (rule-based, summary-level) collapsed it under "Allocated Classes" without crediting the call site; the application-level views show it unambiguously.
