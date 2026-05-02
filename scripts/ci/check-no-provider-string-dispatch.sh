@@ -10,12 +10,18 @@
 # consumers in :app:cli, :app:mcp, :app:sync should consult the SPI,
 # not dispatch on `provider.id == "foo"`.
 #
-# Allow-list: lines containing `// allow: <reason>` are ignored.
-# Single-line `//` comments and KDoc lines (`*`) are also ignored
-# because they are documentation, not dispatch logic.
+# Allow-list:
+#   - lines containing `// allow: <reason>` (same-line marker), OR
+#   - lines IMMEDIATELY preceded by a line whose only content is a
+#     `// allow: <reason>` comment (preceding-line marker, useful when
+#     the same-line position would conflict with ktlint formatters).
+#
+# Single-line `//` comments, KDoc lines (`*`), and `trimMargin` raw-
+# string content lines (`|`) are also ignored — those are
+# documentation, not dispatch logic.
 #
 # Use the allow-list marker for deliberate exceptions, e.g. the
-# historical "onedrive" default in SyncConfig.kt that UD-008
+# historical "onedrive" default in SyncConfig.kt that UD-012
 # (architecture follow-up) will eventually replace with
 # ProviderRegistry.defaultProvider().
 
@@ -29,26 +35,46 @@ SEARCH_PATHS=(
     core/app/sync/src/main
 )
 
-# Filters in order:
-#   1. find provider names as quoted string literals
-#   2. drop pure-comment lines (// at start of line, possibly indented)
-#   3. drop KDoc lines (start with whitespace + *)
-#   4. drop trimMargin help-text lines (start with whitespace + |)
-#   5. drop explicit allow-listed lines
-hits=$(grep -rnE "\"($PROVIDER_NAMES)\"" "${SEARCH_PATHS[@]}" --include='*.kt' \
-    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
-    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*\*' \
-    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*\|' \
-    | grep -v '// allow:' \
-    || true)
+# Pass 1: collect candidate hits, dropping comments / KDoc / trimMargin /
+# same-line `// allow:` markers.
+candidates=$(
+    grep -rnE "\"($PROVIDER_NAMES)\"" "${SEARCH_PATHS[@]}" --include='*.kt' \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*\*' \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*\|' \
+        | grep -v '// allow:' \
+        || true
+)
 
-if [[ -n "$hits" ]]; then
+# Pass 2: for each candidate, also accept a preceding-line `// allow:`
+# marker. The preceding line must be a stand-alone comment whose
+# trimmed content starts with `// allow:`.
+filtered=""
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    file="${line%%:*}"
+    rest="${line#*:}"
+    lineno="${rest%%:*}"
+    if [[ "$lineno" -gt 1 ]]; then
+        prev_line="$(sed -n "$((lineno - 1))p" "$file")"
+        prev_trimmed="$(echo "$prev_line" | sed -E 's/^[[:space:]]+//')"
+        if [[ "$prev_trimmed" == "// allow:"* ]]; then
+            continue
+        fi
+    fi
+    filtered+="$line"$'\n'
+done <<< "$candidates"
+
+filtered="${filtered%$'\n'}"
+
+if [[ -n "$filtered" ]]; then
     echo "FAIL: hardcoded provider-name string literal in :app:{cli,mcp,sync}/main:"
-    echo "$hits"
+    echo "$filtered"
     echo
     echo "Either:"
     echo "  - Migrate to the SPI capability (factory.X() / provider.X()), OR"
-    echo "  - If the literal is deliberate, append '// allow: <reason>' to the line."
+    echo "  - If the literal is deliberate, mark it with '// allow: <reason>'"
+    echo "    on the same line OR on the line immediately above."
     exit 1
 fi
 

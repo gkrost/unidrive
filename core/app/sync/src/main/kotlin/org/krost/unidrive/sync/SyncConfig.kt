@@ -356,7 +356,8 @@ data class SyncConfig(
             }
         }
 
-        fun defaults(providerId: String = "onedrive") = // allow: UD-012
+        // allow: UD-012
+        fun defaults(providerId: String = "onedrive") =
             SyncConfig(
                 syncRoot = defaultSyncRoot(providerId),
                 pollInterval = 60,
