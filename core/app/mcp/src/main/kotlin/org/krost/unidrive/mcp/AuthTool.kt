@@ -77,7 +77,9 @@ private fun handleAuthBegin(
     args: JsonObject,
     ctx: ProfileContext,
 ): JsonElement {
-    val factory = org.krost.unidrive.ProviderRegistry.get(ctx.profileInfo.type)
+    val factory =
+        org.krost.unidrive.ProviderRegistry
+            .get(ctx.profileInfo.type)
     if (factory == null || !factory.supportsInteractiveAuth()) {
         return buildToolResult(
             "Provider '${ctx.profileInfo.type}' does not support interactive auth " +
