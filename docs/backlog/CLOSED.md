@@ -10721,3 +10721,112 @@ After UD-209a + UD-816 + UD-817 land:
 - one-truth-sync-discipline.md — the lesson this ticket operationalises.
 - UD-755 (open) — proposed mechanical drift detection; this ticket is
   the manual sweep UD-755 would automate.
+
+---
+id: UD-339
+title: Per-call HTTP retry helper — unify across OneDrive/Internxt/WebDAV (likely subsumed by UD-330)
+category: providers
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-02
+resolved_by: Closed as duplicate of UD-330. Title self-admits subsumption. UD-330 is the canonical 'unify per-call HTTP retry helper across providers' ticket; this duplicate was never reconciled. Verified 2026-05-02 during external code-review pass.
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+Three different per-call retry-loop implementations on the same logical
+surface (transient HTTP statuses + Retry-After + exponential backoff):
+
+- `core/providers/onedrive/.../GraphApiService.kt:759-854` — inline
+  401 + 429/503 retry with header `Retry-After` + JSON body
+  `retryAfterSeconds` fallback.
+- `core/providers/internxt/.../InternxtApiService.kt:491-526` —
+  `retryOnTransient` with `TRANSIENT_STATUSES` + `RETRY_AFTER_REGEX`.
+- `core/providers/internxt/.../InternxtApiService.kt:421-452` —
+  `authenticatedGet` has its OWN separate retry on `[500, 503]` only —
+  hidden bug-pit: the two Internxt code paths have different retry
+  profiles.
+- `core/providers/webdav/.../WebDavApiService.kt:181-242` — `withRetry`
+  with header parsing, status set `[408, 425, 429, 500, 502, 503, 504]`.
+
+UD-330 is open as the cross-provider retry-budget umbrella. This per-
+call helper sits ABOVE the budget. **Likely subsumed by UD-330** —
+coordinate before lifting.
+
+## Proposal
+
+Either fold into UD-330's planned shape, or extract
+`:app:core/http/RetryPolicy.kt` with composable building blocks
+(transient-status set, max-attempts, header parser, body parser,
+backoff curve, jitter).
+
+Interim mitigation regardless: bring Internxt's `authenticatedGet`
+retry into agreement with `retryOnTransient` (same status set, same
+backoff) so the two paths stop diverging.
+
+## Effort / agent-ability
+
+**M effort**, agent-able partial — must coordinate with UD-330 first.
+
+## Related
+
+- **UD-330** (open, parent umbrella) — HttpRetryBudget cross-provider.
+- **UD-335** (closed) — Internxt retry on transient (introduced
+  `retryOnTransient`).
+
+---
+id: UD-001
+title: Monorepo consolidation
+category: architecture
+priority: high
+effort: L
+status: closed
+closed: 2026-05-02
+resolved_by: Closed as superseded. code_refs anchored to CMakeLists.txt which was deleted by ADR-0011 (shell-win tier removal); the 'monorepo consolidation' work is effectively complete in current state (core/ Gradle composite ships; Kotlin-only build; ADR-0001/0002 still describe the layout). Re-anchoring is not worth the diff. Verified 2026-05-02 during external code-review pass.
+code_refs:
+  - settings.gradle.kts
+  - CMakeLists.txt
+  - README.md
+adr_refs: [ADR-0001, ADR-0002]
+opened: 2026-04-17
+milestone: v0.1.0
+---
+Consolidate the three sibling repos into a single monorepo at `greenfield/unidrive/`. Scaffold complete; pending first green build and tag. Acceptance: `./gradlew build` at root builds `core/` and `ui/` via composite; `cmake --build` builds `shell-win/`.
+
+---
+id: UD-201
+title: Complete NamedPipeServer hydration handler
+category: core
+priority: high
+effort: L
+status: closed
+closed: 2026-05-02
+resolved_by: Closed as superseded by ADR-0011 + ADR-0012. Ticket scope: complete the NamedPipeServer hydration handler (CFAPI shell-tier integration). NamedPipeServer.kt was deleted with ADR-0012; the CFAPI shell tier was retired by ADR-0011. The whole problem this ticket addressed has been taken off the table by the v0.1.0 surface decisions. Verified 2026-05-02 during external code-review pass.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/NamedPipeServer.kt
+adr_refs: [ADR-0003]
+opened: 2026-04-17
+milestone: v0.3.0
+chunk: xpb
+---
+TODOs at lines ~100–110: wire `fetch` → `SyncEngine.downloadFile(path)` + temp file write; wire `dehydrate` → CfDehydratePlaceholder via shell DLL; wire `unregister` → CfUnregisterSyncRoot. Gates v0.3.0 shell release.
+
+---
+id: UD-702
+title: Composite Gradle build root
+category: tooling
+priority: high
+effort: S
+status: closed
+closed: 2026-05-02
+resolved_by: Closed as superseded. code_refs anchored to ui/build.gradle.kts which was deleted by ADR-0013 (UI-tier removal). The 'composite Gradle build root' goal is met in current state (core/settings.gradle.kts is the composite root; runs ./gradlew build cleanly across 13 modules per the v0.1.0 surface). Verified 2026-05-02 during external code-review pass.
+code_refs:
+  - settings.gradle.kts
+  - ui/build.gradle.kts
+  - core/build.gradle.kts
+adr_refs: [ADR-0006]
+opened: 2026-04-17
+milestone: v0.1.0
+---
+Root `settings.gradle.kts` composite scaffold landed; JVM unification to 21 LTS landed. Pending: verify `./gradlew build` from root green.

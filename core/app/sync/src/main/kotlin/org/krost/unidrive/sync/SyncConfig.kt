@@ -301,7 +301,7 @@ data class SyncConfig(
 
         fun load(
             configFile: Path,
-            providerId: String = "onedrive",
+            providerId: String = "onedrive", // allow: UD-012
         ): SyncConfig {
             if (!Files.exists(configFile)) return defaults(providerId)
             val content = Files.readString(configFile)
@@ -310,7 +310,7 @@ data class SyncConfig(
 
         private val defaultSyncRoots =
             mapOf(
-                "onedrive" to "OneDrive",
+                "onedrive" to "OneDrive", // allow: UD-012
             )
 
         fun defaultSyncRoot(providerId: String): Path =
@@ -356,6 +356,7 @@ data class SyncConfig(
             }
         }
 
+        // allow: UD-012
         fun defaults(providerId: String = "onedrive") =
             SyncConfig(
                 syncRoot = defaultSyncRoot(providerId),
@@ -430,15 +431,15 @@ data class SyncConfig(
          */
         fun resolveDefaultProfile(configDir: Path): String {
             val configFile = configDir.resolve("config.toml")
-            if (!Files.exists(configFile)) return "onedrive"
+            if (!Files.exists(configFile)) return "onedrive" // allow: UD-012
             return try {
                 val raw = parseRaw(Files.readString(configFile))
-                raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive"
+                raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive" // allow: UD-012
             } catch (_: Exception) {
                 // Corrupt / unparseable config: fall back to the CLI default rather
                 // than crashing at startup. Downstream resolveProfile() will surface
                 // the real parse error with full context.
-                "onedrive"
+                "onedrive" // allow: UD-012
             }
         }
 
@@ -458,7 +459,7 @@ data class SyncConfig(
 
         fun parse(
             content: String,
-            profileName: String = "onedrive",
+            profileName: String = "onedrive", // allow: UD-012
         ): SyncConfig {
             val raw = decodeRawSyncConfig(content)
             return raw.toSyncConfig(profileName)

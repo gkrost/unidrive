@@ -230,4 +230,24 @@ class WebDavProvider internal constructor(
             hash = etag,
             mimeType = if (isFolder) null else "application/octet-stream",
         )
+
+    override fun transportWarning(planSize: Long): String? {
+        val fiftyGiB = 50L * 1024 * 1024 * 1024
+        if (planSize <= fiftyGiB) return null
+        return "Plan size ${formatSize(planSize)} exceeds 50 GiB on a WebDAV target. " +
+            "Throughput ceiling on nginx-mod_dav is typically < 30 MiB/s LAN; " +
+            "expect this to take many hours. Consider sftp / rclone-native if the " +
+            "same NAS exposes them."
+    }
+
+    private fun formatSize(bytes: Long): String {
+        val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
+        var size = bytes.toDouble()
+        var unit = 0
+        while (size >= 1024 && unit < units.lastIndex) {
+            size /= 1024
+            unit++
+        }
+        return "%.1f %s".format(size, units[unit])
+    }
 }

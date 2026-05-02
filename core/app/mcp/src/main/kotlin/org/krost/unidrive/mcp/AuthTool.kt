@@ -77,10 +77,28 @@ private fun handleAuthBegin(
     args: JsonObject,
     ctx: ProfileContext,
 ): JsonElement {
+    val factory =
+        org.krost.unidrive.ProviderRegistry
+            .get(ctx.profileInfo.type)
+    if (factory == null || !factory.supportsInteractiveAuth()) {
+        return buildToolResult(
+            "Provider '${ctx.profileInfo.type}' does not support interactive auth " +
+                "(unidrive_auth_begin / unidrive_auth_complete).",
+            isError = true,
+        )
+    }
+    // UD-014: the SPI capability gate above is the long-term contract,
+    // but the handler body below still hardcodes OneDriveConfig +
+    // OAuthService and would mis-execute against any other provider
+    // that returned true from supportsInteractiveAuth(). Until the auth
+    // flow itself is provider-agnostic in the SPI, narrow the
+    // implementation surface back to OneDrive with an explicit guard.
+    // allow: UD-014
     if (ctx.profileInfo.type != "onedrive") {
         return buildToolResult(
-            "unidrive_auth_begin currently supports only provider type 'onedrive' " +
-                "(got '${ctx.profileInfo.type}').",
+            "Provider '${ctx.profileInfo.type}' declares interactive-auth support " +
+                "but the unidrive_auth_begin handler is currently OneDrive-specific. " +
+                "Tracking generalisation in UD-014.",
             isError = true,
         )
     }

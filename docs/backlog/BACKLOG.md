@@ -9,23 +9,6 @@ Each item is a frontmatter block + prose. Required fields: `id`, `title`, `categ
 ## Architecture / structural (UD-001..099)
 
 ---
-id: UD-001
-title: Monorepo consolidation
-category: architecture
-priority: high
-effort: L
-status: in-progress
-code_refs:
-  - settings.gradle.kts
-  - CMakeLists.txt
-  - README.md
-adr_refs: [ADR-0001, ADR-0002]
-opened: 2026-04-17
-milestone: v0.1.0
----
-Consolidate the three sibling repos into a single monorepo at `greenfield/unidrive/`. Scaffold complete; pending first green build and tag. Acceptance: `./gradlew build` at root builds `core/` and `ui/` via composite; `cmake --build` builds `shell-win/`.
-
----
 
 ## Security (UD-100..199)
 
@@ -46,22 +29,6 @@ Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD
 ---
 
 ## Core daemon (UD-200..299)
-
----
-id: UD-201
-title: Complete NamedPipeServer hydration handler
-category: core
-priority: high
-effort: L
-status: open
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/NamedPipeServer.kt
-adr_refs: [ADR-0003]
-opened: 2026-04-17
-milestone: v0.3.0
-chunk: xpb
----
-TODOs at lines ~100–110: wire `fetch` → `SyncEngine.downloadFile(path)` + temp file write; wire `dehydrate` → CfDehydratePlaceholder via shell DLL; wire `unregister` → CfUnregisterSyncRoot. Gates v0.3.0 shell release.
 
 ---
 id: UD-205
@@ -177,23 +144,6 @@ Surfaced during the 2026-04-17 e2e test drive against sg5 (192.168.0.63) and kro
 ---
 
 ## Tooling / CI / docs (UD-700..799)
-
----
-id: UD-702
-title: Composite Gradle build root
-category: tooling
-priority: high
-effort: S
-status: in-progress
-code_refs:
-  - settings.gradle.kts
-  - ui/build.gradle.kts
-  - core/build.gradle.kts
-adr_refs: [ADR-0006]
-opened: 2026-04-17
-milestone: v0.1.0
----
-Root `settings.gradle.kts` composite scaffold landed; JVM unification to 21 LTS landed. Pending: verify `./gradlew build` from root green.
 
 ---
 id: UD-801
@@ -2071,56 +2021,6 @@ persistence, generic over credential type) needs human input first.
 - **UD-331** (closed) — NonCancellable wrap mirror across providers.
 - **UD-336** (closed, sibling lift) — error-body helpers in same package.
 ---
-id: UD-339
-title: Per-call HTTP retry helper — unify across OneDrive/Internxt/WebDAV (likely subsumed by UD-330)
-category: providers
-priority: medium
-effort: M
-status: open
-opened: 2026-04-30
----
-**From the 2026-04-30 provider-duplication survey.**
-
-Three different per-call retry-loop implementations on the same logical
-surface (transient HTTP statuses + Retry-After + exponential backoff):
-
-- `core/providers/onedrive/.../GraphApiService.kt:759-854` — inline
-  401 + 429/503 retry with header `Retry-After` + JSON body
-  `retryAfterSeconds` fallback.
-- `core/providers/internxt/.../InternxtApiService.kt:491-526` —
-  `retryOnTransient` with `TRANSIENT_STATUSES` + `RETRY_AFTER_REGEX`.
-- `core/providers/internxt/.../InternxtApiService.kt:421-452` —
-  `authenticatedGet` has its OWN separate retry on `[500, 503]` only —
-  hidden bug-pit: the two Internxt code paths have different retry
-  profiles.
-- `core/providers/webdav/.../WebDavApiService.kt:181-242` — `withRetry`
-  with header parsing, status set `[408, 425, 429, 500, 502, 503, 504]`.
-
-UD-330 is open as the cross-provider retry-budget umbrella. This per-
-call helper sits ABOVE the budget. **Likely subsumed by UD-330** —
-coordinate before lifting.
-
-## Proposal
-
-Either fold into UD-330's planned shape, or extract
-`:app:core/http/RetryPolicy.kt` with composable building blocks
-(transient-status set, max-attempts, header parser, body parser,
-backoff curve, jitter).
-
-Interim mitigation regardless: bring Internxt's `authenticatedGet`
-retry into agreement with `retryOnTransient` (same status set, same
-backoff) so the two paths stop diverging.
-
-## Effort / agent-ability
-
-**M effort**, agent-able partial — must coordinate with UD-330 first.
-
-## Related
-
-- **UD-330** (open, parent umbrella) — HttpRetryBudget cross-provider.
-- **UD-335** (closed) — Internxt retry on transient (introduced
-  `retryOnTransient`).
----
 id: UD-341
 title: Lift Ktor streaming-download skeleton (prepareGet ->bodyAsChannel) to :app:core/http
 category: providers
@@ -3478,3 +3378,1448 @@ Adding retry budgets to two providers is a 2-3 file change per
 provider plus a doc edit. Doable in one session, but distinct
 from PR #7's salvage scope and worth its own atomic commit so
 the rationale survives in `git log`.
+---
+id: UD-114
+title: SECURITY.md drift: NDJSON validation claim vs ADR-0012 (NamedPipeServer + NdjsonValidator deleted)
+category: security
+priority: medium
+effort: S
+status: open
+code_refs:
+  - docs/SECURITY.md:81
+  - docs/SECURITY.md:94
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SECURITY.md:81` and `docs/SECURITY.md:94` claim:
+
+> **NDJSON frame validation** at IPC boundary
+> (`IpcProgressReporter.kt`) — rejects non-conforming frames before
+> dispatch.
+
+> Schema validation rejects malformed structure
+> (`IpcProgressReporter.kt`); JSON parse errors dropped.
+
+This was true before [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+retired the bidirectional named-pipe transport. With ADR-0012:
+
+- `core/app/sync/.../NamedPipeServer.kt` — **deleted**.
+- `core/app/sync/.../NdjsonValidator.kt` — **deleted**.
+- The remaining `IpcProgressReporter.kt` is a **push-only UDS
+  broadcaster**: the daemon writes NDJSON sync events out to a Unix
+  socket; nothing reads frames *into* the daemon over IPC.
+
+Verified at filing time:
+
+```
+$ find core -name "NamedPipeServer.kt" -o -name "NdjsonValidator.kt"
+(no results)
+```
+
+The mitigation referenced in `SECURITY.md` therefore does not exist
+in the current architecture. The threat model row T1 ("Tampering
+with an NDJSON command frame in flight (local loopback)") is also
+moot — there are no inbound IPC frames to tamper with.
+
+## Risk
+
+This is a **threat-model honesty** issue. A reader of `SECURITY.md`
+believes the daemon validates incoming IPC frames. It doesn't,
+because there are no incoming IPC frames. If a future change
+re-introduces an IPC inbound surface (e.g. a CLI-to-daemon command
+channel), the existing doc would falsely claim it's already
+validated.
+
+## Proposed action
+
+Update `docs/SECURITY.md`:
+
+1. **§"Current mitigations"** (line 81 area): remove the "NDJSON
+   frame validation at IPC boundary" bullet. Replace with a
+   short note describing the actual UDS-broadcast topology and
+   why it doesn't need inbound validation (because it has no
+   inbound surface).
+
+2. **STRIDE table T1** (line 94 area): either drop the row
+   entirely (no inbound IPC = no T1 threat surface) or rephrase
+   to cover what *is* exposed today — a malicious local reader
+   binding to `unidrive-<profile>.sock` and consuming frames
+   intended for the legitimate observer. That has its own
+   mitigations (`mode 0600` on the socket, `SO_PEERCRED` if we
+   ever want peer identity).
+
+3. Cross-reference [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+   §"Removed surfaces" so the historical context is one click away.
+
+## Acceptance criteria
+
+- [ ] `grep -rn "NamedPipeServer\|NdjsonValidator" docs/SECURITY.md`
+      returns nothing.
+- [ ] `grep -n "IpcProgressReporter" docs/SECURITY.md` either
+      returns nothing or the surrounding text accurately describes
+      what the file does today (push-only UDS broadcaster).
+- [ ] STRIDE T1 row either removed or rewritten for the actual
+      threat surface.
+- [ ] No code changes required — this is purely doc drift.
+
+## Why this is its own ticket
+
+It's a security-doc fix; bundling it with general doc cleanup
+would bury it. Filing under `security` range keeps it on the
+right reviewer's radar (anyone scanning the security tier in
+`AGENT-SYNC.md`).
+---
+id: UD-768
+title: scripts/dev/log-watch.sh defaults to Windows AppData path on Linux MVP
+category: tooling
+priority: low
+effort: XS
+status: open
+code_refs:
+  - scripts/dev/log-watch.sh:22
+opened: 2026-05-02
+---
+## Problem
+
+`scripts/dev/log-watch.sh:22` defaults the live-log path to a
+**Windows AppData path** on a project whose MVP is Linux:
+
+```
+LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+```
+
+On Linux (the MVP per ADR-0012), `$HOME/AppData/Local/...` does
+not exist; the daemon writes to either `$XDG_STATE_HOME/unidrive/`
+or `$HOME/.local/state/unidrive/` depending on env. The script
+therefore prints "no such file" until the user remembers to set
+`UNIDRIVE_LOG`.
+
+This default is also the seed of broader doc drift: any reader
+who looks at `log-watch.sh` to understand "where does unidrive
+log on this platform?" gets a misleading answer.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Pick the right Linux default** and document the env-var
+override:
+
+```bash
+LOG="${UNIDRIVE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/unidrive/unidrive.log}"
+```
+
+This matches the daemon's actual write path (verify against
+the daemon's logging config before committing).
+
+**B) Refuse to default at all** if `UNIDRIVE_LOG` is unset on
+Linux, exit with a one-line error pointing at the env var. More
+explicit, less convenience.
+
+Recommend **A**: matches the daemon, removes the cliff for new
+contributors trying out the script.
+
+## Acceptance criteria
+
+- [ ] `log-watch.sh` default resolves to a path the daemon
+      actually writes to on Linux.
+- [ ] If macOS / Windows fallbacks are kept, they're behind an
+      `os.name` check at the top of the script with a comment
+      explaining ADR-0012.
+- [ ] Smoke: `UNIDRIVE_LOG=/tmp/test.log scripts/dev/log-watch.sh
+      --summary` works on Linux without further env setup.
+
+## Why a separate ticket from UD-400
+
+UD-400 sweeps `os.name` branches in **non-test Kotlin code**.
+This is a shell script. Same spirit, different scope. Atomic
+commit lets `git log` show the rationale without dragging the
+Kotlin sweep along.
+---
+id: UD-769
+title: Drop windows-latest from CI core matrix (or demote to allowed-to-fail) per ADR-0011/0012
+category: tooling
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - .github/workflows/build.yml:39
+opened: 2026-05-02
+---
+## Problem
+
+`.github/workflows/build.yml:39`:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    os: [ubuntu-latest, windows-latest]
+```
+
+[ADR-0011](adr/0011-shell-win-removal.md) +
+[ADR-0012](adr/0012-linux-mvp-protocol-removal.md) make Linux the
+MVP target. macOS and Windows are explicitly community-best-effort
+(README §"Status", in slim form: "Linux-first").
+
+Yet CI runs the full `core` job on `windows-latest` and `fail-fast:
+false` means a Windows-only failure produces a red overall build
+status even when Linux is green. This:
+
+- **Lies about the support matrix.** Anyone reading the build
+  badge and expanding the run sees "we test on Windows" — we
+  don't, in any meaningful sense; we just smoke that the JVM
+  modules compile.
+- **Burns CI time** (Windows runners are 5-10× slower than
+  ubuntu-latest for Gradle cold start; observed in
+  run 25247884883 — Windows job ran 5+ minutes when Linux took
+  3).
+- **Adds noise to PRs.** Every PR sits with a half-failed
+  status until the Windows run finishes, even though the
+  failure is rarely a real defect.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Drop windows-latest from the matrix entirely.** Honest,
+fast, matches ADR-0012. Loses the "compiles on Windows"
+canary, which is real but cheap to restore later.
+
+**B) Keep it as a separate, allowed-to-fail job** with an
+`continue-on-error: true` or a `if: github.event_name ==
+'schedule'` guard so PR builds don't block on Windows. Restore
+the Windows runner only on the main branch / nightly schedule.
+
+Recommend **A** for v0.1.0. Re-add via **B** if a future ADR
+re-opens Windows as a tier (per ADR-0012 §"Re-opening criteria").
+
+## Acceptance criteria
+
+- [ ] `core` matrix does not include `windows-latest` for PR
+      builds.
+- [ ] If kept (Option B), windows-latest is `continue-on-error:
+      true` AND only runs on `push: branches: [main]` or a
+      `schedule:` trigger.
+- [ ] README badge stays accurate (linux-first claim is honest).
+- [ ] No regression on ubuntu-latest + gitleaks jobs.
+
+## Why this is its own ticket
+
+It's a one-line CI config change but with policy implications
+(does the project still claim "best-effort Windows builds"?).
+A discrete commit with a clear `git log` entry is worth more
+than folding it into a generic "CI hygiene" sweep.
+---
+id: UD-770
+title: SPECS.md §2.2 reports 15 MCP tools; code lists 23 (UD-216 admin verbs added; doc not updated)
+category: tooling
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - docs/SPECS.md:54
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SPECS.md:54` claims the MCP server exposes 15 tools,
+verified against `core/app/mcp/.../Main.kt:20-24`:
+
+> | `app/mcp` | MCP server with 15 tools |
+> [`core/app/mcp/`](../core/app/mcp) | 💻 **15 tools verified**
+> (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:20-24`) |
+
+The actual count in `Main.kt` (verified at filing time) is **23**:
+the original 15 user-facing tools (status, sync, get, free, pin,
+conflicts, ls, config, trash, versions, share, relocate,
+watchEvents, quota, backup) **plus 8 admin verbs** added under
+[UD-216](#ud-216): authBegin, authComplete, logout, profileList,
+profileAdd, profileRemove, profileSet, identity.
+
+`Main.kt:53` even has the comment `// UD-216: admin verbs for
+end-to-end LLM-driven management.` admitting the count moved.
+
+The SPECS.md row is also marked 💻 **15 tools verified**, which
+is now a false attestation — the verification was correct at the
+time it was made, but the doc didn't follow the code.
+
+## Risk
+
+- `SPECS.md` is the **normative intent catalog** per CLAUDE.md.
+  The whole point of SPECS.md is to flag doc-vs-code drift with
+  📄 / 💻 / ✅ / ⚠ labels. A wrong 💻 attestation is precisely
+  the failure mode SPECS.md exists to prevent.
+- LLM clients picking up unidrive's MCP server expecting "15
+  tools" per the docs will be surprised by the 8 admin verbs;
+  not breaking, but inelegant.
+
+## Proposed action
+
+1. Update `docs/SPECS.md:54` row:
+   - Tool count: `15` → `23` (or whatever `Main.kt` lists at
+     edit time — re-verify, do not trust this ticket).
+   - Line range: `Main.kt:20-24` → the actual `listOf(...)`
+     range. At filing time the `tools = listOf(...)` block
+     spans `Main.kt:36-62`.
+   - Verification label: stays 💻 (code-verified) once corrected.
+2. Cross-check: does any other doc (README, ARCHITECTURE.md,
+   docs/EXTENSIONS.md, docs/MCP* if such exists) cite "15
+   tools"? Sweep and update.
+3. Add a `// SPECS.md row N — keep tool count in sync` marker
+   comment near the `listOf(...)` block in `Main.kt` so future
+   adds prompt a SPECS.md edit. (Optional; only if the maintainer
+   thinks comment-pinning beats a CI check.)
+
+## Acceptance criteria
+
+- [ ] `docs/SPECS.md:54` (or its current line) reports the
+      actual tool count, with the actual line range.
+- [ ] `grep -rn "15 tools" docs/` returns no stale claims.
+- [ ] No code changes required (this is doc drift only).
+
+## Why this is its own ticket
+
+Tiny but high-trust: SPECS.md is the source of truth for
+intent-vs-code accuracy. Drift here erodes confidence in every
+other ✅ / ⚠ label across the catalog. Worth its own atomic
+commit so a future reader can `git log -- docs/SPECS.md` and
+see exactly when the count was reconciled.
+---
+id: UD-771
+title: Doc discoverability + small drift sweep: link consequences.md + EXTENSIONS.md from README/ARCHITECTURE; fix CF-API in consequences.md, EXTENSIONS spec misref, log-feedback-loop stalled tickets, archive aged-out handover
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - README.md
+  - docs/ARCHITECTURE.md
+  - docs/user-guide/consequences.md:212
+  - docs/EXTENSIONS.md:122
+  - docs/dev/log-feedback-loop-proposal.md:73
+  - docs/dev/handover/subagent-chunks-2026-04-30.md
+opened: 2026-05-02
+---
+## Problem
+
+Two non-trivial reference documents are present in tree, fully
+written, code-verified, and **not linked from README or
+ARCHITECTURE.md**:
+
+- `docs/user-guide/consequences.md` — pin / unpin semantics, sync
+  edge-case behaviour, conflict resolution. Closed under
+  [UD-220](#ud-220) but undiscoverable to a contributor reading
+  README first.
+- `docs/EXTENSIONS.md` — documents the SPI extension contract
+  (the same `META-INF/services/org.krost.unidrive.ProviderFactory`
+  surface mentioned in README). Code path exists; doc explains
+  it; nothing in the front-page docs points at it.
+
+Verified at filing time:
+
+```
+$ grep -l "consequences\.md\|EXTENSIONS\.md" README.md docs/ARCHITECTURE.md
+(no matches)
+```
+
+Both docs cost real time to write. Leaving them undiscoverable is
+roughly equivalent to having deleted them.
+
+A secondary issue surfaced in the same audit:
+`docs/EXTENSIONS.md:122` cross-references
+`docs/specs/relocate-v1-sprint-plan.md` as its "Spec" link, which
+is a **misfile**: relocate-v1 is the relocate operation contract,
+not the SPI extensibility spec. Either the link is wrong or
+EXTENSIONS.md needs its own spec doc.
+
+## Additional drift items found in the same audit pass
+
+These are smaller but related; group into this ticket's scope
+since they all share the "find-and-fix references" shape:
+
+- `docs/user-guide/consequences.md:212` references "via the
+  Windows CF-API shell" — the CF-API tier was retired by
+  [ADR-0011](adr/0011-shell-win-removal.md). Drop the sentence
+  or rewrite to describe the current Linux pin semantics.
+- `docs/adr/0007-release-versioning.md:16` cites
+  `shell-win-v0.3.0` as a sub-tag example. Replace with a
+  surviving tier's example (e.g. `core-v0.1.0` already there;
+  drop the second example or use `mcp-v0.1.0`).
+- `docs/dev/log-feedback-loop-proposal.md:73` says "file two
+  tickets via `python scripts/dev/backlog.py file ...`"; tickets
+  were never filed. Either file them now (the proposal had
+  acted-on intent) or close the proposal as stalled.
+- `docs/dev/handover/subagent-chunks-2026-04-30.md` — every
+  chunk dispatched in this handover has shipped. Move to
+  `docs/dev/handover/archive/` or delete; keeping aged-out
+  handovers in the live folder confuses readers about current
+  state.
+
+## Proposed action
+
+1. **Linkage:** add `docs/user-guide/consequences.md` and
+   `docs/EXTENSIONS.md` to a "References" or "Further reading"
+   section near the bottom of README, OR (preferred) cross-link
+   them from `docs/ARCHITECTURE.md` where their topics are
+   discussed (consequences.md → architecture pin/conflict
+   section; EXTENSIONS.md → architecture SPI section).
+2. **Misfiled spec ref:** fix `docs/EXTENSIONS.md:122` to point
+   at the real SPI spec (or remove the line if no spec exists
+   yet — then file a follow-up to write one).
+3. **CF-API anachronism in consequences.md:** rewrite the
+   pin-semantics paragraph for Linux only.
+4. **shell-win-v0.3.0 in ADR-0007:** replace example with a
+   live tier.
+5. **log-feedback-loop-proposal.md:** decide — file the two
+   tickets now (which would close this sub-item) or close the
+   proposal as superseded. Note the decision in the proposal
+   doc itself.
+6. **Handover archival:** move `subagent-chunks-2026-04-30.md`
+   out of the live folder.
+
+## Acceptance criteria
+
+- [ ] `grep -l "consequences\.md\|EXTENSIONS\.md" README.md
+      docs/ARCHITECTURE.md` returns at least one match per file.
+- [ ] `grep -rn "CF-API\|shell-win-v0\.3" docs/` returns
+      nothing in non-archived doc files.
+- [ ] `docs/EXTENSIONS.md:122` cross-link resolves to a real
+      doc, or the line is removed.
+- [ ] `docs/dev/handover/subagent-chunks-2026-04-30.md` is
+      either moved to an archive folder or deleted.
+- [ ] No code changes required.
+
+## Why this is one ticket and not five
+
+All sub-items share the "doc reference fix" shape; bundling
+them lets a single sweep handle them with one round of
+verification. If any sub-item turns out to be load-bearing
+(e.g. someone *does* care about the relocate-v1 vs SPI link),
+break it out at fix-time, not now.
+---
+id: UD-005
+title: ADR-0007 cites retired shell-win-v0.3.0 sub-tag example after ADR-0011 retired the tier
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - docs/adr/0007-release-versioning.md:16
+opened: 2026-05-02
+---
+## Problem
+
+`docs/adr/0007-release-versioning.md:16` defines component sub-tag
+versioning with two examples:
+
+> Component sub-tags are permitted as additional tags on the same
+> commit when a tier needs an independently-citable build
+> (e.g., `core-v0.1.0`, `shell-win-v0.3.0`). They are *not*
+> primary and must match the monorepo tag's commit.
+
+The `shell-win-v0.3.0` example references a **retired tier**:
+[ADR-0011](adr/0011-shell-win-removal.md) removed `shell-win` as
+a tier of the project. The example therefore advertises a
+versioning surface that does not exist.
+
+This is a small but real ADR-vs-ADR coherence drift. ADR-0007
+should reflect the post-amendment state of the project's tier
+list (per ADR-0011/0012/0013 — the v0.1.0 surface).
+
+## Why this is filed under `architecture` and not folded into UD-771
+
+UD-771 sweeps doc-discoverability and small textual drift in
+non-ADR files (README links, EXTENSIONS.md misref, consequences.md
+CF-API mention). ADRs are normative architecture decisions; an
+ADR amendment deserves its own commit and its own audit trail in
+`git log` so the reasoning ("we updated the example because the
+referenced tier was retired") is searchable independently of doc
+hygiene noise.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Replace the example with a surviving tier.** Pick something
+like `mcp-v0.1.0` or just remove the second example (one is enough
+to make the point):
+
+> e.g., `core-v0.1.0`.
+
+**B) Add an "as of v0.1.0" qualifier** with a backreference to
+ADR-0011 explaining that the originally cited `shell-win-v0.3.0`
+was illustrative for a tier that has since been retired. Keeps
+the historical breadcrumb visible.
+
+Recommend **A** for line economy; ADR-0011 already explains the
+retirement and is one click away.
+
+## Acceptance criteria
+
+- [ ] `grep -n "shell-win" docs/adr/0007-release-versioning.md`
+      returns nothing (or only a backreference to ADR-0011 if
+      Option B chosen).
+- [ ] ADR-0007 is consistent with ADR-0011/0012/0013 about
+      which tiers exist.
+- [ ] No code change required.
+
+## Out of scope
+
+Broader ADR-0007 review (release cadence, conventional-commit
+enforcement, etc.) — this ticket is **only** the
+`shell-win-v0.3.0` line. Don't scope-creep.
+---
+id: UD-404
+title: CLI-Architektur: 3-Ebenen Command-Baum mit Single-Responsibility-Klassen
+category: cli
+priority: medium
+effort: M
+status: open
+opened: 2026-05-02
+---
+### Die Architektur (Clean Code im CLI-Design)
+
+Wenn man die CLI über eine moderne Bibliothek wie `picocli` (oder `clikt` falls Kotlin bevorzugt wird) aufbaut, lässt sich diese 3-Ebenen-Struktur perfekt in kleine, isolierte Klassen zerlegen. Das verhindert die typischen "Gott-Klassen", in denen hunderte Zeilen Argument-Parsing stattfinden.
+
+Die Paketstruktur spiegelt dabei exakt den CLI-Baum wider:
+
+```text
+org.krost.unidrive.cli
+├── UnidriveCommand         (Top-Level: unidrive)
+├── commands
+│   ├── show
+│   │   ├── ShowCommand     (Level 2: show)
+│   │   ├── StatusCommand   (Level 3: status)
+│   │   └── QuotaCommand    (Level 3: quota)
+│   ├── manage
+│   │   ├── ManageCommand   (Level 2: manage)
+│   │   ├── AuthCommand     (Level 3: auth)
+│   │   └── ProfileCommand  (Level 3: profile)
+│   └── run                 (Level 2: run / do)
+│       ├── RunCommand
+│       └── SyncCommand     (Level 3: sync)
+```
+
+Jedes Kommando ist nach dem Single-Responsibility-Prinzip nur für genau *eine* Aufgabe zuständig.
+
+### Umsetzung der Kombination aus Ansatz 5 und 3
+
+Du baust den Baum nach Ansatz 5 auf, nutzt aber die Annotations-Features deiner CLI-Library, um die Hilfe-Ausgabe (Ansatz 3) zu stylen. Hier ist ein Beispiel, wie so etwas konzeptionell aussieht:
+
+```java
+@Command(
+    name = "unidrive",
+    mixinStandardHelpOptions = true,
+    version = "1.0.0",
+    description = "The universal cloud drive synchronization engine.",
+    commandListHeading = "%n🚀 ACTIONS%n",
+    subcommands = {
+        ShowCommand.class,
+        ManageCommand.class,
+        RunCommand.class
+    }
+)
+public class UnidriveCommand implements Runnable { ... }
+```
+
+### Vorteile für den Entwicklungs-Workflow
+
+1. **Wartbarkeit:** Neues Feature → neue Klasse, keine bestehenden Klassen anfassen.
+2. **Git & Teamwork:** Jeder Befehl in eigener Datei → kaum Merge-Konflikte.
+3. **Kontext-Sensitivität:** Subcommands können validieren ob der Nutzer sich in einem aktiven `sync_root` befindet.
+---
+id: UD-006
+title: Lift formatSize/formatBytes (IEC byte formatting) into :app:core/io; eliminate 5+ duplicates
+category: architecture
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:284
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt:53
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:49
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:374
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:46
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+`formatSize` / `formatBytes` (IEC-binary byte formatting: `B`/`KiB`/`MiB`/`GiB`/`TiB`) is duplicated across 5 files:
+
+| File | Line | Status |
+|---|---|---|
+| `core/app/cli/src/main/kotlin/.../CliProgressReporter.kt` | 284 (companion) | canonical |
+| `core/app/cli/src/main/kotlin/.../VersionsCommand.kt` | 53 | duplicate |
+| `core/app/cli/src/main/kotlin/.../TrashCommand.kt` | 49 | duplicate |
+| `core/app/cli/src/main/kotlin/.../RelocateCommand.kt` | 374 | duplicate |
+| `core/app/cli/src/main/kotlin/.../StatusAudit.kt` | 46 | duplicate |
+| `core/providers/webdav/src/main/kotlin/.../WebDavProvider.kt` | (added by UD-???) | duplicate (this PR added a 6th, deliberately, per the SPI-contract spec §3.5) |
+
+All implement the same algorithm. Highest-ROI cleanup: lift to `:app:core` and replace 5 (or 6, including the WebDAV one this PR introduced) call-sites.
+
+## Proposed action
+
+1. Create `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt`:
+
+   ```kotlin
+   package org.krost.unidrive.io
+
+   /**
+    * Format a byte count using IEC binary prefixes (KiB, MiB, ...).
+    * One decimal place above the 1 KiB threshold.
+    */
+   fun formatSize(bytes: Long): String {
+       val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
+       var size = bytes.toDouble()
+       var unit = 0
+       while (size >= 1024 && unit < units.lastIndex) {
+           size /= 1024
+           unit++
+       }
+       return "%.1f %s".format(size, units[unit])
+   }
+   ```
+
+2. Replace each duplicate with `import org.krost.unidrive.io.formatSize`.
+
+3. Verify byte-identical output for representative sizes (1, 1023, 1024, 999_999_999, 50 GiB) before deleting any duplicate.
+
+## Why architecture-range
+
+This is a cross-module helper lift; the tooling category is for build/CI scripts. Architecture range fits cross-module API surface.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt` exists.
+- [ ] All 5 (or 6) duplicates replaced with `import org.krost.unidrive.io.formatSize`.
+- [ ] Output byte-identical for the 5 fixture sizes above (verify via test).
+- [ ] Build green; `./gradlew build test` reports the same baseline.
+
+## Out of scope
+
+Locale-aware formatting, decimal-prefix variants (KB vs KiB), or any
+behaviour change to the algorithm itself.
+---
+id: UD-007
+title: Default logout() on CloudProvider; remove 4-provider boilerplate (WebDAV, S3, Rclone, LocalFs)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+4 of 7 in-tree providers (WebDAV, S3, Rclone, LocalFs) implement `logout()` as the same boilerplate:
+
+```kotlin
+override suspend fun logout() { isAuthenticated = false }
+```
+
+The `CloudProvider` interface should provide this as the default. SFTP, OneDrive, and Internxt would override to add `api.close()` / `tokenManager.logout()` etc.
+
+## Proposed action
+
+1. In `CloudProvider.kt`, change `logout()` from abstract to default-implemented:
+
+   ```kotlin
+   /**
+    * Forget any cached credentials / authenticated state. Default
+    * implementation flips the in-memory flag; providers that own
+    * external resources (token files, network connections) override
+    * to release them.
+    */
+   suspend fun logout() {
+       // Default no-op; subclasses override to release resources.
+       // Note: subclasses that track an in-memory `isAuthenticated`
+       // flag must reset it themselves in their override.
+   }
+   ```
+
+2. Decide: should `isAuthenticated` be lifted into `CloudProvider`? If yes, the default `logout()` can flip it. If not, keep the default a no-op and let each provider's override handle its own state.
+
+3. Delete the boilerplate `override suspend fun logout() { isAuthenticated = false }` in WebDAV, S3, Rclone, LocalFs.
+
+4. Verify SFTP, OneDrive, Internxt overrides still do the right thing (they'll need to set `isAuthenticated = false` themselves now if it was previously inherited from the boilerplate; depends on §2 decision).
+
+## Acceptance criteria
+
+- [ ] `logout()` has a default implementation in `CloudProvider`.
+- [ ] WebDAV, S3, Rclone, LocalFs no longer override `logout()`.
+- [ ] SFTP, OneDrive, Internxt overrides still close their external
+      resources.
+- [ ] Existing `logout`-related tests still pass; no test weakened.
+
+## Out of scope
+
+Lifting `isAuthenticated` is a separate decision that can be made
+inside this ticket OR deferred. Document the choice in the ticket
+resolution note.
+---
+id: UD-008
+title: Abstract SnapshotDeltaProvider helper (or base class) — eliminate 5x deletedItem lambda duplication and shared delta() boilerplate
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngine.kt
+opened: 2026-05-02
+---
+## Problem
+
+All 5 snapshot-based providers (SFTP, WebDAV, S3, Rclone, LocalFs) follow an identical `delta()` structure:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage {
+    val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+    val currentEntries = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
+    val snapshotEntries = buildSnapshotEntries(currentEntries)
+    val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
+    return computeSnapshotDelta(
+        currentEntries = snapshotEntries,
+        currentItemsByPath = itemsByPath,
+        prevCursor = cursor,
+        entrySerializer = XxxSnapshotEntry.serializer(),
+        hasChanged = { prev, curr -> /* provider-specific */ },
+        deletedItem = { path, entry ->
+            CloudItem(id = path, name = path.substringAfterLast("/"), path = path,
+                      size = 0, isFolder = entry.isFolder, modified = null,
+                      created = null, hash = null, mimeType = null, deleted = true)
+        },
+    )
+}
+```
+
+Per-provider variations:
+- `listAll()` — API call shape
+- `buildSnapshotEntries()` — entry-type mapping
+- `toCloudItem()` — `CloudItem` mapping
+- `hasChanged` — change-detection predicate
+
+The `deletedItem` lambda is **byte-identical across all 5** providers.
+
+## Proposed action
+
+Two options:
+
+**A) Abstract base class `SnapshotDeltaProvider<E>`** that captures the boilerplate. Concrete providers implement only the four variations:
+
+```kotlin
+abstract class SnapshotDeltaProvider<E>(
+    private val entrySerializer: KSerializer<E>,
+) : CloudProvider {
+    protected abstract suspend fun listAll(heartbeat: ScanHeartbeat?): List<RawEntry<E>>
+    protected abstract fun hasChanged(prev: E, curr: E): Boolean
+
+    final override suspend fun delta(cursor: String?, onPageProgress: ((Int) -> Unit)?): DeltaPage {
+        // shared boilerplate — calls listAll, builds maps, calls computeSnapshotDelta
+    }
+}
+```
+
+**B) Standalone helper function `snapshotDelta(...)`** that takes the four variation points as lambda parameters. Providers retain their flat structure but call into the helper:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage =
+    snapshotDelta(
+        cursor = cursor,
+        progress = onPageProgress,
+        listAll = { hb -> api.listAll(...) },
+        toEntry = ::buildSnapshotEntry,
+        toCloudItem = RawEntry<E>::toCloudItem,
+        hasChanged = ::hasChanged,
+        entrySerializer = MySnapshotEntry.serializer(),
+    )
+```
+
+Recommend **B** (helper function) over **A** (abstract base): `CloudProvider` is already an interface, and Kotlin doesn't love abstract-class diamond inheritance when interfaces gain abstract methods. Helper-function pattern keeps providers as plain classes.
+
+Lift `deletedItem` into the helper; per-provider duplicates disappear.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented in the ticket resolution.
+- [ ] `deletedItem` lambda exists once (in the helper or the base class), zero duplicates across providers.
+- [ ] All 5 snapshot providers' `delta()` methods shrink to ≤10 lines, mostly delegating.
+- [ ] No test regressions; existing `Reconciler` / `delta` tests still pass.
+
+## Why architecture-range
+
+It's a structural change to how snapshot providers compose with the
+sync engine. Architecture range; needs an ADR or short design doc
+before any code moves (decision A vs B is the kind of thing future
+readers will ask about).
+
+## Out of scope
+
+Refactoring OneDrive (it uses `/delta` natively, not snapshot mode)
+or Internxt (its delta path is also custom and is being audited
+separately under UD-354).
+---
+id: UD-009
+title: Lift defaultTokenPath() into :app:core/io; eliminate 5-provider duplicate (SFTP/WebDAV/S3/OneDrive/Internxt)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProviderFactory.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 providers (SFTP, WebDAV, S3, OneDrive, Internxt) each define an identical helper:
+
+```kotlin
+fun defaultTokenPath(): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", "<provider-id>")
+}
+```
+
+Only the last path segment varies by provider id.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt
+package org.krost.unidrive.io
+
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * Default per-profile token storage directory:
+ *   $HOME/.config/unidrive/<providerId>
+ *
+ * The caller passes its own `id` (typically `factory.id`) so this
+ * function does not need to know which providers exist.
+ */
+fun defaultTokenPath(providerId: String): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", providerId)
+}
+```
+
+Replace the 5 duplicates with `org.krost.unidrive.io.defaultTokenPath(id)`.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt` exists.
+- [ ] All 5 duplicates removed.
+- [ ] Behaviour byte-identical: `defaultTokenPath("onedrive")` produces the same path string the old `OneDrive`-specific helper did.
+- [ ] No test regressions.
+
+## Why architecture-range
+
+Cross-module helper lift. Same category as UD-006.
+
+## Out of scope
+
+Honouring `XDG_CONFIG_HOME` (currently the helper hardcodes `~/.config`; that's a separate ticket if/when XDG compliance becomes a goal).
+---
+id: UD-010
+title: Lift extractJwtClaim() into :app:core/auth; eliminate 3-site duplicate (OneDrive + 2x Internxt)
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt:49
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt:64-65
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:42-48
+opened: 2026-05-02
+---
+## Problem
+
+JWT body claim extraction is duplicated:
+
+| File | Function | Lines |
+|---|---|---|
+| `core/providers/onedrive/.../OneDriveProviderFactory.kt:49` | `extractJwtClaim()` (private) | ~10 |
+| `core/providers/internxt/.../InternxtProviderFactory.kt:64-65` | inline | ~5 |
+| `core/providers/internxt/.../AuthService.kt:42-48` | inline | ~7 |
+
+All three do: split JWT on `.`, Base64-decode middle segment, find claim by key in JSON body.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt
+package org.krost.unidrive.auth
+
+import kotlinx.serialization.json.*
+import java.util.Base64
+
+/**
+ * Extract a string claim from a JWT body without verifying the signature.
+ *
+ * For unidrive's purposes (sub-claim from a freshly minted refresh-token,
+ * tenant-id from an access-token, etc.) we trust the issuer and just need
+ * the claim value. Signature verification happens at the API layer when
+ * the token is actually used.
+ *
+ * Returns null if the JWT is malformed, the body is unparsable, or the
+ * claim is absent.
+ */
+fun extractJwtClaim(jwt: String, claim: String): String? {
+    val parts = jwt.split(".")
+    if (parts.size < 2) return null
+    val body = try {
+        String(Base64.getUrlDecoder().decode(parts[1]))
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    val json = try {
+        Json.parseToJsonElement(body).jsonObject
+    } catch (_: Exception) {
+        return null
+    }
+    return json[claim]?.jsonPrimitive?.contentOrNull
+}
+```
+
+Replace the three duplicates.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt` exists.
+- [ ] OneDrive's `extractJwtClaim` private helper deleted; calls migrated to the new public helper.
+- [ ] Internxt's two inline JWT parses migrated.
+- [ ] Behaviour byte-identical for representative valid + malformed JWTs (verify via test).
+
+## Security note
+
+This helper does NOT verify the JWT signature. Document this in the
+helper's KDoc (already done above) so a future caller doesn't
+mistakenly use it for trust decisions.
+
+## Out of scope
+
+JWT signature verification, JWKS fetching, expiration checking. Each of those is its own ticket.
+---
+id: UD-011
+title: EPIC: refactor 6 god classes (GraphApiService, Main, WebDavApiService, SyncCommand, StatusCommand, InternxtProvider) — UD-004 already covers SyncEngine
+category: architecture
+priority: medium
+effort: XL
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+Audit (2026-05-02) measured 7 god classes by line count + methods per file:
+
+| Class | Lines | Methods | Lines/method |
+|---|---|---|---|
+| `SyncEngine` | 1249 | 16 | 78 |
+| `GraphApiService` (OneDrive) | 1080 | 26 | 42 |
+| `Main` (CLI) | 839 | 30 | 28 |
+| `WebDavApiService` | 699 | 22 | 32 |
+| `SyncCommand` | 647 | 9 | 72 |
+| `StatusCommand` | 646 | 18 | 36 |
+| `InternxtProvider` | 538 | 15 | 36 |
+
+`SyncEngine` already filed (UD-004 — decompose into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor).
+
+This ticket tracks the **remaining 6 god classes** as a single epic so they show up together in any prioritisation, but each will need its own ADR/sub-ticket before refactor lands.
+
+## Per-class quick triage
+
+### `GraphApiService` (1080 LoC, 26 methods, OneDrive HTTP monolith)
+Delta queries, upload/download, share management, retry budgets, error handling all in one. Natural split: `GraphDeltaService`, `GraphUploadService`, `GraphShareService`, with `GraphApiService` as a thin facade. Effort: M-L.
+
+### `Main` (CLI, 839 LoC, 30 methods)
+Picocli annotations, subcommand registration, provider creation, MDC context all inline. The picocli `@Command` annotations on subcommands force a flat shape; the real win is extracting the helper functions (`profilesOfType`, `buildEnvWarnings` (T8), MDC bootstrap) into focused files. Effort: S.
+
+### `WebDavApiService` (699 LoC, 22 methods)
+PROPFIND, upload/download, chunked uploads, quota, auth in one. Mirrors GraphApiService's shape. Same split pattern: `WebDavListService`, `WebDavUploadService`, `WebDavQuotaService`. Effort: M.
+
+### `SyncCommand` (647 LoC, 9 methods, 72 lines/method — second-highest)
+Provider construction, SyncEngine lifecycle, IPC loop, encryption wrapping. The methods are large because each one orchestrates a phase. Splitting into a `SyncOrchestrator` class that `SyncCommand` consumes would shrink `SyncCommand` to a thin CLI shell. Effort: M.
+
+### `StatusCommand` (646 LoC, 18 methods)
+Status rendering, table building, audit reports, credential checks. T11 already migrated some logic to `provider.statusFields()`; further wins from extracting `StatusRenderer` (table building) into its own file. Effort: S.
+
+### `InternxtProvider` (538 LoC, 15 methods, 2× the next-largest provider at 336)
+Multiple `toCloudItem` variants (file/folder × regular/delta) suggest a mapping layer worth extracting. UD-354 (Internxt computeSnapshotDelta verification) overlaps; consider doing both together. Effort: M.
+
+## Proposed sequencing
+
+Recommend tackling in this order:
+
+1. **`Main` (CLI)** — easiest, biggest readability win for newcomers.
+2. **`StatusCommand`** — T11 already cleaned the worst dispatch site; extracting `StatusRenderer` is straightforward.
+3. **`WebDavApiService`** — same pattern as Graph but smaller; rehearse the split shape here.
+4. **`GraphApiService`** — apply the rehearsed pattern.
+5. **`SyncCommand`** — depends on `SyncEngine` decomposition (UD-004) being at least partway through.
+6. **`InternxtProvider`** — couple with UD-354.
+
+## Acceptance criteria for this epic
+
+This is an EPIC; it does not have its own done-criterion. Done when each of the 6 sub-decisions above has its own UD-### ticket and its own ADR (where structural). The completion of each sub-ticket should reference back to this one.
+
+## Why architecture-range
+
+Structural concern across multiple modules. Each child ticket may go
+to its specific category range when filed.
+
+## Out of scope
+
+`SyncEngine` (UD-004 already exists), provider-name-equality dispatch (just resolved by refactor/provider-spi-contract).
+---
+id: UD-356
+title: Lift duplicated Snapshot test boilerplate (empty-snapshot + invalid-base64) up to :app:sync; keep round-trip tests per-provider
+category: providers
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsSnapshotTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpSnapshotTest.kt
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3SnapshotTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavSnapshotTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneSnapshotTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 snapshot test files contain the same 3 tests with provider-specific data:
+
+| File | Tests duplicated |
+|---|---|
+| `core/providers/localfs/src/test/.../LocalFsSnapshotTest.kt` | round-trip encode/decode, empty snapshot, reject invalid base64 |
+| `core/providers/sftp/src/test/.../SftpSnapshotTest.kt` | same 3 |
+| `core/providers/s3/src/test/.../S3SnapshotTest.kt` | same 3 |
+| `core/providers/webdav/src/test/.../WebDavSnapshotTest.kt` | same 3 |
+| `core/providers/rclone/src/test/.../RcloneSnapshotTest.kt` | same 3 |
+
+The empty-snapshot and invalid-base64 tests are **byte-identical** — they don't exercise any provider-specific data, just the generic `Snapshot<E>` wrapper's parse/encode contract.
+
+## Proposed action
+
+1. **Move the two byte-identical tests up to `:app:sync`** (where `Snapshot<E>` is defined). Replace the 5 per-provider duplicates with imports of the shared test (or just delete them — the contract being tested is the `Snapshot` wrapper's, not any provider-specific behaviour).
+
+2. **Keep round-trip tests per-provider** — those use real provider-specific entry types and DO test something provider-specific. Possibly parameterise via a base class or `@TestFactory`-style discovery, but per-provider is acceptable.
+
+## Per-`challenge-test-assertion` skill
+
+Before deleting the 4 duplicates of `empty snapshot returns null`, verify:
+1. **Invariant?** "An empty `Snapshot<E>` round-trips through encode/decode and stays empty" — generic, provider-independent.
+2. **Reasonable alternative impl?** Any implementation of `Snapshot.encode/decode` that handles the empty case. Test asserts the contract.
+3. **Delete harm?** If `:app:sync` has the same test asserting the same invariant, none. Otherwise, hold the test where the contract is most reachable.
+
+## Acceptance criteria
+
+- [ ] Tests moved up where appropriate; per-provider files don't carry generic-contract tests.
+- [ ] Provider-specific round-trip tests remain (or are parameterised; user choice).
+- [ ] Total test count goes down or stays flat; no invariant lost.
+- [ ] CHANGELOG note that 4 tests were deleted as duplicates (with the kept location named).
+
+## Why providers-range
+
+The work is in `:providers:*/src/test/`. Providers range fits.
+
+## Out of scope
+
+Lifting the snapshot wrapper itself (already done; see UD-008's notes on `Snapshot<E>` already shared via `:app:sync`).
+---
+id: UD-818
+title: Replace 5x duplicate ProviderFactory required-fields tests with parameterised TestFactory driven by ProviderRegistry + credentialPrompts() (post UD-006/spi-contract)
+category: tests
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3ProviderFactoryTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderFactoryTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderFactoryTest.kt
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsProviderFactoryTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneProviderFactoryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 provider-factory test files follow the same shape:
+
+| File | Pattern |
+|---|---|
+| `S3ProviderFactoryTest.kt` | `fullProps()` helper → for each required field: test it missing → test it blank → assert `ConfigurationException` |
+| `SftpProviderFactoryTest.kt` | same |
+| `WebDavProviderFactoryTest.kt` | same |
+| `LocalFsProviderFactoryTest.kt` | same |
+| `RcloneProviderFactoryTest.kt` | same |
+
+Each test class is ~5-15 lines of unique-per-provider data wrapped in identical assertion scaffolding.
+
+## Proposed action
+
+Two options:
+
+**A) Parametric base class.** A `ProviderFactoryRequiredFieldsTestBase<F : ProviderFactory>` in `:app:core/src/testFixtures/` that takes `(factory, requiredKeys, fullProps)` and drives the same tests. Each provider's test class extends it with a 5-line constructor.
+
+**B) JUnit 5 `@TestFactory` style.** A single test in `:app:core/src/test/` that iterates over `ProviderRegistry.all()`, queries each factory's `credentialPrompts()` (now the SPI capability — see UD-006 / refactor-provider-spi-contract), filters to required prompts, and runs the missing-field assertions.
+
+Recommend **B** (TestFactory pattern) — it leverages the new SPI capability `credentialPrompts()` introduced in this session's refactor, so the test stays current as new providers are added without requiring a new test-class subclass per provider. Adding a 9th provider gets free coverage.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented.
+- [ ] Per-provider factory test classes shrink dramatically OR are deleted.
+- [ ] Coverage of "required field missing/blank → ConfigurationException" still in place for all providers (verify by running coverage report).
+- [ ] No new provider can be added without automatically getting required-field coverage.
+
+## Why tests-range
+
+It's a test-architecture refactor.
+
+## Out of scope
+
+Other test patterns (the wizard tests, integration tests, capability-matrix tests). This is just the missing-field assertion family.
+---
+id: UD-012
+title: Replace 8x "onedrive" historical default in SyncConfig.kt with ProviderRegistry-driven default (or document via ADR)
+category: architecture
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:304
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:313
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:359
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:433
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:436
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:441
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:461
+opened: 2026-05-02
+---
+## Problem
+
+`SyncConfig.kt` hardcodes `"onedrive"` as the universal fallback default at 8 sites (verified 2026-05-02 against the post-refactor/provider-spi-contract tree):
+
+| Line | Role |
+|---|---|
+| 304 | `providerId: String = "onedrive"` (default param of `RawProvider.defaults`-helper-style ctor) |
+| 313 | `"onedrive" to "OneDrive"` — display-name override map |
+| 359 | `fun defaults(providerId: String = "onedrive")` |
+| 433 | `if (!Files.exists(configFile)) return "onedrive"` (resolveDefaultProfile waterfall) |
+| 436 | `raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive"` |
+| 441 | `"onedrive"` (last fallback in resolveDefaultProfile) |
+| 461 | `profileName: String = "onedrive"` (default param) |
+
+Plus one help-text reference:
+- `core/app/cli/src/main/kotlin/.../Main.kt:474` — `RCLONE_BINARY ... default: "rclone"` (refers to the rclone *binary* on PATH, not the provider id; mentioned for completeness).
+
+The `SyncConfig` references are the "single-provider-era" artefact: the project had only OneDrive when this default was chosen. With 7 in-tree providers today, the choice is undocumented and inconsistent (display-name map at 313 only covers one provider; the rest get their default-display from elsewhere).
+
+## Proposed action
+
+Replace with a registry-driven default. Two acceptable shapes:
+
+**A) `ProviderRegistry.defaultProvider()`** that returns either:
+- the first SPI-discovered provider (deterministic by classpath order, usually `localfs` since it's pure-Java); or
+- a config-driven choice (`general.default_provider_when_none` in `config.toml`).
+
+Then `SyncConfig.kt` calls `ProviderRegistry.defaultProvider()` instead of literal `"onedrive"`. Display-name map at line 313 is removed in favour of `ProviderRegistry.getMetadata(id)?.displayName`.
+
+**B) Keep "onedrive" but document why** in an ADR. If OneDrive is genuinely the canonical default for the project's target audience, that's a defensible position — but it should be a deliberate choice with `// allow: per ADR-XXXX` markers on each site.
+
+Recommend **A**. The architecture has moved on; the literal hasn't. A registry-driven choice is also testable (parametric tests can swap the default per-test).
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented (ideally in a short ADR, e.g. ADR-0015 "default provider resolution").
+- [ ] If A: `SyncConfig.kt` has zero `"onedrive"` literals; all 8 sites consult `ProviderRegistry.defaultProvider()` or `ProviderRegistry.getMetadata`.
+- [ ] If B: each surviving literal has `// allow: per ADR-XXXX` marker (CI guard's allow-list mechanism).
+- [ ] Either way, `bash scripts/ci/check-no-provider-string-dispatch.sh` passes.
+- [ ] No regression in `resolveDefaultProfile` waterfall semantics; existing tests still green.
+
+## Why architecture-range
+
+It's a structural decision (what is the project's default provider?) with cross-module implications. UD-004 / UD-008 / UD-011 are all architecture-range; this fits.
+
+## Out of scope
+
+XDG-config-honouring resolution, multi-default support (different default per environment), profile-cycling. Those are independent later work.
+
+## Status of the CI guard
+
+`scripts/ci/check-no-provider-string-dispatch.sh` (added in
+refactor/provider-spi-contract) currently flags these 8 sites. Until
+this ticket is resolved, **the lines are tagged with `// allow:
+UD-012` markers** so CI doesn't fail on pre-existing technical debt.
+Removing those markers is part of this ticket's done-criterion.
+---
+id: UD-013
+title: Delete ProviderRegistry.isKnownType + defaultTypes dead code; fail loud on empty SPI discovery instead of silent fallback
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:41
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:74-76
+  - core/app/core/src/test/kotlin/org/krost/unidrive/ProviderMetadataTest.kt
+  - core/app/core/src/test/kotlin/org/krost/unidrive/SpiDiscoveryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt`
+defines two near-identically-named methods with different semantics
+on `ProviderRegistry`:
+
+```kotlin
+private val defaultTypes = setOf("localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
+
+val knownTypes: Set<String> by lazy {
+    val discovered = loader.toList().map { it.id }.toSet()
+    if (discovered.isEmpty()) defaultTypes else discovered
+}
+
+fun isKnown(type: String): Boolean = type in knownTypes      // line 74
+fun isKnownType(type: String): Boolean = type in defaultTypes // line 76
+```
+
+Two distinct issues:
+
+1. **`isKnownType` has zero non-test callers.** Verified
+   2026-05-02 against the post-refactor/provider-spi-contract tree:
+
+   ```
+   $ grep -rn "isKnownType" core/ --include="*.kt" | grep -v build/ | grep -v /test/
+   core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:76:    fun isKnownType(type: String): Boolean = type in defaultTypes
+   ```
+
+   Only the definition. The two test classes that exercise it
+   (`ProviderMetadataTest`, `SpiDiscoveryTest`) test the method
+   against the same `defaultTypes` set the method itself consults
+   — so the tests are tautological: they confirm the hardcoded
+   list contains its own members.
+
+2. **`defaultTypes` is a stale fallback.** It includes `onedrive`
+   but is missing `internxt` (added later). It existed because
+   "discovered.isEmpty()" can happen at unit-test time when the
+   `META-INF/services/...` file is absent from the test classpath.
+   But the right fix for that scenario is to register a
+   `META-INF/services/...` file in test resources, not to keep a
+   stale fallback that silently masks SPI registration failures.
+
+## Risk
+
+- **Footgun semantics.** A reader who sees `isKnown` and
+  `isKnownType` next to each other reasonably assumes they are
+  synonyms. They are not — one consults the live SPI, the other
+  consults the hardcoded fallback. A future caller that picks the
+  wrong one will silently get inconsistent behaviour for newly
+  added providers.
+- **Stale fallback masks SPI registration failures.** If the
+  `META-INF/services/org.krost.unidrive.ProviderFactory` file goes
+  missing from the runtime classpath (e.g. shadow-jar
+  misconfiguration), `knownTypes` silently falls back to the 6
+  members of `defaultTypes` — which currently does NOT include
+  `internxt`. A user with an Internxt profile would see
+  "unknown provider type internxt" with no helpful error pointing
+  at the SPI loading problem.
+
+## Proposed action
+
+1. **Delete `defaultTypes` and `isKnownType` outright.** Both are
+   dead in production code; the tautological tests
+   (`ProviderMetadataTest`'s `isKnownType validates built-in
+   providers`, `SpiDiscoveryTest`'s `isKnownType validates
+   built-in providers`) get deleted with them.
+2. **Replace the silent fallback** in `knownTypes` with a fail-loud
+   error:
+
+   ```kotlin
+   val knownTypes: Set<String> by lazy {
+       val discovered = loader.toList().map { it.id }.toSet()
+       if (discovered.isEmpty()) {
+           error(
+               "ProviderRegistry: no providers discovered via ServiceLoader. " +
+                   "Either no provider modules are on the classpath, or their " +
+                   "META-INF/services/org.krost.unidrive.ProviderFactory files " +
+                   "are missing from the runtime classpath."
+           )
+       }
+       discovered
+   }
+   ```
+
+   This converts the silent-empty-discovery footgun into a loud
+   failure at first call.
+3. **Test impact:** the empty-classpath scenario in tests must now
+   either provide the SPI registration file in test resources (the
+   right fix), or test against a fake-registered set. Most existing
+   tests already work because they're in `:app:cli/src/test` (which
+   has all 7 providers on the classpath) or use mocks.
+
+## Acceptance criteria
+
+- [ ] `defaultTypes`, `isKnownType` deleted from `ProviderMetadata.kt`.
+- [ ] `knownTypes` falls loud on empty discovery instead of falling
+      back silently.
+- [ ] `grep -rn "isKnownType\|defaultTypes" core/` returns zero hits.
+- [ ] `:app:core:test` and the global `./gradlew test` still pass;
+      no test deleted that asserted a real invariant.
+- [ ] Per `challenge-test-assertion`: the deleted tests
+      (`isKnownType validates built-in providers` ×2) are documented
+      in the resolution as "tautological — asserted the hardcoded
+      list contains its own members; deleted with the hardcoded
+      list itself".
+
+## Why architecture-range
+
+It's a contract-surface decision (does `ProviderRegistry` keep a
+fallback or fail loud?) and an API change (deleting a public
+method). Architecture range fits.
+
+## Out of scope
+
+Lifting the SPI registration concern into a build-time check (e.g.
+a Gradle task that asserts every `:providers:*` module ships its
+`META-INF/services/...` file). Worth its own ticket if the
+fail-loud approach surfaces real CI noise.
+
+## Why this wasn't done in refactor/provider-spi-contract
+
+The SPI-contract PR (UD-???-equivalent, the spec
+`docs/specs/2026-05-02-provider-spi-contract-extension-design.md`)
+explicitly listed this in its §6 "out-of-scope follow-ups" along
+with three other small cleanups, but did not file a ticket for it
+at the time. This ticket closes that gap.
+---
+id: UD-014
+title: Make MCP auth_begin/complete provider-agnostic via ProviderFactory.beginInteractiveAuth(); drop OneDrive-narrowing guard in AuthTool
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt:80-101
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt`'s `handleAuthBegin` (and `handleAuthComplete`) currently has a two-step gate:
+
+1. **Capability check** (post-refactor/provider-spi-contract): `if (factory == null || !factory.supportsInteractiveAuth()) return error`. Long-term contract; correct semantically.
+2. **OneDrive-specific narrowing** (added 2026-05-02 by Codex review on PR #9): `if (ctx.profileInfo.type != "onedrive") return "handler is currently OneDrive-specific"`. **Temporary** — the body below the gate hardcodes `OneDriveConfig`, `OAuthService`, `DeviceCodeResponse` etc.
+
+Without step 2, any future provider whose factory returns `true` from `supportsInteractiveAuth()` (e.g. Internxt, hypothetical OAuth providers) would enter the handler and **execute OneDrive's OAuth flow against a non-OneDrive profile**. The Codex reviewer caught this on PR #9; step 2 was added as a stopgap with a `// allow: UD-014` marker.
+
+The proper fix: make the auth flow itself provider-agnostic in the SPI, then drop step 2.
+
+## Proposed action
+
+Extend `ProviderFactory` (or `CloudProvider`) with two new SPI methods:
+
+```kotlin
+interface ProviderFactory {
+    // … existing capabilities including supportsInteractiveAuth()
+
+    /**
+     * Begin an interactive auth flow. Returns a [BeginAuthResult]
+     * describing what the user must do next (visit URL, enter code,
+     * etc.) and a [continuationHandle] that the corresponding
+     * completeAuth() call will use to resume.
+     *
+     * Only invoked when supportsInteractiveAuth() returns true.
+     * Default throws UnsupportedOperationException — the gate
+     * should prevent that path being reached.
+     */
+    suspend fun beginInteractiveAuth(profileDir: Path): BeginAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+
+    /**
+     * Resume an interactive auth flow with the user-provided handle.
+     * Returns success/error; on success the credentials should now
+     * be persisted under profileDir.
+     */
+    suspend fun completeInteractiveAuth(profileDir: Path, continuationHandle: String): CompleteAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+}
+
+data class BeginAuthResult(
+    val userMessage: String,           // "Go to https://… and enter code XYZ"
+    val continuationHandle: String,    // opaque token the user passes to completeAuth
+    val pollableEndpoint: String? = null, // optional: for device-flow polling
+    val expiresAt: Instant? = null,
+)
+
+sealed class CompleteAuthResult {
+    object Success : CompleteAuthResult()
+    data class Pending(val message: String) : CompleteAuthResult()  // user hasn't completed in browser yet
+    data class Error(val message: String) : CompleteAuthResult()
+}
+```
+
+Then:
+
+1. **OneDrive** implements both methods, lifting the existing `OneDriveConfig` + `OAuthService` + `DeviceCodeResponse` plumbing inside the override. Existing `OneDriveProvider` keeps the OAuth-flow code where it belongs (with the provider).
+2. **`AuthTool.handleAuthBegin`** becomes provider-agnostic:
+   ```kotlin
+   if (factory == null || !factory.supportsInteractiveAuth()) return error("…")
+   val result = runBlocking { factory.beginInteractiveAuth(ctx.profileDir) }
+   storeContinuation(result.continuationHandle, ctx.profileInfo.name)
+   return buildToolResult(result.userMessage)
+   ```
+3. **Drop the UD-014 narrowing guard** in `AuthTool.kt`.
+4. **Internxt** can then implement `beginInteractiveAuth` (it does have OAuth) without touching `AuthTool.kt`.
+
+## Acceptance criteria
+
+- [ ] `BeginAuthResult` / `CompleteAuthResult` types added in `:app:core`.
+- [ ] `ProviderFactory.beginInteractiveAuth` + `completeInteractiveAuth` added with throwing defaults.
+- [ ] OneDrive overrides both, lifting current `AuthTool` body internals.
+- [ ] `AuthTool.handleAuthBegin`/`handleAuthComplete` no longer mention `OneDriveConfig` / `OAuthService` / `"onedrive"`.
+- [ ] `// allow: UD-014` marker + the narrowing `if (type != "onedrive")` block deleted from `AuthTool.kt`.
+- [ ] Existing `AdminToolsTest` cases still pass (the capability-rejection invariant is preserved).
+- [ ] Add a contract test asserting OneDrive's `beginInteractiveAuth()` returns a non-empty `userMessage` and a non-empty `continuationHandle` (without doing live network — fixture-driven).
+
+## Why architecture-range
+
+API change to the SPI (two new methods). Architecture range fits.
+
+## Out of scope
+
+Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is the lift target, not a rewrite). Internxt's `beginInteractiveAuth` impl (separate ticket if/when Internxt's interactive flow ships).
+
+## Why this wasn't done in PR #9
+
+Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.

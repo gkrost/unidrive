@@ -805,7 +805,7 @@ class SyncEngine(
         }
 
         if (verifyIntegrity) {
-            val verified = HashVerifier.verify(localPath, action.remoteItem.hash, providerId)
+            val verified = HashVerifier.verify(localPath, action.remoteItem.hash, algorithm = provider.hashAlgorithm())
             if (!verified) {
                 reporter.onWarning("Integrity check failed: ${action.path}")
             }

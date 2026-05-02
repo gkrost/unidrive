@@ -256,4 +256,6 @@ class S3Provider(
         val key = api.pathToKey(path)
         return CapabilityResult.Success(api.presign(key, expiryHours * 3600))
     }
+
+    override fun hashAlgorithm(): HashAlgorithm = HashAlgorithm.Md5Hex
 }

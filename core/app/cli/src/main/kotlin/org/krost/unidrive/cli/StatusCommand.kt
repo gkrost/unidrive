@@ -161,12 +161,7 @@ class StatusCommand : Runnable {
                 null
             }
 
-        val includeShared =
-            if (profile.type == "onedrive") {
-                profile.rawProvider?.include_shared == true
-            } else {
-                null
-            }
+        val extraFields = provider.statusFields()
 
         return AuditReport(
             profileName = profile.name,
@@ -177,7 +172,7 @@ class StatusCommand : Runnable {
             nonHydrated = nonHydrated,
             pendingCursor = pendingCursor,
             lastFullScan = lastFullScan,
-            includeShared = includeShared,
+            extraFields = extraFields,
         )
     }
 

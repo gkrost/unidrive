@@ -82,4 +82,6 @@ class RcloneProviderFactory : ProviderFactory {
         }
         return CredentialHealth.Ok
     }
+
+    override fun envVarMappings(): Map<String, String> = mapOf("RCLONE_REMOTE" to "rclone_remote")
 }

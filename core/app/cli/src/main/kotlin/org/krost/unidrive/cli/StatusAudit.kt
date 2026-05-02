@@ -23,7 +23,7 @@ data class AuditReport(
     val nonHydrated: Int,
     val pendingCursor: String?,
     val lastFullScan: String?,
-    val includeShared: Boolean?,
+    val extraFields: List<org.krost.unidrive.StatusField> = emptyList(),
 )
 
 /**
@@ -119,8 +119,8 @@ object StatusAudit {
 
         lines.add("Last sync:        ${StatusCommand.formatLastSync(report.lastFullScan)}")
 
-        if (report.includeShared != null) {
-            lines.add("Include shared:   ${report.includeShared}")
+        for (field in report.extraFields) {
+            lines.add("${field.label}:".padEnd(18) + field.value)
         }
 
         return lines.joinToString("\n")

@@ -333,4 +333,14 @@ class OneDriveProvider(
     ): Boolean = graphApi.renewSubscription(subscriptionId, expirationDateTime)
 
     suspend fun deleteSubscription(subscriptionId: String): Boolean = graphApi.deleteSubscription(subscriptionId)
+
+    override fun hashAlgorithm(): HashAlgorithm = HashAlgorithm.QuickXor
+
+    override fun statusFields(): List<StatusField> =
+        listOf(
+            StatusField(
+                label = "Include shared",
+                value = config.includeShared.toString(),
+            ),
+        )
 }

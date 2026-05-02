@@ -148,6 +148,30 @@ interface CloudProvider {
         CapabilityResult.Unsupported(Capability.Webhook, "Provider does not support webhook callbacks")
 
     fun close() {}
+
+    /**
+     * Algorithm this provider uses for `remoteHash` strings. Returning
+     * null means the provider has no verifiable hash; callers MUST
+     * treat that as "skip verification" rather than "verification
+     * passed". Default null.
+     */
+    fun hashAlgorithm(): HashAlgorithm? = null
+
+    /**
+     * Provider-specific status fields to render in `unidrive status`
+     * after the shared fields (quota, tracked files, etc.). Empty
+     * list (the default) means this provider contributes no extras.
+     */
+    fun statusFields(): List<StatusField> = emptyList()
+
+    /**
+     * Optional warning surfaced when relocating large data INTO this
+     * provider. `planSize` is the total byte count being moved.
+     * Returning null (the default) means "no provider-specific
+     * warning". Used by `relocate` to flag known transport ceilings
+     * (e.g. WebDAV's nginx-mod_dav throughput cliff).
+     */
+    fun transportWarning(planSize: Long): String? = null
 }
 
 data class ShareInfo(
