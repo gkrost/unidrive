@@ -1,8 +1,8 @@
 # Spec: Promote `unidrive-mcp/` to a self-contained private GitHub repo
 
-- **Version:** 0.1.0
+- **Version:** 0.2.0
 - **Date:** 2026-05-02
-- **Status:** Draft → awaiting user review
+- **Status:** Done — implemented as `gkrost/unidrive-mcp` (private), root commit `4406810`, branch `main`.
 - **Author:** brainstormed in collaboration with Claude
 
 ## 1. Problem
@@ -187,3 +187,42 @@ None at design time. All three brainstorm questions answered:
   touch `core/app/mcp/`.
 - History: **A** — fresh git history; no salvage from unidrive.
 - Remote: **B** — private GitHub repo at `gkrost/unidrive-mcp`.
+
+## 8. Implementation notes (2026-05-02, v0.2.0)
+
+Executed via subagent-driven-development against the plan at
+`docs/plans/2026-05-02-unidrive-mcp-standalone-repo.md`.
+
+**Outcomes:**
+- `gkrost/unidrive-mcp` created as private, default branch `main`.
+- Single root commit `44068109d9b3fbb927c22aab47369cb7fd7c8896`, 36
+  files, 5676 insertions.
+- Smoke test against `daemon-ipc-mcp` from a fresh SSH clone: venv +
+  29-package pip install + `python server.py` all clean.
+- unidrive repo unchanged outside `docs/specs/` and `docs/plans/`.
+
+**Two deviations / lessons:**
+
+1. **HTTPS push helper missing.** `gh repo create --push` invoked an
+   HTTPS push that failed with `git: 'remote-https' is not a git
+   command`. The system git at `/usr/bin/git` (v2.53.0) ships with
+   `git-remote-http` but no `git-remote-https`. Worked around by
+   `git remote set-url origin git@github.com:…` and `git push -u
+   origin main` over SSH. Future automation in this environment
+   should default to SSH for GitHub.
+
+2. **Two pre-existing path-hack bugs salvaged faithfully.** Smoke
+   test surfaced two servers whose `server.py` assumes a specific
+   parent-directory layout that only exists inside the unidrive
+   repo:
+   - `backlog-mcp/server.py:42-46` — `_HERE.parent` was supposed to
+     resolve to `scripts/dev/`, expected to find `backlog.py` as a
+     sibling. After the move, no `backlog.py` is reachable.
+   - `gradle-mcp/server.py:62` — `Path(__file__).resolve().parents[3]`
+     was supposed to resolve to the unidrive repo root. After the
+     move it points at `~/dev/git/`.
+
+   Per spec §5 these are explicitly out of scope for the salvage
+   itself — both bugs pre-existed in the source folder. They are
+   filed as follow-up work in the new repo's own backlog (or a
+   `KNOWN-ISSUES.md` if/when one is created), not in unidrive.
