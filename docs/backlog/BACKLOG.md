@@ -9,23 +9,6 @@ Each item is a frontmatter block + prose. Required fields: `id`, `title`, `categ
 ## Architecture / structural (UD-001..099)
 
 ---
-id: UD-001
-title: Monorepo consolidation
-category: architecture
-priority: high
-effort: L
-status: in-progress
-code_refs:
-  - settings.gradle.kts
-  - CMakeLists.txt
-  - README.md
-adr_refs: [ADR-0001, ADR-0002]
-opened: 2026-04-17
-milestone: v0.1.0
----
-Consolidate the three sibling repos into a single monorepo at `greenfield/unidrive/`. Scaffold complete; pending first green build and tag. Acceptance: `./gradlew build` at root builds `core/` and `ui/` via composite; `cmake --build` builds `shell-win/`.
-
----
 
 ## Security (UD-100..199)
 
@@ -46,22 +29,6 @@ Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD
 ---
 
 ## Core daemon (UD-200..299)
-
----
-id: UD-201
-title: Complete NamedPipeServer hydration handler
-category: core
-priority: high
-effort: L
-status: open
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/NamedPipeServer.kt
-adr_refs: [ADR-0003]
-opened: 2026-04-17
-milestone: v0.3.0
-chunk: xpb
----
-TODOs at lines ~100–110: wire `fetch` → `SyncEngine.downloadFile(path)` + temp file write; wire `dehydrate` → CfDehydratePlaceholder via shell DLL; wire `unregister` → CfUnregisterSyncRoot. Gates v0.3.0 shell release.
 
 ---
 id: UD-205
@@ -177,23 +144,6 @@ Surfaced during the 2026-04-17 e2e test drive against sg5 (192.168.0.63) and kro
 ---
 
 ## Tooling / CI / docs (UD-700..799)
-
----
-id: UD-702
-title: Composite Gradle build root
-category: tooling
-priority: high
-effort: S
-status: in-progress
-code_refs:
-  - settings.gradle.kts
-  - ui/build.gradle.kts
-  - core/build.gradle.kts
-adr_refs: [ADR-0006]
-opened: 2026-04-17
-milestone: v0.1.0
----
-Root `settings.gradle.kts` composite scaffold landed; JVM unification to 21 LTS landed. Pending: verify `./gradlew build` from root green.
 
 ---
 id: UD-801
@@ -2071,56 +2021,6 @@ persistence, generic over credential type) needs human input first.
 - **UD-331** (closed) — NonCancellable wrap mirror across providers.
 - **UD-336** (closed, sibling lift) — error-body helpers in same package.
 ---
-id: UD-339
-title: Per-call HTTP retry helper — unify across OneDrive/Internxt/WebDAV (likely subsumed by UD-330)
-category: providers
-priority: medium
-effort: M
-status: open
-opened: 2026-04-30
----
-**From the 2026-04-30 provider-duplication survey.**
-
-Three different per-call retry-loop implementations on the same logical
-surface (transient HTTP statuses + Retry-After + exponential backoff):
-
-- `core/providers/onedrive/.../GraphApiService.kt:759-854` — inline
-  401 + 429/503 retry with header `Retry-After` + JSON body
-  `retryAfterSeconds` fallback.
-- `core/providers/internxt/.../InternxtApiService.kt:491-526` —
-  `retryOnTransient` with `TRANSIENT_STATUSES` + `RETRY_AFTER_REGEX`.
-- `core/providers/internxt/.../InternxtApiService.kt:421-452` —
-  `authenticatedGet` has its OWN separate retry on `[500, 503]` only —
-  hidden bug-pit: the two Internxt code paths have different retry
-  profiles.
-- `core/providers/webdav/.../WebDavApiService.kt:181-242` — `withRetry`
-  with header parsing, status set `[408, 425, 429, 500, 502, 503, 504]`.
-
-UD-330 is open as the cross-provider retry-budget umbrella. This per-
-call helper sits ABOVE the budget. **Likely subsumed by UD-330** —
-coordinate before lifting.
-
-## Proposal
-
-Either fold into UD-330's planned shape, or extract
-`:app:core/http/RetryPolicy.kt` with composable building blocks
-(transient-status set, max-attempts, header parser, body parser,
-backoff curve, jitter).
-
-Interim mitigation regardless: bring Internxt's `authenticatedGet`
-retry into agreement with `retryOnTransient` (same status set, same
-backoff) so the two paths stop diverging.
-
-## Effort / agent-ability
-
-**M effort**, agent-able partial — must coordinate with UD-330 first.
-
-## Related
-
-- **UD-330** (open, parent umbrella) — HttpRetryBudget cross-provider.
-- **UD-335** (closed) — Internxt retry on transient (introduced
-  `retryOnTransient`).
----
 id: UD-341
 title: Lift Ktor streaming-download skeleton (prepareGet ->bodyAsChannel) to :app:core/http
 category: providers
@@ -3478,3 +3378,497 @@ Adding retry budgets to two providers is a 2-3 file change per
 provider plus a doc edit. Doable in one session, but distinct
 from PR #7's salvage scope and worth its own atomic commit so
 the rationale survives in `git log`.
+---
+id: UD-114
+title: SECURITY.md drift: NDJSON validation claim vs ADR-0012 (NamedPipeServer + NdjsonValidator deleted)
+category: security
+priority: medium
+effort: S
+status: open
+code_refs:
+  - docs/SECURITY.md:81
+  - docs/SECURITY.md:94
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SECURITY.md:81` and `docs/SECURITY.md:94` claim:
+
+> **NDJSON frame validation** at IPC boundary
+> (`IpcProgressReporter.kt`) — rejects non-conforming frames before
+> dispatch.
+
+> Schema validation rejects malformed structure
+> (`IpcProgressReporter.kt`); JSON parse errors dropped.
+
+This was true before [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+retired the bidirectional named-pipe transport. With ADR-0012:
+
+- `core/app/sync/.../NamedPipeServer.kt` — **deleted**.
+- `core/app/sync/.../NdjsonValidator.kt` — **deleted**.
+- The remaining `IpcProgressReporter.kt` is a **push-only UDS
+  broadcaster**: the daemon writes NDJSON sync events out to a Unix
+  socket; nothing reads frames *into* the daemon over IPC.
+
+Verified at filing time:
+
+```
+$ find core -name "NamedPipeServer.kt" -o -name "NdjsonValidator.kt"
+(no results)
+```
+
+The mitigation referenced in `SECURITY.md` therefore does not exist
+in the current architecture. The threat model row T1 ("Tampering
+with an NDJSON command frame in flight (local loopback)") is also
+moot — there are no inbound IPC frames to tamper with.
+
+## Risk
+
+This is a **threat-model honesty** issue. A reader of `SECURITY.md`
+believes the daemon validates incoming IPC frames. It doesn't,
+because there are no incoming IPC frames. If a future change
+re-introduces an IPC inbound surface (e.g. a CLI-to-daemon command
+channel), the existing doc would falsely claim it's already
+validated.
+
+## Proposed action
+
+Update `docs/SECURITY.md`:
+
+1. **§"Current mitigations"** (line 81 area): remove the "NDJSON
+   frame validation at IPC boundary" bullet. Replace with a
+   short note describing the actual UDS-broadcast topology and
+   why it doesn't need inbound validation (because it has no
+   inbound surface).
+
+2. **STRIDE table T1** (line 94 area): either drop the row
+   entirely (no inbound IPC = no T1 threat surface) or rephrase
+   to cover what *is* exposed today — a malicious local reader
+   binding to `unidrive-<profile>.sock` and consuming frames
+   intended for the legitimate observer. That has its own
+   mitigations (`mode 0600` on the socket, `SO_PEERCRED` if we
+   ever want peer identity).
+
+3. Cross-reference [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+   §"Removed surfaces" so the historical context is one click away.
+
+## Acceptance criteria
+
+- [ ] `grep -rn "NamedPipeServer\|NdjsonValidator" docs/SECURITY.md`
+      returns nothing.
+- [ ] `grep -n "IpcProgressReporter" docs/SECURITY.md` either
+      returns nothing or the surrounding text accurately describes
+      what the file does today (push-only UDS broadcaster).
+- [ ] STRIDE T1 row either removed or rewritten for the actual
+      threat surface.
+- [ ] No code changes required — this is purely doc drift.
+
+## Why this is its own ticket
+
+It's a security-doc fix; bundling it with general doc cleanup
+would bury it. Filing under `security` range keeps it on the
+right reviewer's radar (anyone scanning the security tier in
+`AGENT-SYNC.md`).
+---
+id: UD-768
+title: scripts/dev/log-watch.sh defaults to Windows AppData path on Linux MVP
+category: tooling
+priority: low
+effort: XS
+status: open
+code_refs:
+  - scripts/dev/log-watch.sh:22
+opened: 2026-05-02
+---
+## Problem
+
+`scripts/dev/log-watch.sh:22` defaults the live-log path to a
+**Windows AppData path** on a project whose MVP is Linux:
+
+```
+LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+```
+
+On Linux (the MVP per ADR-0012), `$HOME/AppData/Local/...` does
+not exist; the daemon writes to either `$XDG_STATE_HOME/unidrive/`
+or `$HOME/.local/state/unidrive/` depending on env. The script
+therefore prints "no such file" until the user remembers to set
+`UNIDRIVE_LOG`.
+
+This default is also the seed of broader doc drift: any reader
+who looks at `log-watch.sh` to understand "where does unidrive
+log on this platform?" gets a misleading answer.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Pick the right Linux default** and document the env-var
+override:
+
+```bash
+LOG="${UNIDRIVE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/unidrive/unidrive.log}"
+```
+
+This matches the daemon's actual write path (verify against
+the daemon's logging config before committing).
+
+**B) Refuse to default at all** if `UNIDRIVE_LOG` is unset on
+Linux, exit with a one-line error pointing at the env var. More
+explicit, less convenience.
+
+Recommend **A**: matches the daemon, removes the cliff for new
+contributors trying out the script.
+
+## Acceptance criteria
+
+- [ ] `log-watch.sh` default resolves to a path the daemon
+      actually writes to on Linux.
+- [ ] If macOS / Windows fallbacks are kept, they're behind an
+      `os.name` check at the top of the script with a comment
+      explaining ADR-0012.
+- [ ] Smoke: `UNIDRIVE_LOG=/tmp/test.log scripts/dev/log-watch.sh
+      --summary` works on Linux without further env setup.
+
+## Why a separate ticket from UD-400
+
+UD-400 sweeps `os.name` branches in **non-test Kotlin code**.
+This is a shell script. Same spirit, different scope. Atomic
+commit lets `git log` show the rationale without dragging the
+Kotlin sweep along.
+---
+id: UD-769
+title: Drop windows-latest from CI core matrix (or demote to allowed-to-fail) per ADR-0011/0012
+category: tooling
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - .github/workflows/build.yml:39
+opened: 2026-05-02
+---
+## Problem
+
+`.github/workflows/build.yml:39`:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    os: [ubuntu-latest, windows-latest]
+```
+
+[ADR-0011](adr/0011-shell-win-removal.md) +
+[ADR-0012](adr/0012-linux-mvp-protocol-removal.md) make Linux the
+MVP target. macOS and Windows are explicitly community-best-effort
+(README §"Status", in slim form: "Linux-first").
+
+Yet CI runs the full `core` job on `windows-latest` and `fail-fast:
+false` means a Windows-only failure produces a red overall build
+status even when Linux is green. This:
+
+- **Lies about the support matrix.** Anyone reading the build
+  badge and expanding the run sees "we test on Windows" — we
+  don't, in any meaningful sense; we just smoke that the JVM
+  modules compile.
+- **Burns CI time** (Windows runners are 5-10× slower than
+  ubuntu-latest for Gradle cold start; observed in
+  run 25247884883 — Windows job ran 5+ minutes when Linux took
+  3).
+- **Adds noise to PRs.** Every PR sits with a half-failed
+  status until the Windows run finishes, even though the
+  failure is rarely a real defect.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Drop windows-latest from the matrix entirely.** Honest,
+fast, matches ADR-0012. Loses the "compiles on Windows"
+canary, which is real but cheap to restore later.
+
+**B) Keep it as a separate, allowed-to-fail job** with an
+`continue-on-error: true` or a `if: github.event_name ==
+'schedule'` guard so PR builds don't block on Windows. Restore
+the Windows runner only on the main branch / nightly schedule.
+
+Recommend **A** for v0.1.0. Re-add via **B** if a future ADR
+re-opens Windows as a tier (per ADR-0012 §"Re-opening criteria").
+
+## Acceptance criteria
+
+- [ ] `core` matrix does not include `windows-latest` for PR
+      builds.
+- [ ] If kept (Option B), windows-latest is `continue-on-error:
+      true` AND only runs on `push: branches: [main]` or a
+      `schedule:` trigger.
+- [ ] README badge stays accurate (linux-first claim is honest).
+- [ ] No regression on ubuntu-latest + gitleaks jobs.
+
+## Why this is its own ticket
+
+It's a one-line CI config change but with policy implications
+(does the project still claim "best-effort Windows builds"?).
+A discrete commit with a clear `git log` entry is worth more
+than folding it into a generic "CI hygiene" sweep.
+---
+id: UD-770
+title: SPECS.md §2.2 reports 15 MCP tools; code lists 23 (UD-216 admin verbs added; doc not updated)
+category: tooling
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - docs/SPECS.md:54
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SPECS.md:54` claims the MCP server exposes 15 tools,
+verified against `core/app/mcp/.../Main.kt:20-24`:
+
+> | `app/mcp` | MCP server with 15 tools |
+> [`core/app/mcp/`](../core/app/mcp) | 💻 **15 tools verified**
+> (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:20-24`) |
+
+The actual count in `Main.kt` (verified at filing time) is **23**:
+the original 15 user-facing tools (status, sync, get, free, pin,
+conflicts, ls, config, trash, versions, share, relocate,
+watchEvents, quota, backup) **plus 8 admin verbs** added under
+[UD-216](#ud-216): authBegin, authComplete, logout, profileList,
+profileAdd, profileRemove, profileSet, identity.
+
+`Main.kt:53` even has the comment `// UD-216: admin verbs for
+end-to-end LLM-driven management.` admitting the count moved.
+
+The SPECS.md row is also marked 💻 **15 tools verified**, which
+is now a false attestation — the verification was correct at the
+time it was made, but the doc didn't follow the code.
+
+## Risk
+
+- `SPECS.md` is the **normative intent catalog** per CLAUDE.md.
+  The whole point of SPECS.md is to flag doc-vs-code drift with
+  📄 / 💻 / ✅ / ⚠ labels. A wrong 💻 attestation is precisely
+  the failure mode SPECS.md exists to prevent.
+- LLM clients picking up unidrive's MCP server expecting "15
+  tools" per the docs will be surprised by the 8 admin verbs;
+  not breaking, but inelegant.
+
+## Proposed action
+
+1. Update `docs/SPECS.md:54` row:
+   - Tool count: `15` → `23` (or whatever `Main.kt` lists at
+     edit time — re-verify, do not trust this ticket).
+   - Line range: `Main.kt:20-24` → the actual `listOf(...)`
+     range. At filing time the `tools = listOf(...)` block
+     spans `Main.kt:36-62`.
+   - Verification label: stays 💻 (code-verified) once corrected.
+2. Cross-check: does any other doc (README, ARCHITECTURE.md,
+   docs/EXTENSIONS.md, docs/MCP* if such exists) cite "15
+   tools"? Sweep and update.
+3. Add a `// SPECS.md row N — keep tool count in sync` marker
+   comment near the `listOf(...)` block in `Main.kt` so future
+   adds prompt a SPECS.md edit. (Optional; only if the maintainer
+   thinks comment-pinning beats a CI check.)
+
+## Acceptance criteria
+
+- [ ] `docs/SPECS.md:54` (or its current line) reports the
+      actual tool count, with the actual line range.
+- [ ] `grep -rn "15 tools" docs/` returns no stale claims.
+- [ ] No code changes required (this is doc drift only).
+
+## Why this is its own ticket
+
+Tiny but high-trust: SPECS.md is the source of truth for
+intent-vs-code accuracy. Drift here erodes confidence in every
+other ✅ / ⚠ label across the catalog. Worth its own atomic
+commit so a future reader can `git log -- docs/SPECS.md` and
+see exactly when the count was reconciled.
+---
+id: UD-771
+title: Doc discoverability + small drift sweep: link consequences.md + EXTENSIONS.md from README/ARCHITECTURE; fix CF-API in consequences.md, EXTENSIONS spec misref, log-feedback-loop stalled tickets, archive aged-out handover
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - README.md
+  - docs/ARCHITECTURE.md
+  - docs/user-guide/consequences.md:212
+  - docs/EXTENSIONS.md:122
+  - docs/dev/log-feedback-loop-proposal.md:73
+  - docs/dev/handover/subagent-chunks-2026-04-30.md
+opened: 2026-05-02
+---
+## Problem
+
+Two non-trivial reference documents are present in tree, fully
+written, code-verified, and **not linked from README or
+ARCHITECTURE.md**:
+
+- `docs/user-guide/consequences.md` — pin / unpin semantics, sync
+  edge-case behaviour, conflict resolution. Closed under
+  [UD-220](#ud-220) but undiscoverable to a contributor reading
+  README first.
+- `docs/EXTENSIONS.md` — documents the SPI extension contract
+  (the same `META-INF/services/org.krost.unidrive.ProviderFactory`
+  surface mentioned in README). Code path exists; doc explains
+  it; nothing in the front-page docs points at it.
+
+Verified at filing time:
+
+```
+$ grep -l "consequences\.md\|EXTENSIONS\.md" README.md docs/ARCHITECTURE.md
+(no matches)
+```
+
+Both docs cost real time to write. Leaving them undiscoverable is
+roughly equivalent to having deleted them.
+
+A secondary issue surfaced in the same audit:
+`docs/EXTENSIONS.md:122` cross-references
+`docs/specs/relocate-v1-sprint-plan.md` as its "Spec" link, which
+is a **misfile**: relocate-v1 is the relocate operation contract,
+not the SPI extensibility spec. Either the link is wrong or
+EXTENSIONS.md needs its own spec doc.
+
+## Additional drift items found in the same audit pass
+
+These are smaller but related; group into this ticket's scope
+since they all share the "find-and-fix references" shape:
+
+- `docs/user-guide/consequences.md:212` references "via the
+  Windows CF-API shell" — the CF-API tier was retired by
+  [ADR-0011](adr/0011-shell-win-removal.md). Drop the sentence
+  or rewrite to describe the current Linux pin semantics.
+- `docs/adr/0007-release-versioning.md:16` cites
+  `shell-win-v0.3.0` as a sub-tag example. Replace with a
+  surviving tier's example (e.g. `core-v0.1.0` already there;
+  drop the second example or use `mcp-v0.1.0`).
+- `docs/dev/log-feedback-loop-proposal.md:73` says "file two
+  tickets via `python scripts/dev/backlog.py file ...`"; tickets
+  were never filed. Either file them now (the proposal had
+  acted-on intent) or close the proposal as stalled.
+- `docs/dev/handover/subagent-chunks-2026-04-30.md` — every
+  chunk dispatched in this handover has shipped. Move to
+  `docs/dev/handover/archive/` or delete; keeping aged-out
+  handovers in the live folder confuses readers about current
+  state.
+
+## Proposed action
+
+1. **Linkage:** add `docs/user-guide/consequences.md` and
+   `docs/EXTENSIONS.md` to a "References" or "Further reading"
+   section near the bottom of README, OR (preferred) cross-link
+   them from `docs/ARCHITECTURE.md` where their topics are
+   discussed (consequences.md → architecture pin/conflict
+   section; EXTENSIONS.md → architecture SPI section).
+2. **Misfiled spec ref:** fix `docs/EXTENSIONS.md:122` to point
+   at the real SPI spec (or remove the line if no spec exists
+   yet — then file a follow-up to write one).
+3. **CF-API anachronism in consequences.md:** rewrite the
+   pin-semantics paragraph for Linux only.
+4. **shell-win-v0.3.0 in ADR-0007:** replace example with a
+   live tier.
+5. **log-feedback-loop-proposal.md:** decide — file the two
+   tickets now (which would close this sub-item) or close the
+   proposal as superseded. Note the decision in the proposal
+   doc itself.
+6. **Handover archival:** move `subagent-chunks-2026-04-30.md`
+   out of the live folder.
+
+## Acceptance criteria
+
+- [ ] `grep -l "consequences\.md\|EXTENSIONS\.md" README.md
+      docs/ARCHITECTURE.md` returns at least one match per file.
+- [ ] `grep -rn "CF-API\|shell-win-v0\.3" docs/` returns
+      nothing in non-archived doc files.
+- [ ] `docs/EXTENSIONS.md:122` cross-link resolves to a real
+      doc, or the line is removed.
+- [ ] `docs/dev/handover/subagent-chunks-2026-04-30.md` is
+      either moved to an archive folder or deleted.
+- [ ] No code changes required.
+
+## Why this is one ticket and not five
+
+All sub-items share the "doc reference fix" shape; bundling
+them lets a single sweep handle them with one round of
+verification. If any sub-item turns out to be load-bearing
+(e.g. someone *does* care about the relocate-v1 vs SPI link),
+break it out at fix-time, not now.
+---
+id: UD-005
+title: ADR-0007 cites retired shell-win-v0.3.0 sub-tag example after ADR-0011 retired the tier
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - docs/adr/0007-release-versioning.md:16
+opened: 2026-05-02
+---
+## Problem
+
+`docs/adr/0007-release-versioning.md:16` defines component sub-tag
+versioning with two examples:
+
+> Component sub-tags are permitted as additional tags on the same
+> commit when a tier needs an independently-citable build
+> (e.g., `core-v0.1.0`, `shell-win-v0.3.0`). They are *not*
+> primary and must match the monorepo tag's commit.
+
+The `shell-win-v0.3.0` example references a **retired tier**:
+[ADR-0011](adr/0011-shell-win-removal.md) removed `shell-win` as
+a tier of the project. The example therefore advertises a
+versioning surface that does not exist.
+
+This is a small but real ADR-vs-ADR coherence drift. ADR-0007
+should reflect the post-amendment state of the project's tier
+list (per ADR-0011/0012/0013 — the v0.1.0 surface).
+
+## Why this is filed under `architecture` and not folded into UD-771
+
+UD-771 sweeps doc-discoverability and small textual drift in
+non-ADR files (README links, EXTENSIONS.md misref, consequences.md
+CF-API mention). ADRs are normative architecture decisions; an
+ADR amendment deserves its own commit and its own audit trail in
+`git log` so the reasoning ("we updated the example because the
+referenced tier was retired") is searchable independently of doc
+hygiene noise.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Replace the example with a surviving tier.** Pick something
+like `mcp-v0.1.0` or just remove the second example (one is enough
+to make the point):
+
+> e.g., `core-v0.1.0`.
+
+**B) Add an "as of v0.1.0" qualifier** with a backreference to
+ADR-0011 explaining that the originally cited `shell-win-v0.3.0`
+was illustrative for a tier that has since been retired. Keeps
+the historical breadcrumb visible.
+
+Recommend **A** for line economy; ADR-0011 already explains the
+retirement and is one click away.
+
+## Acceptance criteria
+
+- [ ] `grep -n "shell-win" docs/adr/0007-release-versioning.md`
+      returns nothing (or only a backreference to ADR-0011 if
+      Option B chosen).
+- [ ] ADR-0007 is consistent with ADR-0011/0012/0013 about
+      which tiers exist.
+- [ ] No code change required.
+
+## Out of scope
+
+Broader ADR-0007 review (release cadence, conventional-commit
+enforcement, etc.) — this ticket is **only** the
+`shell-win-v0.3.0` line. Don't scope-creep.
