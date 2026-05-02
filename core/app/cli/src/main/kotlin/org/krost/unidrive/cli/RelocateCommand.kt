@@ -188,17 +188,9 @@ class RelocateCommand : Runnable {
         // worth flagging at plan time. The user can pick a better-fit
         // sibling profile on the same NAS (sftp / rclone) before burning
         // the upload time. --confirm-transport suppresses for scripts / CI.
-        if (!confirmTransport && toProviderObj.id == "webdav") {
-            val fiftyGiB = 50L * 1024 * 1024 * 1024
+        if (!confirmTransport) {
             val warnings = mutableListOf<String>()
-            if (sourceSize > fiftyGiB) {
-                warnings.add(
-                    "Plan size ${formatSize(sourceSize)} exceeds 50 GiB on a WebDAV target. " +
-                        "Throughput ceiling on nginx-mod_dav is typically < 30 MiB/s LAN; " +
-                        "expect this to take many hours. Consider sftp / rclone-native if the " +
-                        "same NAS exposes them.",
-                )
-            }
+            toProviderObj.transportWarning(sourceSize)?.let { warnings.add(it) }
             if (warnings.isNotEmpty()) {
                 System.err.println()
                 System.err.println("Transport-fitness warning (UD-279):")
