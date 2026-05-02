@@ -5,6 +5,7 @@ import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 
 class Reconciler(
     private val db: StateDatabase,
@@ -31,6 +32,24 @@ class Reconciler(
             remoteChanges.size,
             localChanges.size,
         )
+
+        // UD-240g: bulk-load DB entries once at the top of reconcile and route every
+        // subsequent lookup through in-memory maps. The pre-fix path issued one
+        // db.getEntry(path) per (remote ∪ local) path PLUS two full-table scans PLUS
+        // per-action lookups in detectMoves / detectRemoteRenames — ~86k single-row
+        // SELECTs on a 67k-local + 19k-remote first-sync. SQLite's per-statement
+        // overhead on Windows dominated wall time; the silent reconcile pass that
+        // motivated this ticket was 90% I/O syscalls, not query plan.
+        //
+        // entryByLcPath replaces db.getEntryCaseInsensitive (SQLite COLLATE NOCASE
+        // is ASCII-only; lowercase(Locale.ROOT) folds Unicode too — a slight
+        // behavioural improvement on case-insensitive filesystems with non-ASCII
+        // names, fully covered by existing case-collision tests with ASCII paths).
+        val allDbEntries = db.getAllEntries()
+        val entryByPath = allDbEntries.associateBy { it.path }
+        val entryByLcPath = allDbEntries.associateBy { it.path.lowercase(Locale.ROOT) }
+        val entryByRemoteId = allDbEntries.mapNotNull { e -> e.remoteId?.let { it to e } }.toMap()
+
         val actions = mutableListOf<SyncAction>()
         val allPaths =
             (remoteChanges.keys + localChanges.keys)
@@ -40,7 +59,7 @@ class Reconciler(
         for (path in allPaths) {
             val remoteItem = remoteChanges[path]
             val localState = localChanges[path] ?: ChangeState.UNCHANGED
-            val entry = db.getEntry(path)
+            val entry = entryByPath[path]
 
             val remoteState =
                 when {
@@ -68,7 +87,7 @@ class Reconciler(
         // Detect case collisions for new local files
         for ((path, state) in localChanges) {
             if (state != ChangeState.NEW) continue
-            val existing = db.getEntryCaseInsensitive(path)
+            val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
                 // Remove any previously generated Upload action for this path
                 actions.removeAll { it.path == path && it is SyncAction.Upload }
@@ -112,7 +131,7 @@ class Reconciler(
         // Before action sort, synthesise a DownloadContent for any such entry that no action
         // already covers.
         val coveredPaths = actions.mapTo(mutableSetOf()) { it.path }
-        for (entry in db.getAllEntries()) {
+        for (entry in allDbEntries) {
             if (entry.isFolder || entry.isHydrated) continue
             if (entry.remoteSize <= 0) continue
             if (entry.path in coveredPaths) continue
@@ -139,7 +158,7 @@ class Reconciler(
         // UNCHANGED+UNCHANGED skip drops the path, and the upload never retries. Synthesise
         // an Upload here so the next sync cycle picks up where the last one left off. Mirrors
         // the UD-225 download-recovery loop above.
-        for (entry in db.getAllEntries()) {
+        for (entry in allDbEntries) {
             if (entry.isFolder) continue
             if (entry.remoteId != null) continue
             if (!entry.isHydrated) continue
@@ -150,8 +169,8 @@ class Reconciler(
             actions.add(SyncAction.Upload(entry.path))
         }
 
-        detectMoves(actions)
-        detectRemoteRenames(actions, remoteChanges)
+        detectMoves(actions, entryByPath)
+        detectRemoteRenames(actions, remoteChanges, entryByRemoteId)
 
         val sorted = sortActions(actions)
         log.info(
@@ -271,7 +290,10 @@ class Reconciler(
         return defaultPolicy
     }
 
-    private fun detectMoves(actions: MutableList<SyncAction>) {
+    private fun detectMoves(
+        actions: MutableList<SyncAction>,
+        entryByPath: Map<String, SyncEntry>,
+    ) {
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>()
         if (deletes.isEmpty()) return
 
@@ -279,7 +301,7 @@ class Reconciler(
         val folderCreates = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
         val matchedFolderDeletes = mutableSetOf<String>()
         for (del in deletes) {
-            val entry = db.getEntry(del.path) ?: continue
+            val entry = entryByPath[del.path] ?: continue
             if (!entry.isFolder || entry.remoteId == null) continue
 
             val oldName = del.path.substringAfterLast("/")
@@ -321,7 +343,7 @@ class Reconciler(
         val matchedUploads = mutableSetOf<String>()
         for (del in deletes) {
             if (del.path in matchedFolderDeletes) continue
-            val entry = db.getEntry(del.path) ?: continue
+            val entry = entryByPath[del.path] ?: continue
             if (entry.isFolder || entry.remoteId == null) continue
 
             for (up in uploads) {
@@ -348,6 +370,7 @@ class Reconciler(
     private fun detectRemoteRenames(
         actions: MutableList<SyncAction>,
         remoteChanges: Map<String, CloudItem>,
+        entryByRemoteId: Map<String, SyncEntry>,
     ) {
         // UD-222: renames of remote non-folders now arrive as DownloadContent (not
         // CreatePlaceholder) because hydration moved to Pass 2. Scan both action types.
@@ -359,7 +382,7 @@ class Reconciler(
 
         for (candidate in candidates) {
             val remoteItem = remoteChanges[candidate.path] ?: continue
-            val oldEntry = db.getEntryByRemoteId(remoteItem.id) ?: continue
+            val oldEntry = entryByRemoteId[remoteItem.id] ?: continue
             if (oldEntry.path == candidate.path) continue
 
             actions.remove(candidate)
