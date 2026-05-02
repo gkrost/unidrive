@@ -2,7 +2,6 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.slf4j.MDCContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
@@ -358,11 +357,24 @@ class SyncCommand : Runnable {
         subscriptionStore.initialize()
 
         try {
-            // UD-212: runBlocking(MDCContext()) propagates the `profile=<name>` MDC set by
-            // Main.resolveCurrentProfile() across all dispatched coroutines, including Pass 2's
-            // concurrent downloads on DefaultDispatcher workers. Without this, log lines emitted
-            // from worker threads lose the profile tag.
-            runBlocking(MDCContext()) {
+            // UD-254a: dropped MDCContext() here. Live JFR (2026-05-02) showed
+            // `LogbackMDCAdapter.getPropertyMap` accounting for 80.63 % of all
+            // allocation pressure — every coroutine resume on this hot path was
+            // cloning the MDC HashMap (getCopyOfContextMap save + setContextMap
+            // restore = 2 allocations per dispatch). With Pass-2 upload workers
+            // suspending repeatedly through Ktor's HTTP/2 stack the count went
+            // into the millions.
+            //
+            // UD-212 originally added MDCContext() so worker-thread log lines
+            // would inherit the `profile=<name>` MDC tag. Trade now: worker
+            // log lines lose `[profile]` / `[scan]` interpolation. Acceptable
+            // because (a) one daemon = one profile (logs are unambiguous) and
+            // (b) scan/profile are still on the synchronous main thread for
+            // the engine's banner lines (`Scan started`/`Scan ended`). The
+            // canonical follow-up — id-in-message logging on coroutine paths
+            // per the lessons/mdc-in-suspend.md guidance — is the wider Slice
+            // B in UD-254a's body and out of scope for this single-file fix.
+            runBlocking {
                 ipcServer.start(this)
                 provider.authenticateAndLog()
 
