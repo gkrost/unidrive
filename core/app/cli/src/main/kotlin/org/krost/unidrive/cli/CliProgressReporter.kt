@@ -81,6 +81,28 @@ class CliProgressReporter(
         }
     }
 
+    // UD-240g: track reconcile-phase start to render `0:XX` elapsed in the
+    // heartbeat line, matching the [onScanProgress] visual. Set on the first
+    // (count == 0) tick from [Reconciler.reconcile].
+    private var reconcileStart: Long = 0
+
+    override fun onReconcileProgress(
+        processed: Int,
+        total: Int,
+    ) {
+        val now = clock()
+        if (processed == 0) {
+            reconcileStart = now
+            printInline("Reconciling... 0 / $total items")
+            return
+        }
+        val elapsedSecs = (now - reconcileStart) / 1000
+        val processedStr = formatCount(processed)
+        val totalStr = formatCount(total)
+        val elapsedStr = formatTime(elapsedSecs)
+        printInline("Reconciling... $processedStr / $totalStr items · $elapsedStr")
+    }
+
     private fun phaseLabel(phase: String): String =
         when (phase) {
             "remote" -> "remote changes"

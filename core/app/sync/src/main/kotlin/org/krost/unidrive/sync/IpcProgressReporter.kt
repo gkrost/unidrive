@@ -59,6 +59,20 @@ class IpcProgressReporter(
         }
     }
 
+    override fun onReconcileProgress(
+        processed: Int,
+        total: Int,
+    ) {
+        // UD-240g: reconcile-phase heartbeat. UI clients can render a progress
+        // bar from (processed / total) and stop showing "stuck on local scan".
+        val current = server.syncState ?: IpcServer.SyncState(profile = profileName)
+        server.updateState(current.copy(phase = "reconcile", scanCount = processed))
+        emit("reconcile_progress") {
+            put("processed", processed)
+            put("total", total)
+        }
+    }
+
     override fun onActionCount(total: Int) {
         val current = server.syncState ?: IpcServer.SyncState(profile = profileName)
         server.updateState(current.copy(actionTotal = total))

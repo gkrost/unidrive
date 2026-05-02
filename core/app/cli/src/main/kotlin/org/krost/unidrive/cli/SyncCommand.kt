@@ -612,6 +612,11 @@ class SyncCommand : Runnable {
             count: Int,
         ) = delegates.forEach { it.onScanProgress(phase, count) }
 
+        override fun onReconcileProgress(
+            processed: Int,
+            total: Int,
+        ) = delegates.forEach { it.onReconcileProgress(processed, total) }
+
         override fun onActionCount(total: Int) = delegates.forEach { it.onActionCount(total) }
 
         override fun onActionProgress(

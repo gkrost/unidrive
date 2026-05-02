@@ -19,6 +19,10 @@ class Reconciler(
     fun reconcile(
         remoteChanges: Map<String, CloudItem>,
         localChanges: Map<String, ChangeState>,
+        // UD-240g: defaulted so existing callers (tests, anything pre-UD-240g)
+        // stay source-compatible. SyncEngine wires the live reporter through
+        // so the CLI and IPC clients see reconcile-phase movement.
+        reporter: ProgressReporter = ProgressReporter.Silent,
     ): List<SyncAction> {
         // UD-240g: bookend the reconcile pass with log breadcrumbs. Before this,
         // the phase between `Delta: N items, hasMore=false` (gatherRemoteChanges)
@@ -56,6 +60,16 @@ class Reconciler(
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
         val pinRules = db.getPinRules()
 
+        // UD-240g: heartbeat into reporter every 5k items / 10s during the main
+        // path walk (mirrors LocalScanner / SyncEngine.gatherRemoteChanges). The
+        // bulk-load above made reconcile fast enough that on small drives the
+        // heartbeat may never fire — that's fine; the bookend `total` event
+        // below still tells the reporter the phase happened.
+        val totalPaths = allPaths.size
+        reporter.onReconcileProgress(0, totalPaths)
+        val heartbeat = ScanHeartbeat({ count -> reporter.onReconcileProgress(count, totalPaths) })
+        var processed = 0
+
         for (path in allPaths) {
             val remoteItem = remoteChanges[path]
             val localState = localChanges[path] ?: ChangeState.UNCHANGED
@@ -82,7 +96,10 @@ class Reconciler(
 
             val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules)
             if (action != null) actions.add(action)
+            processed++
+            heartbeat.tick(processed)
         }
+        reporter.onReconcileProgress(totalPaths, totalPaths)
 
         // Detect case collisions for new local files
         for ((path, state) in localChanges) {

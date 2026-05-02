@@ -159,6 +159,30 @@ class CliProgressReporterTest {
     }
 
     @Test
+    fun `UD-240g reconcile progress renders processed of total items and elapsed`() {
+        val reporter = CliProgressReporter()
+        reporter.onReconcileProgress(0, 86_000)
+        reporter.onReconcileProgress(43_000, 86_000)
+        reporter.onReconcileProgress(86_000, 86_000)
+        reporter.onActionCount(12)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Reconciling...") && output.contains("43,000 / 86,000 items"),
+            "expected mid-pass reconcile line with processed/total; got: $output",
+        )
+        // M:SS elapsed marker must be present on the mid-pass tick.
+        assertTrue(
+            output.contains("· 0:") || output.contains("· 1:"),
+            "expected M:SS elapsed marker on reconcile line; got: $output",
+        )
+        // commitInline must run before "Reconciled: N" so the two don't glue.
+        assertFalse(
+            output.contains("itemsReconciled:"),
+            "reconcile-progress and Reconciled lines must not glue together; got: $output",
+        )
+    }
+
+    @Test
     fun `UD-742 onActionCount after inline-active scan emits newline first`() {
         val reporter = CliProgressReporter()
         reporter.onScanProgress("remote", 0)

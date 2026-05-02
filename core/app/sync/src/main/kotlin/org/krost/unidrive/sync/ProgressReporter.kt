@@ -38,6 +38,26 @@ interface ProgressReporter {
         lastCount: Int,
     ) {}
 
+    /**
+     * UD-240g: progress heartbeat for the reconcile phase. Fired by
+     * [Reconciler.reconcile] every 5k iterations / 10s wall-clock (see
+     * [ScanHeartbeat]) so the CLI / IPC clients show movement instead of
+     * looking hung. On a 67k-local + 19k-remote first-sync the pre-fix
+     * reconcile was many seconds of total silence; this event closes the
+     * UX gap symmetric to [onScanProgress].
+     *
+     * `processed` is the number of (remote ∪ local) paths walked so far;
+     * `total` is the final size of that union (set once at start, stable
+     * for the rest of the pass). Both maxed out signals the phase is done.
+     *
+     * Default no-op so reporters that don't render reconcile progress
+     * (Notify, Silent, test shells) need no update.
+     */
+    fun onReconcileProgress(
+        processed: Int,
+        total: Int,
+    ) {}
+
     fun onActionCount(total: Int)
 
     fun onActionProgress(
