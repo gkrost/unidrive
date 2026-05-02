@@ -1,14 +1,12 @@
 # Spec: Extend Provider SPI contract; remove provider-name string-equality dispatch from `:app:cli`, `:app:mcp`, `:app:sync`
 
-- **Version:** 0.2.0
+- **Version:** 0.3.0
 - **Date:** 2026-05-02
-- **Status:** Reviewed → ready for implementation plan
-- **Author:** brainstormed in collaboration with Claude; reviewed by user
+- **Status:** Done — implemented on `refactor/provider-spi-contract` (off `dev`)
+- **Author:** brainstormed in collaboration with Claude; reviewed by user; implemented via subagent-driven-development
 - **Branch:** `refactor/provider-spi-contract` off `dev` off `main`
-- **Changes since 0.1.0:** added 7th dispatch site
-  (`ProfileCommand.kt:157`); expanded §3.3 with `AuditReport` /
-  `StatusAudit` migration surface; renamed `PromptSpec.masked` →
-  `isMasked`.
+- **Changes since 0.2.0:** §9 implementation notes appended;
+  status moved Reviewed → Done.
 
 ## 1. Problem
 
@@ -393,3 +391,114 @@ Filing wave 2 happens after this spec is approved.
 This work goes on `refactor/provider-spi-contract` off `dev` off
 `main`. PR target: `dev`, not `main`. `dev` is the new long-lived
 integration branch; promotion `dev` → `main` is the user's call.
+
+## 9. Implementation notes (2026-05-02, v0.3.0)
+
+Executed via `superpowers:subagent-driven-development` against the
+plan at `docs/plans/2026-05-02-provider-spi-contract-extension.md`.
+
+### Outcomes
+
+- **3 supporting types** added (`HashAlgorithm`, `PromptSpec`,
+  `StatusField`) in `org.krost.unidrive`.
+- **6 SPI methods** added with default implementations:
+  `ProviderFactory.{credentialPrompts, envVarMappings,
+  supportsInteractiveAuth}`, `CloudProvider.{hashAlgorithm,
+  statusFields, transportWarning}`.
+- **5 in-tree providers** gained capability overrides:
+  - `S3ProviderFactory`, `SftpProviderFactory`,
+    `WebDavProviderFactory`: `credentialPrompts` + `envVarMappings`.
+  - `OneDriveProviderFactory`: `supportsInteractiveAuth`.
+  - `RcloneProviderFactory`: `envVarMappings`.
+  - `OneDriveProvider`: `hashAlgorithm` + `statusFields`.
+  - `S3Provider`: `hashAlgorithm`.
+  - `WebDavProvider`: `transportWarning` + private `formatSize` helper.
+- **7 consumer dispatch sites migrated** (the headline goal):
+  `HashVerifier.kt`, `ProfileCommand.kt:113-144`,
+  `ProfileCommand.kt:157`, `Main.kt:355-365`, `AuthTool.kt:80`,
+  `StatusCommand.kt:165` (with `StatusAudit` chain refactor),
+  `RelocateCommand.kt:191`.
+- **2 contract test classes** added (`ProviderFactoryContractTest`,
+  `CloudProviderContractTest`) with 13 tests pinning per-provider
+  capability snapshots. Located in `:app:cli/src/test` rather than
+  `:app:core/src/test` because `:app:core` lacks the providers on
+  its test classpath; `:app:cli` aggregates all 7.
+- **CI anti-regression guard** at
+  `scripts/ci/check-no-provider-string-dispatch.sh` wired into
+  `.github/workflows/build.yml`. Honours both same-line and
+  preceding-line `// allow:` markers.
+- **`./gradlew build test`** passes with the same 1450-test
+  baseline plus 13 new contract tests + 1 new HashVerifier
+  null-algorithm test = 1464 tests, 0 failures, 0 errors.
+
+### Deviations from the plan (all minor; folded into commits)
+
+1. **Plan put contract tests in `:app:core/src/test/`** — wrong;
+   the provider modules aren't on `:app:core`'s test classpath.
+   Implementer relocated to `:app:cli/src/test/` where all 7
+   providers are `implementation` deps, with a KDoc note.
+2. **Plan's localfs stub used `local_root`** — actual factory key
+   is `root_path`. Test fixture corrected.
+3. **Smart-cast on `prompt.default`** required a one-line `val
+   default = prompt.default` capture in `ProfileCommand.kt`'s
+   wizard loop. Behaviour-equivalent.
+4. **`AdminToolsTest` had a stale string assertion** —
+   `resultText.contains("onedrive")` checked the old error message.
+   Per `challenge-test-assertion` skill: the invariant ("non-
+   supporting providers rejected with `isError=true`") was
+   preserved; the brittle text-match was the test bug. Updated
+   to `.contains("does not support interactive auth")` and
+   renamed the test accordingly.
+5. **ktlint cascade** — T7-T12 edits triggered ktlint baseline
+   drift across 5 modules (`:app:cli`, `:app:sync`, `:app:mcp`,
+   `:providers:onedrive`, `:providers:rclone`, `:providers:s3`).
+   Each module synced via `scripts/dev/ktlint-sync.sh --module
+   :NAME` and committed as `chore(NAME): ktlint-sync ...`. The
+   `multiline-expression-on-new-line` rule was the most common
+   trigger.
+6. **CI guard same-line `// allow:` markers** conflicted with
+   ktlint's "newline-before-expression-body" rule on
+   `SyncConfig.defaults()`. Extended the guard to honour
+   preceding-line markers as well; SyncConfig:359 uses that form.
+
+### Wave 2 follow-ups filed during this work
+
+The audit pass that drove this refactor surfaced more findings
+that were filed as separate tickets rather than expanding scope:
+
+- **UD-004** — Decompose SyncEngine.kt (filed earlier this session;
+  already in BACKLOG).
+- **UD-006** (architecture, high, S) — Lift `formatSize` /
+  `formatBytes` into `:app:core/io`; eliminates 5+ duplicates.
+- **UD-007** (architecture, medium, XS) — Default `logout()` on
+  `CloudProvider`; 4 providers drop boilerplate.
+- **UD-008** (architecture, high, M) — `SnapshotDeltaProvider`
+  helper or abstract base; eliminates `deletedItem` 5x duplicate.
+- **UD-009** (architecture, medium, XS) — Lift `defaultTokenPath()`
+  into `:app:core/io`; 5 providers stop duplicating.
+- **UD-010** (architecture, low, XS) — Lift `extractJwtClaim()`
+  into `:app:core/auth`; OneDrive + 2x Internxt unify.
+- **UD-011** (architecture, medium, XL) — EPIC tracking 6 god
+  classes (GraphApiService, Main, WebDavApiService, SyncCommand,
+  StatusCommand, InternxtProvider).
+- **UD-012** (architecture, medium, S) — Replace `SyncConfig.kt`'s
+  8x `"onedrive"` historical default with
+  `ProviderRegistry.defaultProvider()` (or document via ADR). The
+  CI guard's `// allow: UD-012` markers come off when this lands.
+- **UD-356** (providers, low, XS) — Lift duplicated Snapshot test
+  boilerplate to `:app:sync`.
+- **UD-818** (tests, medium, S) — Replace 5x ProviderFactory
+  required-fields test classes with a parameterised TestFactory
+  driven by `ProviderRegistry` + `credentialPrompts()`.
+
+### Behaviour-preservation evidence
+
+- All 1450 pre-existing tests still pass.
+- One test asserted-message updated (AdminToolsTest auth_begin),
+  invariant preserved, justified per `challenge-test-assertion`.
+- `WebDavProvider.transportWarning` produces byte-identical
+  message text to the old `RelocateCommand.kt` warning at
+  60 GiB, confirmed manually.
+- `StatusAudit` rendered output for OneDrive's "Include shared"
+  row is byte-identical post-refactor, confirmed by the 5
+  `StatusAuditTest` fixtures.
