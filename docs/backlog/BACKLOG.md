@@ -3109,3 +3109,372 @@ A roadmap without non-goals reads as "all the things, eventually, just be patien
 ## Provenance
 
 Discussed 2026-05-01 with maintainer. Pairs with UD-003 (ADR-0014 surface consolidator) — together they make the project navigable for new contributors without reading 13 ADRs + 90 tickets.
+---
+id: UD-004
+title: Decompose SyncEngine.kt into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor; enforce single-flight-per-profile in code
+category: architecture
+priority: high
+effort: XL
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt`
+is 1249 LoC with 28 methods. The single function `doSyncOnce` is
+467 lines. The class is the central reconciliation engine.
+
+Concurrency footprint today: 8 atomic primitives
+(`AtomicInteger`/`AtomicReference`) used to track per-pass progress
+counters during a single sync. There are **no `synchronized` blocks,
+no `Mutex`, no `@Volatile` fields** on the engine's state machine.
+
+This is currently safe because `ProcessLock` serialises `syncOnce` per
+profile (one in-flight sync per profile, enforced at the OS-pidfile
+level outside SyncEngine itself). The "no engine-internal locking
+needed" invariant lives only in the comment that introduces
+`ProcessLock`. Nothing in SyncEngine fails loudly if that comment
+ever stops being true.
+
+## Risk
+
+Any future change that:
+- parallelises a scan pass (e.g. fanning out provider listings),
+- introduces a second invocation surface that bypasses `ProcessLock`
+  (e.g. an MCP tool that calls `doSyncOnce` directly without going
+  through the CLI's `SyncCommand` path),
+- or splits SyncEngine across multiple coroutine scopes,
+
+…would race silently. The atomics in place catch counter contention,
+not state-machine contention.
+
+## Proposed split (to be designed in an ADR before any refactor)
+
+A reasonable decomposition into smaller units with explicit
+boundaries:
+
+- **Reconciler** (already exists at
+  `core/app/sync/.../Reconciler.kt`) — pure 3-way merge, no I/O.
+  Already isolated; keep.
+- **ScanCoordinator** — owns provider-side delta/snapshot fetch +
+  local-side `LocalScanner` walk. Currently spread across
+  `doSyncOnce` lines ~150-350 (approx; needs survey).
+- **ActionPlanner** — turns reconciled diff into the action list
+  (upload / download / conflict). Currently inline in `doSyncOnce`
+  around lines 350-450 (approx).
+- **ActionExecutor** — runs the planned actions, owns the retry /
+  failure-collection state. Currently inline in `doSyncOnce` after
+  line ~450 (approx).
+- **SyncEngine** thin orchestrator — wires the above together,
+  enforces the single-flight invariant in code (not in a sibling
+  comment).
+
+Each unit has one clear responsibility, communicates through a
+typed interface, and can be tested independently with fakes.
+
+## Acceptance criteria
+
+- [ ] ADR (architecture range, e.g. ADR-0015) lays out the boundary
+      contract for the four units above before any code moves.
+- [ ] `SyncEngine.kt` < 300 LoC, no method > 100 LoC.
+- [ ] Single-flight-per-profile invariant is enforced *in code*
+      (e.g. private `Mutex` per profile, or a typestate that prevents
+      reentry), not by a comment about `ProcessLock`.
+- [ ] No regressions in `:app:sync:test` and the localfs round-trip
+      smoke.
+- [ ] Existing 1450-test suite still green, no test removed.
+
+## Why this is a separate ticket, not done in PR #7
+
+PR #7 is salvage + cleanup. This is a multi-week structural refactor
+behind an ADR. Conflating them would obscure the salvage commits,
+balloon the diff, and put real regression risk on a PR whose value
+is "land what's already there cleanly".
+
+## Out of scope
+
+- Threading model overhaul (coroutine scope topology, cancellation
+  contracts) — separate ADR if needed.
+- Provider-side concurrency primitives — those live in each
+  `*ApiService.kt`, not here.
+---
+id: UD-400
+title: Sweep 10 os.name branches from non-test code; honour Linux-MVP per ADR-0011/0012; add CI guard
+category: cli
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:586
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:719
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:286
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt:19
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ConflictsTool.kt:25
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt:52
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:252
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:166
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/PlaceholderManager.kt:194
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1202
+opened: 2026-05-02
+---
+## Problem
+
+ADR-0011 + ADR-0012 narrowed the MVP to **Linux**. Yet 10
+`os.name` / `System.getProperty("os.name")` branches survive in
+non-test code:
+
+| File | Line |
+|---|---|
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` | 586 |
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` | 719 |
+| `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt` | 286 |
+| `core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt` | 19 |
+| `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ConflictsTool.kt` | 25 |
+| `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt` | 52 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt` | 252 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt` | 166 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/PlaceholderManager.kt` | 194 |
+| `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt` | 1202 |
+
+Each branch typically guards a Windows-specific path (named-pipe
+fallback, `chcp`, Win-only `OpenBrowser` shell-out, etc.).
+
+Most of the protocol-level Windows surface was removed in
+ADR-0012 (named-pipe transport gone), but these per-callsite
+branches remained as defensive code "just in case the JVM happens
+to be on Windows." That's not honest: the rest of the build
+(launcher scripts, smoke test, CI matrix, documentation) treats
+Windows as community-best-effort.
+
+## Risk
+
+- **Documentation drift.** ADR-0012 says Linux MVP; the code
+  reads as if it serves three platforms.
+- **Dead-code maintenance burden.** Every Windows branch is a
+  thing future readers must understand and reviewers must
+  consider when changing the surrounding code.
+- **False-positive test scenarios.** A few of these branches
+  (e.g. `IpcServer.kt:252`, `LocalScanner.kt:166`) sit on hot
+  paths; their existence implies they're tested, but there is no
+  Windows runtime in CI for the protocol/IPC layers.
+
+## Proposed action
+
+For each of the 10 sites:
+
+1. Read the branch. Classify as one of:
+   - **Pure Windows specifics with no Linux behaviour** → delete.
+     Add `// removed in UD-XXX (Linux MVP per ADR-0012); restore
+     when re-opening Windows tier per ADR-0012 §re-opening
+     criteria.` if the deletion is non-obvious.
+   - **Genuine cross-platform dispatch where Linux happens to
+     share a branch** → keep, but rewrite to make Linux the
+     happy path and Windows the unsupported fallback (e.g.
+     `error("Windows is not supported in v0.1.0; see ADR-0012")`).
+   - **Stale defensive guard from before ADR-0012** → delete
+     unconditionally.
+2. After the sweep, add a check to `scripts/ci/check-boundaries.sh`
+   (or a new `scripts/ci/check-os-branches.sh`) that fails CI
+   on any new `os.name` branch added to non-test code outside
+   an explicitly allow-listed file (e.g. the Windows-specific
+   parts of the launcher generator, if any).
+
+## Acceptance criteria
+
+- [ ] All 10 sites triaged, decisions documented either in
+      individual commit messages or in this ticket's resolution.
+- [ ] After cleanup, `grep -rE 'os\.name|System\.getProperty\("os'
+      core --include="*.kt" | grep -v /test/` returns ≤ 2 hits,
+      and each surviving hit has a comment justifying it.
+- [ ] CI guard script wired into `.github/workflows/build.yml`
+      (host-neutral fragment first, per `scripts/ci/README.md`).
+- [ ] No behaviour change on Linux. Smoke test (`scripts/smoke.sh`)
+      still passes after the sweep.
+
+## Why this is a separate ticket
+
+Each branch deletion is a small judgement call; bundling them
+into a single sweep keeps the cognitive surface small per commit.
+PR #7 is salvage scope; OS-cleanup is its own pass.
+---
+id: UD-354
+title: Verify Internxt does not call computeSnapshotDelta; if confirmed, adopt or document exemption
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - docs/ARCHITECTURE.md
+opened: 2026-05-02
+---
+## Problem
+
+`docs/ARCHITECTURE.md` documents `computeSnapshotDelta` as the
+shared cross-provider helper for snapshot-mode delta computation
+(every provider whose API does not expose `/delta` natively is
+expected to use it). An external code-review pass flagged that
+**Internxt does not call `computeSnapshotDelta`** despite being
+a snapshot-mode provider, and that no exemption is documented.
+
+This ticket has two parts: (a) verify the claim against current
+code (the auditor's snapshot may pre-date refactors); (b) if the
+claim holds, decide whether Internxt should adopt the helper or
+whether its custom path needs an explicit ADR-level exemption.
+
+## Verification gap
+
+At ticket-filing time the gap was not personally re-verified
+against current `:app:sync` code. Before any fix:
+
+```bash
+grep -rn "computeSnapshotDelta" core/app/sync/src/main/
+grep -rn "computeSnapshotDelta\|InternxtSnapshot\|InternxtDelta" \
+    core/providers/internxt/src/main/
+```
+
+…to confirm whether Internxt actually opts out, or whether the
+helper is invoked from a layer the auditor didn't trace.
+
+If verification disproves the claim, **close as wontfix** with a
+note pointing at the call-site that proves the helper is used.
+
+## If verified
+
+Two acceptable resolutions:
+
+1. **Adopt the helper.** Refactor `InternxtProvider` (or its
+   `Snapshot.kt` peer) to call `computeSnapshotDelta`, deleting
+   the duplicate implementation. Behaviour-preserving;
+   golden-file test on a sample snapshot pair to lock parity.
+2. **Document the exemption.** Add a short ADR (or a
+   `docs/providers/internxt.md` § "Why Internxt does not use
+   computeSnapshotDelta") explaining the technical reason
+   (e.g. Internxt's API returns deltas in a non-snapshot shape
+   that doesn't fit the helper's contract). Update
+   ARCHITECTURE.md to acknowledge the exemption alongside the
+   helper's documentation.
+
+## Acceptance criteria
+
+- [ ] Verification step run; result documented in this ticket.
+- [ ] Either: helper adoption merged with a parity test, OR
+      exemption documented in the right place
+      (`docs/providers/internxt.md` + ARCHITECTURE.md cross-link).
+- [ ] No regression in `InternxtIntegrationTest` and
+      `InternxtNameSanitizationTest`.
+
+## Context
+
+Internxt test ratio at filing time was 0.46 (915 test LoC over
+1968 main LoC) — second-lowest in the repo after the now-archived
+HiDrive. Encryption is in scope (`InternxtCrypto.kt`), which
+makes any silent semantic drift in the snapshot path
+particularly costly to debug after the fact.
+---
+id: UD-355
+title: Install RequestId + HttpRetryBudget in S3ApiService and WebDavApiService; replace ARCHITECTURE.md 'where applicable' with adoption table
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - docs/ARCHITECTURE.md
+opened: 2026-05-02
+---
+## Problem
+
+`docs/ARCHITECTURE.md` documents `RequestId` and `HttpRetryBudget`
+as the shared cross-provider helpers Ktor-using providers install
+"where applicable." Verified at filing time:
+
+```
+$ grep -rln "RequestId\|HttpRetryBudget" core/providers/*/src/main/
+core/providers/internxt/src/main/kotlin/.../InternxtApiService.kt
+core/providers/onedrive/src/main/kotlin/.../OneDriveProviderFactory.kt
+core/providers/onedrive/src/main/kotlin/.../GraphApiService.kt
+core/providers/onedrive/src/main/kotlin/.../model/ApiResponse.kt
+```
+
+So **only `onedrive` and `internxt` actually install them.**
+`s3`, `webdav` (and `sftp`, `rclone`, `localfs`) do not.
+
+For `localfs`, `sftp`, `rclone` the absence is justified — they
+either don't use Ktor or don't speak HTTP at all. **For `s3` and
+`webdav` the absence is a real gap:**
+
+- `s3` (or any S3-compatible endpoint, e.g. AWS S3, MinIO,
+  Cloudflare R2, Synology C2) returns 503 / `SlowDown` /
+  `RequestTimeout` under load. No retry-budget circuit means
+  the daemon will hammer a degraded endpoint and either get
+  rate-limited harder or amplify a brief outage into a sustained
+  one.
+- `webdav` servers (NextCloud, Synology WebDAV, hoster
+  webdrives) similarly return 429 / 503 under congestion.
+  Without `RequestId` correlation, a multi-request failure
+  cluster can't be tied to a single root cause in
+  `unidrive.log`.
+
+## Why this isn't caught today
+
+The "where applicable" hedge in ARCHITECTURE.md is doing all the
+load-bearing work. The only test that would catch the gap is a
+live integration test against a throttling endpoint, and:
+- `s3` integration tests use MinIO which doesn't simulate 503
+  storms.
+- `webdav` integration tests use a local Apache instance with no
+  rate-limit path.
+
+So the gap is silent in CI. It would surface as a user-visible
+"sync stuck on retries" report against a real provider, with no
+correlatable log lines.
+
+## Proposed action
+
+1. Update ARCHITECTURE.md "shared cross-provider utilities" §
+   to drop the "where applicable" hedge and instead enumerate
+   per-provider adoption status:
+   ```
+   | Provider | RequestId | HttpRetryBudget | Justification |
+   |---|---|---|---|
+   | localfs | n/a | n/a | local FS, no HTTP |
+   | sftp    | n/a | n/a | SFTP transport |
+   | rclone  | n/a | n/a | shells out to rclone binary |
+   | s3      | TODO | TODO | UD-XXX |
+   | webdav  | TODO | TODO | UD-XXX |
+   | onedrive | ✓  | ✓  | adopted UD-XXX |
+   | internxt | ✓  | ✓  | adopted UD-XXX |
+   ```
+2. Implement `RequestId` + `HttpRetryBudget` installation in
+   `S3ApiService` and `WebDavApiService`. Pattern is already
+   established in `GraphApiService` and `InternxtApiService`;
+   lift to `:app:core/http` if that lift hasn't already
+   happened (check the cross-provider duplication audit
+   2026-04-30 referenced in CLAUDE.md).
+3. Add a unit test per provider that asserts `RequestId` is
+   present in outgoing request headers and that
+   `HttpRetryBudget` opens the circuit after N synthetic 503s.
+   Pattern: see `ThrottleBudgetTest` in onedrive.
+
+## Acceptance criteria
+
+- [ ] ARCHITECTURE.md "where applicable" replaced with per-provider
+      adoption table.
+- [ ] `S3ApiService` and `WebDavApiService` install both helpers.
+- [ ] Unit tests assert presence (not implementation) — per
+      `challenge-test-assertion`, the invariant is "outgoing
+      requests are correlatable and retries are bounded", not
+      "exactly N retries occur".
+- [ ] No regression in S3 / WebDAV integration tests.
+
+## Why this is a separate ticket
+
+Adding retry budgets to two providers is a 2-3 file change per
+provider plus a doc edit. Doable in one session, but distinct
+from PR #7's salvage scope and worth its own atomic commit so
+the rationale survives in `git log`.
