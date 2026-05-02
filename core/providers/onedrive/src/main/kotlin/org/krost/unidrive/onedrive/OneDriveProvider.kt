@@ -333,4 +333,15 @@ class OneDriveProvider(
     ): Boolean = graphApi.renewSubscription(subscriptionId, expirationDateTime)
 
     suspend fun deleteSubscription(subscriptionId: String): Boolean = graphApi.deleteSubscription(subscriptionId)
+
+    override fun hashAlgorithm(): org.krost.unidrive.HashAlgorithm =
+        org.krost.unidrive.HashAlgorithm.QuickXor
+
+    override fun statusFields(): List<org.krost.unidrive.StatusField> =
+        listOf(
+            org.krost.unidrive.StatusField(
+                label = "Include shared",
+                value = config.includeShared.toString(),
+            ),
+        )
 }

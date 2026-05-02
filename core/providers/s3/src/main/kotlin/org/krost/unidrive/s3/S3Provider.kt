@@ -256,4 +256,7 @@ class S3Provider(
         val key = api.pathToKey(path)
         return CapabilityResult.Success(api.presign(key, expiryHours * 3600))
     }
+
+    override fun hashAlgorithm(): org.krost.unidrive.HashAlgorithm =
+        org.krost.unidrive.HashAlgorithm.Md5Hex
 }
