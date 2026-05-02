@@ -15,7 +15,9 @@ import java.util.Locale
  * same negative outcome as `!Files.isRegularFile`. Tests inject a
  * counting / synthetic probe; production calls [Reconciler.probeRealFs].
  */
-data class LocalFileInfo(val size: Long)
+data class LocalFileInfo(
+    val size: Long,
+)
 
 class Reconciler(
     private val db: StateDatabase,
@@ -372,32 +374,42 @@ class Reconciler(
             }
         }
 
-        // File moves: DeleteRemote(oldFile) + Upload(newFile) with matching size
+        // File moves: DeleteRemote(oldFile) + Upload(newFile) with matching size.
+        // UD-240i: the original implementation walked every (delete × upload) pair
+        // and called Files.isRegularFile + Files.size on the upload's local path
+        // once per pair — O(D × U) Windows GetFileAttributesEx syscalls. Captured
+        // live 2026-05-02 17:48 via jstack on PID 12764: ~5M syscalls / ~4 min on
+        // a 67k-upload first-sync. The fix is a single pre-pass over uploads,
+        // grouping them by size in a Map<Long, List<Upload>>; each delete then
+        // does an O(1) bySize lookup and picks the first un-matched candidate.
+        // Total probe calls drops from D × U to U.
         val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        val uploadsBySize: Map<Long, List<SyncAction.Upload>> =
+            uploads
+                .mapNotNull { up ->
+                    val info = localFsProbe(resolveLocal(up.path)) ?: return@mapNotNull null
+                    up to info.size
+                }.groupBy({ it.second }, { it.first })
+
         val matchedUploads = mutableSetOf<String>()
         for (del in deletes) {
             if (del.path in matchedFolderDeletes) continue
             val entry = entryByPath[del.path] ?: continue
             if (entry.isFolder || entry.remoteId == null) continue
 
-            for (up in uploads) {
-                if (up.path in matchedUploads) continue
-                val localPath = resolveLocal(up.path)
-                val info = localFsProbe(localPath) ?: continue
-                if (info.size == entry.remoteSize) {
-                    actions.remove(del)
-                    actions.remove(up)
-                    actions.add(
-                        SyncAction.MoveRemote(
-                            path = up.path,
-                            fromPath = del.path,
-                            remoteId = entry.remoteId,
-                        ),
-                    )
-                    matchedUploads.add(up.path)
-                    break
-                }
-            }
+            val candidate =
+                uploadsBySize[entry.remoteSize]
+                    ?.firstOrNull { it.path !in matchedUploads } ?: continue
+            actions.remove(del)
+            actions.remove(candidate)
+            actions.add(
+                SyncAction.MoveRemote(
+                    path = candidate.path,
+                    fromPath = del.path,
+                    remoteId = entry.remoteId,
+                ),
+            )
+            matchedUploads.add(candidate.path)
         }
     }
 

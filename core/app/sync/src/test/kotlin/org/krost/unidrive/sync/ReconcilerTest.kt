@@ -356,10 +356,11 @@ class ReconcilerTest {
             db.upsertEntry(dbEntry("/old$i.bin"))
         }
         val uploadCount = 500
-        val localChanges = buildMap<String, ChangeState> {
-            repeat(deleteCount) { i -> put("/old$i.bin", ChangeState.DELETED) }
-            repeat(uploadCount) { i -> put("/new$i.bin", ChangeState.NEW) }
-        }
+        val localChanges =
+            buildMap<String, ChangeState> {
+                repeat(deleteCount) { i -> put("/old$i.bin", ChangeState.DELETED) }
+                repeat(uploadCount) { i -> put("/new$i.bin", ChangeState.NEW) }
+            }
         val remoteChanges = emptyMap<String, CloudItem>()
 
         r.reconcile(remoteChanges, localChanges)
