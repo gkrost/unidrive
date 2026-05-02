@@ -68,6 +68,39 @@ interface ProviderFactory {
         properties: Map<String, String?>,
         profileDir: Path,
     ): String = "$id provider"
+
+    /**
+     * Schema for the interactive 'profile add' wizard. Each entry
+     * describes one prompt the CLI should issue. Empty list (the
+     * default) means this provider has no provider-specific prompts —
+     * the wizard collects only the universal name + sync_root + type.
+     *
+     * Order matters: prompts are issued in list order. Implementations
+     * with dependent prompts (e.g. "host" before "port") must order
+     * accordingly.
+     */
+    fun credentialPrompts(): List<PromptSpec> = emptyList()
+
+    /**
+     * Mapping of environment-variable name to config-property key for
+     * credentials this provider can pick up from the environment.
+     *
+     * Used by the CLI to warn when an env var is set but the matching
+     * config key is also present in `config.toml` (env is ignored in
+     * that case). Empty (the default) means this provider does not
+     * recognise any environment variables.
+     */
+    fun envVarMappings(): Map<String, String> = emptyMap()
+
+    /**
+     * Whether this provider has an interactive auth flow (typically
+     * OAuth) that the CLI `auth` subcommand and the MCP
+     * `auth_begin` / `auth_complete` tools should drive.
+     *
+     * Default false: most providers receive credentials via config
+     * and have no interactive begin/complete handshake.
+     */
+    fun supportsInteractiveAuth(): Boolean = false
 }
 
 /** Offline credential health diagnostic (no network calls). */
