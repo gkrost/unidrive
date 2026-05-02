@@ -3,6 +3,7 @@ package org.krost.unidrive.s3
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
+import org.krost.unidrive.PromptSpec
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
 import java.nio.file.Path
@@ -97,18 +98,18 @@ class S3ProviderFactory : ProviderFactory {
         return CredentialHealth.Ok
     }
 
-    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+    override fun credentialPrompts(): List<PromptSpec> =
         listOf(
-            org.krost.unidrive.PromptSpec(key = "bucket", label = "S3 bucket"),
-            org.krost.unidrive.PromptSpec(key = "region", label = "S3 region", default = "auto", required = false),
-            org.krost.unidrive.PromptSpec(
+            PromptSpec(key = "bucket", label = "S3 bucket"),
+            PromptSpec(key = "region", label = "S3 region", default = "auto", required = false),
+            PromptSpec(
                 key = "endpoint",
                 label = "S3 endpoint",
                 default = "https://s3.amazonaws.com",
                 required = false,
             ),
-            org.krost.unidrive.PromptSpec(key = "access_key_id", label = "Access key ID"),
-            org.krost.unidrive.PromptSpec(key = "secret_access_key", label = "Secret access key", isMasked = true),
+            PromptSpec(key = "access_key_id", label = "Access key ID"),
+            PromptSpec(key = "secret_access_key", label = "Secret access key", isMasked = true),
         )
 
     override fun envVarMappings(): Map<String, String> =

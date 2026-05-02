@@ -257,5 +257,5 @@ class S3Provider(
         return CapabilityResult.Success(api.presign(key, expiryHours * 3600))
     }
 
-    override fun hashAlgorithm(): org.krost.unidrive.HashAlgorithm = org.krost.unidrive.HashAlgorithm.Md5Hex
+    override fun hashAlgorithm(): HashAlgorithm = HashAlgorithm.Md5Hex
 }

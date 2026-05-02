@@ -3,6 +3,7 @@ package org.krost.unidrive.sftp
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
+import org.krost.unidrive.PromptSpec
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
 import java.nio.file.Files
@@ -117,18 +118,18 @@ class SftpProviderFactory : ProviderFactory {
         return CredentialHealth.Ok
     }
 
-    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+    override fun credentialPrompts(): List<PromptSpec> =
         listOf(
-            org.krost.unidrive.PromptSpec(key = "host", label = "SFTP host"),
-            org.krost.unidrive.PromptSpec(key = "port", label = "Port", default = "22", required = false),
-            org.krost.unidrive.PromptSpec(
+            PromptSpec(key = "host", label = "SFTP host"),
+            PromptSpec(key = "port", label = "Port", default = "22", required = false),
+            PromptSpec(
                 key = "user",
                 label = "Username",
                 default = System.getProperty("user.name") ?: "root",
                 required = false,
             ),
-            org.krost.unidrive.PromptSpec(key = "remote_path", label = "Remote path", default = "", required = false),
-            org.krost.unidrive.PromptSpec(
+            PromptSpec(key = "remote_path", label = "Remote path", default = "", required = false),
+            PromptSpec(
                 key = "identity",
                 label = "Identity file",
                 default = "~/.ssh/id_ed25519",

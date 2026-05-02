@@ -3,6 +3,7 @@ package org.krost.unidrive.webdav
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
+import org.krost.unidrive.PromptSpec
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
 import java.nio.file.Path
@@ -111,11 +112,11 @@ class WebDavProviderFactory : ProviderFactory {
         return CredentialHealth.Ok
     }
 
-    override fun credentialPrompts(): List<org.krost.unidrive.PromptSpec> =
+    override fun credentialPrompts(): List<PromptSpec> =
         listOf(
-            org.krost.unidrive.PromptSpec(key = "url", label = "WebDAV URL"),
-            org.krost.unidrive.PromptSpec(key = "user", label = "Username"),
-            org.krost.unidrive.PromptSpec(key = "password", label = "Password", isMasked = true),
+            PromptSpec(key = "url", label = "WebDAV URL"),
+            PromptSpec(key = "user", label = "Username"),
+            PromptSpec(key = "password", label = "Password", isMasked = true),
         )
 
     override fun envVarMappings(): Map<String, String> =
