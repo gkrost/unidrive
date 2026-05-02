@@ -4581,3 +4581,143 @@ refactor/provider-spi-contract) currently flags these 8 sites. Until
 this ticket is resolved, **the lines are tagged with `// allow:
 UD-012` markers** so CI doesn't fail on pre-existing technical debt.
 Removing those markers is part of this ticket's done-criterion.
+---
+id: UD-013
+title: Delete ProviderRegistry.isKnownType + defaultTypes dead code; fail loud on empty SPI discovery instead of silent fallback
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:41
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:74-76
+  - core/app/core/src/test/kotlin/org/krost/unidrive/ProviderMetadataTest.kt
+  - core/app/core/src/test/kotlin/org/krost/unidrive/SpiDiscoveryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt`
+defines two near-identically-named methods with different semantics
+on `ProviderRegistry`:
+
+```kotlin
+private val defaultTypes = setOf("localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
+
+val knownTypes: Set<String> by lazy {
+    val discovered = loader.toList().map { it.id }.toSet()
+    if (discovered.isEmpty()) defaultTypes else discovered
+}
+
+fun isKnown(type: String): Boolean = type in knownTypes      // line 74
+fun isKnownType(type: String): Boolean = type in defaultTypes // line 76
+```
+
+Two distinct issues:
+
+1. **`isKnownType` has zero non-test callers.** Verified
+   2026-05-02 against the post-refactor/provider-spi-contract tree:
+
+   ```
+   $ grep -rn "isKnownType" core/ --include="*.kt" | grep -v build/ | grep -v /test/
+   core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:76:    fun isKnownType(type: String): Boolean = type in defaultTypes
+   ```
+
+   Only the definition. The two test classes that exercise it
+   (`ProviderMetadataTest`, `SpiDiscoveryTest`) test the method
+   against the same `defaultTypes` set the method itself consults
+   — so the tests are tautological: they confirm the hardcoded
+   list contains its own members.
+
+2. **`defaultTypes` is a stale fallback.** It includes `onedrive`
+   but is missing `internxt` (added later). It existed because
+   "discovered.isEmpty()" can happen at unit-test time when the
+   `META-INF/services/...` file is absent from the test classpath.
+   But the right fix for that scenario is to register a
+   `META-INF/services/...` file in test resources, not to keep a
+   stale fallback that silently masks SPI registration failures.
+
+## Risk
+
+- **Footgun semantics.** A reader who sees `isKnown` and
+  `isKnownType` next to each other reasonably assumes they are
+  synonyms. They are not — one consults the live SPI, the other
+  consults the hardcoded fallback. A future caller that picks the
+  wrong one will silently get inconsistent behaviour for newly
+  added providers.
+- **Stale fallback masks SPI registration failures.** If the
+  `META-INF/services/org.krost.unidrive.ProviderFactory` file goes
+  missing from the runtime classpath (e.g. shadow-jar
+  misconfiguration), `knownTypes` silently falls back to the 6
+  members of `defaultTypes` — which currently does NOT include
+  `internxt`. A user with an Internxt profile would see
+  "unknown provider type internxt" with no helpful error pointing
+  at the SPI loading problem.
+
+## Proposed action
+
+1. **Delete `defaultTypes` and `isKnownType` outright.** Both are
+   dead in production code; the tautological tests
+   (`ProviderMetadataTest`'s `isKnownType validates built-in
+   providers`, `SpiDiscoveryTest`'s `isKnownType validates
+   built-in providers`) get deleted with them.
+2. **Replace the silent fallback** in `knownTypes` with a fail-loud
+   error:
+
+   ```kotlin
+   val knownTypes: Set<String> by lazy {
+       val discovered = loader.toList().map { it.id }.toSet()
+       if (discovered.isEmpty()) {
+           error(
+               "ProviderRegistry: no providers discovered via ServiceLoader. " +
+                   "Either no provider modules are on the classpath, or their " +
+                   "META-INF/services/org.krost.unidrive.ProviderFactory files " +
+                   "are missing from the runtime classpath."
+           )
+       }
+       discovered
+   }
+   ```
+
+   This converts the silent-empty-discovery footgun into a loud
+   failure at first call.
+3. **Test impact:** the empty-classpath scenario in tests must now
+   either provide the SPI registration file in test resources (the
+   right fix), or test against a fake-registered set. Most existing
+   tests already work because they're in `:app:cli/src/test` (which
+   has all 7 providers on the classpath) or use mocks.
+
+## Acceptance criteria
+
+- [ ] `defaultTypes`, `isKnownType` deleted from `ProviderMetadata.kt`.
+- [ ] `knownTypes` falls loud on empty discovery instead of falling
+      back silently.
+- [ ] `grep -rn "isKnownType\|defaultTypes" core/` returns zero hits.
+- [ ] `:app:core:test` and the global `./gradlew test` still pass;
+      no test deleted that asserted a real invariant.
+- [ ] Per `challenge-test-assertion`: the deleted tests
+      (`isKnownType validates built-in providers` ×2) are documented
+      in the resolution as "tautological — asserted the hardcoded
+      list contains its own members; deleted with the hardcoded
+      list itself".
+
+## Why architecture-range
+
+It's a contract-surface decision (does `ProviderRegistry` keep a
+fallback or fail loud?) and an API change (deleting a public
+method). Architecture range fits.
+
+## Out of scope
+
+Lifting the SPI registration concern into a build-time check (e.g.
+a Gradle task that asserts every `:providers:*` module ships its
+`META-INF/services/...` file). Worth its own ticket if the
+fail-loud approach surfaces real CI noise.
+
+## Why this wasn't done in refactor/provider-spi-contract
+
+The SPI-contract PR (UD-???-equivalent, the spec
+`docs/specs/2026-05-02-provider-spi-contract-extension-design.md`)
+explicitly listed this in its §6 "out-of-scope follow-ups" along
+with three other small cleanups, but did not file a ticket for it
+at the time. This ticket closes that gap.
