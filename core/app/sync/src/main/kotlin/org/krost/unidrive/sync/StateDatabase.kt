@@ -235,15 +235,39 @@ class StateDatabase(
     ) {
         val old = if (oldPrefix.endsWith('/')) oldPrefix else "$oldPrefix/"
         val new = if (newPrefix.endsWith('/')) newPrefix else "$newPrefix/"
-        conn
-            .prepareStatement(
-                "UPDATE sync_entries SET path = ? || substr(path, ?) WHERE path LIKE ? ESCAPE '\\'",
-            ).use { stmt ->
-                stmt.setString(1, new)
-                stmt.setInt(2, old.length + 1)
-                stmt.setString(3, "${escapeLike(old)}%")
-                stmt.executeUpdate()
-            }
+        // UD-901c: clear any pre-existing destination rows BEFORE the UPDATE.
+        // Pre-fix, when LocalScanner had already written UD-901 pending rows
+        // at the destination prefix (because the user moved a folder locally
+        // and the new path appeared as NEW during local-scan), the UPDATE
+        // collided with SQLite's PK uniqueness on `path`. The action failed,
+        // the remote-side move had already landed, and the DB was left
+        // half-moved — source rows at old prefix, pending rows at new prefix
+        // — feeding a permanent failure cascade on subsequent runs.
+        //
+        // Wrap DELETE + UPDATE in batch{} so they're atomic. Pass 1 already
+        // runs inside a batch (SyncEngine.kt:356), so the nested call is a
+        // no-op per the batch{} contract; tests calling renamePrefix
+        // directly get their own transaction.
+        batch {
+            conn
+                .prepareStatement(
+                    "DELETE FROM sync_entries WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+                ).use { stmt ->
+                    // Match both the destination root itself AND its descendants.
+                    stmt.setString(1, newPrefix.removeSuffix("/"))
+                    stmt.setString(2, "${escapeLike(new)}%")
+                    stmt.executeUpdate()
+                }
+            conn
+                .prepareStatement(
+                    "UPDATE sync_entries SET path = ? || substr(path, ?) WHERE path LIKE ? ESCAPE '\\'",
+                ).use { stmt ->
+                    stmt.setString(1, new)
+                    stmt.setInt(2, old.length + 1)
+                    stmt.setString(3, "${escapeLike(old)}%")
+                    stmt.executeUpdate()
+                }
+        }
     }
 
     @Synchronized

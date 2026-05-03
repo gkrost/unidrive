@@ -136,6 +136,119 @@ class StateDatabaseTest {
         assertNotNull(db.getEntry("/other/c.txt"))
     }
 
+    // ── UD-901c: renamePrefix tolerates pre-existing destination rows ───────
+    // Pre-fix the UPDATE collided with SQLite's PK uniqueness when LocalScanner
+    // had already written UD-901 pending rows at the destination prefix
+    // (because the user moved a folder locally and the new path appeared as
+    // NEW during local-scan). The action threw SQLITE_CONSTRAINT_PRIMARYKEY,
+    // the engine logged WARN, and the DB was left half-moved — source rows
+    // at old prefix, pending rows at new prefix — feeding a permanent failure
+    // cascade. Captured live 2026-05-03 10:13.
+
+    @Test
+    fun `UD-901c renamePrefix tolerates pre-existing pending row at destination`() {
+        // Source row carries the canonical metadata (remoteId, hash).
+        db.upsertEntry(entry("/old/Sample/photo.jpg"))
+        // Destination row is a UD-901 pending placeholder with remoteId=null —
+        // exactly the shape LocalScanner writes when the new path appears NEW.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/new/Sample/photo.jpg",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+
+        // Pre-fix this threw SQLITE_CONSTRAINT_PRIMARYKEY. Post-fix it succeeds.
+        db.renamePrefix("/old/Sample", "/new/Sample")
+
+        // Exactly one row at the destination, carrying the SOURCE's metadata
+        // (the canonical remoteId), not the pending placeholder's null.
+        val resolved = db.getEntry("/new/Sample/photo.jpg")
+        assertNotNull(resolved, "destination row must exist after rename")
+        assertEquals("id-/old/Sample/photo.jpg", resolved.remoteId)
+        assertEquals("hash-/old/Sample/photo.jpg", resolved.remoteHash)
+        // Source is gone.
+        assertNull(db.getEntry("/old/Sample/photo.jpg"))
+    }
+
+    @Test
+    fun `UD-901c renamePrefix wipes deeper destination descendants too`() {
+        // Source has /old/Sample/sub/file.bin; destination already has
+        // ./sub/file.bin AND ./other.bin (both pending). After rename the
+        // destination should ONLY hold the source-rooted descendants.
+        db.upsertEntry(entry("/old/Sample/sub/file.bin"))
+        // Pending rows at destination — including a deeper one and an
+        // unrelated leaf at the same level.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/new/Sample/sub/file.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 0,
+                localSize = 0,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        db.upsertEntry(
+            SyncEntry(
+                path = "/new/Sample/other.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 0,
+                localSize = 0,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+
+        db.renamePrefix("/old/Sample", "/new/Sample")
+
+        // Source-rooted file is now at the destination, with canonical metadata.
+        val moved = db.getEntry("/new/Sample/sub/file.bin")
+        assertNotNull(moved)
+        assertEquals("id-/old/Sample/sub/file.bin", moved.remoteId)
+        // Pre-existing destination-only sibling row is gone (was a pending
+        // placeholder; canonical-source-rooted-rename wins).
+        assertNull(db.getEntry("/new/Sample/other.bin"))
+        // Source is gone.
+        assertNull(db.getEntry("/old/Sample/sub/file.bin"))
+    }
+
+    @Test
+    fun `UD-901c renamePrefix preserves rows outside both prefixes`() {
+        db.upsertEntry(entry("/old/x.txt"))
+        db.upsertEntry(entry("/new/y.txt")) // legitimate, non-colliding
+        db.upsertEntry(entry("/totally-other/z.txt"))
+
+        db.renamePrefix("/old", "/new")
+
+        assertNotNull(db.getEntry("/new/x.txt"))
+        // /new/y.txt is INSIDE the destination prefix, so it gets wiped along
+        // with the rename's DELETE phase. This is the documented trade — the
+        // post-rename destination subtree reflects what came from /old/.
+        assertNull(db.getEntry("/new/y.txt"))
+        // Wholly unrelated rows stay.
+        assertNotNull(db.getEntry("/totally-other/z.txt"))
+    }
+
     @Test
     fun `renamePrefix with underscore in path does not match wildcard`() {
         db.upsertEntry(entry("/folder_a/file.txt"))
