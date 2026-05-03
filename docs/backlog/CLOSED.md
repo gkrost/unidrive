@@ -11246,3 +11246,53 @@ If `/notifications` carries file-mutation events (created / modified / trashed /
 ## Out of scope
 
 - Implementing `/notifications` for OneDrive / S3 / WebDAV. Those have their own change-feed surfaces (Graph webhooks, S3 bucket notifications, WebDAV polling-only) and each is a separate ticket.
+
+---
+id: UD-367
+title: Internxt deletes go straight to permanent — wire POST /storage/trash/add for soft-delete safety net
+category: providers
+priority: high
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit 632d839. InternxtProvider.delete now routes through POST /storage/trash/add (MoveItemsToTrashDto, max 50 items per call). Permanent deleteFile/deleteFolder primitives kept in InternxtApiService for an explicit unidrive trash purge --remote action (separate ticket, out of scope here). Audit doc gains a Drive Trash endpoints section flipping /storage/trash/add to used and cataloguing the seven related ◯ available-unused trash endpoints. Three input-validation tests cover the empty/>50/invalid-type contract.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:274
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:208
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**Internxt remote deletes are immediately permanent** — `InternxtProvider.delete()` calls `DELETE /files/{uuid}` (or the collection-form `DELETE /folders` body for folders). Internxt's Drive API also exposes a soft-delete trash surface (`POST /storage/trash/add` to move items to the recycle bin, with `DELETE /storage/trash/file/{fileId}` to purge later) that the provider does not call.
+
+This is the **single most consequential safety gap** in the Internxt provider. The `delta()` reconstruction has multiple known mechanisms ([audit](docs/audits/internxt-api-vs-spi.md) §3a–f, §4i–iii) by which a file can be silently absent from the gathered inventory — pagination races without `sort`/`order` (now mostly fixed in UD-358), 6h-cursor-window drops, recursive-fallback subtree skips on 5xx. Each absent path becomes a `del-local` in the engine which, in bidirectional mode or a future `--upload-only --propagate-deletes` run, lands as `DeleteRemote` and **wipes the file at the provider with no recovery path**. The `--max-delete-percentage` engine guard ([core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt)) only fires above 10 deletes — single-file silent-drops sail past it.
+
+A trash-first delete path converts every misfire from "bytes gone" to "30-day recoverable" at the cost of one HTTP verb swap.
+
+Filed from the post-UD-366 review of Gemini's API-surface overview vs the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md). The audit's capability matrix predates this analysis (it categorises only the §"Drive — File endpoints" tag and `/storage/trash/*` lives under a different swagger tag); add it.
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `trashFile(uuid: String)` and `trashFolder(uuid: String)` calling `POST /storage/trash/add` with the documented `items: [{uuid, type: "file" | "folder"}]` body shape (verify exact field names against `https://api.internxt.com/drive/swagger-ui-init.js` — search components.schemas for the trash DTO before coding).
+2. Add `purgeFromTrash(fileId: String)` calling `DELETE /storage/trash/file/{fileId}` (used by an explicit `unidrive trash purge --remote` operator action, not the routine sync path).
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+3. Route `override suspend fun delete(remotePath: String)` through `trashFile` / `trashFolder` instead of the permanent `deleteFile` / `deleteFolder`. The remote item moves to Internxt's recycle bin; `delta()` will see `status=TRASHED` on the next walk and the engine's existing tombstone reconciliation handles it cleanly (the audit confirms `TRASHED|DELETED` is correctly mapped to `CloudItem.deleted=true` at [InternxtProvider.kt:494,542](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:494)).
+
+4. Optional config knob: `internxt.deleteMode = trash | permanent` (default `trash`). Operators who want hard-delete semantics for compliance reasons can opt in to `permanent`.
+
+## Acceptance
+
+- `InternxtProvider.delete()` issues `POST /storage/trash/add` by default; the file appears in the user's Internxt web UI recycle bin.
+- An integration test (env-gated, `UNIDRIVE_INTEGRATION_TESTS=true`) creates a file, deletes it via the provider, asserts it's findable in trash via the listing endpoint, and that a follow-up `delta()` surfaces it with `deleted=true`.
+- Audit doc `docs/audits/internxt-api-vs-spi.md` capability matrix gains a `### Drive — Trash endpoints` section flipping `/storage/trash/*` from omitted to ✅.
+- Behaviour change documented in `docs/user-guide/consequences.md` under the `sync` and `trash` verbs.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) — does not currently cover `/storage/trash/*` (gap to be closed by this ticket's audit-doc edit).
+- UD-360 (closed `7d3bf62`) — the `DeltaPage.complete=false` partial-gather signal already suppresses `detectMissingAfterFullSync` when the recursive fallback skipped subtrees. This ticket is the **second line of defence** for the cases UD-360 doesn't catch (cursor-window drops, server reorder races without UD-358's stable sort).
+- UD-225b (closed `2dac299`) — sibling correctness work on the download path; this ticket closes the analogous loophole on the delete path.
+- The local `TrashManager` ([core/app/sync/src/main/kotlin/.../TrashManager.kt](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/TrashManager.kt)) is *separate* — it stages local-side bytes into `.unidrive/trash/` before a `DeleteLocal` action removes them. The remote-trash path proposed here is its mirror on the provider side.
