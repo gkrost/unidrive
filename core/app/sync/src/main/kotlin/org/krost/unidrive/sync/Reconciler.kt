@@ -390,57 +390,92 @@ class Reconciler(
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>()
         if (deletes.isEmpty()) return
 
-        // Folder moves: DeleteRemote(oldFolder) + CreateRemoteFolder(newFolder)
+        // Folder moves: DeleteRemote(oldFolder) + CreateRemoteFolder(newFolder).
+        //
+        // UD-240j + UD-240k: the loop iterates CREATES (the user's intent — "I
+        // just made this folder, where did it come from?") and picks the BEST
+        // matching delete for each. "Best" = same basename AND longest common
+        // parent-path with the create. A score of 0 (no shared parent segment)
+        // is rejected: that's two independent operations the user happened to
+        // perform with same-named folders, not a move.
+        //
+        // Pre-UD-240k the loop went deletes→creates with basename-only match.
+        // With stale DB rows sharing a basename across totally unrelated subtrees
+        // (legacy /Sample vs current /userhome/Pictures/Sample, both with
+        // remoteId), set-iteration order picked one effectively at random —
+        // routinely the wrong one. UD-240j (matchedFolderCreates dedup) capped
+        // the false-positive count at 1; UD-240k makes that 1 actually correct.
         val folderCreates = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
         val matchedFolderDeletes = mutableSetOf<String>()
-        // UD-240j: dedup the create side too. Without this, two different
-        // DeleteRemote actions sharing a basename (e.g. /Sample and
-        // /Pictures/Sample, both folder rows in the DB) would both match
-        // the SAME CreateRemoteFolder by basename, producing two MoveRemote
-        // actions targeting the same destination — both failing at apply
-        // time because at most one source can really be the destination.
-        // The file-move loop below has the symmetric `matchedUploads` set;
-        // folder-move was missing the parallel.
         val matchedFolderCreates = mutableSetOf<String>()
-        for (del in deletes) {
-            val entry = entryByPath[del.path] ?: continue
-            if (!entry.isFolder || entry.remoteId == null) continue
+        for (create in folderCreates) {
+            if (create.path in matchedFolderCreates) continue
+            val newName = create.path.substringAfterLast("/")
+            val createParentSegs = parentSegments(create.path)
 
-            val oldName = del.path.substringAfterLast("/")
-            for (create in folderCreates) {
-                // UD-240j: skip creates already consumed by an earlier match.
-                if (create.path in matchedFolderCreates) continue
-                // Same folder name, any parent — covers both renames (same parent) and cross-parent moves
-                if (create.path.substringAfterLast("/") != oldName) continue
-                actions.add(
-                    SyncAction.MoveRemote(
-                        path = create.path,
-                        fromPath = del.path,
-                        remoteId = entry.remoteId,
-                    ),
-                )
-                // Remove the folder delete and create
-                actions.remove(del)
-                actions.remove(create)
-                // Remove child deletes under old prefix — API move handles them
-                val oldPrefix = del.path + "/"
-                val newPrefix = create.path + "/"
-                val movedNames =
-                    actions
-                        .filter { it is SyncAction.DeleteRemote && it.path.startsWith(oldPrefix) }
-                        .map { it.path.removePrefix(oldPrefix) }
-                        .toSet()
-                actions.removeAll { it is SyncAction.DeleteRemote && it.path.startsWith(oldPrefix) }
-                // Only remove new-prefix actions that have a matching old-prefix counterpart (moved files)
-                // Keep uploads for files that are genuinely new (never existed under old folder)
-                actions.removeAll { action ->
-                    action.path.startsWith(newPrefix) &&
-                        action.path.removePrefix(newPrefix) in movedNames
+            // Find the best matching delete: same basename, has a folder DB
+            // row with remoteId, longest common parent-segment overlap with
+            // this create.
+            //
+            // Tie-break rule:
+            //   - 1 candidate                → accept (legitimate move,
+            //     possibly cross-parent at top level like /a/X → /b/X)
+            //   - >= 2 candidates with same max score == 0 → REJECT
+            //     (ambiguous; without parent overlap we can't tell which
+            //     stale row corresponds to the user's actual intent)
+            //   - otherwise → pick the highest-scoring candidate, ties
+            //     broken by iteration order
+            data class Candidate(val del: SyncAction.DeleteRemote, val score: Int)
+            val candidates = deletes
+                .asSequence()
+                .filter { it.path !in matchedFolderDeletes }
+                .filter { it.path.substringAfterLast("/") == newName }
+                .mapNotNull { d ->
+                    val e = entryByPath[d.path] ?: return@mapNotNull null
+                    if (!e.isFolder || e.remoteId == null) return@mapNotNull null
+                    Candidate(d, commonPrefixSegments(parentSegments(d.path), createParentSegs))
                 }
-                matchedFolderDeletes.add(del.path)
-                matchedFolderCreates.add(create.path) // UD-240j
-                break
+                .toList()
+            if (candidates.isEmpty()) continue
+            val maxScore = candidates.maxOf { it.score }
+            // UD-240k ambiguous-zero guard: when several candidates share
+            // basename but none have parent overlap with the destination,
+            // we don't have a structural signal to pick between them.
+            // Refusing to emit a MoveRemote is safer than guessing wrong;
+            // the standalone DeleteRemote / CreateRemoteFolder will run
+            // independently and the engine handles 404s gracefully.
+            if (candidates.size > 1 && maxScore == 0) continue
+            val best = candidates.first { it.score == maxScore }
+
+            val del = best.del
+            val entry = entryByPath[del.path]!! // proven non-null + isFolder + remoteId by filter above
+            actions.add(
+                SyncAction.MoveRemote(
+                    path = create.path,
+                    fromPath = del.path,
+                    remoteId = entry.remoteId!!,
+                ),
+            )
+            // Remove the folder delete and create
+            actions.remove(del)
+            actions.remove(create)
+            // Remove child deletes under old prefix — API move handles them
+            val oldPrefix = del.path + "/"
+            val newPrefix = create.path + "/"
+            val movedNames =
+                actions
+                    .filter { it is SyncAction.DeleteRemote && it.path.startsWith(oldPrefix) }
+                    .map { it.path.removePrefix(oldPrefix) }
+                    .toSet()
+            actions.removeAll { it is SyncAction.DeleteRemote && it.path.startsWith(oldPrefix) }
+            // Only remove new-prefix actions that have a matching old-prefix counterpart (moved files)
+            // Keep uploads for files that are genuinely new (never existed under old folder)
+            actions.removeAll { action ->
+                action.path.startsWith(newPrefix) &&
+                    action.path.removePrefix(newPrefix) in movedNames
             }
+            matchedFolderDeletes.add(del.path)
+            matchedFolderCreates.add(create.path)
         }
 
         // File moves: DeleteRemote(oldFile) + Upload(newFile) with matching size.
@@ -554,6 +589,37 @@ class Reconciler(
     private fun resolveLocal(remotePath: String): java.nio.file.Path = safeResolveLocal(syncRoot, remotePath)
 
     companion object {
+        /**
+         * UD-240k: split a path into its parent's segment list.
+         *
+         *   `/A/B/C/file.bin` → `["A", "B", "C"]`
+         *   `/file.bin`        → `[]`
+         *   `/`                → `[]`
+         *   `""`               → `[]`
+         */
+        fun parentSegments(path: String): List<String> {
+            val trimmed = path.removePrefix("/")
+            if (trimmed.isEmpty()) return emptyList()
+            val parts = trimmed.split('/')
+            return if (parts.size <= 1) emptyList() else parts.dropLast(1)
+        }
+
+        /**
+         * UD-240k: number of leading segments two paths share.
+         *
+         *   `["A","B","C"]` vs `["A","B","D"]` → 2
+         *   `["A","B"]`     vs `["X","Y"]`     → 0
+         *   `["A"]`         vs `["A","B"]`     → 1
+         */
+        fun commonPrefixSegments(
+            a: List<String>,
+            b: List<String>,
+        ): Int {
+            var i = 0
+            while (i < a.size && i < b.size && a[i] == b[i]) i++
+            return i
+        }
+
         /**
          * UD-901a: predicate matching the engine's own scope filter at
          * [SyncEngine.kt:163-168]. Encoded once here so the recovery

@@ -426,6 +426,216 @@ class ReconcilerTest {
         assertEquals("/Pictures/_Photos/Sample", moves[0].path)
     }
 
+    // ── UD-240k: folder-move structural-locality match ──────────────────────
+    // Captured live 2026-05-03 10:51 (post-UD-240j): with two stale DB rows
+    // sharing basename "Sample" — a top-level legacy /Sample and the user's
+    // actual /userhome/Pictures/Sample — detectMoves picked /Sample as
+    // the source for /userhome/Pictures/_Photos/Sample. UD-240j stopped
+    // duplicates; UD-240k makes the surviving one actually right.
+
+    @Test
+    fun `UD-240k folder-move picks the close-relative source over a far-tree one`() {
+        // Legacy stale row at root, no parent overlap with the destination.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Sample",
+                remoteId = "id-stale-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        // Real source — same parent tree as the destination.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Pictures/Sample",
+                remoteId = "id-real-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        Files.createDirectories(syncRoot.resolve("Pictures/_Photos/Sample"))
+        val localChanges =
+            mapOf(
+                "/Sample" to ChangeState.DELETED,
+                "/Pictures/Sample" to ChangeState.DELETED,
+                "/Pictures/_Photos/Sample" to ChangeState.NEW,
+            )
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size, "expected one MoveRemote; got: $moves")
+        assertEquals(
+            "/Pictures/Sample",
+            moves[0].fromPath,
+            "must pick the close-relative source (shares /Pictures parent), NOT /Sample",
+        )
+        assertEquals("/Pictures/_Photos/Sample", moves[0].path)
+        // The unmatched stale delete survives as a plain DeleteRemote — engine's
+        // skip-on-not-found path will handle it gracefully if it's already gone
+        // from remote.
+        val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
+        assertEquals(listOf("/Sample"), deletes)
+    }
+
+    @Test
+    fun `UD-240k single cross-tree candidate is accepted as a move`() {
+        // One delete, one create, no parent overlap (e.g. /a/docs → /b/docs
+        // in the SyncEngineTest legacy fixture). Single-candidate scenario
+        // has no ambiguity — accept the move.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/a/docs",
+                remoteId = "id-a-docs",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        Files.createDirectories(syncRoot.resolve("b/docs"))
+        val localChanges =
+            mapOf(
+                "/a/docs" to ChangeState.DELETED,
+                "/b/docs" to ChangeState.NEW,
+            )
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size, "single cross-tree candidate must still produce a move; got: $moves")
+        assertEquals("/a/docs", moves[0].fromPath)
+        assertEquals("/b/docs", moves[0].path)
+    }
+
+    @Test
+    fun `UD-240k two cross-tree candidates with no parent overlap reject the match`() {
+        // Two stale rows sharing basename, both top-level, neither shares a
+        // parent segment with the destination. Without structural evidence
+        // we'd be guessing — better to refuse the match and let the engine
+        // run the standalone delete + create paths.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Lonely",
+                remoteId = "id-lonely-1",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Old/Lonely",
+                remoteId = "id-lonely-2",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        Files.createDirectories(syncRoot.resolve("Far/Away/Lonely"))
+        val localChanges =
+            mapOf(
+                "/Lonely" to ChangeState.DELETED,
+                "/Old/Lonely" to ChangeState.DELETED,
+                "/Far/Away/Lonely" to ChangeState.NEW,
+            )
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertTrue(
+            moves.isEmpty(),
+            "ambiguous zero-score cross-tree candidates → no move; got: $moves",
+        )
+        // Both deletes survive standalone.
+        val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
+        assertTrue("/Lonely" in deletes && "/Old/Lonely" in deletes, "got: $deletes")
+        // Create survives standalone.
+        assertTrue(actions.any { it is SyncAction.CreateRemoteFolder && it.path == "/Far/Away/Lonely" })
+    }
+
+    @Test
+    fun `UD-240k legitimate single-move with shared parent still works`() {
+        // Regression guard: rename in place should still produce MoveRemote.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Pictures/Sample",
+                remoteId = "id-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        Files.createDirectories(syncRoot.resolve("Pictures/_Photos/Sample"))
+        val localChanges =
+            mapOf(
+                "/Pictures/Sample" to ChangeState.DELETED,
+                "/Pictures/_Photos/Sample" to ChangeState.NEW,
+            )
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size)
+        assertEquals("/Pictures/Sample", moves[0].fromPath)
+        assertEquals("/Pictures/_Photos/Sample", moves[0].path)
+    }
+
+    @Test
+    fun `UD-240k pure helpers parentSegments and commonPrefixSegments`() {
+        // Pin the helper semantics so future refactors don't drift.
+        assertEquals(listOf("A", "B", "C"), Reconciler.parentSegments("/A/B/C/file.bin"))
+        assertEquals(emptyList(), Reconciler.parentSegments("/file.bin"))
+        assertEquals(emptyList(), Reconciler.parentSegments("/"))
+        assertEquals(emptyList(), Reconciler.parentSegments(""))
+
+        assertEquals(
+            2,
+            Reconciler.commonPrefixSegments(listOf("A", "B", "C"), listOf("A", "B", "D")),
+        )
+        assertEquals(
+            0,
+            Reconciler.commonPrefixSegments(listOf("A", "B"), listOf("X", "Y")),
+        )
+        assertEquals(
+            1,
+            Reconciler.commonPrefixSegments(listOf("A"), listOf("A", "B")),
+        )
+        assertEquals(
+            0,
+            Reconciler.commonPrefixSegments(emptyList(), listOf("A", "B")),
+        )
+    }
+
     // ── UD-901a: recovery loops respect syncPath scope ──────────────────────
     // Pre-fix the UD-225 download-recovery and UD-901 upload-recovery loops
     // iterated `db.getAllEntries()` without any scope filter. A
