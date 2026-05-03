@@ -11344,3 +11344,51 @@ Optionally extend the `CloudProvider` SPI with a dedicated `rename(path, newName
 - UD-366 (closed `490cca5`) — sibling capability-gap ticket: replace-in-place via `PUT /files/{uuid}`. Same audit batch ("available-unused on `/files/{uuid}` family"), same fix shape (add API method, route the dispatcher conditionally).
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) lines 93, 117.
 - The existing `move` PATCH flow at `InternxtProvider.kt:313-328` is the integration point.
+
+---
+id: UD-368
+title: Bulk folder creation — POST /folders accepts batch body, provider creates one at a time
+category: providers
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit da85b27. Implemented partial scope: InternxtApiService.createFoldersBatch (1-5 items), CloudProvider.createFolders SPI extension with default-loop impl, InternxtProvider.createFolders override that groups by parent + chunks at 5 + falls back to serial createFolder on bulk 409. Engine-side dispatch wiring (SyncEngine Pass 1 grouping of CreateRemoteFolder actions) deferred to UD-371 — the SPI default still loops in production today, so the bulk path is dormant until that wiring lands. Spec findings documented in audit doc: 5-item server cap (not 50 as ticket originally claimed), polymorphic POST /folders endpoint, undocumented bulk response shape, bulk-409 returns names-not-UUIDs.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:134
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:283
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:225
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**`POST /folders` accepts a multi-folder batch body, but the provider only ever creates one folder per request.** [`InternxtApiService.createFolder`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:134) sends a single `{parentFolderUuid, plainName, name}` object; the spec's `CreateFoldersDto` (verify the exact name in `swagger-ui-init.js` components.schemas) accepts an array. The audit calls this out at line 107 ("Multi-folder batch form is unused") but doesn't quantify the cost.
+
+The cost is real on the orphan-recovery path. [`Reconciler.kt:225-275`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:225) (UD-901b ancestor synthesis) walks each recovery-emitted action's path chain and emits `CreateRemoteFolder` for every missing ancestor. A single deeply-nested recovered file produces N sequential `POST /folders` round-trips, each subject to Internxt's per-request latency floor (~150–400 ms observed) plus the UD-317 409-recovery dance per folder. For a `/path/with/10/levels/of/nesting/file.txt` with no ancestors known, that's 10 sequential POSTs ≈ 2–4 s before the file itself can upload — and the engine is single-threaded for these (folder creates can't parallelise without Internxt's bulk semantics resolving uuid dependencies).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `createFoldersBatch(parentUuid: String, names: List<Pair<String, String>>): List<InternxtFolder>` where each pair is `(plainName, encryptedName)`. POST body matches the spec's bulk shape — confirm against `swagger-ui-init.js` (likely `{parentFolderUuid, items: [{plainName, name}, …]}` but **don't guess; read the schema first**).
+2. Keep the existing single-folder `createFolder` as a thin wrapper around the batch form (`createFoldersBatch(parentUuid, listOf(name to encryptedName)).single()`) so existing call sites don't fan out into changes.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) and the engine:
+
+3. Add a batched variant of `createFolder` to the `CloudProvider` SPI — `createFolders(paths: List<String>): List<CloudItem>` with a default implementation that loops over `createFolder(path)` so providers without bulk semantics keep working unchanged.
+
+4. Override it in `InternxtProvider`: group the requested paths by parent UUID (resolving each parent once via the existing `resolveFolder` cache), issue one `createFoldersBatch` per parent group, populate `folderCache` with all returned UUIDs in one pass.
+
+5. In [`SyncEngine`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt) Pass 1 dispatch: before entering the per-action loop for `CreateRemoteFolder`, group the actions by their parent path, call `provider.createFolders(group)` per parent. Falls back transparently for non-bulk-aware providers.
+
+## Acceptance
+
+- `InternxtApiService.createFoldersBatch` exists and is covered by a unit test that asserts the request body matches the spec's batch shape.
+- `CreateRemoteFolder` actions for siblings (same parent) are coalesced into one HTTP request in `SyncEngine`'s Pass 1.
+- Integration test: orphan-recovery for a 5-deep new path issues at most 5 HTTP POSTs (one per depth level), not 5 + 4 + 3 + 2 + 1.
+- `docs/audits/internxt-api-vs-spi.md` capability-matrix line 107 updated: ✅ batch form used.
+
+## Related
+
+- UD-317 (closed) — folder name sanitisation; the 409-recovery dance in `createFolder` already deals with eventual-consistency races. The batch form needs a similar partial-success handler (a single batch can return some 200s and some 409s).
+- UD-357 (closed) — `folderCache` already tracks created UUIDs; the batch path needs to populate it for each returned folder, not just the last one.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) line 107.
