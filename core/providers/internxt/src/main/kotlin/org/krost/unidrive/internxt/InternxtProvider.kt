@@ -22,6 +22,24 @@ class InternxtProvider(
     private val authService = AuthService(config)
     private val api = InternxtApiService(config) { authService.getValidCredentials() }
 
+    // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
+    // folder lookups. Populated on createFolder success (the API returns the
+    // new folder's UUID — without this the next resolveFolder call races
+    // Internxt's read-after-write inconsistency window: POST /drive/folders
+    // returns 200, but GET /drive/folders/{parentUuid} doesn't yet show the
+    // child for ~1-3 seconds). Consulted at the top of each resolveFolder
+    // segment-walk so multi-level mkdir cascades survive that window.
+    //
+    // Also populated on read (after a successful list) so subsequent
+    // resolveFolder calls hitting the same parent don't re-list — a free
+    // latency win on top of the bug fix.
+    //
+    // Eviction: none. Process-lifetime cache. A folder created via this
+    // cache then deleted out-of-band (web UI, another sync session) leaves
+    // a stale entry whose UUID will 404 on the next operation; acceptable
+    // trade for the in-process scope.
+    private val folderCache = FolderUuidCache()
+
     override val isAuthenticated: Boolean get() = authService.isAuthenticated
     override val canAuthenticate: Boolean get() = Files.exists(config.tokenPath.resolve("credentials.json"))
 
@@ -247,6 +265,11 @@ class InternxtProvider(
                         ?: throw e // 409 but folder not found: re-throw original error
                 existing
             }
+        // UD-357: cache the new folder's UUID so the next resolveFolder call
+        // doesn't race Internxt's read-after-write inconsistency on listing.
+        // Use sanitizeName(name) so the lookup key matches what resolveFolder
+        // compares against.
+        folderCache.put(parentUuid, sanitizeName(name), folder.uuid)
         return folder.toCloudItem(parentPath)
     }
 
@@ -380,11 +403,23 @@ class InternxtProvider(
         var currentUuid = creds.rootFolderId
 
         for (segment in segments) {
+            // UD-357: cache hit short-circuits Internxt's eventual-consistency
+            // window. On the first resolveFolder right after createFolder of
+            // a new subfolder, the API listing still doesn't show it; the
+            // cache (populated by createFolder) does.
+            val cached = folderCache.get(currentUuid, segment)
+            if (cached != null) {
+                currentUuid = cached
+                continue
+            }
             val content = api.getFolderContents(currentUuid)
             val child =
                 // UD-317: sanitise child name before matching path segment.
                 content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == segment }
                     ?: throw ProviderException("Folder not found: $segment in $path")
+            // UD-357: cache the discovered UUID too — subsequent resolveFolder
+            // calls on the same parent skip the round-trip.
+            folderCache.put(currentUuid, segment, child.uuid)
             currentUuid = child.uuid
         }
         return currentUuid
