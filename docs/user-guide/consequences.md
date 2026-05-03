@@ -105,6 +105,38 @@ version history. unidrive does not locally stage a pre-sync snapshot.
 mutating anything. state.db is not touched. Useful for verifying
 unexpected deletes before committing.
 
+**`--upload-only`** (UD-737): suppresses every action that would
+mutate local state. The engine still pulls the remote delta (so the
+state.db cursor advances and the next cycle plans against fresh
+remote metadata), but **DeleteRemote is also dropped by default** —
+upload-only is push-additive: new local files go up, modified local
+files overwrite, but a locally-deleted file does NOT delete on
+remote. Pass `--propagate-deletes` to opt back in to remote deletion.
+The asymmetric default exists because `--upload-only` is most often
+used in "back up new files only" scenarios where local deletes are
+expected to be intentional and unrelated to the remote.
+
+**`--download-only`:** the inverse — suppresses every action that
+would mutate the remote (Upload, DeleteRemote, CreateRemoteFolder,
+MoveRemote). **DeleteLocal IS still emitted** when the remote shows
+a file as deleted: download-only's contract is "mirror remote state
+locally", not "never touch local files". A remote-side delete (via
+the provider's web UI, another client, or a TRASHED status flag in
+the next delta) propagates to a local delete here. If the local
+file matters, pin it (`unidrive pin add <path>`) before running
+download-only against a scope where remote deletions are possible —
+pinned paths are skipped by DeleteLocal. There is no symmetric
+`--no-propagate-deletes` flag yet (UD-737-equivalent for the
+download direction is not implemented; if you need additive-only
+download semantics, use `--dry-run` first to inspect the plan).
+
+**`--sync-path=<remote-path>`:** restricts both gather and apply to
+a remote subtree. Only delta items inside the path are reconciled;
+DB entries outside the path are not considered (UD-901a). The
+provider-level gather is NOT yet narrowed (UD-362, open) — the
+delta still pulls the entire drive's listing and the engine
+filters post-delta. Watch wall-clock on large drives.
+
 ---
 
 ## auth
