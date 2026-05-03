@@ -85,6 +85,27 @@ class RequestIdPluginTest {
         }
 
     @Test
+    fun `UD-773 formatSizeSegment suppresses both-zero and both-null`() {
+        assertEquals("", formatSizeSegment(null, null))
+        assertEquals("", formatSizeSegment(0L, 0L))
+    }
+
+    @Test
+    fun `UD-773 formatSizeSegment emits up and dn for non-zero values`() {
+        assertEquals(" up=12345 dn=30", formatSizeSegment(12345L, 30L))
+        assertEquals(" up=0 dn=4194304", formatSizeSegment(0L, 4194304L))
+        assertEquals(" up=999 dn=0", formatSizeSegment(999L, 0L))
+    }
+
+    @Test
+    fun `UD-773 formatSizeSegment uses question-mark for unknown side`() {
+        // Streaming response with known upload size.
+        assertEquals(" up=12345 dn=?", formatSizeSegment(12345L, null))
+        // Streaming upload with known response size.
+        assertEquals(" up=? dn=30", formatSizeSegment(null, 30L))
+    }
+
+    @Test
     fun `redact strips query string`() {
         assertEquals("https://a.example/path?<redacted>", redact("https://a.example/path?token=secret"))
         assertEquals("https://a.example/path", redact("https://a.example/path"))
