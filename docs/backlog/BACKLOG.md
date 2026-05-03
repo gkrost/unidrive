@@ -6379,3 +6379,197 @@ For each, note the open-source repo path used to derive the wire shape and date 
 ## Related
 
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md).
+---
+id: UD-367
+title: Internxt deletes go straight to permanent — wire POST /storage/trash/add for soft-delete safety net
+category: providers
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:274
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:208
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**Internxt remote deletes are immediately permanent** — `InternxtProvider.delete()` calls `DELETE /files/{uuid}` (or the collection-form `DELETE /folders` body for folders). Internxt's Drive API also exposes a soft-delete trash surface (`POST /storage/trash/add` to move items to the recycle bin, with `DELETE /storage/trash/file/{fileId}` to purge later) that the provider does not call.
+
+This is the **single most consequential safety gap** in the Internxt provider. The `delta()` reconstruction has multiple known mechanisms ([audit](docs/audits/internxt-api-vs-spi.md) §3a–f, §4i–iii) by which a file can be silently absent from the gathered inventory — pagination races without `sort`/`order` (now mostly fixed in UD-358), 6h-cursor-window drops, recursive-fallback subtree skips on 5xx. Each absent path becomes a `del-local` in the engine which, in bidirectional mode or a future `--upload-only --propagate-deletes` run, lands as `DeleteRemote` and **wipes the file at the provider with no recovery path**. The `--max-delete-percentage` engine guard ([core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt)) only fires above 10 deletes — single-file silent-drops sail past it.
+
+A trash-first delete path converts every misfire from "bytes gone" to "30-day recoverable" at the cost of one HTTP verb swap.
+
+Filed from the post-UD-366 review of Gemini's API-surface overview vs the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md). The audit's capability matrix predates this analysis (it categorises only the §"Drive — File endpoints" tag and `/storage/trash/*` lives under a different swagger tag); add it.
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `trashFile(uuid: String)` and `trashFolder(uuid: String)` calling `POST /storage/trash/add` with the documented `items: [{uuid, type: "file" | "folder"}]` body shape (verify exact field names against `https://api.internxt.com/drive/swagger-ui-init.js` — search components.schemas for the trash DTO before coding).
+2. Add `purgeFromTrash(fileId: String)` calling `DELETE /storage/trash/file/{fileId}` (used by an explicit `unidrive trash purge --remote` operator action, not the routine sync path).
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+3. Route `override suspend fun delete(remotePath: String)` through `trashFile` / `trashFolder` instead of the permanent `deleteFile` / `deleteFolder`. The remote item moves to Internxt's recycle bin; `delta()` will see `status=TRASHED` on the next walk and the engine's existing tombstone reconciliation handles it cleanly (the audit confirms `TRASHED|DELETED` is correctly mapped to `CloudItem.deleted=true` at [InternxtProvider.kt:494,542](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:494)).
+
+4. Optional config knob: `internxt.deleteMode = trash | permanent` (default `trash`). Operators who want hard-delete semantics for compliance reasons can opt in to `permanent`.
+
+## Acceptance
+
+- `InternxtProvider.delete()` issues `POST /storage/trash/add` by default; the file appears in the user's Internxt web UI recycle bin.
+- An integration test (env-gated, `UNIDRIVE_INTEGRATION_TESTS=true`) creates a file, deletes it via the provider, asserts it's findable in trash via the listing endpoint, and that a follow-up `delta()` surfaces it with `deleted=true`.
+- Audit doc `docs/audits/internxt-api-vs-spi.md` capability matrix gains a `### Drive — Trash endpoints` section flipping `/storage/trash/*` from omitted to ✅.
+- Behaviour change documented in `docs/user-guide/consequences.md` under the `sync` and `trash` verbs.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) — does not currently cover `/storage/trash/*` (gap to be closed by this ticket's audit-doc edit).
+- UD-360 (closed `7d3bf62`) — the `DeltaPage.complete=false` partial-gather signal already suppresses `detectMissingAfterFullSync` when the recursive fallback skipped subtrees. This ticket is the **second line of defence** for the cases UD-360 doesn't catch (cursor-window drops, server reorder races without UD-358's stable sort).
+- UD-225b (closed `2dac299`) — sibling correctness work on the download path; this ticket closes the analogous loophole on the delete path.
+- The local `TrashManager` ([core/app/sync/src/main/kotlin/.../TrashManager.kt](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/TrashManager.kt)) is *separate* — it stages local-side bytes into `.unidrive/trash/` before a `DeleteLocal` action removes them. The remote-trash path proposed here is its mirror on the provider side.
+---
+id: UD-368
+title: Bulk folder creation — POST /folders accepts batch body, provider creates one at a time
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:134
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:283
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:225
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**`POST /folders` accepts a multi-folder batch body, but the provider only ever creates one folder per request.** [`InternxtApiService.createFolder`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:134) sends a single `{parentFolderUuid, plainName, name}` object; the spec's `CreateFoldersDto` (verify the exact name in `swagger-ui-init.js` components.schemas) accepts an array. The audit calls this out at line 107 ("Multi-folder batch form is unused") but doesn't quantify the cost.
+
+The cost is real on the orphan-recovery path. [`Reconciler.kt:225-275`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:225) (UD-901b ancestor synthesis) walks each recovery-emitted action's path chain and emits `CreateRemoteFolder` for every missing ancestor. A single deeply-nested recovered file produces N sequential `POST /folders` round-trips, each subject to Internxt's per-request latency floor (~150–400 ms observed) plus the UD-317 409-recovery dance per folder. For a `/path/with/10/levels/of/nesting/file.txt` with no ancestors known, that's 10 sequential POSTs ≈ 2–4 s before the file itself can upload — and the engine is single-threaded for these (folder creates can't parallelise without Internxt's bulk semantics resolving uuid dependencies).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `createFoldersBatch(parentUuid: String, names: List<Pair<String, String>>): List<InternxtFolder>` where each pair is `(plainName, encryptedName)`. POST body matches the spec's bulk shape — confirm against `swagger-ui-init.js` (likely `{parentFolderUuid, items: [{plainName, name}, …]}` but **don't guess; read the schema first**).
+2. Keep the existing single-folder `createFolder` as a thin wrapper around the batch form (`createFoldersBatch(parentUuid, listOf(name to encryptedName)).single()`) so existing call sites don't fan out into changes.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) and the engine:
+
+3. Add a batched variant of `createFolder` to the `CloudProvider` SPI — `createFolders(paths: List<String>): List<CloudItem>` with a default implementation that loops over `createFolder(path)` so providers without bulk semantics keep working unchanged.
+
+4. Override it in `InternxtProvider`: group the requested paths by parent UUID (resolving each parent once via the existing `resolveFolder` cache), issue one `createFoldersBatch` per parent group, populate `folderCache` with all returned UUIDs in one pass.
+
+5. In [`SyncEngine`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt) Pass 1 dispatch: before entering the per-action loop for `CreateRemoteFolder`, group the actions by their parent path, call `provider.createFolders(group)` per parent. Falls back transparently for non-bulk-aware providers.
+
+## Acceptance
+
+- `InternxtApiService.createFoldersBatch` exists and is covered by a unit test that asserts the request body matches the spec's batch shape.
+- `CreateRemoteFolder` actions for siblings (same parent) are coalesced into one HTTP request in `SyncEngine`'s Pass 1.
+- Integration test: orphan-recovery for a 5-deep new path issues at most 5 HTTP POSTs (one per depth level), not 5 + 4 + 3 + 2 + 1.
+- `docs/audits/internxt-api-vs-spi.md` capability-matrix line 107 updated: ✅ batch form used.
+
+## Related
+
+- UD-317 (closed) — folder name sanitisation; the 409-recovery dance in `createFolder` already deals with eventual-consistency races. The batch form needs a similar partial-success handler (a single batch can return some 200s and some 409s).
+- UD-357 (closed) — `folderCache` already tracks created UUIDs; the batch path needs to populate it for each returned folder, not just the last one.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) line 107.
+---
+id: UD-369
+title: Pure renames re-encrypt — wire PUT /files/{uuid}/meta and /folders/{uuid}/meta
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:157
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**Pure renames currently re-encrypt the entire file.** Internxt's Drive API exposes `PUT /files/{uuid}/meta` (rename without move) and `PUT /folders/{uuid}/meta` (rename a folder), but the provider doesn't use either. The audit lines 93 and 117 flag both as available-unused.
+
+Today's rename path goes through the engine's `MoveRemote` action ([core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:898](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:898)) which calls `provider.move(fromPath, toPath)`. [`InternxtProvider.move`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313) routes through `api.moveFile`/`api.moveFolder` (PATCH `/files/{uuid}` / PATCH `/folders/{uuid}`) which only changes the `destinationFolder` parent — it does **not** rewrite the encrypted name. So if a user renames `report.docx` → `report-final.docx` in the same directory, the engine sees a `MoveLocal` action (path-based), the provider issues a same-parent PATCH, and the encrypted name on disk still decodes to `report` (bare-name field) rather than `report-final`.
+
+Worse: depending on how the reconciler resolves a same-parent rename today (needs verification — could be `Move` if filesystem rename detection works, but in many platforms it's `Delete + Upload`), the worst case is a full **download → re-encrypt → re-upload → delete-old** cycle for a metadata-only change. Internxt's encrypted-name field is `crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")` and the rename endpoints exist to update it without touching bridge content.
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `renameFile(uuid: String, plainName: String, encryptedName: String, type: String?)` calling `PUT /files/{uuid}/meta` with the spec's `UpdateFileMetaDto` shape (`{plainName, type}` per the schema; verify whether it also accepts `name` for the encrypted form — the audit doesn't say, must check `swagger-ui-init.js`).
+2. Add `renameFolder(uuid: String, plainName: String, encryptedName: String)` calling `PUT /folders/{uuid}/meta`.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+3. In `move(fromPath, toPath)`, detect same-parent transitions (`pathSegments(from).dropLast(1) == pathSegments(to).dropLast(1)`) and route to `renameFile` / `renameFolder` with a freshly-derived encrypted name (`crypto.encryptName(newName, "${creds.mnemonic}-$parentUuid")`). Cross-parent moves keep using PATCH today.
+4. Mixed transition (different parent AND different name) — issue both operations: PATCH parent first, then PUT meta to update the name. Two round-trips, but still no re-encrypt of file content.
+
+Optionally extend the `CloudProvider` SPI with a dedicated `rename(path, newName)` method that providers without separate rename endpoints (path-based stores like OneDrive's `move`) can ignore, falling through to `move`. Most providers don't need it; the API is mainly for Internxt's encrypted-name layer.
+
+## Acceptance
+
+- `InternxtApiService.renameFile` and `renameFolder` exist and pass a unit test asserting the wire body matches the spec.
+- `InternxtProvider.move` for same-parent renames issues `PUT /…/meta`, not `PATCH /…` followed by an upload-cycle.
+- Integration test: create a 5 MiB file, rename it via `provider.move("/dir/a.bin", "/dir/b.bin")`, assert the encrypted-name on the next `delta()` decodes to `"b"` AND that the bridge `fileId` is unchanged (no re-upload).
+- Audit doc lines 93 and 117 flip to ✅.
+
+## Related
+
+- UD-366 (closed `490cca5`) — sibling capability-gap ticket: replace-in-place via `PUT /files/{uuid}`. Same audit batch ("available-unused on `/files/{uuid}` family"), same fix shape (add API method, route the dispatcher conditionally).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) lines 93, 117.
+- The existing `move` PATCH flow at `InternxtProvider.kt:313-328` is the integration point.
+---
+id: UD-370
+title: Internxt /notifications real-time invalidation as delta() polling alternative — speculative
+category: providers
+priority: low
+effort: L
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**Replace `delta()` polling with the `/notifications` real-time channel as a sync trigger** — speculative, depends on whether the endpoint actually fires on file/folder events.
+
+The Drive swagger exposes `GET /notifications`, `POST /notifications`, and `PATCH /notifications/{id}/expire` under a `notifications` tag. The audit (line 148) flags this: *"`Capability.Webhook` not declared. Could feed real-time invalidation instead of polling `delta()`."* The provider does not call any of these.
+
+If `/notifications` carries file-mutation events (created / modified / trashed / restored / moved), the daemon could subscribe to it and trigger an incremental `delta()` immediately rather than waiting for the next polling tick — eliminating the polling latency floor (currently 30 s minimum interval) and cutting wasted full-walks when nothing changed.
+
+**Speculative because:** the spec doesn't document the notification payload schema in detail (or the agent didn't surface it during the original audit). It's plausible that `/notifications` is account-level only — license expiry, plan changes, marketing — in which case this ticket has no value. **First step is reconnaissance, not implementation.**
+
+## What to change
+
+### Phase 0 (reconnaissance — this is the bulk of the work)
+
+1. Fetch `https://api.internxt.com/drive/swagger-ui-init.js` and extract the `notifications` tag's full operation definitions (request/response schemas, query parameters). Look for any indication of event types, polling vs streaming semantics, retention window.
+2. Cross-reference Internxt's open-source desktop client (https://github.com/internxt/drive-desktop) for any consumer of `/notifications` to learn the payload shape from real client code.
+3. If the schema mentions file/folder mutation events: proceed to Phase 1. Otherwise: close this ticket as **invalid — `/notifications` is account-level only**.
+
+### Phase 1 (implementation — only if Phase 0 confirms file-event semantics)
+
+1. Add `Capability.Webhook` declaration in `InternxtProvider.capabilities()`.
+2. Add a long-poll loop (or websocket subscription, if the spec supports one) to `InternxtApiService` that consumes `/notifications` and emits a typed `RemoteChangeEvent` flow.
+3. Wire the event flow into `SyncEngine` as an additional trigger for `requestSync()` — same path the existing periodic timer uses. Coalesce multiple events within a 5 s window into a single sync to avoid thrash.
+4. Mark received notifications consumed via `PATCH /notifications/{id}/expire` so they don't re-fire on the next poll.
+
+## Acceptance
+
+### Phase 0
+- A short markdown note at `docs/audits/internxt-notifications-feasibility.md` reports what the spec reveals + what the desktop client does + a verdict (`go` / `no-go`).
+
+### Phase 1 (conditional)
+- `InternxtProvider.capabilities()` includes `Capability.Webhook`.
+- A daemon log line `Notification received: <event-type> <uuid>` appears within 10 s of an external file create/modify/delete in Internxt's web UI.
+- Wall-clock latency from external mutation → unidrive starts the sync that picks it up drops from "≤ poll interval" (30 s default) to "≤ 5 s + delta() time".
+- Audit doc line 148 flips to ✅ (or `❓ used-but-undocumented` if the payload schema turns out to be opaque).
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) line 148, §"Notifications".
+- `Capability.Webhook` declaration site: [`core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt`](core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt).
+- Polling-tick configuration: [`SyncEngine`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt) periodic timer.
+- UD-362 / UD-363 — `delta()` efficiency tickets. If `/notifications` works, the cost-of-`delta()` debate becomes much less acute (we'd run `delta()` only on actual change, not every 30 s).
+
+## Out of scope
+
+- Implementing `/notifications` for OneDrive / S3 / WebDAV. Those have their own change-feed surfaces (Graph webhooks, S3 bucket notifications, WebDAV polling-only) and each is a separate ticket.
