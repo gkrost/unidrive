@@ -33,7 +33,14 @@ class LogCommand : Runnable {
         val displayName =
             ProviderRegistry.getMetadata(profile.type)?.displayName
                 ?: profile.type.replaceFirstChar { it.uppercase() }
-        println("Recent sync entries for ${AnsiHelper.bold(profile.name)} · $displayName:")
+        // UD-764: prefix each rendered line with the running build's short commit. Restores
+        // the pre-greenfield #122 traceability — when a user pastes `unidrive log` output we
+        // can tie the rows to a specific build, narrowing bug-report ambiguity across deploy
+        // boundaries. The DB doesn't yet track which build wrote each row (deferred —
+        // requires schema migration); for now every line shows the *current* build, which
+        // bounds the ambiguity to "rows synced since the last redeploy".
+        val commitPrefix = "[${BuildInfo.COMMIT}${if (BuildInfo.DIRTY) "-dirty" else ""}]"
+        println("Recent sync entries for ${AnsiHelper.bold(profile.name)} · $displayName  $commitPrefix")
         for (entry in recent) {
             val status =
                 when {
@@ -42,7 +49,7 @@ class LogCommand : Runnable {
                     else -> "STUB"
                 }
             val size = if (!entry.isFolder) " ${CliProgressReporter.formatSize(entry.remoteSize)}" else ""
-            println("  [$status] ${entry.path}$size  (synced: ${entry.lastSynced})")
+            println("  $commitPrefix [$status] ${entry.path}$size  (synced: ${entry.lastSynced})")
         }
 
         db.close()
