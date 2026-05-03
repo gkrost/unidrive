@@ -5724,3 +5724,92 @@ Source rows' UPDATE then lands cleanly because their target paths are now empty.
 ## Surfaced
 
 2026-05-03 10:13, immediately after UD-405 + UD-901a + UD-901b + UD-357 fixes deployed at 10:00. The user's first AfA-tree sync succeeded (8 files uploaded in 298.8 s, the four-fix stack working as intended). The next full sync surfaced this PK collision in the move-detection path. Different bug, different code area, same UD-901-pending-row root cause class.
+---
+id: UD-406
+title: unidrive sync (non-watch) hangs after Sync complete — IPC accept loop keeps runBlocking alive
+category: cli
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:365
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:69
+opened: 2026-05-03
+---
+**`unidrive sync` (without `--watch`) prints `Sync complete: …` and then hangs forever instead of returning to the shell prompt. The user has to Ctrl+C to escape. The root cause is `IpcServer.start(this)` launching an infinite accept-loop coroutine into the `runBlocking` scope at [SyncCommand.kt:366](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L366); the `runBlocking` blocks waiting for that child coroutine to complete, which it never does.**
+
+## Repro (live, 2026-05-03 11:xx)
+
+```
+PS C:\> unidrive -p inxt_user sync --upload-only --sync-path '/Project Notes'
+sync: profile=inxt_user type=internxt sync_root=… sync_path=/Project Notes mode=upload
+Reconciling... 16 / 16 items · 0:00
+Reconciled: 0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (6.9s)
+                                                            ← hangs here, no prompt
+```
+
+User confirmed the previous "successful" 298-second AfA sync also hung at the end ("Batchvorgang abbrechen (J/N)? j" in the paste); they hadn't called it out as a bug because Ctrl+C is muscle memory after long-running scans. With UD-901a/b/c/UD-357 letting fast scoped syncs finish in seconds, the hang is the dominant remaining UX wart.
+
+## Root cause
+
+[SyncCommand.kt:365-475](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L365):
+
+```kotlin
+runBlocking(MDCContext()) {
+    ipcServer.start(this)              // ← spawns infinite accept loop into `this` scope
+    provider.authenticateAndLog()
+    …
+    if (watch) {
+        …                              // intentional infinite loop
+    } else {
+        engine.syncOnce(…)             // returns when sync done
+    }
+}                                       // ← runBlocking blocks waiting for accept loop
+} finally {
+    ipcServer.close()                  // never runs while we're blocked
+    …
+}
+```
+
+[IpcServer.start](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt#L69) does `scope.launch(Dispatchers.IO) { while (isActive) { socket.accept() … } }`. `runBlocking` semantics: the `runBlocking { }` block returns only when ALL child coroutines launched into its scope complete. The accept loop never completes naturally. The `finally` block that DOES close the IPC server runs after `runBlocking` returns — chicken-and-egg.
+
+## Why this only matters now
+
+UD-240a ("always-on IPC") landed earlier so the UI tray could discover one-shot daemons. Pre-UD-240a, IPC was watch-only and one-shot syncs returned cleanly. The trade-off was never fully realised because every long-running sync ate enough wall-clock that the user typed Ctrl+C as part of normal flow.
+
+UD-901a / UD-901b / UD-901c / UD-357 (just landed) made first-sync and recovery-loop paths fast enough that syncs complete in single-digit seconds for scoped invocations. The Ctrl+C dance is now a UX cliff.
+
+## Proposal
+
+In the non-`watch` branch — after `engine.syncOnce` returns — explicitly close the IPC server before exiting the `runBlocking` lambda, so its accept-loop coroutine is cancelled and `runBlocking` returns naturally:
+
+```kotlin
+} else {
+    engine.syncOnce(…)
+    // UD-406: cancel the IPC accept loop so runBlocking can return.
+    // The finally{} below also closes it, but that runs AFTER
+    // runBlocking returns — by which time we're already blocked.
+    ipcServer.close()
+}
+```
+
+`IpcServer.close` already does `acceptJob?.cancel(); broadcastJob?.cancel()` ([IpcServer.kt:111-114](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt#L111)) — calling it from inside the runBlocking lambda is the targeted fix.
+
+The double-close (here + in `finally`) is safe: `close()` is idempotent (`?.cancel()` is no-op on already-cancelled jobs).
+
+## Acceptance
+
+- `unidrive -p X sync --upload-only --sync-path /Y` (or any non-`--watch` invocation) returns to the shell prompt within ~100 ms of `Sync complete: …` printing.
+- `--watch` mode behaviour unchanged — the watch loop is its own infinite while-true, the existing Runtime shutdown hook handles Ctrl+C, the Runtime hook closes ipcServer correctly.
+- A test in `SyncCommandTest` (or `IpcServerTest`) exercises a synthetic equivalent: spawn `IpcServer.start(scope)` inside a `runBlocking` block, do nothing for a moment, call `ipcServer.close()`, assert the `runBlocking` block returns. Without the close, the test hangs (use a timeout).
+- No regression on UI tray daemon discovery: the IPC socket exists for the duration of the sync. Tray that polls every N seconds still has a window.
+
+## Related
+
+- **UD-240** (umbrella): "always-on IPC" was UD-240a's idea. UD-406 fixes the consequence.
+- **UD-254a**: dropped `MDCContext()` from the same `runBlocking`. Independent fix; both can land in either order. UD-254a's branch (`fix/UD-254a-mdc-clone-storm`) is currently unmerged and will need a trivial rebase if UD-406 lands first.
+
+## Surfaced
+
+2026-05-03 11:xx, after the four-fix stack (UD-405 + UD-901a/b/c + UD-357) made fast scoped syncs visible. User reported "it then blocks" after a 6.9-second sync of `/Project Notes`.
