@@ -19,12 +19,8 @@ class OneDriveProvider(
     private val oauthService = OAuthService(config)
     private val tokenManager = TokenManager(config, oauthService)
 
-    // UD-315: log the first time we encounter a Personal Vault per session at INFO so ops see
-    // the filter engaged; subsequent hits stay at DEBUG to keep the log quiet on large syncs.
     private val loggedVaultThisSession = AtomicBoolean(false)
 
-    // UD-310: pass through the forceRefresh hint so authenticatedRequest's 401 retry can bypass
-    // the cached-token fast path.
     private val graphApi =
         GraphApiService(config) { forceRefresh ->
             tokenManager.getValidToken(forceRefresh).accessToken
@@ -52,7 +48,6 @@ class OneDriveProvider(
         if (!tokenManager.isAuthenticated) {
             tokenManager.authenticateWithBrowser()
         }
-        // UD-752: post-authenticate debug log lifted to authenticateAndLog wrapper.
     }
 
     suspend fun authenticateWithDeviceCode() {
@@ -70,9 +65,7 @@ class OneDriveProvider(
     }
 
     override suspend fun listChildren(path: String): List<CloudItem> {
-        // UD-315: filter Personal Vault — Graph returns it as a facet-less stub that would
-        // otherwise confuse the mapper (neither file nor folder). See DriveItem.isPersonalVault.
-        return graphApi.listChildren(path).filterNot { noteAndSkipVault(it) }.map { it.toCloudItem() }
+            return graphApi.listChildren(path).filterNot { noteAndSkipVault(it) }.map { it.toCloudItem() }
     }
 
     override suspend fun getMetadata(path: String): CloudItem = graphApi.getItemByPath(path).toCloudItem()
@@ -100,13 +93,6 @@ class OneDriveProvider(
                 graphApi.uploadLargeFile(localPath, remotePath, onProgress).toCloudItem()
             }
         } catch (e: GraphApiException) {
-            // UD-307 (Option C): tag the OneDrive ZWJ-compound emoji collision
-            // case with a targeted WARN so postmortem can grep it apart from
-            // the generic SyncEngine "Upload failed" line. We re-throw so
-            // SyncEngine treats it as a per-file failure (one error, sync
-            // continues — the existing pass-2 behaviour). No auto-rename, no
-            // policy knob — see docs/SPECS.md §3.1 for the full rationale
-            // and the 14 codepoint families that DO round-trip cleanly.
             if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
                 log.warn(
                     "UD-307: OneDrive rejected '{}' with nameAlreadyExists — likely a " +
@@ -153,15 +139,7 @@ class OneDriveProvider(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
     ): DeltaPage {
-        // UD-352: OneDrive returns a single Graph delta page per delta() call;
-        // the engine's outer pagination loop already emits scan progress after
-        // every nextPage() return, so the per-call heartbeat would be redundant.
-        // Signature kept aligned with the interface; onPageProgress unused.
         val result = graphApi.getDelta(cursor)
-
-        // Filter out the drive root item itself — it appears in delta responses
-        // but is not a real child. Without this filter, it creates a phantom "root" folder.
-        // UD-315: also filter Personal Vault (facet-less stub; Graph hides its children).
         val items =
             result.items
                 .filterNot { it.isRootItem() }
@@ -176,9 +154,6 @@ class OneDriveProvider(
     }
 
     override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> {
-        // UD-223: Graph's `?token=latest` bootstrap. Returns the current delta cursor
-        // with an empty/near-empty items list — subsequent delta calls then receive
-        // only changes since this moment. Skips the full-enumeration 11+ min walk.
         val result = graphApi.getDelta(fromLatest = true)
         val items = result.items.filterNot { it.isRootItem() }.map { it.toCloudItem() }
         return CapabilityResult.Success(
@@ -236,13 +211,6 @@ class OneDriveProvider(
 
     override suspend fun quota(): QuotaInfo = graphApi.getQuota()
 
-    /**
-     * UD-216: surface Graph `/me` for the MCP `unidrive_identity` tool. Returns
-     * the provider's identity record; the MCP layer shapes it into the tool
-     * response. Kept on the provider (not on the interface) because /me is a
-     * Graph-specific concept — other providers return a "not supported" result
-     * from the MCP tool directly.
-     */
     suspend fun getIdentity(): org.krost.unidrive.onedrive.model.GraphMe = graphApi.getMe()
 
     override suspend fun verifyItemExists(remoteId: String): CapabilityResult<Boolean> =
@@ -257,13 +225,8 @@ class OneDriveProvider(
             }
         }
 
-    /** True if this DriveItem is the drive root itself (not a child). */
     private fun DriveItem.isRootItem(): Boolean = parentReference?.path == null || parentReference?.path == "/drive/root"
 
-    /**
-     * UD-315: returns true iff [item] is OneDrive's Personal Vault stub and should be skipped.
-     * Logs at INFO the first time per session; subsequent hits stay at DEBUG.
-     */
     private fun noteAndSkipVault(item: DriveItem): Boolean {
         if (!item.isPersonalVault) return false
         val displayName = item.name ?: "(unnamed)"

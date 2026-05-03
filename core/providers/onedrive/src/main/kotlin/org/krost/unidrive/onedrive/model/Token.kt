@@ -24,19 +24,8 @@ data class Token(
     val isExpired: Boolean
         get() = System.currentTimeMillis() >= expiresAt
 
-    /** UD-310: true if the token expires within [thresholdMs] from now, even if still nominally valid. */
     fun isNearExpiry(thresholdMs: Long = 5 * 60 * 1000): Boolean = System.currentTimeMillis() + thresholdMs >= expiresAt
 
-    /**
-     * UD-312: cheap sanity check on the access_token's shape before returning
-     * it to a caller that's about to send it to Graph. We deliberately do NOT
-     * assert the JWS compact form (three dot-separated segments) — personal
-     * Microsoft accounts mint OPAQUE bearer tokens (no dots, ~1.5 KB prefixed
-     * `EwB…`), while work/school accounts mint JWTs (3 segments). Both are
-     * valid at Graph; only "empty or truncated" is the failure mode we guard
-     * here — matches the 32-char floor used by `scripts/dev/oauth-mcp/
-     * graph_client.py::refresh`.
-     */
     fun hasPlausibleAccessTokenShape(): Boolean = accessToken.length >= 32
 }
 

@@ -81,11 +81,6 @@ class OneDriveProviderFactory : ProviderFactory {
             tier = "Global",
             userRating = 4.5,
             benchmarkGrade = "A",
-            // UD-263: matches HttpRetryBudget(maxConcurrency = 8) in
-            // GraphApiService — UD-712 measured ~119 files/min as steady-state.
-            // 200 ms spacing follows UD-200's minSpacingMs default for
-            // post-throttle cooldown; 0 ms steady-state is enforced inside
-            // HttpRetryBudget so SyncEngine doesn't double-pace.
             maxConcurrentTransfers = 8,
             minRequestSpacingMs = 200L,
         )

@@ -19,12 +19,6 @@ class TokenManager(
     private var token: Token? = null
     private val refreshMutex = Mutex()
 
-    /**
-     * UD-111: structured record of the most recent OAuth refresh failure,
-     * exposed for `unidrive status --audit` / MCP `unidrive_status` so a
-     * user-facing client can surface "please re-auth" at the right moment.
-     * Cleared on the next successful refresh.
-     */
     @Volatile
     var lastRefreshFailure: RefreshFailure? = null
         private set
@@ -83,11 +77,6 @@ class TokenManager(
         return token!!
     }
 
-    // UD-310: [forceRefresh] = true skips the !isExpired fast path and always issues a refresh.
-    // Callers set this on a 401 retry where the access token may still be nominally non-expired
-    // (clock skew, server-side rotation) but Graph has rejected it. Direction B: we also refresh
-    // proactively when the token is within 5 min of expiry, cutting the 401 race window down from
-    // "minutes" to "seconds" during long syncs.
     suspend fun getValidToken(forceRefresh: Boolean = false): Token {
         val currentToken = token ?: throw AuthenticationException("Not authenticated")
 
@@ -110,27 +99,15 @@ class TokenManager(
             val refreshToken = freshToken.refreshToken
             if (refreshToken != null) {
                 try {
-                    // UD-310: wrap in NonCancellable so an in-flight refresh survives parent
-                    // coroutine cancellation (Pass 2 scope cancel on a sibling's 401, for
-                    // example). Without this, the refresh was logging "ScopeCoroutine was
-                    // cancelled" and falling through to the re-auth error, even though the
-                    // refresh_token itself was perfectly valid.
                     val refreshed =
                         withContext(NonCancellable) {
                             oauthService.refreshToken(refreshToken)
                         }
                     token = refreshed
                     oauthService.saveToken(refreshed)
-                    // UD-111: clear the failure record on success so status
-                    // shows "auth-healthy" rather than a stale stale message.
                     lastRefreshFailure = null
                     return refreshed
                 } catch (e: Exception) {
-                    // UD-111: replaced the bare `println` with a structured
-                    // log.warn + stored RefreshFailure record. Pre-fix the
-                    // failure was visible only in stdout (often invisible to
-                    // daemon logs / tray) so users hit "please re-auth"
-                    // without warning.
                     val failure =
                         RefreshFailure(
                             timestamp = java.time.Instant.now(),
@@ -157,6 +134,3 @@ class TokenManager(
         Files.deleteIfExists(tokenFile)
     }
 }
-
-// UD-348: waitForCallback / parseAndValidateCallback / openBrowser lifted
-// to org.krost.unidrive.auth.OAuthCallbackServer + org.krost.unidrive.io.OpenBrowser.

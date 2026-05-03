@@ -30,15 +30,7 @@ import java.nio.file.StandardOpenOption
 
 class GraphApiService(
     private val config: OneDriveConfig,
-    // UD-232: shared circuit breaker + token bucket. One instance per service (= per
-    // profile). Test constructor can inject a fake-clock budget; production picks up the
-    // default 8-permit budget with 200ms inter-request spacing. Kept as a constructor
-    // parameter (not a property of tokenProvider) so the trailing-lambda call style at
-    // OneDriveProvider:24 stays readable.
     private val throttleBudget: HttpRetryBudget = HttpRetryBudget(maxConcurrency = 8),
-    // UD-310: tokenProvider takes an explicit forceRefresh hint. Normal callers pass false;
-    // the on-401 retry path inside authenticatedRequest passes true to bypass the cached-
-    // token fast path and issue a real OAuth refresh before resending.
     private val tokenProvider: suspend (forceRefresh: Boolean) -> String,
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(GraphApiService::class.java)
@@ -50,14 +42,9 @@ class GraphApiService(
                 socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
                 requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
             }
-            // UD-255: per-request correlation id + DEBUG req/response logging.
             install(org.krost.unidrive.http.RequestId)
         }
 
-    // UD-343: defer to the shared :app:core UnidriveJson singleton —
-    // ignoreUnknownKeys + isLenient is the right default for unidrive's
-    // wire formats. If a future Graph contract demands stricter parsing,
-    // flip to a local Json {} with a comment explaining why.
     private val json = org.krost.unidrive.UnidriveJson
     private val sessionStore = UploadSessionStore(config.tokenPath)
     private val baseUrl = "${OneDriveConfig.GRAPH_BASE_URL}/${OneDriveConfig.GRAPH_VERSION}"
@@ -80,11 +67,6 @@ class GraphApiService(
         )
     }
 
-    /**
-     * UD-216: call Graph `/me` and return a minimal identity record. Only
-     * parses the fields the MCP `unidrive_identity` tool surfaces — keeps the
-     * serializer tolerant to the dozens of other fields Graph returns.
-     */
     suspend fun getMe(): GraphMe {
         val response = authenticatedRequest("$baseUrl/me")
         val body = response.bodyAsText()
@@ -122,11 +104,6 @@ class GraphApiService(
     }
 
     suspend fun listChildren(path: String): List<DriveItem> {
-        // UD-314: Graph defaults to ~200 items per page and signals more via `@odata.nextLink`.
-        // The old implementation read only the first page, silently truncating any folder with
-        // > 200 children. Bump `$top=999` (Graph's hard cap) to shrink the common case to one
-        // round-trip, then loop-follow nextLink for folders that exceed it. Debug verbosity
-        // matches getDelta: at most one line per page walked, not one per item.
         val cleanPath = path.removePrefix("/").ifEmpty { "" }
         val firstUrl =
             if (cleanPath.isEmpty()) {
@@ -154,17 +131,9 @@ class GraphApiService(
         link: String? = null,
         fromLatest: Boolean = false,
     ): DeltaResult {
-        // UD-223: fromLatest bootstraps a fresh profile via `?token=latest` — Graph
-        // returns the current cursor with zero items instead of enumerating the drive.
-        // Mutually exclusive with `link`; if a cursor is already in hand, resume from it.
         val url = link ?: if (fromLatest) "$baseUrl/me/drive/root/delta?token=latest" else "$baseUrl/me/drive/root/delta"
         log.debug("Delta cursor: {}", link?.takeLast(40) ?: if (fromLatest) "(token=latest bootstrap)" else "(initial)")
 
-        // UD-308: `bodyAsText()` returns whatever bytes arrived before the connection closed —
-        // a transient short-read on a large delta page yields a truncated string that fails
-        // `decodeFromString` with "Expected end of the object '}', but had 'EOF'". On a ~1300-
-        // page first-sync even a sub-percent flake rate makes full enumeration fail in
-        // expectation. Retry same-URL — Graph delta is idempotent at the cursor level.
         var attempt = 0
         val maxAttempts = 3
         while (true) {
@@ -180,7 +149,6 @@ class GraphApiService(
             } catch (e: AuthenticationException) {
                 throw e // token failures aren't retryable
             } catch (e: kotlinx.coroutines.CancellationException) {
-                // UD-300: propagate cancellation cleanly, don't retry.
                 throw e
             } catch (e: kotlinx.serialization.SerializationException) {
                 attempt++
@@ -209,38 +177,12 @@ class GraphApiService(
         val item = getItemById(itemId)
         val url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
         val authNeeded = item.downloadUrl == null
-
-        // UD-309: the Azure Blob/CDN endpoints that OneDrive hands out as `downloadUrl` close
-        // the connection mid-stream often enough on first-sync-scale workloads that Ktor throws
-        // "Content-Length mismatch" for ~5 % of files in the 1 MB–500 MB range. Same-URL retry
-        // recovers almost all of them. Authenticated retries on the `$baseUrl/.../content`
-        // fallback path work identically because both are idempotent GETs.
-        //
-        // UD-227: the CDN path also returns 429/503. Previously this threw GraphApiException
-        // which UD-309's retry explicitly passed through. Now both paths go through the same
-        // throttle-and-retry pipeline as authenticatedRequest, and the `retryAfterSeconds` JSON
-        // body hint is honoured as a fallback when the `Retry-After` header is missing (Graph's
-        // CDN edge sometimes includes it only in the body).
-        //
-        // UD-329: the previous body-handling went `httpClient.get(url)` →
-        // `response.body<ByteReadChannel>()`, which on Ktor 3.x buffers the entire response
-        // into a single `byte[contentLength]` before exposing the channel. Files larger than
-        // `Integer.MAX_VALUE` (~2.147 GiB) failed at allocation time with "Can't create an
-        // array of size N". Switched to `prepareGet(url).execute { }` so `bodyAsChannel()`
-        // returns a true streaming channel — no allocation grows with file size, the existing
-        // 8 KiB ring buffer is the only memory the download holds. The 401-refresh-once and
-        // 429/503 throttle paths are inlined into this loop because `execute { }` is the only
-        // way to scope the streaming body lifetime correctly; `authenticatedRequest`'s
-        // buffered-response shape doesn't match the streaming case.
         var flakeAttempts = 0
         var throttleAttempts = 0
         var totalThrottleWaitMs = 0L
         var authRefreshed = false
         while (true) {
             try {
-                // UD-232: gate every request start through the shared throttle budget so
-                // concurrent coroutines cooperate during a storm instead of each burning
-                // their own 5-attempt allowance independently.
                 throttleBudget.awaitSlot()
                 val statement =
                     httpClient.prepareGet(url) {
@@ -257,11 +199,6 @@ class GraphApiService(
                             )
                         }
                         if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
-                            // UD-227 + UD-293: read a bounded prefix for retryAfterSeconds parsing.
-                            // The Graph throttle JSON body is < 1 KB; bounding here keeps the OOM
-                            // risk gone even on the off-chance that a CDN edge attaches a giant
-                            // body to a 429/503 (observed: text/html captive portal pages with
-                            // Content-Length matching the original asset = 2+ GB).
                             val body = readBoundedErrorBody(response, maxBytes = 16384)
                             val waitMs = pickBackoffMsWithBody(response, body, throttleAttempts, totalThrottleWaitMs)
                             return@execute DownloadOutcome.Throttle(waitMs, response.status.value)
@@ -272,21 +209,8 @@ class GraphApiService(
                                 response.status.value,
                             )
                         }
-                        // UD-340: shared `assertNotHtml` lifted from UD-231/UD-293
-                        // OneDrive helper to :app:core/http so HiDrive + Internxt
-                        // share the exact guard. CDN edge nodes occasionally return
-                        // HTTP 200 with a `text/html` body (tenant throttle page,
-                        // captive-portal redirect, expired-URL login page). Without
-                        // this guard the raw HTML would stream into the destination
-                        // file at the correct byte size — UD-226 NUL-stub sweep
-                        // doesn't flag it (HTML is non-NUL). Read is bounded
-                        // (UD-293) so a CDN attaching a multi-GB body to a fake
-                        // text/html response can't OOM the diagnostic path.
-                        // The IOException it throws bubbles into the UD-309 flake
-                        // loop for retry.
                         assertNotHtml(response, contextMsg = "Download itemId=$itemId")
                         throttleBudget.recordSuccess()
-                        // UD-329: bodyAsChannel() inside execute{} is the Ktor-blessed streaming path.
                         val channel: ByteReadChannel = response.bodyAsChannel()
                         withContext(Dispatchers.IO) {
                             Files.createDirectories(destPath.parent)
@@ -331,14 +255,7 @@ class GraphApiService(
                 // HTTP-status failures (403/404/etc) aren't short-read flakes; don't retry.
                 throw e
             } catch (e: kotlinx.coroutines.CancellationException) {
-                // UD-300: cancellation must propagate — never retry. A sibling
-                // download's auth failure cancelled the scope; the next delay()
-                // in the retry loop would throw CancellationException again and
-                // we'd chew through the flake budget logging the misleading
-                // `ScopeCoroutine was cancelled` (2x observed at unidrive.log
-                // 09:16:51 on 2026-04-19). Kotlin's structured-concurrency rule:
-                // CancellationException must not be absorbed by a generic catch.
-                throw e
+                 throw e
             } catch (e: Exception) {
                 flakeAttempts++
                 if (flakeAttempts >= MAX_FLAKE_ATTEMPTS) {
@@ -358,13 +275,7 @@ class GraphApiService(
         }
     }
 
-    // UD-336 (UD-334 Part A): readBoundedErrorBody + truncateErrorBody live
-    // in `:app:core` at org.krost.unidrive.http.ErrorBody so HiDrive,
-    // Internxt, S3 etc. can share the implementation. UD-293 / UD-234 origin
-    // notes are preserved on the lifted helpers.
-
-    /** UD-227: Graph sometimes tucks the retry-after seconds into the JSON error body, e.g.
-     *  `{"error": {..., "retryAfterSeconds": 5}}`. Read the header first; fall back to the body. */
+  
     private fun pickBackoffMsWithBody(
         response: HttpResponse,
         body: String,
@@ -402,10 +313,6 @@ class GraphApiService(
 
         val response =
             httpClient.put("$baseUrl/me/drive/root:/$encoded:/content") {
-                // UD-337: size-adaptive request timeout. Replaces the
-                // default HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat
-                // cap which would tear down a legitimate large-content
-                // PUT before completion.
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
                 }
@@ -748,22 +655,10 @@ class GraphApiService(
         url: String,
         method: HttpMethod = HttpMethod.Get,
     ): HttpResponse {
-        // UD-310: on 401, force a token refresh and retry once before surfacing the
-        // AuthenticationException. Most in-flight failures are transient — the token expired
-        // milliseconds before the request reached Graph, or an earlier sibling coroutine just
-        // refreshed behind our back. The refresh mutex in TokenManager serialises concurrent
-        // refreshes, so a flood of 401s from a concurrent pass won't each spawn a refresh.
-        //
-        // UD-207: 429 Too Many Requests (and 503 Service Unavailable) are treated as transient
-        // throttling. Graph sends `Retry-After` as an integer number of seconds when it wants
-        // us to back off. Honour the header, cap per-call + cumulative wait, and retry the
-        // same URL (idempotent GET). Concurrent callers all serialise on Graph's throttle
-        // window, so each one sees the recommended delay and the pack naturally de-synchronises.
         var refreshed = false
         var throttleAttempts = 0
         var totalThrottleWaitMs = 0L
         while (true) {
-            // UD-232: coordinate request starts across coroutines via the shared budget.
             throttleBudget.awaitSlot()
             val response =
                 httpClient.request(url) {
@@ -810,12 +705,10 @@ class GraphApiService(
         method: HttpMethod,
         body: String,
     ): HttpResponse {
-        // UD-310 + UD-207: same 401 refresh and 429/503 throttle handling as the no-body overload.
         var refreshed = false
         var throttleAttempts = 0
         var totalThrottleWaitMs = 0L
         while (true) {
-            // UD-232: coordinate request starts across coroutines via the shared budget.
             throttleBudget.awaitSlot()
             val response =
                 httpClient.request(url) {
@@ -886,12 +779,7 @@ class GraphApiService(
         return minOf(retryAfterMs, MAX_SINGLE_BACKOFF_MS, remainingBudget)
     }
 
-    // UD-329: signals from the streaming-download `execute { }` block back to the outer
-    // retry loop. Done = response consumed, body written. RetryAuth = 401 with refresh
-    // unattempted; outer loop refreshes the token and retries once. Throttle = 429/503
-    // with a backoff hint; outer loop sleeps and retries. Sealed because the three are
-    // the exhaustive set of "didn't write the file, here's what to do next" outcomes.
-    private sealed class DownloadOutcome {
+       private sealed class DownloadOutcome {
         data object Done : DownloadOutcome()
 
         data object RetryAuth : DownloadOutcome()
@@ -903,17 +791,10 @@ class GraphApiService(
     }
 
     companion object {
-        // UD-207 / UD-232: throttle handling budgets. Single-retry cap lifted to 300s
-        // after the UD-712 live sync showed server-demanded Retry-After of up to 297s —
-        // the old 120s cap was the kill-shot for 246/454 permanent failures. Cumulative
-        // per-request budget widened to 900s (15 min) so a single call can ride out two
-        // consecutive near-max waits without exhausting the sequence budget.
         private const val MAX_THROTTLE_ATTEMPTS = 5
         private const val MAX_SINGLE_BACKOFF_MS = 300_000L // 5 min per individual retry
         private const val MAX_TOTAL_THROTTLE_WAIT_MS = 900_000L // 15 min budget per request
         private const val DEFAULT_BACKOFF_START_MS = 2_000L
-
-        // UD-309: budget for network flakes (Content-Length mismatch, I/O errors) on download.
         private const val MAX_FLAKE_ATTEMPTS = 3
     }
 

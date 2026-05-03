@@ -31,29 +31,12 @@ class InternxtApiService(
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
-        // UD-335: retry-eligible HTTP statuses for transient-failure write
-        // endpoints. 429 is rate-limit; 5xx are server-side. The Cloudflare
-        // 502 origin_bad_gateway pattern that drove this ticket lives here.
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
 
-        /**
-         * UD-358: query params shared by `listFiles` and `listFolders`. The
-         * Drive API exposes `sort` ∈ {`updatedAt`, `uuid`} and `order` ∈
-         * {`ASC`, `DESC`}; without an explicit stable sort, paginated
-         * full-scans can drop or duplicate rows whenever the server-side
-         * default order reshuffles between requests (a row inserted /
-         * updated / deleted mid-walk shifts every subsequent page boundary).
-         * `sort=uuid&order=ASC` is the only choice that's stable under
-         * concurrent mutation: UUID is opaque and immutable per row, where
-         * `updatedAt` is reshuffled by every write.
-         *
-         * Extracted as a pure helper so a unit test can pin the wire shape
-         * without HTTP infrastructure.
-         */
         internal fun listingQueryParams(
             updatedAt: String?,
             limit: Int,
@@ -71,16 +54,6 @@ class InternxtApiService(
             return params
         }
 
-        // UD-353: throughput floor for OVH temporal-uploads-bucket PUTs.
-        // Internxt's shard-upload backend is `s3.gra.io.cloud.ovh.net`,
-        // a third-party S3-compatible endpoint with no Internxt-side SLA.
-        // Observed at 30–50 KB/s during congestion (2026-04-30 incident:
-        // 5 ~30 MiB videos torn down at the 600 s floor while OVH was
-        // still receiving). Override the UploadTimeoutPolicy default
-        // (50 KiB/s) with a more pessimistic 10 KiB/s for OVH PUTs only;
-        // Internxt's own API calls keep the default. The 60 s
-        // socketTimeoutMillis still fires on stalled connections, so
-        // slow-loris exposure is unchanged.
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
     }
 
@@ -95,7 +68,6 @@ class InternxtApiService(
             install(org.krost.unidrive.http.RequestId)
         }
 
-    // UD-343: shared :app:core UnidriveJson singleton.
     private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
@@ -266,16 +238,7 @@ class InternxtApiService(
             if (!response.status.isSuccess()) {
                 throw InternxtApiException("Download failed: ${response.status}", response.status.value)
             }
-            // UD-340: shared assertNotHtml at :app:core/http (UD-333/UD-231/
-            // UD-293 lineage). On Internxt this is HIGHER severity than on
-            // the OneDrive baseline because the body is fed through
-            // cipher.update() (AES-CTR) before write — HTML XOR'd through a
-            // strong keystream produces high-entropy bytes indistinguishable
-            // from a real decrypted file. UD-226's NUL-stub sweep does not
-            // catch it. Permanent silent corruption is the failure mode if
-            // the guard isn't here. Must execute BEFORE the first
-            // cipher.update() call so the AES-CTR keystream / IV state stays
-            // untouched and the URL can be retried cleanly.
+
             assertNotHtml(response, contextMsg = "Download (encrypted) -> ${destination.fileName}")
             val channel: ByteReadChannel = response.body()
             var written = 0L
@@ -413,14 +376,9 @@ class InternxtApiService(
         file: java.nio.file.Path,
         size: Long,
     ) {
-        // UD-342: shared streamingFileBody adds UD-287 finally-flushAndClose
-        // (Internxt's previous inline body lacked it — silent connection-
-        // pool corruption on cancellation).
+
         val response =
             httpClient.put(url) {
-                // UD-337 + UD-353: streaming variant that actually triggered
-                // the 2026-04-30 incident. Same pessimistic OVH floor — see
-                // OVH_PUT_MIN_THROUGHPUT_BPS.
                 timeout {
                     requestTimeoutMillis =
                         UploadTimeoutPolicy.computeRequestTimeoutMs(
@@ -491,26 +449,7 @@ class InternxtApiService(
         }
     }
 
-    // UD-335: tactical retry on transient 5xx + 429 for write endpoints
-    // (createFolder / createFile / moveFile / moveFolder). Cloudflare 502
-    // origin_bad_gateway during a 1230-folder mkdir burst on 2026-04-30
-    // surfaced as ~30 hard failures in a single sync — Internxt's API has
-    // no retry layer, so the action propagates straight to SyncEngine
-    // which logs WARN and moves on. With this wrapper the action retries
-    // in-band against the captured retry_after hint (or exponential
-    // fallback) before bubbling up.
-    //
-    // UD-330 is the structural cross-provider HttpRetryBudget lift. This is
-    // narrower: only the write endpoints, only Internxt, no shared budget
-    // across concurrent calls (each caller backs off independently).
-    //
-    // Idempotency caveat: POST `/folders` / `/files` MAY create a duplicate
-    // if the server completed the write but Cloudflare 502'd the response
-    // edge. Internxt's documented behaviour for duplicate-name creates is
-    // a 4xx (which we don't retry), so the typical case is "request never
-    // landed → safe to retry". A tiny tail of double-creates is the
-    // accepted cost vs the much-larger pain of dropping every transient
-    // failure.
+   
     internal suspend fun <T> retryOnTransient(
         maxAttempts: Int = 3,
         op: suspend () -> T,
@@ -539,19 +478,14 @@ class InternxtApiService(
         }
     }
 
-    // UD-335: parse `"retry_after": <int seconds>` from the Cloudflare /
-    // Internxt error JSON body (which our InternxtApiException carries
-    // verbatim in its message). Returns ms, or null if absent/unparseable.
+   
     internal fun parseRetryAfter(message: String?): Long? {
         if (message == null) return null
         val match = RETRY_AFTER_REGEX.find(message) ?: return null
         return match.groupValues[1].toLongOrNull()?.times(1000)
     }
 
-    // UD-336 (UD-334 Part A): readBoundedErrorBody lifted to
-    // org.krost.unidrive.http.ErrorBody so HiDrive / Internxt / OneDrive
-    // share a single implementation. UD-333 / UD-293 origin notes are
-    // preserved on the lifted helper.
+
 
     override fun close() {
         httpClient.close()
