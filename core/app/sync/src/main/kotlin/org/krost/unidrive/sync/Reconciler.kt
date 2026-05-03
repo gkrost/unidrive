@@ -350,13 +350,25 @@ class Reconciler(
             localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED ->
                 SyncAction.Upload(path)
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
-                // UD-901: a pending-upload row (entry.remoteId == null) that vanished
-                // before its first upload has nothing to delete on the remote side —
-                // just drop the placeholder row. Otherwise propagate the deletion.
-                if (entry != null && entry.remoteId == null) {
-                    SyncAction.RemoveEntry(path)
-                } else {
-                    SyncAction.DeleteRemote(path)
+                when {
+                    // UD-901: a pending-upload row (entry.remoteId == null) that vanished
+                    // before its first upload has nothing to delete on the remote side —
+                    // just drop the placeholder row.
+                    entry != null && entry.remoteId == null -> SyncAction.RemoveEntry(path)
+                    // UD-225a: unhydrated placeholder where the local stub was never
+                    // created (or was wiped before content arrived). isHydrated=false
+                    // means "this row represents a planned-but-unfulfilled local
+                    // presence" — the local-missing state IS the original state, not
+                    // user intent. Pre-fix the reconciler treated it as user-initiated
+                    // delete and emitted DeleteRemote, which (a) was filtered out in
+                    // --download-only and made the placeholders unreachable forever,
+                    // and (b) in bidirectional mode would destroy remote data based
+                    // on a false inference. Sibling to UD-225's recovery-loop fix
+                    // for the UNCHANGED+UNCHANGED skip.
+                    entry != null && !entry.isHydrated && remoteItem != null ->
+                        SyncAction.DownloadContent(path, remoteItem)
+                    // Otherwise: real user delete on a hydrated row → propagate.
+                    else -> SyncAction.DeleteRemote(path)
                 }
 
             else -> null

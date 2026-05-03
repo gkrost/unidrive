@@ -129,9 +129,54 @@ class ReconcilerTest {
 
     @Test
     fun `local deleted deletes remote`() {
-        db.upsertEntry(dbEntry("/del.txt"))
+        // Hydrated entry + local-missing → real user delete → propagate.
+        db.upsertEntry(dbEntry("/del.txt", isHydrated = true))
         val remoteChanges = emptyMap<String, CloudItem>()
         val localChanges = mapOf("/del.txt" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DeleteRemote>(actions[0])
+    }
+
+    @Test
+    fun `UD-225a unhydrated row plus local-missing plus remote-present rehydrates`() {
+        // The 2026-05-03 incident: 1,550 unhydrated DB rows for /_INBOX/* +
+        // missing /_INBOX/ directory locally + all files still present on
+        // remote → the reconciler used to emit DeleteRemote (which the
+        // --download-only direction filter dropped, leaving 0 actions). With
+        // UD-225a, an unhydrated row whose remoteItem is present in the
+        // delta gets a DownloadContent action — the local-missing state IS
+        // the original state for unhydrated rows, not user intent.
+        db.upsertEntry(dbEntry("/_INBOX/secret.pdf", isHydrated = false))
+        val remoteChanges = mapOf("/_INBOX/secret.pdf" to cloudItem("/_INBOX/secret.pdf"))
+        val localChanges = mapOf("/_INBOX/secret.pdf" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DownloadContent>(actions[0])
+        assertEquals("/_INBOX/secret.pdf", actions[0].path)
+    }
+
+    @Test
+    fun `UD-225a regression pin - hydrated row plus local-missing still deletes remote`() {
+        // Inverse pin so a future refactor can't accidentally always-rehydrate.
+        // Hydrated rows mean the file WAS once present locally; if it's gone
+        // now and remote is unchanged, that's user intent → DeleteRemote.
+        db.upsertEntry(dbEntry("/hydrated-real-delete.txt", isHydrated = true))
+        val remoteChanges = mapOf("/hydrated-real-delete.txt" to cloudItem("/hydrated-real-delete.txt"))
+        val localChanges = mapOf("/hydrated-real-delete.txt" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DeleteRemote>(actions[0])
+    }
+
+    @Test
+    fun `UD-225a unhydrated row without remoteItem still falls through to DeleteRemote`() {
+        // If we don't have a remoteItem to download from, we can't synthesise
+        // DownloadContent — fall through to the existing DeleteRemote
+        // behaviour. (A separate bug class; not in scope for UD-225a.)
+        db.upsertEntry(dbEntry("/_INBOX/orphan.txt", isHydrated = false))
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/_INBOX/orphan.txt" to ChangeState.DELETED)
         val actions = reconciler.reconcile(remoteChanges, localChanges)
         assertEquals(1, actions.size)
         assertIs<SyncAction.DeleteRemote>(actions[0])
