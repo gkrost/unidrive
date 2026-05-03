@@ -49,6 +49,9 @@ class SyncEngine(
     private val maxVersions: Int = 5,
     private val versionRetentionDays: Int = 90,
     private val fastBootstrap: Boolean = false,
+    // UD-113: optional structured audit log of mutations (Download/Upload/Delete/Move/
+    // CreateRemoteFolder). Wired from CLI/MCP startup; null in tests that don't need it.
+    private val auditLog: org.krost.unidrive.sync.audit.AuditLog? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -859,20 +862,41 @@ class SyncEngine(
             versionManager.snapshot(action.path)
             versionManager.pruneByCount(action.path, maxVersions)
         }
-        withEchoSuppression(action.path) {
-            // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
-            downloadByIdOrPath(action.remoteItem, action.path, localPath)
-            placeholder.restoreMtime(action.path, action.remoteItem.modified)
-        }
-
-        if (verifyIntegrity) {
-            val verified = HashVerifier.verify(localPath, action.remoteItem.hash, algorithm = provider.hashAlgorithm())
-            if (!verified) {
-                reporter.onWarning("Integrity check failed: ${action.path}")
+        // UD-113: capture pre-action hash for the audit oldHash field.
+        val prevHash = db.getEntry(action.path)?.remoteHash
+        try {
+            withEchoSuppression(action.path) {
+                // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
+                downloadByIdOrPath(action.remoteItem, action.path, localPath)
+                placeholder.restoreMtime(action.path, action.remoteItem.modified)
             }
-        }
 
-        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            if (verifyIntegrity) {
+                val verified = HashVerifier.verify(localPath, action.remoteItem.hash, algorithm = provider.hashAlgorithm())
+                if (!verified) {
+                    reporter.onWarning("Integrity check failed: ${action.path}")
+                }
+            }
+
+            db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            auditLog?.emit(
+                action = "Download",
+                path = action.path,
+                size = action.remoteItem.size,
+                oldHash = prevHash,
+                newHash = action.remoteItem.hash,
+                result = "success",
+            )
+        } catch (e: Exception) {
+            auditLog?.emit(
+                action = "Download",
+                path = action.path,
+                size = action.remoteItem.size,
+                oldHash = prevHash,
+                result = "failed:${e.javaClass.simpleName}: ${e.message}",
+            )
+            throw e
+        }
     }
 
     private suspend fun applyUpload(action: SyncAction.Upload) {
@@ -880,11 +904,25 @@ class SyncEngine(
         val sizeForLog = if (Files.isRegularFile(localPath)) Files.size(localPath) else -1L
         // UD-753: per-operation log at the engine (was repeated across provider services).
         log.debug("Upload: {} ({} bytes)", action.path, sizeForLog)
+        // UD-113: capture pre-action remote hash so the audit entry's oldHash reflects
+        // the version we replaced (or null for a fresh upload).
+        val prevHash = db.getEntry(action.path)?.remoteHash
         val result =
-            // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
-            // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
-            provider.upload(localPath, action.path, existingRemoteId = action.remoteId) { transferred, total ->
-                reporter.onTransferProgress(action.path, transferred, total)
+            try {
+                // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
+                // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
+                provider.upload(localPath, action.path, existingRemoteId = action.remoteId) { transferred, total ->
+                    reporter.onTransferProgress(action.path, transferred, total)
+                }
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Upload",
+                    path = action.path,
+                    size = if (sizeForLog >= 0) sizeForLog else null,
+                    oldHash = prevHash,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
             }
         val mtime = Files.getLastModifiedTime(localPath).toMillis()
         val size = Files.size(localPath)
@@ -903,6 +941,15 @@ class SyncEngine(
                 lastSynced = Instant.now(),
             ),
         )
+        // UD-113: success path. Failure path emits inside the try/catch above.
+        auditLog?.emit(
+            action = "Upload",
+            path = action.path,
+            size = size,
+            oldHash = prevHash,
+            newHash = result.hash,
+            result = "success",
+        )
     }
 
     private suspend fun applyMoveRemote(action: SyncAction.MoveRemote) {
@@ -910,7 +957,18 @@ class SyncEngine(
         log.debug("Move: {} -> {}", action.fromPath, action.path)
         val oldEntry = db.getEntry(action.fromPath)
         val isFolder = oldEntry?.isFolder ?: false
-        val result = provider.move(action.fromPath, action.path)
+        val result =
+            try {
+                provider.move(action.fromPath, action.path)
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Move",
+                    path = action.path,
+                    fromPath = action.fromPath,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
         val localPath = placeholder.resolveLocal(action.path)
         val mtime = if (Files.exists(localPath)) Files.getLastModifiedTime(localPath).toMillis() else 0L
         val size =
@@ -940,6 +998,15 @@ class SyncEngine(
         if (isFolder) {
             db.renamePrefix(action.fromPath, action.path)
         }
+        // UD-113: success path for the remote-side rename/move.
+        auditLog?.emit(
+            action = "Move",
+            path = action.path,
+            fromPath = action.fromPath,
+            oldHash = oldEntry?.remoteHash,
+            newHash = result.hash,
+            result = "success",
+        )
     }
 
     private fun applyMoveLocal(action: SyncAction.MoveLocal) {
@@ -985,16 +1052,46 @@ class SyncEngine(
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
         // UD-753: per-operation log at the engine (was repeated across provider services).
         log.debug("Delete: {}", action.path)
+        // UD-113: capture pre-delete row for the audit entry.
+        val priorEntry = db.getEntry(action.path)
+        var auditResult = "success"
         try {
             provider.delete(action.path)
         } catch (e: ProviderException) {
             log.debug("DeleteRemote skipped for ${action.path}: ${e.message}")
+            auditResult = "skipped:${e.message}"
+        } catch (e: Exception) {
+            auditLog?.emit(
+                action = "Delete",
+                path = action.path,
+                size = priorEntry?.remoteSize,
+                oldHash = priorEntry?.remoteHash,
+                result = "failed:${e.javaClass.simpleName}: ${e.message}",
+            )
+            throw e
         }
         db.deleteEntry(action.path)
+        auditLog?.emit(
+            action = "Delete",
+            path = action.path,
+            size = priorEntry?.remoteSize,
+            oldHash = priorEntry?.remoteHash,
+            result = auditResult,
+        )
     }
 
     private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
-        val result = provider.createFolder(action.path)
+        val result =
+            try {
+                provider.createFolder(action.path)
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "CreateRemoteFolder",
+                    path = action.path,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
@@ -1009,6 +1106,12 @@ class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
             ),
+        )
+        // UD-113: success path.
+        auditLog?.emit(
+            action = "CreateRemoteFolder",
+            path = action.path,
+            result = "success",
         )
     }
 

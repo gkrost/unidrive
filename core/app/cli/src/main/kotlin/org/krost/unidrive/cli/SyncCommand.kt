@@ -320,6 +320,13 @@ class SyncCommand : Runnable {
                 null
             }
 
+        // UD-113: structured per-action audit log. JSONL date-stamped under
+        // {profileConfigDir}/audit-YYYY-MM-DD.jsonl. Always-on; emit failures
+        // are swallowed at WARN, never blocks the sync engine.
+        val auditLog =
+            org.krost.unidrive.sync.audit
+                .AuditLog(parent.providerConfigDir(), profile.name)
+
         val engine =
             SyncEngine(
                 provider = xtraProvider ?: provider,
@@ -348,6 +355,7 @@ class SyncCommand : Runnable {
                 versionRetentionDays = config.versionRetentionDays,
                 // UD-223: CLI flag wins over config.toml per-profile setting.
                 fastBootstrap = fastBootstrap || profile.rawProvider?.fast_bootstrap == true,
+                auditLog = auditLog,
             )
 
         Files.createDirectories(config.syncRoot)
