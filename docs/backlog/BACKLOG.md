@@ -6212,3 +6212,312 @@ Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once 
 ## Surfaced
 
 2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
+---
+id: UD-358
+title: Send sort=uuid&order=ASC on /files and /folders GETs
+category: providers
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+opened: 2026-05-03
+---
+**Without an explicit stable sort on `/files` and `/folders` GETs, paginated full-scans can drop or duplicate rows whenever the server-side default order reshuffles between requests.** This is a structural correctness prerequisite for [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) — it walks both endpoints page-by-page and assumes the cursor offset is stable across calls. It isn't. A row inserted, updated, or deleted on the server during the walk shifts every subsequent page boundary; the result is silent row-loss or row-duplication that the engine then sees as deletions.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3c, §6 mechanism 4).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt) — both `listFiles` and `listFolders` call sites — append `sort=uuid` and `order=ASC` query parameters. UUID is monotonic-ish, opaque, and present on every row; it's the only field guaranteed stable across mutations. (`updatedAt` is not stable — an update mid-walk reshuffles by it.)
+
+## Acceptance
+
+- Both `listFiles` and `listFolders` send `sort` + `order` query parameters on every paginated request.
+- An integration test against a stable test drive walks the full inventory twice in succession and asserts identical `uuid` sets between the two walks.
+
+## Related
+
+- UD-360 / UD-361 (delta-partial-gather signalling) — this ticket is a prerequisite; without stable sort, even a complete-looking gather can be missing rows.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3 (pagination correctness).
+---
+id: UD-359
+title: Add removed/deleted fields to InternxtFile DTO
+category: providers
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-03
+---
+**`InternxtFile` does not deserialise `removed` or `deleted`, so any deletion signal that doesn't come through `status` is silently dropped.** The folder DTO ([`InternxtFolder.kt:21-22`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:21)) has both fields with `Boolean = false` defaults, but [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) is missing them entirely. The Internxt OpenAPI `FileDto` exposes both, and `fileToDeltaCloudItem` in [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) only flags `deleted` when `status == "TRASHED" || status == "DELETED"`. Server schema drift to `removed=true` / `deleted=true` while leaving `status="EXISTS"` would mask deletions entirely.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§DTO comparison, §6 mechanism 5).
+
+## What to change
+
+In [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) add:
+```kotlin
+val removed: Boolean = false,
+val deleted: Boolean = false,
+```
+
+In `InternxtProvider.fileToDeltaCloudItem` (companion-object section), OR `removed` and `deleted` into the emitted `deleted` flag, mirroring the folder helper.
+
+## Acceptance
+
+- `InternxtFile` has both `removed` and `deleted` fields with `Boolean = false` defaults.
+- `fileToDeltaCloudItem` ORs them into the emitted `deleted` flag analogous to `folderToDeltaCloudItem`.
+- A unit test parses a payload with `status="EXISTS"` and `removed=true` and asserts the resulting `CloudItem` has `deleted=true`.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §DTO comparison.
+---
+id: UD-360
+title: delta() must signal partial gather instead of silent hasMore=false
+category: providers
+priority: critical
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:353
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:232
+opened: 2026-05-03
+---
+**`InternxtProvider.delta()` always returns `DeltaPage(hasMore=false)` ([InternxtProvider.kt:353](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:353)), even when the gather was demonstrably partial.** The engine's "absence ⇒ delete" reconciliation depends on the inventory being complete; a partial gather plus `hasMore=false` is the difference between "nothing changed in `/_INBOX/wiederherstellungs_codes.txt`" and "delete it". This is the highest-impact mechanism in the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3, §6), responsible for the observed `del-local /_INBOX/wiederherstellungs_codes.txt` regression on a download-only run.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3 pagination correctness, §6 mechanism 2/3, executive summary).
+
+## Concrete trigger paths
+
+The provider returns `hasMore=false` while having silently dropped rows in any of:
+1. **`/folders` non-{500,503} error mid-pagination** — exception propagates but the file half is already accumulated; in `collectFilesFromFolders` mode the folder map is incomplete and orphaned files reparent to drive root, vanishing from `/_INBOX`.
+2. **`collectFilesFromFolders` 500/503 on a subtree** — the recursion `log.warn`s and returns; the parent caller treats the gather as complete.
+3. **Cursor `updatedAt - 6h` window** misses rows older than 6 h whose only "change" was a status flip back to EXISTS within the window.
+
+In every case the engine sees a smaller-than-truth remote inventory and emits `del-local` for every locally-present file that didn't appear.
+
+## What to change
+
+In [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) and [`collectFilesFromFolders()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375):
+- Track a `partialGather: Boolean` that flips true on any caught exception or any subtree skip.
+- Return `DeltaPage(items, cursor, hasMore = partialGather)` — i.e. report `hasMore=true` when the gather is incomplete, so the engine retries instead of running the del-local sweep.
+
+In the engine ([`SyncEngine.kt:232-258`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:232) and the reconciler), `hasMore=true` on the final page must suppress `DeleteLocal` action emission. (Verify whether existing `hasMore` semantics already do this; if not, this ticket also covers the engine-side behaviour change.)
+
+## Acceptance
+
+- `delta()` returns `hasMore=true` if any non-{500,503} error was caught or any subtree was skipped.
+- The engine treats `hasMore=true` on a delta as "do not run del-local sweep this run".
+- A unit test injects a thrown 502 mid-`/folders` pagination and asserts `hasMore=true` and zero `DeleteLocal` actions emitted.
+
+## Related
+
+- UD-361 — sub-ticket: surface the skip count from `collectFilesFromFolders`.
+- UD-358 — prerequisite: stable sort to make "complete" actually meaningful.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §6 concrete answer.
+---
+id: UD-361
+title: Surface collectFilesFromFolders skip count to delta() caller
+category: providers
+priority: critical
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:329
+opened: 2026-05-03
+---
+**`collectFilesFromFolders()` ([InternxtProvider.kt:375-398](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375)) silently swallows 500/503 on individual folder fetches** — it `log.warn`s and continues, but the caller has no signal that an entire subtree was skipped. The result is a partial inventory presented as complete (see UD-360); a single `/folders/content/{INBOX_uuid}` returning 503 makes every file under `/_INBOX` invisible to `delta()`, which the engine then turns into `del-local` actions.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§4 mechanism i, §6 mechanism 3). Sub-ticket of UD-360.
+
+## What to change
+
+In [`collectFilesFromFolders()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375):
+- Accept a `skipCounter: AtomicInteger` (or pass back via return value).
+- On 500/503 catch, increment the counter before continuing.
+- Caller in `delta()` ([InternxtProvider.kt:329-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:329) area) reads the counter; if `> 0`, sets the partial-gather flag from UD-360 (or raises a `ProviderException` if UD-360 isn't yet landed).
+
+## Acceptance
+
+- `collectFilesFromFolders` exposes a skip count via parameter or return value.
+- `delta()` consumes the skip count and either marks the gather partial (post-UD-360) or raises `ProviderException` (if UD-361 lands first).
+- A unit test injects a 503 on one nested folder and asserts the skip count is exactly 1 and the page is marked partial.
+
+## Related
+
+- UD-360 — parent ticket; this signal is the input to the partial-gather flag.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §4.
+---
+id: UD-362
+title: Narrow Internxt delta() request to --sync-path scope when set
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:578
+opened: 2026-05-03
+---
+**`unidrive sync --sync-path=/_INBOX` still pulls the entire drive's `/files` + `/folders` listing** — the scope filter is engine-side only, applied after the full delta returns. The Internxt Drive API exposes per-folder content endpoints (`/folders/content/{uuid}`, `/folders/{uuid}/tree` per the spec); the provider could narrow the wire-level call set when `syncPath` is plumbed through. Two costs today: (a) wasted bandwidth/time pulling 22,700 items to filter down to ~50 (cf. UD-352a 3:40 gather phase), and (b) a wider blast radius for the partial-gather problems in UD-360/UD-361 — the more surface area we walk, the more chances for a transient error to silently truncate.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§5 sync-path scope handling).
+
+Related: UD-352a (which already raised the parallelism + scoped-delta angle from the perf side). This ticket is the API-correctness framing of the same gap; coordinate or merge.
+
+## What to change
+
+Plumb `syncPath` from the engine to the provider via the existing `delta()` signature or a new overload. When set, the provider:
+- Resolves `syncPath` to a folder UUID once (cached per-cursor).
+- Walks `/folders/content/{uuid}` recursively scoped to that subtree, instead of `/files` + `/folders` flat listings.
+- Or, post-UD-363, uses `/folders/{uuid}/tree` for atomic scoped retrieval.
+
+## Acceptance
+
+- When `syncPath` is non-null and the provider supports scoped delta, the wire-level call set is restricted to the subtree.
+- An integration test asserts that `--sync-path=/_INBOX` against a 22 700-item drive issues O(items-in-subtree) requests, not O(items-in-drive).
+
+## Related
+
+- UD-352a (parallelism + scoped delta — perf framing).
+- UD-360, UD-361 (partial-gather signalling — narrower scope reduces exposure).
+- UD-363 (`/folders/{uuid}/tree` — atomic alternative).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §5.
+---
+id: UD-363
+title: Replace flat-listing reconstruction with /folders/{uuid}/tree
+category: providers
+priority: medium
+effort: L
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+opened: 2026-05-03
+---
+**The Internxt Drive OpenAPI spec exposes `/folders/{uuid}/tree`, an atomic single-call subtree fetch — the provider doesn't use it.** Today's [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) reconstructs the inventory from two independently paginated flat listings (`/files`, `/folders`); any insert, update, or delete on the server during the walk shifts page boundaries and can drop or duplicate rows. A single `/tree` call is atomic from the server's POV and eliminates the entire reorder/insert race class.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3c, §3f, §6 mechanism 4).
+
+## What to change
+
+Behind a feature flag (so we can compare result sets on live drives), implement an alternative gather path that calls `/folders/{uuid}/tree` rooted at the drive root (or at `syncPath` per UD-362). Convert the tree response into the same `DeltaPage` shape the existing flat-listing path emits. Keep the legacy path until live-fixture parity is demonstrated.
+
+## Acceptance
+
+- Feature-flagged gather path uses `/folders/{uuid}/tree`.
+- Live-fixture test asserts the tree-based result set matches the legacy flat-listing result set across at least one full sync cycle on a stable test drive.
+- Performance comparison (request count, wall time) recorded in the lessons doc.
+
+## Related
+
+- UD-358 (stable sort) — sibling fix for the legacy path; this ticket bypasses the problem instead.
+- UD-362 (scoped delta) — `/tree` is the natural primitive for that.
+- UD-352a (parallelism perf) — `/tree` is one round-trip vs 454; collapses both perf and correctness wins into one change.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3c.
+---
+id: UD-364
+title: Use /files/limits to populate maxFileSizeBytes()
+category: providers
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-03
+---
+**`InternxtProvider.maxFileSizeBytes()` returns null** — the SPI default — so the engine has no early reject for oversized uploads. A wasted `PUT` against the OVH shard backend can run to its full timeout (10 KB/s floor × file size, see UD-353) before failing. The Internxt Drive API exposes `/files/limits` (per the OpenAPI spec) which returns the server-reported per-file size cap; the provider should consume it and override the SPI method.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§capability matrix, available-unused).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt) add a `getFileLimits()` call. In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) override `maxFileSizeBytes()` to return the cached server value, refreshed lazily on auth.
+
+## Acceptance
+
+- `maxFileSizeBytes()` returns a non-null Long matching the value reported by `/files/limits`.
+- Engine pre-flight check rejects oversized files before the upload pipeline starts (verify existing engine consumes `maxFileSizeBytes` — if not, this ticket also covers wiring it in).
+
+## Related
+
+- UD-353 (OVH shard upload throughput floor) — context for why oversized uploads hurt today.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §capability matrix.
+---
+id: UD-365
+title: Declare and implement Capability.Share family for Internxt
+category: providers
+priority: low
+effort: L
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-05-03
+---
+**Internxt's Drive API exposes a fully-featured sharing model (~30 endpoints under `/sharings/*` per the OpenAPI spec); the provider returns `Unsupported` for the entire `Capability.Share` family.** That covers `share()`, `listShares()`, `revokeShare()` on [`CloudProvider`](core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt). The functionality is server-side ready and free; this is pure provider implementation work.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§capability matrix, available-unused).
+
+## What to change
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+- Add `Capability.Share` (or whatever the SPI granularity is — verify against `Capability` enum) to the `capabilities()` set.
+- Override `share(path, expiryHours, password)` → POST `/sharings/...` with the spec-defined request body, return the share URL.
+- Override `listShares(path)` → GET `/sharings?...`.
+- Override `revokeShare(path, shareId)` → DELETE `/sharings/{id}`.
+- Add corresponding DTOs to `model/`.
+
+## Acceptance
+
+- All three SPI methods round-trip through `/sharings/*` and return live data.
+- `capabilities()` declares the share family.
+- Integration test creates a share, lists it, revokes it, and asserts the share is gone.
+
+## Related
+
+- UD-364 (`/files/limits`) — sibling capability-gap ticket for unused but advertised API surface.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §capability matrix.
+---
+id: UD-015
+title: Document /auth/login* and Bridge endpoints as undocumented vendor-flux surfaces
+category: architecture
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:100
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:290
+  - docs/ARCHITECTURE.md
+opened: 2026-05-03
+---
+**Three vendor-flux Internxt API surfaces are absent from `docs/ARCHITECTURE.md`** — `/auth/login`, `/auth/login/access`, and the entire Bridge family (`/buckets/*`, `/v2/buckets/*`). They're called by [`AuthService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt) and [`InternxtApiService.kt:290,326-368`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:290) but **not in the public Drive OpenAPI spec at `https://api.internxt.com/drive/`**. They're stable per Internxt's open-source desktop client, but documenting their reverse-derived nature protects future agents from assuming the spec is canonical.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§API discovery, "Used-but-undocumented" classification).
+
+## What to change
+
+Either add a section to [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) under the Internxt provider summary, or create a new `docs/dev/lessons/internxt-undocumented-surfaces.md` listing:
+
+- `/auth/login` and `/auth/login/access` — auth challenge + token mint, called from `AuthService.kt:100,134`. Source of truth: Internxt's open-source desktop client (`internxt/drive-desktop` on GitHub).
+- `/buckets/{bucket}/files/{fileId}/info` — Bridge file metadata for download, called from `InternxtApiService.kt:290`. Source of truth: `internxt/inxt-js` (legacy Storj fork).
+- `/v2/buckets/{bucket}/files/start` and `/v2/buckets/{bucket}/files/finish` — Bridge upload protocol, called from `InternxtApiService.kt:326-368`. Source of truth: same as above.
+
+For each, note the open-source repo path used to derive the wire shape and date of derivation. This is a vendor-flux risk register, not an SLA — Internxt could change these without notice.
+
+## Acceptance
+
+- Section exists in `ARCHITECTURE.md` (or a dedicated lessons doc) listing all three undocumented surfaces.
+- Each entry has the call site, the source-of-truth open-source link, and a "verified on" date.
+- Cross-link from [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §API discovery.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md).
