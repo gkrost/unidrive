@@ -11296,3 +11296,51 @@ In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/uni
 - UD-360 (closed `7d3bf62`) — the `DeltaPage.complete=false` partial-gather signal already suppresses `detectMissingAfterFullSync` when the recursive fallback skipped subtrees. This ticket is the **second line of defence** for the cases UD-360 doesn't catch (cursor-window drops, server reorder races without UD-358's stable sort).
 - UD-225b (closed `2dac299`) — sibling correctness work on the download path; this ticket closes the analogous loophole on the delete path.
 - The local `TrashManager` ([core/app/sync/src/main/kotlin/.../TrashManager.kt](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/TrashManager.kt)) is *separate* — it stages local-side bytes into `.unidrive/trash/` before a `DeleteLocal` action removes them. The remote-trash path proposed here is its mirror on the provider side.
+
+---
+id: UD-369
+title: Pure renames re-encrypt — wire PUT /files/{uuid}/meta and /folders/{uuid}/meta
+category: providers
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit 7916fdd. InternxtProvider.move now detects same-parent transitions and routes through PUT /files/{uuid}/meta or /folders/{uuid}/meta instead of the worst-case download/re-encrypt/re-upload cycle. Cross-parent moves keep PATCH; mixed (different parent AND different name) issues both ops in sequence. Spec finding: rename DTOs accept only plaintext fields (plainName + type for files, plainName for folders); the encrypted name stays stale but unidrive uses plainName for all path resolution so it's invisible. stripExtension + newFileType lifted to companion for testability; audit doc lines 93 + 117 flipped to used.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:157
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**Pure renames currently re-encrypt the entire file.** Internxt's Drive API exposes `PUT /files/{uuid}/meta` (rename without move) and `PUT /folders/{uuid}/meta` (rename a folder), but the provider doesn't use either. The audit lines 93 and 117 flag both as available-unused.
+
+Today's rename path goes through the engine's `MoveRemote` action ([core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:898](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:898)) which calls `provider.move(fromPath, toPath)`. [`InternxtProvider.move`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313) routes through `api.moveFile`/`api.moveFolder` (PATCH `/files/{uuid}` / PATCH `/folders/{uuid}`) which only changes the `destinationFolder` parent — it does **not** rewrite the encrypted name. So if a user renames `report.docx` → `report-final.docx` in the same directory, the engine sees a `MoveLocal` action (path-based), the provider issues a same-parent PATCH, and the encrypted name on disk still decodes to `report` (bare-name field) rather than `report-final`.
+
+Worse: depending on how the reconciler resolves a same-parent rename today (needs verification — could be `Move` if filesystem rename detection works, but in many platforms it's `Delete + Upload`), the worst case is a full **download → re-encrypt → re-upload → delete-old** cycle for a metadata-only change. Internxt's encrypted-name field is `crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")` and the rename endpoints exist to update it without touching bridge content.
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt):
+
+1. Add `renameFile(uuid: String, plainName: String, encryptedName: String, type: String?)` calling `PUT /files/{uuid}/meta` with the spec's `UpdateFileMetaDto` shape (`{plainName, type}` per the schema; verify whether it also accepts `name` for the encrypted form — the audit doesn't say, must check `swagger-ui-init.js`).
+2. Add `renameFolder(uuid: String, plainName: String, encryptedName: String)` calling `PUT /folders/{uuid}/meta`.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+3. In `move(fromPath, toPath)`, detect same-parent transitions (`pathSegments(from).dropLast(1) == pathSegments(to).dropLast(1)`) and route to `renameFile` / `renameFolder` with a freshly-derived encrypted name (`crypto.encryptName(newName, "${creds.mnemonic}-$parentUuid")`). Cross-parent moves keep using PATCH today.
+4. Mixed transition (different parent AND different name) — issue both operations: PATCH parent first, then PUT meta to update the name. Two round-trips, but still no re-encrypt of file content.
+
+Optionally extend the `CloudProvider` SPI with a dedicated `rename(path, newName)` method that providers without separate rename endpoints (path-based stores like OneDrive's `move`) can ignore, falling through to `move`. Most providers don't need it; the API is mainly for Internxt's encrypted-name layer.
+
+## Acceptance
+
+- `InternxtApiService.renameFile` and `renameFolder` exist and pass a unit test asserting the wire body matches the spec.
+- `InternxtProvider.move` for same-parent renames issues `PUT /…/meta`, not `PATCH /…` followed by an upload-cycle.
+- Integration test: create a 5 MiB file, rename it via `provider.move("/dir/a.bin", "/dir/b.bin")`, assert the encrypted-name on the next `delta()` decodes to `"b"` AND that the bridge `fileId` is unchanged (no re-upload).
+- Audit doc lines 93 and 117 flip to ✅.
+
+## Related
+
+- UD-366 (closed `490cca5`) — sibling capability-gap ticket: replace-in-place via `PUT /files/{uuid}`. Same audit batch ("available-unused on `/files/{uuid}` family"), same fix shape (add API method, route the dispatcher conditionally).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) lines 93, 117.
+- The existing `move` PATCH flow at `InternxtProvider.kt:313-328` is the integration point.
