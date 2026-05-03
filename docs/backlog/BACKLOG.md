@@ -5604,3 +5604,123 @@ Caching on read AS WELL as on write means subsequent multi-segment `resolveFolde
 ## Surfaced
 
 2026-05-03 09:40, after UD-405 + UD-901a/b were filed but before they were implemented. The user's `--sync-path '/Project Notes'` produced the right action set (CreateRemoteFolder for the AfA root + every subfolder + files) but the second mkdir failed because step 1's create wasn't visible to step 2's `getFolderContents`. Diagnosed by the inconsistency between failure messages: step 2 fails at `Project Notes` segment (depth 1), step 3 fails at `Subfolder1` segment (depth 2 — past the now-visible `AfA`). Same root cause: Internxt's listing endpoint lags create by 1-3 s.
+---
+id: UD-901c
+title: renamePrefix PK collision when LocalScanner pre-wrote pending row at move destination
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:232
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:876
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:72
+opened: 2026-05-03
+---
+**`StateDatabase.renamePrefix` UPDATEs `sync_entries.path` to relocate every row under an old prefix to a new prefix. SQLite enforces PK uniqueness on `path`. When a row already exists at the destination path (because `LocalScanner` just wrote a UD-901 pending-upload placeholder there for the same file/folder the user moved locally), the UPDATE fails with `SQLITE_CONSTRAINT_PRIMARYKEY`. The `MoveRemote` action fails, Pass 1 logs `WARN`, sync continues — but the rename never lands and the DB is left half-moved (source rows still at the old prefix, pending rows still at the new prefix).**
+
+## Captured live (2026-05-03 10:13, scan after AfA fix succeeded)
+
+```
+[1/107775] move ...78/Pictures/Sample -> /userhome/Pictures/_Photos/Sample
+10:13:20 WARN Action failed for /userhome/Pictures/_Photos/Sample (1 consecutive):
+              SQLiteException: [SQLITE_CONSTRAINT_PRIMARYKEY]
+              A PRIMARY KEY constraint failed (UNIQUE constraint failed: sync_entries.path)
+  at StateDatabase.renamePrefix(StateDatabase.kt:245)
+  at SyncEngine.applyMoveRemote(SyncEngine.kt:876)
+```
+
+The MoveRemote came from `Reconciler.detectMoves` matching `DeleteRemote(/Pictures/Sample)` + `CreateRemoteFolder(/Pictures/_Photos/Sample)` by basename — i.e., the user moved the `Sample` folder locally, LocalScanner saw the absence at the old path (DELETED) and presence at the new path (NEW), and reconcile correctly detected it as a move.
+
+## Root cause — the two-writers-one-row pattern
+
+UD-901 (closed) added a synchronous `db.upsertEntry(...)` write inside `LocalScanner.scan` for every NEW local file ([LocalScanner.kt:72](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:72)) — the pending-upload placeholder row that survives daemon restarts.
+
+When the user moves a folder `/Pictures/Sample` → `/Pictures/_Photos/Sample`, the local-scan pass emits two changes:
+
+1. `/Pictures/Sample/<file>` for every existing tracked file (DELETED — gone from disk)
+2. `/Pictures/_Photos/Sample/<file>` for every same file at the new location (NEW)
+
+LocalScanner writes UD-901 pending rows for category 2 — at the NEW path. Those rows have `remoteId=null` and `isHydrated=true`.
+
+Reconciler's `detectMoves` then matches `DeleteRemote(old)` + `CreateRemoteFolder(new)` and emits `MoveRemote`.
+
+`SyncEngine.applyMoveRemote` ([SyncEngine.kt:876](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:876)) calls `db.renamePrefix(action.fromPath, action.path)` to rename all source rows to the destination prefix. The SQL ([StateDatabase.kt:240](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:240)):
+
+```sql
+UPDATE sync_entries SET path = ? || substr(path, ?) WHERE path LIKE ? ESCAPE '\'
+```
+
+Hits the PK constraint because the destination rows are already there.
+
+## Failure mode
+
+- `applyMoveRemote` throws `SQLiteException`. The action is logged `Action failed`. Sync continues.
+- The remote-side move already succeeded (`api.move(...)` ran at line ~860 before the rename DB call). So **the remote tree IS correct**.
+- The DB is left half-moved: source rows at old prefix (now pointing at a remote that doesn't have those files anymore), pending rows at new prefix (with `remoteId=null`).
+- Next sync: source rows look like remote-deleted-but-DB-says-they-exist; reconciler likely emits redundant DeleteRemote. New rows trigger UD-901 recovery → re-upload. Same MoveRemote fires again. **Permanent failure mode** until `--reset` or manual SQL.
+- `failures.jsonl` accumulates duplicate entries.
+
+## Proposal
+
+In `StateDatabase.renamePrefix`, **delete any pre-existing destination rows before the UPDATE**, inside a single transaction:
+
+```kotlin
+@Synchronized
+fun renamePrefix(oldPrefix: String, newPrefix: String) {
+    val old = if (oldPrefix.endsWith('/')) oldPrefix else "$oldPrefix/"
+    val new = if (newPrefix.endsWith('/')) newPrefix else "$newPrefix/"
+    conn.autoCommit = false
+    try {
+        // UD-901c: clear any rows at the destination prefix first. They are
+        // either UD-901 pending placeholders just written by LocalScanner
+        // (for the same files the source rows track) or stale from an
+        // earlier interrupted move; either way, the source rows about to
+        // land here carry the canonical remoteId/hash/modified.
+        conn.prepareStatement(
+            "DELETE FROM sync_entries WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+        ).use { stmt ->
+            stmt.setString(1, newPrefix.removeSuffix("/"))
+            stmt.setString(2, "${escapeLike(new)}%")
+            stmt.executeUpdate()
+        }
+        conn.prepareStatement(
+            "UPDATE sync_entries SET path = ? || substr(path, ?) WHERE path LIKE ? ESCAPE '\\'",
+        ).use { stmt ->
+            stmt.setString(1, new)
+            stmt.setInt(2, old.length + 1)
+            stmt.setString(3, "${escapeLike(old)}%")
+            stmt.executeUpdate()
+        }
+        conn.commit()
+    } catch (e: Exception) {
+        conn.rollback()
+        throw e
+    } finally {
+        conn.autoCommit = true
+    }
+}
+```
+
+Source rows' UPDATE then lands cleanly because their target paths are now empty. The atomicity ensures we never observe a half-deleted state if the JVM crashes mid-operation.
+
+## Acceptance
+
+- `StateDatabase.renamePrefix` no longer throws `SQLITE_CONSTRAINT_PRIMARYKEY` when rows pre-exist at the destination.
+- Source rows successfully relocate to the destination, retaining their `remoteId` / `remoteHash` / `remoteModified` / `lastSynced` (the historical metadata we want to keep).
+- Pre-existing destination rows are discarded (they were either UD-901 pending placeholders or stale half-moved leftovers — both meaningless after the rename).
+- New `StateDatabaseTest` case: pre-seed DB with rows at BOTH `/old/file.bin` (with remoteId="src") and `/new/file.bin` (with remoteId=null), call `renamePrefix("/old", "/new")`, assert exactly one row at `/new/file.bin` with `remoteId="src"`.
+- New test: rollback semantics — if the UPDATE phase throws, the prior DELETE is undone (table unchanged from before the call).
+- Existing tests pass.
+- Live verification: the user's `move /userhome/Pictures/Sample -> /_Photos/Sample` action runs to completion; subsequent sync is clean.
+
+## Related
+
+- **UD-901** (closed parent): introduced the LocalScanner pending-upload writes that this collision depends on. UD-901c is the third invariant violation in that family — UD-901a (scope filter), UD-901b (parent CreateRemoteFolder), UD-901c (rename PK conflict).
+- **UD-205** (open, "atomicity across sync transfer phases" peer review): the half-moved-DB failure mode here is a concrete instance of that ticket's framing. Fixing UD-901c reduces UD-205's surface area but doesn't close it.
+- **UD-203** (closed, "DB-vs-remote drift after failed action"): related class of "what happens when applyXxx throws after side-effects have already landed elsewhere." Same shape — but UD-901c is preventable, where UD-203 was about better recovery.
+- **UD-240h** (open, sibling): proposes wrapping the LocalScanner walk in `db.batch { }` for perf. Independent of UD-901c, but the batch-write semantics could help if the rename's DELETE+UPDATE pair is also adopted as a sub-batch elsewhere.
+
+## Surfaced
+
+2026-05-03 10:13, immediately after UD-405 + UD-901a + UD-901b + UD-357 fixes deployed at 10:00. The user's first AfA-tree sync succeeded (8 files uploaded in 298.8 s, the four-fix stack working as intended). The next full sync surfaced this PK collision in the move-detection path. Different bug, different code area, same UD-901-pending-row root cause class.
