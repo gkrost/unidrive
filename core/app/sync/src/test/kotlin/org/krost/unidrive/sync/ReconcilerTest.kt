@@ -139,14 +139,12 @@ class ReconcilerTest {
     }
 
     @Test
-    fun `UD-225a unhydrated row plus local-missing plus remote-present rehydrates`() {
-        // The 2026-05-03 incident: 1,550 unhydrated DB rows for /_INBOX/* +
-        // missing /_INBOX/ directory locally + all files still present on
-        // remote → the reconciler used to emit DeleteRemote (which the
-        // --download-only direction filter dropped, leaving 0 actions). With
-        // UD-225a, an unhydrated row whose remoteItem is present in the
-        // delta gets a DownloadContent action — the local-missing state IS
-        // the original state for unhydrated rows, not user intent.
+    fun `UD-225a unhydrated row + local-missing + remoteItem in delta emits DownloadContent`() {
+        // Unhydrated DB row + missing local file + remoteItem present in the
+        // delta. Pre-fix the main loop emitted DeleteRemote, the engine's
+        // --download-only filter dropped it, and the file stayed unreachable.
+        // With UD-225a, the main loop emits DownloadContent using the delta's
+        // remoteItem.
         db.upsertEntry(dbEntry("/_INBOX/secret.pdf", isHydrated = false))
         val remoteChanges = mapOf("/_INBOX/secret.pdf" to cloudItem("/_INBOX/secret.pdf"))
         val localChanges = mapOf("/_INBOX/secret.pdf" to ChangeState.DELETED)
@@ -157,26 +155,40 @@ class ReconcilerTest {
     }
 
     @Test
-    fun `UD-225a regression pin - hydrated row plus local-missing still deletes remote`() {
+    fun `UD-225a unhydrated row + local-missing + remoteItem ABSENT synthesises CloudItem from DB`() {
+        // The actual 2026-05-03 incident shape: the provider's delta returned
+        // 3,123 items but Internxt's `/folders` cursor window dropped the
+        // parent folder, so InternxtProvider's path resolution collapsed
+        // /_INBOX/* paths to drive root and the engine's syncPath filter
+        // eliminated all of them — 0 entries in remoteChanges, 1,550 entries
+        // in localChanges (DELETED). Pre-UD-225a the main loop emitted 1,550
+        // DeleteRemote actions, the engine's --download-only filter dropped
+        // them, files unreachable. With UD-225a, the main loop synthesises a
+        // CloudItem from the DB row's remote_id/size/modified — same shape as
+        // UD-225's recovery loop already uses for the UNCHANGED+UNCHANGED skip.
+        db.upsertEntry(dbEntry("/_INBOX/orphan.pdf", isHydrated = false))
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/_INBOX/orphan.pdf" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertEquals(1, actions.size, "expected exactly one DownloadContent")
+        val action = actions[0]
+        assertIs<SyncAction.DownloadContent>(action)
+        assertEquals("/_INBOX/orphan.pdf", action.path)
+        // Verify the synthesised CloudItem carries the DB's remoteId so Pass 2's
+        // downloadById can fetch from the provider even when the path was
+        // missing from the delta.
+        assertEquals("id-/_INBOX/orphan.pdf", (action as SyncAction.DownloadContent).remoteItem.id)
+        assertEquals(100L, action.remoteItem.size)
+    }
+
+    @Test
+    fun `UD-225a regression pin - hydrated row + local-missing still deletes remote`() {
         // Inverse pin so a future refactor can't accidentally always-rehydrate.
         // Hydrated rows mean the file WAS once present locally; if it's gone
         // now and remote is unchanged, that's user intent → DeleteRemote.
         db.upsertEntry(dbEntry("/hydrated-real-delete.txt", isHydrated = true))
         val remoteChanges = mapOf("/hydrated-real-delete.txt" to cloudItem("/hydrated-real-delete.txt"))
         val localChanges = mapOf("/hydrated-real-delete.txt" to ChangeState.DELETED)
-        val actions = reconciler.reconcile(remoteChanges, localChanges)
-        assertEquals(1, actions.size)
-        assertIs<SyncAction.DeleteRemote>(actions[0])
-    }
-
-    @Test
-    fun `UD-225a unhydrated row without remoteItem still falls through to DeleteRemote`() {
-        // If we don't have a remoteItem to download from, we can't synthesise
-        // DownloadContent — fall through to the existing DeleteRemote
-        // behaviour. (A separate bug class; not in scope for UD-225a.)
-        db.upsertEntry(dbEntry("/_INBOX/orphan.txt", isHydrated = false))
-        val remoteChanges = emptyMap<String, CloudItem>()
-        val localChanges = mapOf("/_INBOX/orphan.txt" to ChangeState.DELETED)
         val actions = reconciler.reconcile(remoteChanges, localChanges)
         assertEquals(1, actions.size)
         assertIs<SyncAction.DeleteRemote>(actions[0])
@@ -1031,9 +1043,12 @@ class ReconcilerTest {
 
         // Seed DB with 50 entries that resolveAction will turn into DeleteRemote
         // (DB has them, remote no longer reports them, local marks them DELETED).
+        // UD-225a: hydrated source — non-hydrated rows now trigger UD-225a's
+        // rehydrate path instead of DeleteRemote, which would change what
+        // detectMoves sees and break this test's invariant.
         val deleteCount = 50
         repeat(deleteCount) { i ->
-            db.upsertEntry(dbEntry("/old$i.bin"))
+            db.upsertEntry(dbEntry("/old$i.bin", isHydrated = true))
         }
         val uploadCount = 500
         val localChanges =
@@ -1060,7 +1075,7 @@ class ReconcilerTest {
     fun `UD-240i detectMoves still produces MoveRemote on size match`() {
         // Correctness regression: a (DeleteRemote + same-sized Upload) pair must
         // still resolve to MoveRemote after the bySize-map refactor.
-        db.upsertEntry(dbEntry("/old.bin"))
+        db.upsertEntry(dbEntry("/old.bin", isHydrated = true)) // UD-225a: hydrated source for legitimate move semantics
         Files.writeString(syncRoot.resolve("new.bin"), "x".repeat(100))
 
         val remoteChanges = emptyMap<String, CloudItem>()
@@ -1084,7 +1099,7 @@ class ReconcilerTest {
     fun `UD-240i detectMoves does not match different-size upload`() {
         // Negative case: size mismatch must NOT produce a move; the original
         // DeleteRemote and Upload survive the pass.
-        db.upsertEntry(dbEntry("/old.bin"))
+        db.upsertEntry(dbEntry("/old.bin", isHydrated = true)) // UD-225a: hydrated source for legitimate move semantics
         Files.writeString(syncRoot.resolve("new.bin"), "x".repeat(42)) // dbEntry is 100 bytes
 
         val remoteChanges = emptyMap<String, CloudItem>()

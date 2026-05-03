@@ -355,18 +355,52 @@ class Reconciler(
                     // before its first upload has nothing to delete on the remote side —
                     // just drop the placeholder row.
                     entry != null && entry.remoteId == null -> SyncAction.RemoveEntry(path)
-                    // UD-225a: unhydrated placeholder where the local stub was never
+                    // UD-225a: unhydrated file row where the local stub was never
                     // created (or was wiped before content arrived). isHydrated=false
                     // means "this row represents a planned-but-unfulfilled local
                     // presence" — the local-missing state IS the original state, not
-                    // user intent. Pre-fix the reconciler treated it as user-initiated
-                    // delete and emitted DeleteRemote, which (a) was filtered out in
-                    // --download-only and made the placeholders unreachable forever,
-                    // and (b) in bidirectional mode would destroy remote data based
-                    // on a false inference. Sibling to UD-225's recovery-loop fix
-                    // for the UNCHANGED+UNCHANGED skip.
-                    entry != null && !entry.isHydrated && remoteItem != null ->
-                        SyncAction.DownloadContent(path, remoteItem)
+                    // user intent. Pre-fix the reconciler emitted DeleteRemote which
+                    // (a) was filtered out in --download-only and made the placeholders
+                    // unreachable forever, and (b) in bidirectional mode would destroy
+                    // remote data based on a false inference.
+                    //
+                    // Use the delta's remoteItem if present; synthesise from DB
+                    // metadata otherwise. The delta may not carry the row (live
+                    // 2026-05-03 incident: Internxt's `/folders` cursor window
+                    // omitted the parent folder, the provider's path resolution
+                    // collapsed /_INBOX/* paths to drive root, and the engine's
+                    // syncPath filter eliminated all of them — 0 entries in
+                    // remoteChanges post-filter despite 1,550 unhydrated DB rows).
+                    // The synthesised CloudItem mirrors UD-225's recovery-loop
+                    // synthesis shape so Pass 2's downloadById picks up where
+                    // either path leaves off.
+                    //
+                    // Sibling to UD-225 (closed) which fixed the same bug class for
+                    // the UNCHANGED+UNCHANGED skip path. UD-225a fixes the
+                    // DELETED+UNCHANGED case in the main loop directly so detectMoves
+                    // (which converts DeleteRemote+Upload pairs into MoveRemote) is
+                    // not corrupted by phantom DeleteRemote actions for unhydrated
+                    // rows that were never user-deleted.
+                    //
+                    // Folders are not handled here; isHydrated semantics for folders
+                    // are different (they represent on-disk directory presence, not
+                    // file content), and the folder-placeholder recovery is out of
+                    // scope for UD-225a.
+                    entry != null && !entry.isHydrated && !entry.isFolder -> {
+                        val item =
+                            remoteItem ?: CloudItem(
+                                id = entry.remoteId ?: "",
+                                name = path.substringAfterLast('/'),
+                                path = path,
+                                size = entry.remoteSize,
+                                isFolder = false,
+                                modified = entry.remoteModified,
+                                created = null,
+                                hash = entry.remoteHash,
+                                mimeType = null,
+                            )
+                        SyncAction.DownloadContent(path, item)
+                    }
                     // Otherwise: real user delete on a hydrated row → propagate.
                     else -> SyncAction.DeleteRemote(path)
                 }
