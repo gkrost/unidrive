@@ -6441,3 +6441,152 @@ The savings are real but bounded. Time-box this against the dispatch-loop refact
 - UD-901b (closed) — the orphan-recovery cascade emitter that's the main beneficiary on the breadth-first edge.
 - UD-317 (closed) — the per-item 409 recovery dance that the bulk path falls back to on conflict.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) — `POST /folders` row already notes the deferral.
+---
+id: UD-372
+title: Internxt timestamps re-parsed per row in delta() — eager-parse at deserialise (perf)
+category: providers
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:708
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:788
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt:19
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:18
+opened: 2026-05-03
+---
+**JFR-confirmed perf hotspot.** `InternxtProvider.parseTime(iso)` calls `Instant.parse(iso)` once per timestamp field per `delta()`/listing call. Each `InternxtFile`/`InternxtFolder` carries up to four ISO-8601 timestamp fields stored as `String?` (`creationTime`, `modificationTime`, `createdAt`, `updatedAt`) — and `toCloudItem` / `toDeltaCloudItem` invoke `parseTime` on `creationTime` + `modificationTime` per call site, **6 call sites total** ([InternxtProvider.kt:708-709, 731-732, 758-759, 780-781](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:708)).
+
+Worse: `parseTime` is wrapped in `try { ... } catch (_: Exception) { null }` at [InternxtProvider.kt:788-793](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:788), so each malformed-or-null timestamp generates an exception throw. JFR trace from the 2026-05-03 .safe-DL profiling (`recording_2026_05_03_20_23_10.jfr`) shows:
+
+- `java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.parse` at **1.46% of CPU samples** (top 10 hot methods)
+- `DateTimeFormatterBuilder.toFormatter` at **0.97%**
+- Allocation pressure: `DateTimeParseContext` 0.69%, `Parsed` 0.69%, `DateTimeFormatterBuilder$DateTimePrinterParser[]` 0.69% — combined ~2% of total allocations
+
+Net cost on a 60k-item delta walk: ≈360k `Instant.parse` calls. Cold sync wall-clock impact estimate: 1–2%.
+
+## What to change
+
+### Option A (preferred — eager parse at deserialise)
+
+In [`model/InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) and [`model/InternxtFolder.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt):
+
+1. Keep the `String?` wire fields (don't break the JSON deserialiser — kotlinx-serialization needs to round-trip them).
+2. Add lazy-initialised `Instant?` properties:
+   ```kotlin
+   val modificationTimeInstant: Instant? by lazy { modificationTime?.let { tryParseInstant(it) } }
+   val creationTimeInstant: Instant?     by lazy { creationTime?.let { tryParseInstant(it) } }
+   ```
+3. `tryParseInstant` is a top-level helper that does `try { Instant.parse(s) } catch { null }` — same semantics as today's `parseTime`, but only invoked **once per row per JVM** instead of once per call site per call.
+
+### Option B (transient cache field)
+
+If `by lazy` adds too much per-instance overhead (Kotlin `lazy` allocates a `Lazy<T>` wrapper per property per row — would partially defeat the win), use a `@Transient` field initialised in an `init {}` block.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+4. Replace the 6 `parseTime(it)` call sites with the cached property — `file.modificationTimeInstant` instead of `file.modificationTime?.let { parseTime(it) }`.
+5. The standalone `parseTime` private helper can stay (other potential callers, low cost) or be removed.
+
+## Acceptance
+
+- A unit test in `InternxtModelTest` (or similar) creates an `InternxtFile` with a timestamp, calls the cached property twice, and asserts the underlying `parseTime` is invoked exactly once (use a counter spy).
+- A second test asserts a malformed timestamp returns `null` from the cached property without throwing past the call site.
+- Audit doc [internxt-api-vs-spi.md](docs/audits/internxt-api-vs-spi.md) DTO table notes that timestamp fields are now eagerly parsed (the existing ⚠️ on `size` String parsing should not change).
+- Re-profile a delta walk: expect the `DateTimeFormatterBuilder.parse` row to drop out of the top-25 hot methods.
+
+## Out of scope
+
+- `cursor` / `updatedAt` / `createdAt` (the delta cursor fields) — only `creationTime`/`modificationTime` are read per item by `toCloudItem`. The cursor fields are read once at the end of `delta()` and don't have the per-row multiplier.
+- Switching to a `Long` epoch-millis wire format — Internxt returns ISO-8601 strings, no negotiation possible.
+
+## Related
+
+- JFR profile snapshot: `core/recording_2026_05_03_20_23_10.jfr` (144 s recording during the user's `.safe`-dir DL test, 2026-05-03 20:23 local).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) DTO table notes `creationTime`/`modificationTime` as `String?`.
+- UD-329 et al — Internxt provider correctness work; this ticket is purely perf, no correctness change.
+---
+id: UD-373
+title: Reconciler.matchesGlob recompiles regex per call — cache compiled Patterns (perf)
+category: providers
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:713
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:87
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:186
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:217
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:423
+opened: 2026-05-03
+---
+**JFR-confirmed perf hotspot.** `Reconciler.matchesGlob` recompiles the regex from scratch on every call. The hot path is:
+
+```kotlin
+fun matchesGlob(path: String, pattern: String): Boolean {
+    val regex = buildGlobRegex(cleanPattern)         // builds StringBuilder regex
+    return Regex("^$regex$").matches(...)           // fresh Pattern.compile every call
+}
+```
+
+at [Reconciler.kt:713-727](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:713). It's invoked from FOUR sites:
+- [Line 87](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:87): every path × every excludePattern in `reconcile()` setup
+- [Line 186](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:186): every UD-901 orphan-recovery candidate × every excludePattern
+- [Line 217](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:217): every pending-upload row × every excludePattern
+- [Line 423](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:423): every path × every pinRule
+
+For a 60k-item sync with 10 excludePatterns + 5 pinRules, that's ~900k regex recompilations per `reconcile()` — each one allocating a StringBuilder, building the regex string, then constructing a Kotlin `Regex` (which calls `Pattern.compile` under the hood, allocates `Pattern$Node[]`, `Matcher`, etc).
+
+JFR trace from the 2026-05-03 .safe-DL profiling shows the cumulative cost:
+- `java.util.regex.Pattern.RemoveQEQuoting` at **1.94% of CPU samples** (top 10)
+- `java.util.regex.Pattern.atom` at **1.46%**
+- `org.krost.unidrive.sync.Reconciler$Companion.buildGlobRegex` at **0.97%**
+- Allocation pressure: `Pattern$Node[]` 0.56%, `Pattern` 0.56%, `Matcher` 0.69%, `Pattern$GroupTail` 0.43%, `Pattern$GroupHead` 0.34%, `IntHashSet[]` 0.34% — combined ~3% of total allocations
+
+This is sync-engine code, but the perf impact manifests across **every provider's `reconcile()` call**. Filed as `providers` for ID continuity with UD-372; categorically it's `:app:sync`.
+
+## What to change
+
+In [`Reconciler.kt`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt):
+
+1. Move `buildGlobRegex` and `matchesGlob` semantics into a `GlobMatcher` companion-object cache. Keep the public API stable:
+   ```kotlin
+   companion object {
+       private val globCache = ConcurrentHashMap<String, Regex>()
+
+       fun matchesGlob(path: String, pattern: String): Boolean {
+           val cleanPath = path.removePrefix("/")
+           val cleanPattern = pattern.removePrefix("/")
+           val regex = globCache.computeIfAbsent(cleanPattern) {
+               val raw = buildGlobRegex(it)
+               Regex("^$raw$")
+           }
+           return if ('/' !in cleanPattern) {
+               regex.matches(cleanPath.substringAfterLast('/'))
+           } else {
+               regex.matches(cleanPath)
+           }
+       }
+   }
+   ```
+2. Cache key is the cleaned pattern string; cache value is the compiled `Regex`. The basename-vs-full-path distinction stays at the match site (path-side branching), so a single cached `Regex` serves both cases.
+3. Cache size is bounded by the number of distinct exclude/pin patterns the user configures (typically <50). No eviction policy needed.
+4. `ConcurrentHashMap` (not `HashMap`) — `Reconciler` is constructed per sync but the companion is JVM-global; multiple syncs from the daemon share the cache.
+
+## Acceptance
+
+- A unit test in `ReconcilerTest` calls `matchesGlob(p1, "**/*.tmp")` and `matchesGlob(p2, "**/*.tmp")` (same pattern, different paths), spies on `buildGlobRegex` invocations via a counter, asserts it's called exactly once.
+- A second test asserts the cache works across `Reconciler` instances (build two reconcilers, exercise matchesGlob on each, assert single buildGlobRegex call).
+- All existing `matchesGlob` semantics tests still pass — same regex, just cached.
+- Re-profile a delta walk: expect the `Pattern.atom` / `Pattern.RemoveQEQuoting` / `buildGlobRegex` rows to drop out of the top-25 hot methods.
+
+## Out of scope
+
+- Replacing the bespoke glob-to-regex translator with `java.nio.file.FileSystems.getDefault().getPathMatcher("glob:...")` — that's a bigger refactor with semantics differences (FileSystem-glob has Windows path-separator quirks). Worth considering separately if more perf is needed after this ticket.
+- Eviction / LRU on the cache — cardinality is small and bounded by user config; a never-evicting map is fine.
+
+## Related
+
+- JFR profile snapshot: `core/recording_2026_05_03_20_23_10.jfr`.
+- UD-901a/b/c (closed) — orphan-recovery loops that hit `matchesGlob` per recovery row; this ticket directly speeds them up.
+- The `pin rules` loop at [Reconciler.kt:422-424](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:422) also benefits.
