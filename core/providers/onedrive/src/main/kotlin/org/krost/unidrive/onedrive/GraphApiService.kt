@@ -571,11 +571,6 @@ class GraphApiService(
         for ((attempt, delayMs) in retryDelays.withIndex()) {
             val response =
                 httpClient.put(uploadUrl) {
-                    // UD-337: size-adaptive request timeout per chunk.
-                    // Most chunks (10-50 MB) clear well within the 600s
-                    // floor at any reasonable link speed; the policy
-                    // mainly matters when an admin sets a slow-link
-                    // throughput floor or runs a giant chunk size.
                     timeout {
                         requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
                     }

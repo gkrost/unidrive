@@ -6,8 +6,6 @@ import java.util.Locale
 class CliProgressReporter(
     private val verbose: Boolean = false,
     private val dryRun: Boolean = false,
-    // UD-757: injectable clock so unit tests can assert M:SS elapsed +
-    // ETA strings deterministically. Default delegates to System.
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressReporter {
     var lastDownloaded = 0

@@ -85,8 +85,6 @@ class OneDriveProvider(
         @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
-        // UD-366: existingRemoteId unused — OneDrive's path-based PUT
-        // (`PUT /me/drive/root:/{path}:/content`) replaces any existing entry in place.
         val fileSize = Files.size(localPath)
         return try {
             if (fileSize <= 4 * 1024 * 1024) {
