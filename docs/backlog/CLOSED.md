@@ -11645,3 +11645,167 @@ Why this matters: when a user reports a sync bug we ask them for `unidrive log`.
 ## Provenance
 
 CHANGELOG audit 2026-05-01. Old: `logic-arts-official/unidrive`@`b8e4223`, CHANGELOG entry `#122`. Confirmed missing in current via grep on `LogCommand.kt` for `commit|BuildInfo`.
+
+---
+id: UD-405
+title: --sync-path silently drops scope on Windows backslash-prefixed value
+category: cli
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 9e84b1a. Already fixed in commit 9e84b1a on dev (predates this batch). SyncCommand.normalizeSyncPath at line ~685 + applied at line 145 — converts backslashes to forward slashes, ensures leading slash, strips trailing slash, returns null for empty/'/' inputs. Verified in code: SyncCommand.kt:138-145 carries the UD-405 reference comment + the normalize helper at line 685. Ticket was filed but not closed; this is a bookkeeping close.
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163
+opened: 2026-05-03
+---
+**`unidrive sync --sync-path '\Project Notes'` (Windows backslash) is silently accepted, then the scope filter never matches anything and the main reconcile path runs against zero remote / zero local items. No warning, no error — the user sees a successful-looking sync that didn't sync what they asked for.**
+
+## Repro (live, 2026-05-03 00:22)
+
+```
+PS C:\> unidrive -p inxt_user sync --upload-only --sync-path '\Project Notes'
+sync: profile=inxt_user type=internxt sync_root=C:\Users\gerno\InternxtDrive sync_path=\Project Notes mode=upload
+…
+Reconciled: 106455 actions
+… (uploads from outside the requested scope; main scope contributes nothing)
+```
+
+Daemon log for that scan:
+
+```
+00:22:08  Scan started …
+00:25:27  Reconcile started: 0 remote, 0 local         ← scope filter dropped EVERYTHING
+00:25:35  Reconcile complete: 170139 actions in 8213ms ← actions all from UD-901 recovery (UD-901a)
+00:25:37  Pass 2 transfer semaphore … (zero CreateRemoteFolder ran)
+00:25:37  Upload failed for /AfA - …                   ← UD-901b's missing-parent bug
+```
+
+## Root cause
+
+[`SyncEngine.kt:163-168`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163) and the matching local-changes block (line ~190):
+
+```kotlin
+val remoteChanges = if (syncPath != null) {
+    allRemoteChanges.filterKeys { it.startsWith(syncPath) || it == syncPath }
+} else {
+    allRemoteChanges
+}
+```
+
+Every path in `allRemoteChanges` and `allLocalChanges` is forward-slash-normalised (the `LocalScanner` does `relativize.toString().replace('\\', '/')` at [LocalScanner.kt:52](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:52); the providers emit forward-slash paths from their delta APIs). The `syncPath` argument is taken verbatim from the CLI option in [`SyncCommand.kt`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt) — no normalisation. With Windows users typing `\` from PowerShell tab-completion, `startsWith` fails for every path and the filter eats everything.
+
+Same trap applies to `sync_path` in `config.toml` if a Windows user transcribes a path with backslashes.
+
+## Acceptance
+
+- Either:
+  - **(a) Normalise at the CLI argument boundary in `SyncCommand`** — replace `\` with `/`, prepend missing leading `/`, reject empty result. Single-line edit + targeted unit test in `SyncCommandTest`.
+  - **(b) Reject loud at parse time** — `picocli.ParameterException("--sync-path must use forward slashes; got '\\AfA - …'")`. Less convenient but unambiguous.
+- Pick **(a)**: silent normalisation matches the project's "do what I mean for paths" precedent (UD-299 sync_root drift detection normalises root paths the same way; `Path.toAbsolutePath().normalize().toString()`).
+- Same normalisation applies to the `sync_path` field in `SyncConfig` (config.toml entry) — covered by either the same helper or a sibling validator.
+- Unit test: with `syncPath = "\\Project Notes"`, after construction the engine sees `syncPath = "/Project Notes"`. Round-trip filter against synthetic `remoteChanges` map containing `/Project Notes/foo.txt` matches.
+- Manual repro from the ticket body (with backslash) now succeeds the same way as forward slash.
+
+## Related
+
+- **UD-901a (filed alongside)**: the symptom is amplified because UD-901's upload-recovery loop ignores `syncPath` entirely. Even after this ticket lands, scope-bypass via UD-901 stays — fix both.
+- **UD-901b (filed alongside)**: orphaned pending-upload rows whose parent folder isn't on remote fail forever. The user's "Folder not found" error chain is UD-901b's manifestation. Bug A → Bug B exposed → Bug C fired. All three deserve fixes.
+- **UD-299** — sync_root drift detection: precedent for path normalisation at the engine boundary. Mirror its `toAbsolutePath().normalize().toString()` shape but for the relative `syncPath` instead of the absolute root.
+
+## Surfaced
+
+2026-05-03 session, while diagnosing why `--sync-path '\Project Notes'` produced 106,455 unrelated upload failures. The user's first attempt (`\AfA - …`) silently filtered to nothing; the second (`/internal`) revealed UD-901a still bypasses scope. Bug A on its own is small; it's the gateway that exposes UD-901a/b.
+
+---
+id: UD-406
+title: unidrive sync (non-watch) hangs after Sync complete — IPC accept loop keeps runBlocking alive
+category: cli
+priority: high
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 32c186f. Already fixed in commit 32c186f on dev (predates this batch). SyncCommand.kt:487-496 carries the UD-406 reference comment + the explicit ipcServer.close() after engine.syncOnce() in the non-watch branch. The double-close (here + in finally{}) is safe; close() is idempotent. Verified in code. Ticket was filed but not closed; this is a bookkeeping close.
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:365
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:69
+opened: 2026-05-03
+---
+**`unidrive sync` (without `--watch`) prints `Sync complete: …` and then hangs forever instead of returning to the shell prompt. The user has to Ctrl+C to escape. The root cause is `IpcServer.start(this)` launching an infinite accept-loop coroutine into the `runBlocking` scope at [SyncCommand.kt:366](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L366); the `runBlocking` blocks waiting for that child coroutine to complete, which it never does.**
+
+## Repro (live, 2026-05-03 11:xx)
+
+```
+PS C:\> unidrive -p inxt_user sync --upload-only --sync-path '/Project Notes'
+sync: profile=inxt_user type=internxt sync_root=… sync_path=/Project Notes mode=upload
+Reconciling... 16 / 16 items · 0:00
+Reconciled: 0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (6.9s)
+                                                            ← hangs here, no prompt
+```
+
+User confirmed the previous "successful" 298-second AfA sync also hung at the end ("Batchvorgang abbrechen (J/N)? j" in the paste); they hadn't called it out as a bug because Ctrl+C is muscle memory after long-running scans. With UD-901a/b/c/UD-357 letting fast scoped syncs finish in seconds, the hang is the dominant remaining UX wart.
+
+## Root cause
+
+[SyncCommand.kt:365-475](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt#L365):
+
+```kotlin
+runBlocking(MDCContext()) {
+    ipcServer.start(this)              // ← spawns infinite accept loop into `this` scope
+    provider.authenticateAndLog()
+    …
+    if (watch) {
+        …                              // intentional infinite loop
+    } else {
+        engine.syncOnce(…)             // returns when sync done
+    }
+}                                       // ← runBlocking blocks waiting for accept loop
+} finally {
+    ipcServer.close()                  // never runs while we're blocked
+    …
+}
+```
+
+[IpcServer.start](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt#L69) does `scope.launch(Dispatchers.IO) { while (isActive) { socket.accept() … } }`. `runBlocking` semantics: the `runBlocking { }` block returns only when ALL child coroutines launched into its scope complete. The accept loop never completes naturally. The `finally` block that DOES close the IPC server runs after `runBlocking` returns — chicken-and-egg.
+
+## Why this only matters now
+
+UD-240a ("always-on IPC") landed earlier so the UI tray could discover one-shot daemons. Pre-UD-240a, IPC was watch-only and one-shot syncs returned cleanly. The trade-off was never fully realised because every long-running sync ate enough wall-clock that the user typed Ctrl+C as part of normal flow.
+
+UD-901a / UD-901b / UD-901c / UD-357 (just landed) made first-sync and recovery-loop paths fast enough that syncs complete in single-digit seconds for scoped invocations. The Ctrl+C dance is now a UX cliff.
+
+## Proposal
+
+In the non-`watch` branch — after `engine.syncOnce` returns — explicitly close the IPC server before exiting the `runBlocking` lambda, so its accept-loop coroutine is cancelled and `runBlocking` returns naturally:
+
+```kotlin
+} else {
+    engine.syncOnce(…)
+    // UD-406: cancel the IPC accept loop so runBlocking can return.
+    // The finally{} below also closes it, but that runs AFTER
+    // runBlocking returns — by which time we're already blocked.
+    ipcServer.close()
+}
+```
+
+`IpcServer.close` already does `acceptJob?.cancel(); broadcastJob?.cancel()` ([IpcServer.kt:111-114](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt#L111)) — calling it from inside the runBlocking lambda is the targeted fix.
+
+The double-close (here + in `finally`) is safe: `close()` is idempotent (`?.cancel()` is no-op on already-cancelled jobs).
+
+## Acceptance
+
+- `unidrive -p X sync --upload-only --sync-path /Y` (or any non-`--watch` invocation) returns to the shell prompt within ~100 ms of `Sync complete: …` printing.
+- `--watch` mode behaviour unchanged — the watch loop is its own infinite while-true, the existing Runtime shutdown hook handles Ctrl+C, the Runtime hook closes ipcServer correctly.
+- A test in `SyncCommandTest` (or `IpcServerTest`) exercises a synthetic equivalent: spawn `IpcServer.start(scope)` inside a `runBlocking` block, do nothing for a moment, call `ipcServer.close()`, assert the `runBlocking` block returns. Without the close, the test hangs (use a timeout).
+- No regression on UI tray daemon discovery: the IPC socket exists for the duration of the sync. Tray that polls every N seconds still has a window.
+
+## Related
+
+- **UD-240** (umbrella): "always-on IPC" was UD-240a's idea. UD-406 fixes the consequence.
+- **UD-254a**: dropped `MDCContext()` from the same `runBlocking`. Independent fix; both can land in either order. UD-254a's branch (`fix/UD-254a-mdc-clone-storm`) is currently unmerged and will need a trivial rebase if UD-406 lands first.
+
+## Surfaced
+
+2026-05-03 11:xx, after the four-fix stack (UD-405 + UD-901a/b/c + UD-357) made fast scoped syncs visible. User reported "it then blocks" after a 6.9-second sync of `/Project Notes`.
