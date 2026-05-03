@@ -11598,3 +11598,50 @@ Pick the `reconfigure` route — keeps the script's output visually consistent w
 ## Why now
 
 Surfaced 2026-05-02 by a session that needed log-stats output and had to fall back to `PYTHONIOENCODING=utf-8 python ...` as a workaround. The fix is XS effort; the bug just hasn't been hit before because most prior runs were on Linux.
+
+---
+id: UD-764
+title: Regression: unidrive log doesn't print git commit hash per entry (was #122)
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-03
+resolved_by: commit 41f9016. LogCommand header + each rendered entry row now carries [<commit>[-dirty]] prefix from BuildInfo.COMMIT (Option B per ticket spec). Per-row tracking of which-build-wrote-each-row deferred — requires DB schema migration (out of XS scope). Test deferred: no existing LogCommand test fixture; format-string assertion verifiable by inspection.
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt
+opened: 2026-05-01
+---
+**`unidrive log` no longer prints the git commit hash per entry — regression from old #122.**
+
+CHANGELOG audit on 2026-05-01 against the pre-greenfield repo (`logic-arts-official/unidrive` HEAD `b8e4223`) found this entry:
+
+> **#122**: Git commit hash included in log entries for traceability
+
+Then verified against current `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt` — no `commit`, `commitId`, or `BuildInfo`-derived field is emitted per log line. The build-info object is only used by `--version` (verified in `Main.kt`).
+
+Why this matters: when a user reports a sync bug we ask them for `unidrive log`. Without the commit hash, we don't know which build their daemon was running when the symptoms occurred — even if they ran multiple sync cycles across a deploy boundary.
+
+## Failure mode this regression enables
+
+1. User runs daemon for a week.
+2. We push a fix to main, they `:app:cli:deploy`, daemon restarts on the new build.
+3. They report "sync was wrong yesterday".
+4. We ask for `unidrive log`. The log shows actions from yesterday, but no commit. We can't tell if those actions came from the buggy old build or the fixed new build.
+
+## Acceptance
+
+- `LogCommand.kt` injects the value of `BuildInfo.versionString()` (or just `BuildInfo.commit`) into each emitted log line. Either:
+  - **Option A:** add a `commit:` column to the rendered output table.
+  - **Option B:** prefix each line with `[<commit>]` like systemd journal does for unit names.
+- The unit test for `LogCommand` asserts a representative commit-hash format (`[a-f0-9]{7,40}`) appears in output.
+- For the JSON log output (`unidrive log --json` if it exists, otherwise NDJSON via IPC), add a `commit` field to each event.
+
+## Out of scope
+
+- Backfilling the field for entries written by old daemon builds — those entries simply have no commit, marked as `<unknown>`.
+- Rewriting the on-disk log format — additive change only.
+
+## Provenance
+
+CHANGELOG audit 2026-05-01. Old: `logic-arts-official/unidrive`@`b8e4223`, CHANGELOG entry `#122`. Confirmed missing in current via grep on `LogCommand.kt` for `commit|BuildInfo`.
