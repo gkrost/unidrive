@@ -10866,3 +10866,51 @@ In [`collectFilesFromFolders()`](core/providers/internxt/src/main/kotlin/org/kro
 
 - UD-360 — parent ticket; this signal is the input to the partial-gather flag.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §4.
+
+---
+id: UD-360
+title: delta() must signal partial gather instead of silent hasMore=false
+category: providers
+priority: critical
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit 7d3bf62. DeltaPage gains complete:Boolean=true; engine skips detectMissingAfterFullSync when allComplete is false. Provider sets complete=skipped==0; UD-361's fail-loud ProviderException replaced with the new signal. 2 new SyncEngine regression tests pin both branches. Deviated from ticket body's hasMore=true approach — would have caused infinite retry loops; new field is structurally cleaner.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:353
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:232
+opened: 2026-05-03
+---
+**`InternxtProvider.delta()` always returns `DeltaPage(hasMore=false)` ([InternxtProvider.kt:353](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:353)), even when the gather was demonstrably partial.** The engine's "absence ⇒ delete" reconciliation depends on the inventory being complete; a partial gather plus `hasMore=false` is the difference between "nothing changed in `/_INBOX/wiederherstellungs_codes.txt`" and "delete it". This is the highest-impact mechanism in the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3, §6), responsible for the observed `del-local /_INBOX/wiederherstellungs_codes.txt` regression on a download-only run.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3 pagination correctness, §6 mechanism 2/3, executive summary).
+
+## Concrete trigger paths
+
+The provider returns `hasMore=false` while having silently dropped rows in any of:
+1. **`/folders` non-{500,503} error mid-pagination** — exception propagates but the file half is already accumulated; in `collectFilesFromFolders` mode the folder map is incomplete and orphaned files reparent to drive root, vanishing from `/_INBOX`.
+2. **`collectFilesFromFolders` 500/503 on a subtree** — the recursion `log.warn`s and returns; the parent caller treats the gather as complete.
+3. **Cursor `updatedAt - 6h` window** misses rows older than 6 h whose only "change" was a status flip back to EXISTS within the window.
+
+In every case the engine sees a smaller-than-truth remote inventory and emits `del-local` for every locally-present file that didn't appear.
+
+## What to change
+
+In [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) and [`collectFilesFromFolders()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375):
+- Track a `partialGather: Boolean` that flips true on any caught exception or any subtree skip.
+- Return `DeltaPage(items, cursor, hasMore = partialGather)` — i.e. report `hasMore=true` when the gather is incomplete, so the engine retries instead of running the del-local sweep.
+
+In the engine ([`SyncEngine.kt:232-258`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:232) and the reconciler), `hasMore=true` on the final page must suppress `DeleteLocal` action emission. (Verify whether existing `hasMore` semantics already do this; if not, this ticket also covers the engine-side behaviour change.)
+
+## Acceptance
+
+- `delta()` returns `hasMore=true` if any non-{500,503} error was caught or any subtree was skipped.
+- The engine treats `hasMore=true` on a delta as "do not run del-local sweep this run".
+- A unit test injects a thrown 502 mid-`/folders` pagination and asserts `hasMore=true` and zero `DeleteLocal` actions emitted.
+
+## Related
+
+- UD-361 — sub-ticket: surface the skip count from `collectFilesFromFolders`.
+- UD-358 — prerequisite: stable sort to make "complete" actually meaningful.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §6 concrete answer.
