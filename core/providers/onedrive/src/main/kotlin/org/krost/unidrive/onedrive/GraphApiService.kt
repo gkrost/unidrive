@@ -173,7 +173,7 @@ class GraphApiService(
         itemId: String,
         destPath: Path,
     ) {
-        log.debug("Download: itemId={}", itemId)
+        // UD-753: per-operation log moved to SyncEngine.applyDownload.
         val item = getItemById(itemId)
         val url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
         val authNeeded = item.downloadUrl == null
@@ -333,7 +333,7 @@ class GraphApiService(
     }
 
     suspend fun deleteItem(itemId: String) {
-        log.debug("Delete: itemId={}", itemId)
+        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val response =
             httpClient.request("$baseUrl/me/drive/items/$itemId") {
                 bearerAuth(tokenProvider(false))
@@ -388,7 +388,7 @@ class GraphApiService(
         newPath: String,
         oldPath: String? = null,
     ): DriveItem {
-        log.debug("Move: {} -> {}", oldPath ?: itemId, newPath)
+        // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val cleanPath = newPath.removePrefix("/")
         val newName = cleanPath.substringAfterLast("/")
         val newParentPath = cleanPath.substringBeforeLast("/", "")

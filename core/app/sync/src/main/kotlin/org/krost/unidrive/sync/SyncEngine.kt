@@ -849,6 +849,11 @@ class SyncEngine(
         }
 
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
+        // UD-753: log per-operation lines once at the engine instead of N times across
+        // providers (was repeated in WebDav, S3, OneDrive ApiServices). Provider-specific
+        // detail (itemId, S3 key, …) lives at provider WARN/ERROR sites where it's
+        // diagnostic rather than per-action noise.
+        log.debug("Download: {} ({} bytes)", action.path, action.remoteItem.size)
         val localPath = placeholder.resolveLocal(action.path)
         if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
             versionManager.snapshot(action.path)
@@ -872,6 +877,9 @@ class SyncEngine(
 
     private suspend fun applyUpload(action: SyncAction.Upload) {
         val localPath = placeholder.resolveLocal(action.path)
+        val sizeForLog = if (Files.isRegularFile(localPath)) Files.size(localPath) else -1L
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Upload: {} ({} bytes)", action.path, sizeForLog)
         val result =
             // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
             // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
@@ -898,6 +906,8 @@ class SyncEngine(
     }
 
     private suspend fun applyMoveRemote(action: SyncAction.MoveRemote) {
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Move: {} -> {}", action.fromPath, action.path)
         val oldEntry = db.getEntry(action.fromPath)
         val isFolder = oldEntry?.isFolder ?: false
         val result = provider.move(action.fromPath, action.path)
@@ -973,6 +983,8 @@ class SyncEngine(
     }
 
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Delete: {}", action.path)
         try {
             provider.delete(action.path)
         } catch (e: ProviderException) {

@@ -52,7 +52,7 @@ open class S3ApiService(
         destination: Path,
     ): Long {
         val url = objectUrl(key)
-        log.debug("Download: {}", key)
+        // UD-753: per-operation log moved to SyncEngine.applyDownload.
         val headers = SigV4Signer.sign("GET", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         log.debug("SigV4: GET {}", url)
         // UD-349: switch from `httpClient.get(url)` + `response.body<ByteReadChannel>()`
@@ -96,7 +96,7 @@ open class S3ApiService(
         onProgress: ((Long, Long) -> Unit)? = null,
     ): String? {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        log.debug("Upload: {} ({} bytes)", key, fileSize)
+        // UD-753: per-operation log moved to SyncEngine.applyUpload.
         val url = objectUrl(key)
         val headers =
             SigV4Signer.sign(
@@ -138,7 +138,7 @@ open class S3ApiService(
         fromKey: String,
         toKey: String,
     ) {
-        log.debug("Move: {} -> {}", fromKey, toKey)
+        // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val url = objectUrl(toKey)
         val encodedFrom =
             fromKey.removePrefix("/").split("/").joinToString("/") { segment ->
@@ -166,7 +166,7 @@ open class S3ApiService(
 
     /** Delete object at [key]. 204/404 are both treated as success. */
     open suspend fun deleteObject(key: String) {
-        log.debug("Delete: {}", key)
+        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val url = objectUrl(key)
         val headers = SigV4Signer.sign("DELETE", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         val response = httpClient.delete(url) { headers.forEach { (k, v) -> header(k, v) } }

@@ -293,7 +293,7 @@ open class WebDavApiService(
         destination: Path,
     ): Long =
         withRetry("download", remotePath) {
-            log.debug("Download: {}", remotePath)
+            // UD-753: per-operation log moved to SyncEngine.applyDownload.
             val url = resourceUrl(remotePath)
             // UD-285 / UD-277: data-plane requests must NOT inherit the
             // 10-min REQUEST_TIMEOUT_MS wall-clock cap from HttpDefaults
@@ -356,7 +356,7 @@ open class WebDavApiService(
         onProgress: ((Long, Long) -> Unit)?,
     ): WebDavEntry {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        log.debug("Upload: {} ({} bytes)", remotePath, fileSize)
+        // UD-753: per-operation log moved to SyncEngine.applyUpload.
         val url = resourceUrl(remotePath)
         ensureParentCollections(remotePath)
         // UD-277: size-adaptive request-timeout. Pre-fix this was
@@ -396,7 +396,7 @@ open class WebDavApiService(
 
     /** Delete resource or empty collection at [remotePath]. 404 is silently ignored. */
     suspend fun delete(remotePath: String) {
-        log.debug("Delete: {}", remotePath)
+        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val url = resourceUrl(remotePath)
         val response = httpClient.delete(url)
         if (response.status != HttpStatusCode.NotFound) checkResponse(response, url)
@@ -438,7 +438,7 @@ open class WebDavApiService(
         fromPath: String,
         toPath: String,
     ) {
-        log.debug("Move: {} -> {}", fromPath, toPath)
+        // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val fromUrl = resourceUrl(fromPath)
         val toUrl = resourceUrl(toPath)
         log.debug("MOVE destination: {}", toUrl)
