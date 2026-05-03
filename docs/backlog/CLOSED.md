@@ -10914,3 +10914,35 @@ In the engine ([`SyncEngine.kt:232-258`](core/app/sync/src/main/kotlin/org/krost
 - UD-361 — sub-ticket: surface the skip count from `collectFilesFromFolders`.
 - UD-358 — prerequisite: stable sort to make "complete" actually meaningful.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §6 concrete answer.
+
+---
+id: UD-358
+title: Send sort=uuid&order=ASC on /files and /folders GETs
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit a3926ee. Both listFiles/listFolders now send sort=uuid&order=ASC. Wire shape extracted to InternxtApiService.listingQueryParams() companion helper; 2 unit tests pin the params (default + cursor). uuid chosen because it's the only stable key under concurrent mutation.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+opened: 2026-05-03
+---
+**Without an explicit stable sort on `/files` and `/folders` GETs, paginated full-scans can drop or duplicate rows whenever the server-side default order reshuffles between requests.** This is a structural correctness prerequisite for [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) — it walks both endpoints page-by-page and assumes the cursor offset is stable across calls. It isn't. A row inserted, updated, or deleted on the server during the walk shifts every subsequent page boundary; the result is silent row-loss or row-duplication that the engine then sees as deletions.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3c, §6 mechanism 4).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt) — both `listFiles` and `listFolders` call sites — append `sort=uuid` and `order=ASC` query parameters. UUID is monotonic-ish, opaque, and present on every row; it's the only field guaranteed stable across mutations. (`updatedAt` is not stable — an update mid-walk reshuffles by it.)
+
+## Acceptance
+
+- Both `listFiles` and `listFolders` send `sort` + `order` query parameters on every paginated request.
+- An integration test against a stable test drive walks the full inventory twice in succession and asserts identical `uuid` sets between the two walks.
+
+## Related
+
+- UD-360 / UD-361 (delta-partial-gather signalling) — this ticket is a prerequisite; without stable sort, even a complete-looking gather can be missing rows.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3 (pagination correctness).

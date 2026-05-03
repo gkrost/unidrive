@@ -6213,35 +6213,6 @@ Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once 
 
 2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
 ---
-id: UD-358
-title: Send sort=uuid&order=ASC on /files and /folders GETs
-category: providers
-priority: high
-effort: S
-status: open
-code_refs:
-  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
-  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
-opened: 2026-05-03
----
-**Without an explicit stable sort on `/files` and `/folders` GETs, paginated full-scans can drop or duplicate rows whenever the server-side default order reshuffles between requests.** This is a structural correctness prerequisite for [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) — it walks both endpoints page-by-page and assumes the cursor offset is stable across calls. It isn't. A row inserted, updated, or deleted on the server during the walk shifts every subsequent page boundary; the result is silent row-loss or row-duplication that the engine then sees as deletions.
-
-Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3c, §6 mechanism 4).
-
-## What to change
-
-In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt) — both `listFiles` and `listFolders` call sites — append `sort=uuid` and `order=ASC` query parameters. UUID is monotonic-ish, opaque, and present on every row; it's the only field guaranteed stable across mutations. (`updatedAt` is not stable — an update mid-walk reshuffles by it.)
-
-## Acceptance
-
-- Both `listFiles` and `listFolders` send `sort` + `order` query parameters on every paginated request.
-- An integration test against a stable test drive walks the full inventory twice in succession and asserts identical `uuid` sets between the two walks.
-
-## Related
-
-- UD-360 / UD-361 (delta-partial-gather signalling) — this ticket is a prerequisite; without stable sort, even a complete-looking gather can be missing rows.
-- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3 (pagination correctness).
----
 id: UD-359
 title: Add removed/deleted fields to InternxtFile DTO
 category: providers
