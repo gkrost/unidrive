@@ -705,8 +705,8 @@ class InternxtProvider(
                 path = fullPath,
                 size = file.size.toLongOrNull() ?: 0,
                 isFolder = false,
-                modified = file.modificationTime?.let { parseTime(it) },
-                created = file.creationTime?.let { parseTime(it) },
+                modified = file.modificationInstant,
+                created = file.creationInstant,
                 hash = null,
                 mimeType = cleanType,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
@@ -728,8 +728,8 @@ class InternxtProvider(
                 path = fullPath,
                 size = 0,
                 isFolder = true,
-                modified = folder.modificationTime?.let { parseTime(it) },
-                created = folder.creationTime?.let { parseTime(it) },
+                modified = folder.modificationInstant,
+                created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
                 deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
@@ -755,8 +755,8 @@ class InternxtProvider(
                 path = "$parentPath/$name",
                 size = file.size.toLongOrNull() ?: 0,
                 isFolder = false,
-                modified = file.modificationTime?.let { parseTime(it) },
-                created = file.creationTime?.let { parseTime(it) },
+                modified = file.modificationInstant,
+                created = file.creationInstant,
                 hash = null,
                 mimeType = cleanType,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
@@ -777,19 +777,13 @@ class InternxtProvider(
                 path = "$parentPath/$name",
                 size = 0,
                 isFolder = true,
-                modified = folder.modificationTime?.let { parseTime(it) },
-                created = folder.creationTime?.let { parseTime(it) },
+                modified = folder.modificationInstant,
+                created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
                 deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
             )
         }
 
-        private fun parseTime(iso: String): Instant? =
-            try {
-                Instant.parse(iso)
-            } catch (_: Exception) {
-                null
-            }
     }
 }

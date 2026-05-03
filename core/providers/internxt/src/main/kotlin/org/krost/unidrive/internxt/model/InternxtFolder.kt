@@ -1,6 +1,8 @@
 package org.krost.unidrive.internxt.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import java.time.Instant
 
 @Serializable
 data class InternxtFolder(
@@ -21,7 +23,15 @@ data class InternxtFolder(
     val updatedAt: String? = null,
     val removed: Boolean = false,
     val deleted: Boolean = false,
-)
+) {
+    // UD-372: see InternxtFile — eagerly parse the two timestamps that the hot delta() loop
+    // consumes; createdAt / updatedAt stay as String (cursor lexicographic max only).
+    @Transient
+    val creationInstant: Instant? = tryParseInternxtInstant(creationTime)
+
+    @Transient
+    val modificationInstant: Instant? = tryParseInternxtInstant(modificationTime)
+}
 
 @Serializable
 data class FolderListResponse(
