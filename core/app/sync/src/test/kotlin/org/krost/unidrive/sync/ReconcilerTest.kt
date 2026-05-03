@@ -326,6 +326,106 @@ class ReconcilerTest {
         assertEquals(ChangeState.MODIFIED, action.remoteState)
     }
 
+    // ── UD-240j: detectMoves folder-move dedup ──────────────────────────────
+    // Captured live 2026-05-03 10:41: two MoveRemote actions emitted with the
+    // SAME destination path, different sources, both failing at apply time
+    // because the source folders don't exist on remote. detectMoves's folder-
+    // move loop matched the same CreateRemoteFolder twice (once per delete
+    // sharing the basename) — the matchedFolderCreates dedup wasn't there.
+
+    @Test
+    fun `UD-240j folder-move emits at most one MoveRemote per CreateRemoteFolder`() {
+        // Two folder rows in DB sharing basename "Sample" — a stale one at root
+        // (legacy path from an earlier sync_root configuration) and the current
+        // one nested. Both have remoteId set (i.e. both look "real" to the
+        // engine — DB doesn't have a way to distinguish stale).
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Sample",
+                remoteId = "id-stale-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Pictures/Sample",
+                remoteId = "id-real-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        // Local: one new folder at the moved location.
+        Files.createDirectories(syncRoot.resolve("Pictures/_Photos/Sample"))
+        val localChanges =
+            mapOf(
+                "/Sample" to ChangeState.DELETED,
+                "/Pictures/Sample" to ChangeState.DELETED,
+                "/Pictures/_Photos/Sample" to ChangeState.NEW,
+            )
+        val remoteChanges = emptyMap<String, CloudItem>()
+
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        val movesToTarget = moves.filter { it.path == "/Pictures/_Photos/Sample" }
+        assertEquals(
+            1,
+            movesToTarget.size,
+            "UD-240j: at most ONE MoveRemote per destination; got: ${moves.map { "${it.fromPath}->${it.path}" }}",
+        )
+        // The other Delete should survive untouched as DeleteRemote (the engine
+        // will then propagate it as a real delete-remote, OR the user can
+        // resolve via UD-205-class atomicity work — out of scope for UD-240j).
+        val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
+        assertEquals(1, deletes.size, "the unmatched delete must remain in actions; got: $deletes")
+    }
+
+    @Test
+    fun `UD-240j folder-move dedup does not break the legitimate single-move case`() {
+        // Regression guard: with exactly one DeleteRemote + matching CreateRemoteFolder,
+        // detectMoves still emits MoveRemote.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/Pictures/Sample",
+                remoteId = "id-Sample",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 0,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        Files.createDirectories(syncRoot.resolve("Pictures/_Photos/Sample"))
+        val localChanges =
+            mapOf(
+                "/Pictures/Sample" to ChangeState.DELETED,
+                "/Pictures/_Photos/Sample" to ChangeState.NEW,
+            )
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size, "expected one MoveRemote; got: $actions")
+        assertEquals("/Pictures/Sample", moves[0].fromPath)
+        assertEquals("/Pictures/_Photos/Sample", moves[0].path)
+    }
+
     // ── UD-901a: recovery loops respect syncPath scope ──────────────────────
     // Pre-fix the UD-225 download-recovery and UD-901 upload-recovery loops
     // iterated `db.getAllEntries()` without any scope filter. A

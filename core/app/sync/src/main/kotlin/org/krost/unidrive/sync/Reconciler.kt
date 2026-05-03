@@ -393,12 +393,23 @@ class Reconciler(
         // Folder moves: DeleteRemote(oldFolder) + CreateRemoteFolder(newFolder)
         val folderCreates = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
         val matchedFolderDeletes = mutableSetOf<String>()
+        // UD-240j: dedup the create side too. Without this, two different
+        // DeleteRemote actions sharing a basename (e.g. /Sample and
+        // /Pictures/Sample, both folder rows in the DB) would both match
+        // the SAME CreateRemoteFolder by basename, producing two MoveRemote
+        // actions targeting the same destination — both failing at apply
+        // time because at most one source can really be the destination.
+        // The file-move loop below has the symmetric `matchedUploads` set;
+        // folder-move was missing the parallel.
+        val matchedFolderCreates = mutableSetOf<String>()
         for (del in deletes) {
             val entry = entryByPath[del.path] ?: continue
             if (!entry.isFolder || entry.remoteId == null) continue
 
             val oldName = del.path.substringAfterLast("/")
             for (create in folderCreates) {
+                // UD-240j: skip creates already consumed by an earlier match.
+                if (create.path in matchedFolderCreates) continue
                 // Same folder name, any parent — covers both renames (same parent) and cross-parent moves
                 if (create.path.substringAfterLast("/") != oldName) continue
                 actions.add(
@@ -427,6 +438,7 @@ class Reconciler(
                         action.path.removePrefix(newPrefix) in movedNames
                 }
                 matchedFolderDeletes.add(del.path)
+                matchedFolderCreates.add(create.path) // UD-240j
                 break
             }
         }
