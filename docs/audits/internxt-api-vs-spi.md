@@ -145,7 +145,7 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| `/notifications` GET / POST, `/notifications/{id}/expire` PATCH | ◯ | `Capability.Webhook` not declared. Could feed real-time invalidation instead of polling `delta()`. |
+| `/notifications` GET / POST, `/notifications/{id}/expire` PATCH | ◯ (marketing-only) | UD-370 Phase 0 confirmed this is an account-level promotional channel — schema example is literally a Black Friday banner. Not a file-mutation event feed. See [internxt-notifications-feasibility.md](internxt-notifications-feasibility.md). No real-time invalidation surface exists in the public Internxt spec. |
 
 ### Auth endpoints (NOT in public spec)
 
