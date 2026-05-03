@@ -11459,3 +11459,91 @@ In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/uni
 - JFR profile snapshot: `core/recording_2026_05_03_20_23_10.jfr` (144 s recording during the user's `.safe`-dir DL test, 2026-05-03 20:23 local).
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) DTO table notes `creationTime`/`modificationTime` as `String?`.
 - UD-329 et al — Internxt provider correctness work; this ticket is purely perf, no correctness change.
+
+---
+id: UD-373
+title: Reconciler.matchesGlob recompiles regex per call — cache compiled Patterns (perf)
+category: providers
+priority: low
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 3739292. Reconciler.matchesGlob now caches compiled Regex per pattern string in a ConcurrentHashMap on the companion. Same regex semantics (basename-vs-full-path branching unchanged); single buildGlobRegex + Regex compile per distinct pattern across all reconcile() invocations and across daemon-shared sync runs. Cache cardinality bounded by user config (<50 typical), no eviction. Visible-for-test invocation counter; two tests verify cache hits + semantic preservation. Modest wall-clock win (2-3% on cold delta walks with non-trivial globsets) per JFR baseline.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:713
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:87
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:186
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:217
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:423
+opened: 2026-05-03
+---
+**JFR-confirmed perf hotspot.** `Reconciler.matchesGlob` recompiles the regex from scratch on every call. The hot path is:
+
+```kotlin
+fun matchesGlob(path: String, pattern: String): Boolean {
+    val regex = buildGlobRegex(cleanPattern)         // builds StringBuilder regex
+    return Regex("^$regex$").matches(...)           // fresh Pattern.compile every call
+}
+```
+
+at [Reconciler.kt:713-727](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:713). It's invoked from FOUR sites:
+- [Line 87](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:87): every path × every excludePattern in `reconcile()` setup
+- [Line 186](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:186): every UD-901 orphan-recovery candidate × every excludePattern
+- [Line 217](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:217): every pending-upload row × every excludePattern
+- [Line 423](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:423): every path × every pinRule
+
+For a 60k-item sync with 10 excludePatterns + 5 pinRules, that's ~900k regex recompilations per `reconcile()` — each one allocating a StringBuilder, building the regex string, then constructing a Kotlin `Regex` (which calls `Pattern.compile` under the hood, allocates `Pattern$Node[]`, `Matcher`, etc).
+
+JFR trace from the 2026-05-03 .safe-DL profiling shows the cumulative cost:
+- `java.util.regex.Pattern.RemoveQEQuoting` at **1.94% of CPU samples** (top 10)
+- `java.util.regex.Pattern.atom` at **1.46%**
+- `org.krost.unidrive.sync.Reconciler$Companion.buildGlobRegex` at **0.97%**
+- Allocation pressure: `Pattern$Node[]` 0.56%, `Pattern` 0.56%, `Matcher` 0.69%, `Pattern$GroupTail` 0.43%, `Pattern$GroupHead` 0.34%, `IntHashSet[]` 0.34% — combined ~3% of total allocations
+
+This is sync-engine code, but the perf impact manifests across **every provider's `reconcile()` call**. Filed as `providers` for ID continuity with UD-372; categorically it's `:app:sync`.
+
+## What to change
+
+In [`Reconciler.kt`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt):
+
+1. Move `buildGlobRegex` and `matchesGlob` semantics into a `GlobMatcher` companion-object cache. Keep the public API stable:
+   ```kotlin
+   companion object {
+       private val globCache = ConcurrentHashMap<String, Regex>()
+
+       fun matchesGlob(path: String, pattern: String): Boolean {
+           val cleanPath = path.removePrefix("/")
+           val cleanPattern = pattern.removePrefix("/")
+           val regex = globCache.computeIfAbsent(cleanPattern) {
+               val raw = buildGlobRegex(it)
+               Regex("^$raw$")
+           }
+           return if ('/' !in cleanPattern) {
+               regex.matches(cleanPath.substringAfterLast('/'))
+           } else {
+               regex.matches(cleanPath)
+           }
+       }
+   }
+   ```
+2. Cache key is the cleaned pattern string; cache value is the compiled `Regex`. The basename-vs-full-path distinction stays at the match site (path-side branching), so a single cached `Regex` serves both cases.
+3. Cache size is bounded by the number of distinct exclude/pin patterns the user configures (typically <50). No eviction policy needed.
+4. `ConcurrentHashMap` (not `HashMap`) — `Reconciler` is constructed per sync but the companion is JVM-global; multiple syncs from the daemon share the cache.
+
+## Acceptance
+
+- A unit test in `ReconcilerTest` calls `matchesGlob(p1, "**/*.tmp")` and `matchesGlob(p2, "**/*.tmp")` (same pattern, different paths), spies on `buildGlobRegex` invocations via a counter, asserts it's called exactly once.
+- A second test asserts the cache works across `Reconciler` instances (build two reconcilers, exercise matchesGlob on each, assert single buildGlobRegex call).
+- All existing `matchesGlob` semantics tests still pass — same regex, just cached.
+- Re-profile a delta walk: expect the `Pattern.atom` / `Pattern.RemoveQEQuoting` / `buildGlobRegex` rows to drop out of the top-25 hot methods.
+
+## Out of scope
+
+- Replacing the bespoke glob-to-regex translator with `java.nio.file.FileSystems.getDefault().getPathMatcher("glob:...")` — that's a bigger refactor with semantics differences (FileSystem-glob has Windows path-separator quirks). Worth considering separately if more perf is needed after this ticket.
+- Eviction / LRU on the cache — cardinality is small and bounded by user config; a never-evicting map is fine.
+
+## Related
+
+- JFR profile snapshot: `core/recording_2026_05_03_20_23_10.jfr`.
+- UD-901a/b/c (closed) — orphan-recovery loops that hit `matchesGlob` per recovery row; this ticket directly speeds them up.
+- The `pin rules` loop at [Reconciler.kt:422-424](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:422) also benefits.
