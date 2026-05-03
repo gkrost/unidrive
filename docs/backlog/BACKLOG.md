@@ -5282,3 +5282,72 @@ This is the canonical implementation of that guidance.
 ## Surfaced
 
 2026-05-02 19:27 — JFR recording on the running daemon (post-UD-240g/i deploy at 18:41) examined with `jfr.exe view allocation-by-class` and `jfr.exe print --events ObjectAllocationSample`. The signal was only visible because JMC's overview report (rule-based, summary-level) collapsed it under "Allocated Classes" without crediting the call site; the application-level views show it unambiguously.
+---
+id: UD-405
+title: --sync-path silently drops scope on Windows backslash-prefixed value
+category: cli
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163
+opened: 2026-05-03
+---
+**`unidrive sync --sync-path '\Project Notes'` (Windows backslash) is silently accepted, then the scope filter never matches anything and the main reconcile path runs against zero remote / zero local items. No warning, no error — the user sees a successful-looking sync that didn't sync what they asked for.**
+
+## Repro (live, 2026-05-03 00:22)
+
+```
+PS C:\> unidrive -p inxt_user sync --upload-only --sync-path '\Project Notes'
+sync: profile=inxt_user type=internxt sync_root=C:\Users\gerno\InternxtDrive sync_path=\Project Notes mode=upload
+…
+Reconciled: 106455 actions
+… (uploads from outside the requested scope; main scope contributes nothing)
+```
+
+Daemon log for that scan:
+
+```
+00:22:08  Scan started …
+00:25:27  Reconcile started: 0 remote, 0 local         ← scope filter dropped EVERYTHING
+00:25:35  Reconcile complete: 170139 actions in 8213ms ← actions all from UD-901 recovery (UD-901a)
+00:25:37  Pass 2 transfer semaphore … (zero CreateRemoteFolder ran)
+00:25:37  Upload failed for /AfA - …                   ← UD-901b's missing-parent bug
+```
+
+## Root cause
+
+[`SyncEngine.kt:163-168`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163) and the matching local-changes block (line ~190):
+
+```kotlin
+val remoteChanges = if (syncPath != null) {
+    allRemoteChanges.filterKeys { it.startsWith(syncPath) || it == syncPath }
+} else {
+    allRemoteChanges
+}
+```
+
+Every path in `allRemoteChanges` and `allLocalChanges` is forward-slash-normalised (the `LocalScanner` does `relativize.toString().replace('\\', '/')` at [LocalScanner.kt:52](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:52); the providers emit forward-slash paths from their delta APIs). The `syncPath` argument is taken verbatim from the CLI option in [`SyncCommand.kt`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt) — no normalisation. With Windows users typing `\` from PowerShell tab-completion, `startsWith` fails for every path and the filter eats everything.
+
+Same trap applies to `sync_path` in `config.toml` if a Windows user transcribes a path with backslashes.
+
+## Acceptance
+
+- Either:
+  - **(a) Normalise at the CLI argument boundary in `SyncCommand`** — replace `\` with `/`, prepend missing leading `/`, reject empty result. Single-line edit + targeted unit test in `SyncCommandTest`.
+  - **(b) Reject loud at parse time** — `picocli.ParameterException("--sync-path must use forward slashes; got '\\AfA - …'")`. Less convenient but unambiguous.
+- Pick **(a)**: silent normalisation matches the project's "do what I mean for paths" precedent (UD-299 sync_root drift detection normalises root paths the same way; `Path.toAbsolutePath().normalize().toString()`).
+- Same normalisation applies to the `sync_path` field in `SyncConfig` (config.toml entry) — covered by either the same helper or a sibling validator.
+- Unit test: with `syncPath = "\\Project Notes"`, after construction the engine sees `syncPath = "/Project Notes"`. Round-trip filter against synthetic `remoteChanges` map containing `/Project Notes/foo.txt` matches.
+- Manual repro from the ticket body (with backslash) now succeeds the same way as forward slash.
+
+## Related
+
+- **UD-901a (filed alongside)**: the symptom is amplified because UD-901's upload-recovery loop ignores `syncPath` entirely. Even after this ticket lands, scope-bypass via UD-901 stays — fix both.
+- **UD-901b (filed alongside)**: orphaned pending-upload rows whose parent folder isn't on remote fail forever. The user's "Folder not found" error chain is UD-901b's manifestation. Bug A → Bug B exposed → Bug C fired. All three deserve fixes.
+- **UD-299** — sync_root drift detection: precedent for path normalisation at the engine boundary. Mirror its `toAbsolutePath().normalize().toString()` shape but for the relative `syncPath` instead of the absolute root.
+
+## Surfaced
+
+2026-05-03 session, while diagnosing why `--sync-path '\Project Notes'` produced 106,455 unrelated upload failures. The user's first attempt (`\AfA - …`) silently filtered to nothing; the second (`/internal`) revealed UD-901a still bypasses scope. Bug A on its own is small; it's the gateway that exposes UD-901a/b.
