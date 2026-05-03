@@ -11142,3 +11142,47 @@ All four already have the `CloudItem` in scope (action.remoteItem or local `item
 - UD-352a (open) — provider-level scope narrowing; orthogonal but compounds the API-traversal cost.
 - UD-353 — OVH shard upload throughput floor; sets the realistic post-fix lower bound on wall clock.
 - UD-317 — name sanitization that can cause path-based resolution to silently fail (one of several reasons to prefer id-based dispatch).
+
+---
+id: UD-366
+title: Internxt upload always POSTs /files; 409 Conflict on modify-in-place
+category: providers
+priority: high
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit 490cca5. Internxt MODIFIED uploads route through PUT /files/{uuid}; defensive 409 fallback on POST /files. Audit doc flipped to used. Live verification: stranded files Businessplan_Krost.docx + Finanzplan_Krost.xlsx unblock on next sync.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:143
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:112
+  - docs/audits/internxt-api-vs-spi.md
+opened: 2026-05-03
+---
+**`InternxtProvider.upload` always POSTs to `/files` to create a new entry, even when the path already exists on remote.** Internxt's API responds with `409 Conflict — {"message":"File already exists"}`, which surfaces as `Upload failed: …InternxtApiException: API error: 409 Conflict` and leaves the local modification stranded.
+
+Live impact, 2026-05-03: user invoked `unidrive sync --upload-only --sync-path="/AfA - Gründungsprozess"` to push 2 net-new `.txt` files plus 3 net-new docs and 2 locally-modified files. The 5 net-new uploads succeeded; both locally-modified files (`Businessplan_Krost.docx`, `Finanzplan_Krost.xlsx`) failed with 409. The reconciler will keep emitting Upload for them on every subsequent sync until the bug is fixed.
+
+The Drive OpenAPI spec exposes `PUT /files/{uuid}` for replace-in-place ([audit](docs/audits/internxt-api-vs-spi.md) §capability matrix, line 97 — flagged as available-unused). The provider's `upload` doesn't reach for it.
+
+## What to change
+
+In [`InternxtProvider.upload` (around InternxtProvider.kt:143–235)](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:143):
+
+1. Before POSTing `/files` to create a new entry, check whether a file already exists at the target path. The reconciler already knows this — when the action is a *modification* (existing DB row + `is_hydrated=true` + matching path), the entry's `remoteId` is the file UUID. Plumb that through the `upload(localPath, remotePath, onProgress)` signature so the provider can route MODIFIED uploads through `PUT /files/{uuid}` instead of `POST /files`.
+
+2. As a fallback for cases without a known UUID (defensive, shouldn't happen post-reconciler-rewrite): catch `InternxtApiException(statusCode=409)` from `createFile`, re-resolve the target's UUID via `getMetadata(remotePath)`, and retry as `PUT /files/{uuid}`.
+
+3. Add an integration test case (env-gated): create a file, modify it locally, upload — assert the second upload succeeds (single remote entry, latest local content).
+
+## Acceptance
+
+- The user's `Businessplan_Krost.docx` + `Finanzplan_Krost.xlsx` modifications upload cleanly (replace remote in place).
+- Pin the regression with a unit test that constructs a MODIFIED action (existing DB row, isHydrated=true, local mtime > DB mtime), routes through `applyUpload`, and asserts the provider receives a PUT-style call carrying the existing remoteId rather than a fresh POST.
+- The default `CloudProvider.upload` signature gains an optional `existingRemoteId: String?` parameter (or equivalent — design choice in the implementation), defaulting to null for backwards compat. Providers that don't have replace-in-place semantics ignore it (current behaviour) — only Internxt and OneDrive Graph need to implement.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §capability matrix — line 97 flags `/files/{uuid}` PUT as available-unused.
+- UD-225a / UD-225b — the same week's reconciler/dispatch fixes that revealed this downstream issue. The first batch of files shaped after UD-225a's fix exposed the modify-overwrite gap.
+- UD-317 — folder name sanitization; orthogonal but related to provider's overall write-path resilience.
+- UD-737 — `--upload-only` semantics. The user's case ran under `--upload-only` and the failure surfaced as a Sync-complete-with-2-failed line, not a hard error — the orchestration layer is fine, the provider's API verb selection is the problem.
