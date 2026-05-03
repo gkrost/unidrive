@@ -11924,3 +11924,58 @@ them lets a single sweep handle them with one round of
 verification. If any sub-item turns out to be load-bearing
 (e.g. someone *does* care about the relocate-v1 vs SPI link),
 break it out at fix-time, not now.
+
+---
+id: UD-773
+title: RequestId close line missing content-length — blocks bytes/sec throughput stats
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 5cf294d. RequestIdPlugin.onResponse appends 'up=N dn=M' (or '?' for streaming) after the existing '(Nms)' chunk; suppressed when both counts are zero or both null. Goes after the ms close-paren so log-stats.py's r'\(\d+\)ms\)' regex (line 35) keeps matching unchanged. Three tests cover suppress/emit/streaming behaviour. log-throughput.py consumer was referenced in the ticket but the file doesn't exist in the tree — left as a follow-on if/when that script lands.
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestId.kt
+  - scripts/dev/log-throughput.py
+  - scripts/dev/log-stats.py
+opened: 2026-05-02
+---
+**`RequestId` close lines (`← req=ID STATUS (Nms)`) carry no payload size, so any analysis that wants true bytes/sec throughput per provider has to give up and report ops/sec instead.**
+
+## Today
+
+The `RequestId` HTTP logger emits:
+```
+→ req=d76091c0 GET https://gateway.internxt.com/drive/files?<redacted>
+← req=d76091c0 200 (671ms)
+```
+
+That's enough to derive request count, latency percentiles, and HTTP-status error rate per host (see [scripts/dev/log-stats.py](scripts/dev/log-stats.py) and [scripts/dev/log-throughput.py](scripts/dev/log-throughput.py)). What's missing is the byte count of the request body (uploads) and response body (downloads). On a 13,924-PUT Internxt session the analyser can say "you uploaded 27.9 ops/min" but not "you uploaded N MiB/s" — the question the user actually asks.
+
+For most providers the byte count is already known at the call site:
+
+- WebDAV `Upload:` log line already carries `(N bytes)` — but only at start, only on WebDAV, and not paired with the `← req=` close line.
+- OkHttp / Ktor expose `Content-Length` request and response headers when set; chunked / streamed bodies fall back to "unknown" which is fine.
+- `RequestId.kt` is the canonical single point where every provider's HTTP traffic flows.
+
+## Proposal
+
+Extend the close line:
+```
+← req=d76091c0 200 (671ms) up=0B dn=12.3KiB
+```
+
+- `up=` and `dn=` are byte counts (request body / response body). Suppress the segment when both are zero (most metadata calls on streamed paths) to avoid bloating logs.
+- Format: raw integer bytes is parser-friendly (`up=12345`); IEC suffix is human-friendly (`up=12.3KiB`). Pick raw — log-stats.py and friends prefer integers, humans can tolerate it.
+- If `Content-Length` is missing on a streaming response, emit `dn=?` rather than dropping the segment (so analysers can distinguish "zero" from "unknown").
+
+## Acceptance
+
+- `RequestId.kt` close path emits `up=N dn=M` (or `up=? dn=?`) for every HTTP exchange.
+- `log-throughput.py` consumes the new fields and reports per-provider bytes/sec next to ops/min, replacing the current "throughput here is ops, not bytes" caveat in its docstring.
+- A new `LogFormatTest` (or `RequestIdTest`) asserts the close-line shape so a future refactor doesn't silently drop the byte counts.
+- Existing log-grep heuristics keep working — the new segment goes after the `(Nms)` chunk so any regex that ends at `\d+ms\)` still matches.
+
+## Why now
+
+Surfaced 2026-05-02 alongside [UD-240g](docs/backlog/BACKLOG.md): user asked for per-provider DL/UL throughput, the analyser script could only deliver ops/min because of this gap. Closing the gap unlocks both throughput stats today AND the cross-provider benchmark harness motivation in [UD-247](docs/backlog/BACKLOG.md) — UD-247 will need bytes/sec to be apples-to-apples across providers anyway.
