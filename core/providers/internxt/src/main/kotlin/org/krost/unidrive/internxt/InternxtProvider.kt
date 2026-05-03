@@ -3,6 +3,7 @@ package org.krost.unidrive.internxt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
+import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
 import org.krost.unidrive.sync.ScanHeartbeat
@@ -295,6 +296,7 @@ class InternxtProvider(
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
     ): DeltaPage {
         foldersScanned.set(0)
+        foldersSkipped.set(0)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
@@ -350,6 +352,21 @@ class InternxtProvider(
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull() ?: cursor ?: Instant.now().toString()
 
+        // UD-361: refuse to return a partial inventory. The /files-fallback
+        // path (collectFilesFromFolders) silently treats per-subtree 500/503
+        // as "skip and continue", which the engine's detectMissingAfterFullSync
+        // would interpret as a remote-deletion of every file under that
+        // subtree (e.g. /_INBOX/wiederherstellungs_codes.txt → del-local).
+        // Fail loud here; UD-360 will refine this to a partial-flag the
+        // engine can honour without raising an exception.
+        val skipped = foldersSkipped.get()
+        if (skipped > 0) {
+            throw ProviderException(
+                "Internxt delta gather skipped $skipped folder(s) due to 500/503; " +
+                    "refusing to return partial inventory (UD-361). Retry on next sync run.",
+            )
+        }
+
         return DeltaPage(items = items, cursor = latestUpdatedAt, hasMore = false)
     }
 
@@ -372,29 +389,26 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicInteger(0)
 
+    // UD-361: count of subtrees we skipped due to 500/503 during the recursive
+    // /files fallback. Inspected at the end of delta() to refuse partial gathers.
+    private val foldersSkipped =
+        java.util.concurrent.atomic
+            .AtomicInteger(0)
+
     private suspend fun collectFilesFromFolders(
         folderUuid: String,
         accumulator: MutableList<InternxtFile>,
         depth: Int,
     ) {
-        val content =
-            try {
-                api.getFolderContents(folderUuid)
-            } catch (e: InternxtApiException) {
-                if (e.statusCode in listOf(500, 503)) {
-                    log.warn("Skipping folder {} ({}): {}", folderUuid, e.statusCode, e.message)
-                    return
-                }
-                throw e
-            }
-        accumulator.addAll(content.files)
-        val scanned = foldersScanned.incrementAndGet()
-        log.debug("Scanning: {} files, {} folders scanned", accumulator.size, scanned)
-        for (child in content.children) {
-            if (child.status == "EXISTS" && !child.removed && !child.deleted) {
-                collectFilesFromFolders(child.uuid, accumulator, depth + 1)
-            }
-        }
+        collectFilesFromFoldersImpl(
+            getContents = api::getFolderContents,
+            folderUuid = folderUuid,
+            accumulator = accumulator,
+            depth = depth,
+            scanned = foldersScanned,
+            skipped = foldersSkipped,
+            log = log,
+        )
     }
 
     private suspend fun resolveFolder(path: String): String {
@@ -449,6 +463,53 @@ class InternxtProvider(
     }
 
     companion object {
+        /**
+         * UD-361: testable recursion driver. Walks the folder tree rooted at
+         * [folderUuid], accumulating files into [accumulator]. On 500/503
+         * from [getContents], increments [skipped] and returns (the subtree
+         * is silently dropped from the accumulator — caller is responsible
+         * for inspecting [skipped] and rejecting partial gathers). Other
+         * exceptions propagate. Increments [scanned] for every successfully
+         * walked folder.
+         */
+        internal suspend fun collectFilesFromFoldersImpl(
+            getContents: suspend (String) -> FolderContentResponse,
+            folderUuid: String,
+            accumulator: MutableList<InternxtFile>,
+            depth: Int,
+            scanned: java.util.concurrent.atomic.AtomicInteger,
+            skipped: java.util.concurrent.atomic.AtomicInteger,
+            log: org.slf4j.Logger,
+        ) {
+            val content =
+                try {
+                    getContents(folderUuid)
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode in listOf(500, 503)) {
+                        log.warn("Skipping folder {} ({}): {}", folderUuid, e.statusCode, e.message)
+                        skipped.incrementAndGet()
+                        return
+                    }
+                    throw e
+                }
+            accumulator.addAll(content.files)
+            val total = scanned.incrementAndGet()
+            log.debug("Scanning: {} files, {} folders scanned", accumulator.size, total)
+            for (child in content.children) {
+                if (child.status == "EXISTS" && !child.removed && !child.deleted) {
+                    collectFilesFromFoldersImpl(
+                        getContents,
+                        child.uuid,
+                        accumulator,
+                        depth + 1,
+                        scanned,
+                        skipped,
+                        log,
+                    )
+                }
+            }
+        }
+
         fun rewindCursor(cursor: String): String {
             val instant = Instant.parse(cursor)
             return instant.minus(6, ChronoUnit.HOURS).toString()
