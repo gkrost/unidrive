@@ -42,6 +42,14 @@ class Reconciler(
         // stay source-compatible. SyncEngine wires the live reporter through
         // so the CLI and IPC clients see reconcile-phase movement.
         reporter: ProgressReporter = ProgressReporter.Silent,
+        // UD-901a: syncPath filter must reach the recovery loops below — they
+        // iterate `db.getAllEntries()` directly, NOT the already-scope-filtered
+        // remoteChanges/localChanges. Without this parameter a `--sync-path
+        // /foo` invocation would still resurrect every pending-upload row in
+        // the DB regardless of its path. Confirmed live 2026-05-03: 107k
+        // unrelated orphans surfaced when the user asked for ~106 in-scope
+        // changes.
+        syncPath: String? = null,
     ): List<SyncAction> {
         // UD-240g: bookend the reconcile pass with log breadcrumbs. Before this,
         // the phase between `Delta: N items, hasMore=false` (gatherRemoteChanges)
@@ -172,6 +180,9 @@ class Reconciler(
             if (entry.remoteSize <= 0) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+            // UD-901a: respect syncPath scope; orphans outside the user's requested
+            // subtree must NOT be silently surfaced.
+            if (!pathInSyncScope(entry.path, syncPath)) continue
             val remoteItem =
                 remoteChanges[entry.path] ?: CloudItem(
                     id = entry.remoteId ?: "",
@@ -200,6 +211,8 @@ class Reconciler(
             if (!entry.isHydrated) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+            // UD-901a: same scope guard as the UD-225 loop above.
+            if (!pathInSyncScope(entry.path, syncPath)) continue
             val localPath = safeResolveLocal(syncRoot, entry.path)
             if (!Files.isRegularFile(localPath)) continue
             actions.add(SyncAction.Upload(entry.path))
@@ -485,6 +498,29 @@ class Reconciler(
     private fun resolveLocal(remotePath: String): java.nio.file.Path = safeResolveLocal(syncRoot, remotePath)
 
     companion object {
+        /**
+         * UD-901a: predicate matching the engine's own scope filter at
+         * [SyncEngine.kt:163-168]. Encoded once here so the recovery
+         * loops can reuse it without drifting from the main filter's
+         * semantics.
+         *
+         * Returns true when:
+         *   - syncPath is null (no scope = everything in scope), or
+         *   - path equals syncPath (the scope's own root), or
+         *   - path is a strict descendant of syncPath (path startsWith
+         *     "$syncPath/").
+         *
+         * Note `startsWith("$syncPath/")` not `startsWith(syncPath)` —
+         * otherwise `/foo` would match `/footer.txt` etc.
+         */
+        fun pathInSyncScope(
+            path: String,
+            syncPath: String?,
+        ): Boolean {
+            if (syncPath == null) return true
+            return path == syncPath || path.startsWith("$syncPath/")
+        }
+
         /**
          * UD-240i: combined isRegularFile + size in a single
          * `Files.readAttributes` call (one Windows GetFileAttributesEx
