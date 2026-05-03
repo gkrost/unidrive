@@ -5929,3 +5929,108 @@ The file-move loop directly below uses the symmetric pattern with `matchedUpload
 ## Surfaced
 
 2026-05-03 10:41, after UD-901a/b/c + UD-357 + UD-405 + UD-406 deployed. The user re-ran a full upload-only sync and got two MoveRemote actions targeting the same destination path. They flagged it: "It tries to move a non existing remote folder hence the move was made locally. does not make sense at all." Confirmed by code-read of `Reconciler.detectMoves` folder-move loop — missing `matchedFolderCreates` dedup.
+---
+id: UD-240k
+title: detectMoves folder-move basename-only match picks wrong source across tree distance
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:401
+opened: 2026-05-03
+---
+**`Reconciler.detectMoves`'s folder-move detection matches `DeleteRemote` ↔ `CreateRemoteFolder` purely by basename. When multiple deletes share a basename, it picks one effectively at random (set-iteration order). With stale legacy DB rows, "random" routinely hits the wrong source — producing a `MoveRemote` from a path that doesn't exist on remote, instead of from the close-relative path that's the actual user intent.**
+
+## Captured live (2026-05-03 10:51, post-UD-240j)
+
+```
+[1/107801] move /Sample -> /userhome/Pictures/_Photos/Sample
+10:51:59 WARN Action failed: ProviderException: Item not found: /Sample
+```
+
+UD-240j stopped the *duplicate* MoveRemote (only one emitted now, not two). But the surviving one picked `/Sample` (a top-level legacy folder that no longer exists on Internxt) as the source, instead of `/userhome/Pictures/Sample` (the actual moved folder, sibling-tree to the destination). The user wanted:
+
+```
+move /userhome/Pictures/Sample -> /userhome/Pictures/_Photos/Sample     ← real move
+delete /Sample                                                              ← legacy garbage
+```
+
+But got:
+
+```
+move /Sample -> /userhome/Pictures/_Photos/Sample                       ← fictional move
+delete /userhome/Pictures/Sample                                           ← unintentional, also fails
+```
+
+## Root cause
+
+[Reconciler.kt:401-404](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt#L401):
+
+```kotlin
+val oldName = del.path.substringAfterLast("/")
+for (create in folderCreates) {
+    if (create.path in matchedFolderCreates) continue   // UD-240j dedup
+    if (create.path.substringAfterLast("/") != oldName) continue
+    // ↑ basename-only match. No structural similarity check.
+    actions.add(SyncAction.MoveRemote(...))
+    ...
+}
+```
+
+A real folder move has **structural locality**: source and destination share at least one ancestor segment. A rename in place shares the entire parent (`/A/B/Old → /A/B/New`). A cross-parent move shares the grandparent (`/A/old/X → /A/new/X`). A move that crosses *the entire tree* (`/X → /a/b/c/d/X`) is plausible only when the user has actually moved their data tree-deep — extremely rare.
+
+Pure basename matching cheerfully accepts any two paths in the universe, ignoring structural distance. With stale DB rows accumulating over time (legacy `/Sample`, current `/userhome/Pictures/Sample`, partial-rename leftovers, etc.), false positives are routine.
+
+## Proposal
+
+Score candidate matches by **common-ancestor segment count** between the parents of source and destination. Pick the highest score. Require score ≥ 1 — i.e. the source and destination must share at least one parent segment.
+
+```kotlin
+// For each CreateRemoteFolder, find the best-matching DeleteRemote.
+// "Best" = same basename AND longest common parent-path. Score 0
+// (no shared parent segments) → not a move.
+for (create in folderCreates) {
+    if (create.path in matchedFolderCreates) continue
+    val newName = create.path.substringAfterLast("/")
+    val createParent = parentSegments(create.path)
+    val bestDel = deletes
+        .asSequence()
+        .filter { it.path !in matchedFolderDeletes }
+        .filter { it.path.substringAfterLast("/") == newName }
+        .filter {
+            val e = entryByPath[it.path]
+            e != null && e.isFolder && e.remoteId != null
+        }
+        .map { it to commonPrefixSegments(parentSegments(it.path), createParent) }
+        .filter { (_, score) -> score >= 1 }
+        .maxByOrNull { (_, score) -> score }
+        ?.first ?: continue
+
+    // emit MoveRemote(create.path, fromPath = bestDel.path)
+    ...
+}
+```
+
+The loop also flips inside-out: outer = creates, inner = candidate deletes. This reflects intent — a `CreateRemoteFolder` is the "thing the user just made"; we look back for the source that BEST explains it. The previous loop did it the other direction, biasing against the user's intent when multiple stale deletes were in play.
+
+When score ≥ 1 isn't satisfied (no candidate shares any parent segment), no move is emitted. The standalone `DeleteRemote` propagates as a normal delete; if the source path doesn't actually exist on remote, the existing 404-skip path in `applyDeleteRemote` handles it gracefully.
+
+## Acceptance
+
+- New `ReconcilerTest` case: pre-seed DB with TWO folder rows sharing basename — one stale far-away (`/Sample`) and one close-relative (`/Pictures/Sample`). Local `CreateRemoteFolder(/Pictures/_Photos/Sample)`. Reconcile must emit `MoveRemote(fromPath=/Pictures/Sample, path=/Pictures/_Photos/Sample)` AND a separate `DeleteRemote(/Sample)` — NOT the cross-tree move.
+- New test: cross-tree-only candidates (no parent overlap with the create at all). Expect NO `MoveRemote` emitted; both `DeleteRemote` and `CreateRemoteFolder` survive untouched.
+- Existing folder-move tests still pass:
+  - single legitimate move (rename in place, share full parent)
+  - cross-parent move that DOES share at least one ancestor segment
+  - UD-240j dedup test (two deletes sharing basename → at most one MoveRemote)
+
+## Related
+
+- **UD-240j** (closed): dedup matchedFolderCreates so each create is consumed at most once. Necessary precondition for UD-240k — without dedup, a smart pick still gets duplicated.
+- **UD-205** (open): "atomicity across sync transfer phases." Sister concern: even with the right move detected, the half-moved-DB recovery problem persists. UD-901c addressed renamePrefix; UD-205 is the broader concern.
+- **detectMoves' file-move side** (UD-240i refactored): files match by SIZE, not basename. The same structural-locality argument applies — `/mnt/nas/<HASH>` matching a JPG by size alone produced false-positive moves we've seen earlier in this session. A follow-up UD-240l should apply the same parent-overlap heuristic to the file-move loop. Out of scope for UD-240k; same pattern.
+
+## Surfaced
+
+2026-05-03 10:51, immediately after UD-240j deployed. The user's full upload sync still showed `move /Sample → /userhome/Pictures/_Photos/Sample` as action #1 — the wrong source despite UD-240j stopping the duplicate. User identified the problem in real time: detectMoves picked an impossible source over the obvious correct one.
