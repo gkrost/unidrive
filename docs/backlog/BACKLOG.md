@@ -6119,3 +6119,96 @@ Each option needs:
 ## Surfaced
 
 2026-05-03 11:42, while the operator was end-to-end verifying the UD-901 fix-stack against their full ~68k local tree on Internxt. One file failed with the 409; the rest of the sync continued. State.db has 107k legacy rows so the surfacing is high-volume — every conflict-eligible file in the operator's `/AfA - …/` and similar trees is at risk.
+---
+id: UD-352a
+title: gather-phase 3:40 on narrow --sync-path: sequential pagination + no scoped delta + no streaming
+category: providers
+priority: medium
+effort: M
+status: open
+opened: 2026-05-03
+---
+**`unidrive sync --download-only --sync-path=/_INBOX` against a 22,700-item Internxt drive sat in `Scanning remote changes... 22,700 items · 3:40` before the first download started. The 3:40 is dominated by **sequential pagination of `/files` and `/folders`** in [`InternxtProvider.delta()` lines 313-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313). 22,700 items / 50 per page ≈ 454 round-trips × ~485ms ≈ 220s, entirely API-bound. Two compounding issues: (a) no parallelism on the offset-paginate; (b) `--sync-path` is filtered in-engine *after* the full delta returns ([SyncEngine.kt:163-168](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163)), so the engine pulls every item in the entire drive even when the user wants 1 % of it.**
+
+## Dig findings (2026-05-03)
+
+Triaged the 3:40 cost on `unidrive -p inxt_gernot_krost_posteo sync --download-only --sync-path=/_INBOX`:
+
+1. **`gatherRemoteChanges` does NOT honor `syncPath`.** [SyncEngine.kt:578-690](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:578) fetches the entire remote delta, full-set; filtering happens later at [SyncEngine.kt:163-168](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163). For a narrow `--sync-path` against a wide drive the wasted work is the dominant cost.
+
+2. **`InternxtProvider.delta` paginates sequentially.** [InternxtProvider.kt:313-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313):
+   ```kotlin
+   var offset = 0
+   while (true) {
+       val batch = api.listFiles(adjustedCursor, limit, offset)   // limit=50
+       allFiles.addAll(batch)
+       …
+       if (batch.size < limit) break
+       offset += limit
+   }
+   // identical loop for /folders
+   ```
+   No concurrency. 22,700 items × 50/page = 454 sequential requests. Observed 220s ÷ 454 ≈ 485 ms/request — entirely network/server time.
+
+3. **`resolveItemPath` is cheap.** [SyncEngine.kt:703-709](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:703) only does DB lookup for deleted items at root; non-deleted items return directly. Not the bottleneck.
+
+4. **Fast-bootstrap (UD-223) is bypassed** because the operator has a populated DB (`storedCursor != null`), so `isFullSync = false`. Even if it weren't, this is `--download-only` — fast-bootstrap adopts the cursor and emits zero actions, which is the wrong answer when the user wants files pulled.
+
+5. **No streaming.** Engine's gather → reconcile → apply phases are strict. First download cannot start until gather + reconcile complete.
+
+## Three layers of fix, smallest to largest
+
+### (a) Parallelize Internxt offset-paginate — easy win, biggest absolute saving
+
+Replace the sequential offset loop with a parallel fetcher. Pseudo:
+
+```kotlin
+val pages = generateSequence(0) { it + limit }.takeWhile { it < probedTotal }
+val sem = Semaphore(8)
+val batches = pages.map { offset ->
+    async { sem.withPermit { api.listFiles(adjustedCursor, limit, offset) } }
+}.awaitAll()
+```
+
+Risks: the offset-paginate API contract assumes "stop when batch < limit" — without a count probe the parallel fan-out can't know how many pages exist. Either (i) request via `Range`-like total-count header (if Internxt supports it), (ii) over-fetch with `limit*N` slots and ignore empty pages, or (iii) spawn N requests, fan out more if any returned full pages. Concurrency 8 should cut 220 s to ~30 s.
+
+Same pattern applies to `listFolders`. Could be done in parallel with `listFiles`.
+
+### (b) Folder-scoped delta when `--sync-path` is set — eliminates wasted work
+
+For Internxt, the engine could pass `syncPath` (or its resolved folder UUID via `FolderUuidCache`) to the provider's `delta()` and have the provider only enumerate the subtree. Current `listFiles`/`listFolders` API doesn't take a folder filter — needs API research (does Internxt's REST API support `?folder=<uuid>` on `/files`?). If yes, narrow paths drop from 22,700 → ~hundreds.
+
+If the API doesn't support it, the engine could call `listFiles(folder=<uuid>)`-style folder-by-folder traversal as a `Capability.ScopedDelta` opt-in, falling back to full delta when absent. Adds capability bookkeeping but is the right answer for narrow `--sync-path` use cases.
+
+### (c) Streaming gather → apply for `--download-only` — biggest UX win, biggest refactor
+
+User's original ask. Pipeline pages of remote items into Pass-2 download workers as they arrive, before reconcile completes. Constraints relax in `--download-only` mode:
+- Move detection ([Reconciler.detectMoves](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt) — UD-240i/j/k) needs the full remote+local set; in `--download-only` move-as-download-new + delete-old is acceptable (slightly more bytes, correct outcome).
+- Conflict detection in `--download-only` defaults to remote-wins-content; per-item resolution is fine.
+- Cursor-promotion guard (UD-222) still works — just promote at end of gather only if every transfer succeeded.
+
+Implementation shape: a new `SyncMode.STREAM_DOWNLOAD` that bypasses `gatherRemoteChanges`/`reconcile`, enumerates remote pages, and per-page emits `DownloadContent` actions into a channel that Pass-2 workers consume. Initial impl could be Internxt-only behind a flag.
+
+## Why this fits as UD-352a
+
+[UD-352](docs/backlog/CLOSED.md) closed the gather-phase visibility problem (heartbeat per page so users see progress). UD-352a is the next layer: the gather phase is now visible *and* observably slow. The fixes here either preserve UD-352's heartbeat contract (parallelize, scoped delta) or relax it (streaming = no fixed total to count toward).
+
+## Acceptance
+
+- (a) is a self-contained provider-side change. Acceptance: sync wall-clock for the operator's `--sync-path=/_INBOX` against 22,700-item drive drops below 60 s with parallelism = 8. New `InternxtProviderTest` case asserts concurrent in-flight requests (mock with delay assertion).
+- (b) requires API research first. Acceptance: a `Capability.ScopedDelta` opt-in path; when set, narrow-path syncs enumerate < 1 s independent of total drive size.
+- (c) needs an ADR (streaming changes engine invariants). Acceptance: `--download-only --sync-path=/_INBOX` starts the first download within 10 s, regardless of drive size.
+
+Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once the easy win is in.
+
+## Related
+
+- **UD-352** (closed) — gather-phase heartbeat. Sets the visibility contract this ticket builds on.
+- **UD-742** (closed) — heartbeat per page. Same gather-phase family.
+- **UD-223** (open) — fast-bootstrap. Adjacent: skips full enumeration on first sync via `Capability.FastBootstrap`. The `Capability.ScopedDelta` of (b) is the symmetric capability for non-first syncs.
+- **UD-405** (closed) — `--sync-path` Windows backslash normalisation. Same `--sync-path` UX axis.
+- **UD-901a** (closed) — recovery loops respect `syncPath`. Same scope-honoring concern at a different code site.
+
+## Surfaced
+
+2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
