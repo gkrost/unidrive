@@ -4,6 +4,7 @@ import picocli.CommandLine
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -42,6 +43,63 @@ class SyncCommandTest {
         val syncCmd = cmd.subcommands["sync"]!!
         val options = syncCmd.commandSpec.options().map { it.longestName() }
         assertTrue("--sync-path" in options)
+    }
+
+    // ── UD-405: --sync-path normalisation ────────────────────────────────────
+    // Pre-fix repro: PowerShell tab-completion produces `\Project Notes`
+    // which is taken verbatim. The engine's scope filter compares against
+    // forward-slash-normalised paths and matches nothing, silently. UD-405's
+    // normaliser turns it into `/Project Notes` so the filter works.
+
+    @Test
+    fun `UD-405 normalizeSyncPath converts Windows backslash to forward slash`() {
+        assertEquals(
+            "/Project Notes",
+            SyncCommand.normalizeSyncPath("\\Project Notes"),
+        )
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath converts mid-path backslashes too`() {
+        assertEquals(
+            "/internal/sub/dir",
+            SyncCommand.normalizeSyncPath("\\internal\\sub\\dir"),
+        )
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath leaves valid forward-slash paths unchanged`() {
+        assertEquals("/internal", SyncCommand.normalizeSyncPath("/internal"))
+        assertEquals(
+            "/Project Notes/Subfolder1",
+            SyncCommand.normalizeSyncPath("/Project Notes/Subfolder1"),
+        )
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath prepends leading slash when missing`() {
+        assertEquals("/internal", SyncCommand.normalizeSyncPath("internal"))
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath strips trailing slash`() {
+        assertEquals("/internal/sub", SyncCommand.normalizeSyncPath("/internal/sub/"))
+        assertEquals("/internal", SyncCommand.normalizeSyncPath("\\internal\\"))
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath collapses runs of separators`() {
+        assertEquals("/internal/sub", SyncCommand.normalizeSyncPath("//internal//sub"))
+        assertEquals("/internal/sub", SyncCommand.normalizeSyncPath("\\\\internal\\\\sub"))
+    }
+
+    @Test
+    fun `UD-405 normalizeSyncPath returns null for null empty or root`() {
+        assertNull(SyncCommand.normalizeSyncPath(null))
+        assertNull(SyncCommand.normalizeSyncPath(""))
+        assertNull(SyncCommand.normalizeSyncPath("/"))
+        assertNull(SyncCommand.normalizeSyncPath("\\"))
+        assertNull(SyncCommand.normalizeSyncPath("//"))
     }
 
     @Test

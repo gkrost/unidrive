@@ -136,6 +136,14 @@ class SyncCommand : Runnable {
                 "--propagate-deletes is only valid together with --upload-only.",
             )
         }
+        // UD-405: normalise --sync-path at the CLI boundary. PowerShell tab-
+        // completion routinely produces backslash-prefixed values like
+        // `'\Project Notes'`; without normalisation the engine's
+        // scope filter (which compares against forward-slash paths) silently
+        // matches nothing and the sync runs against zero in-scope items.
+        // Mirrors UD-299's sync_root normalisation philosophy: do-what-I-mean
+        // for paths instead of failing loud.
+        syncPath = normalizeSyncPath(syncPath)
         val lock = parent.acquireProfileLock()
         val profile = parent.resolveCurrentProfile()
         val rawProvider = parent.createProvider()
@@ -648,5 +656,36 @@ class SyncCommand : Runnable {
         }
 
         override fun onWarning(message: String) = delegates.forEach { it.onWarning(message) }
+    }
+
+    companion object {
+        /**
+         * UD-405: normalise a `--sync-path` value (or its `sync_path` config
+         * equivalent) to the forward-slash, leading-slash, no-trailing-slash
+         * form the SyncEngine scope filter expects.
+         *
+         * Returns null if the input is null, empty, or normalises to "/"
+         * (which is the same as "no scope" — every path startsWith "/").
+         *
+         * Examples:
+         *   `\Project Notes` → `/Project Notes`
+         *   `\internal\sub\`           → `/internal/sub`
+         *   `internal`                 → `/internal`
+         *   `/`                        → `null` (= no scope)
+         *   `""`                       → `null`
+         */
+        internal fun normalizeSyncPath(raw: String?): String? {
+            if (raw.isNullOrEmpty()) return null
+            // Replace any backslashes with forward slashes (PowerShell-friendly).
+            var s = raw.replace('\\', '/')
+            // Collapse runs of '/' to a single '/' (handles "//", "\\\\", mixed).
+            s = s.replace(Regex("/+"), "/")
+            // Ensure leading '/'.
+            if (!s.startsWith("/")) s = "/$s"
+            // Strip trailing '/' (engine matches startsWith("$syncPath/")).
+            if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
+            // A bare "/" is the whole tree — same as no scope.
+            return if (s == "/") null else s
+        }
     }
 }
