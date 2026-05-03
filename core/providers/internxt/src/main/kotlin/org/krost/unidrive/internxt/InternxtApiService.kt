@@ -238,6 +238,55 @@ class InternxtApiService(
         if (response.status != HttpStatusCode.NotFound) checkResponse(response)
     }
 
+    /**
+     * UD-367: move items to Internxt's recycle bin via `POST /storage/trash/add`.
+     *
+     * Spec: `MoveItemsToTrashDto` accepts `items: [{uuid, type: "file"|"folder"}]` with
+     * a server-side cap of 50 items per call. Replaces the permanent `DELETE /files/{uuid}`
+     * + `DELETE /folders` collection-form path for routine sync-driven deletes — the user
+     * recovers via Internxt's web UI within the configured retention window.
+     *
+     * The permanent `deleteFile` / `deleteFolder` primitives remain available for explicit
+     * purge actions (e.g. a future `unidrive trash purge --remote`).
+     *
+     * @param items list of (uuid, type) pairs where type is "file" or "folder". Caller is
+     *   responsible for chunking >50 items into multiple calls — this method does not split.
+     */
+    suspend fun trashItems(items: List<Pair<String, String>>) {
+        require(items.isNotEmpty()) { "trashItems requires at least one item" }
+        require(items.size <= 50) { "trashItems is server-capped at 50; got ${items.size}" }
+        require(items.all { it.second == "file" || it.second == "folder" }) {
+            "type must be 'file' or 'folder'; got ${items.map { it.second }.distinct()}"
+        }
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put(
+                        "items",
+                        kotlinx.serialization.json.buildJsonArray {
+                            items.forEach { (uuid, type) ->
+                                add(
+                                    kotlinx.serialization.json.buildJsonObject {
+                                        put("uuid", kotlinx.serialization.json.JsonPrimitive(uuid))
+                                        put("type", kotlinx.serialization.json.JsonPrimitive(type))
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+            val response =
+                httpClient.post("$baseUrl/storage/trash/add") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            // 200 OK — items moved. 400 means at least one uuid was invalid; let it surface.
+            checkResponse(response)
+        }
+    }
+
     suspend fun deleteFolder(uuid: String) {
         val creds = credentialsProvider()
         val requestBody =

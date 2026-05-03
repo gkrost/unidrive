@@ -272,12 +272,14 @@ class InternxtProvider(
     }
 
     override suspend fun delete(remotePath: String) {
+        // UD-367: route routine sync-driven deletes through Internxt's recycle bin
+        // (POST /storage/trash/add) so any spurious del-local from a partial delta()
+        // gather is recoverable rather than permanently destructive. The permanent
+        // deleteFile/deleteFolder primitives in InternxtApiService remain available
+        // for an explicit `unidrive trash purge --remote` operator action (not yet wired).
         val metadata = getMetadata(remotePath)
-        if (metadata.isFolder) {
-            api.deleteFolder(metadata.id)
-        } else {
-            api.deleteFile(metadata.id)
-        }
+        val type = if (metadata.isFolder) "folder" else "file"
+        api.trashItems(listOf(metadata.id to type))
     }
 
     override suspend fun createFolder(path: String): CloudItem {

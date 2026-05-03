@@ -123,6 +123,19 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/folders/{uuid}/size` | GET | ◯ | — | |
 | `/folders/meta` | GET (?path) | ◯ | — | |
 
+### Drive — Trash endpoints
+
+| Endpoint | Verb | Status | Provider site | Notes |
+|---|---|---|---|---|
+| `/storage/trash/add` | POST | ✅ | `InternxtApiService.kt` `trashItems` | UD-367: routine sync-driven deletes route through here. Body shape `{items: [{uuid, type:"file"|"folder"}]}` per `MoveItemsToTrashDto`; server-capped at 50 items per call. |
+| `/storage/trash/paginated` | GET | ◯ | — | Could feed a `unidrive trash list --remote` operator command. |
+| `/storage/trash` | DELETE | ◯ | — | Bulk purge by id list. |
+| `/storage/trash/all` | DELETE | ◯ | — | Empty entire trash. |
+| `/storage/trash/all/request` | DELETE | ◯ | — | Async empty-trash request (subset of `/all` semantics — needs spec follow-up if surfaced). |
+| `/storage/trash/file/{fileId}` | DELETE | ◯ | — | Permanent purge of one trashed file. Could feed `unidrive trash purge --remote --id …`. |
+| `/storage/trash/folder/{folderId}` | DELETE | ◯ | — | Same for folders. |
+| `/workspaces/{workspaceId}/trash` | GET / DELETE | ◯ | — | Workspace-scoped variants — out of scope until unidrive grows workspace support. |
+
 ### Drive — User / quota endpoints
 
 | Endpoint | Verb | Status | Provider site | Notes |

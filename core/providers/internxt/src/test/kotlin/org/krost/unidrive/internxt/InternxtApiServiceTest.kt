@@ -142,6 +142,43 @@ class InternxtApiServiceTest {
         }
 
     @Test
+    fun `UD-367 trashItems rejects empty list`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.trashItems(emptyList())
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("at least one item"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-367 trashItems rejects more than 50 items (server cap)`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            val tooMany = (1..51).map { "uuid-$it" to "file" }
+            try {
+                service.trashItems(tooMany)
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("server-capped at 50"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-367 trashItems rejects invalid type values`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.trashItems(listOf("uuid-1" to "directory"))
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("must be 'file' or 'folder'"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
     fun `UD-335 retryOnTransient surfaces original exception after budget exhausted`() =
         kotlinx.coroutines.test.runTest {
             val service = mkService()
