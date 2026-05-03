@@ -12045,3 +12045,66 @@ adr_refs: [ADR-0004]
 opened: 2026-04-17
 ---
 Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD-111 covers "structured audit log per action" — but UD-111 is about token-refresh failure telemetry only, not a per-action audit trail. The STRIDE R-row (Repudiation) therefore has a gap: the sync engine emits WARN/INFO logs but nothing durable enough to prove "this run deleted X at Y on behalf of Z". Scope: an append-only JSONL log with `{ts, action, path, size, oldHash, newHash, result, profile}` per action, rotated daily, surfaced via MCP `unidrive_audit` tool (new). Acceptance: run `unidrive -p x sync` on a non-trivial change, observe `{profile}/audit.jsonl` grows with one entry per action. Deferred past v0.1.0 unless compliance need arises.
+
+---
+id: UD-408
+title: CLI 1:1 lines output (tail -f style) — drop in-place overwrite + width truncation in CliProgressReporter
+category: cli
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit d37aacd. CliProgressReporter.printInline collapsed to plain println — no \r\u001b[K, no truncateForWidth, no isTty branch. cols field + terminalWidth/truncateForWidth helpers + UD-742's inlineActive/commitInline machinery deleted (5 UD-735 tests removed too). onTransferProgress + RelocateCommand.preFlightCheck callbacks get a 1-second per-path throttle so multi-GB transfers don't spam hundreds of progress lines. Acceptance: full untruncated paths + 1:1 line scrollback verified; TTY and non-TTY paths now collapsed.
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:286
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:323
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:149
+opened: 2026-05-03
+---
+**Successor to UD-404 follow-up.** Test-drive feedback after the 2026-05-03 CLI batch (UD-405/406/407/764/771/772/773/753/113): the in-place-overwriting + width-clamping that [UD-735](docs/backlog/CLOSED.md) introduced for "tidy terminal output" actively hurts when the user wants to *see* what happened.
+
+Today, [`CliProgressReporter.printInline`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:286) does:
+
+```kotlin
+val displayed = truncateForWidth(msg, cols - 1)
+print("\r[K$displayed")
+```
+
+…on every progress event. Two consequences:
+
+1. **Width truncation** ([truncateForWidth at line 323](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:323)) clips long paths so each progress line stays on one physical row. A `[1247/2400] Upload /AfA - Gründungsprozess/02 - Steuern/2026-Q1/.../some-long-name.docx` becomes `[1247/2400] Upload …/some-long-name.docx`.
+2. **`\r[K`** rewrites the same terminal row, so each new progress event erases the previous one. After the sync finishes, the terminal scrollback shows only summary lines + whatever `printInline` happened to leave on the cursor mid-line — no per-action history.
+
+The non-TTY branch already does the right thing (`println(msg)` — one line per event, full width). The change is to make TTY mode behave the same way.
+
+## What to change
+
+In [`CliProgressReporter.kt`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt):
+
+1. **`printInline` becomes plain `println`.** Drop the `\r[K` prefix, drop the `truncateForWidth` call, drop the `cols` field if no longer used. Each progress event lands on its own line; scrollback is the audit trail.
+2. **Drop the `inlineActive` / `commitInline` machinery** ([UD-742 lines 38–46, 194–204](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:38)) — without mid-line cursor state, there's nothing to commit before the next `println`.
+3. **Throttle the chatty paths.** `onTransferProgress` fires per chunk during a single file (could be hundreds of calls for a multi-GB upload). Throttle to one line per second per active transfer (or per N% complete, e.g. every 10%) — without this guard, a single 1 GB upload would emit 1000+ lines.
+4. **Same surgery on [`RelocateCommand.kt:149`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:149)** — uses the same `\r…padEnd(72)` pattern for its own scan progress.
+
+## Acceptance
+
+- `unidrive sync` on a 100-file change set produces 100+ lines of scrollback (one per action), each carrying the full untruncated path.
+- A single multi-GB upload emits a small number of progress lines (throttled), not one per chunk.
+- `unidrive sync` non-TTY (output piped to a file) behaves identically to TTY — the two branches collapse.
+- Visual: `unidrive sync 2>&1 | tail -f` is no longer a useful monitoring trick because the live output already behaves that way.
+
+## Out of scope
+
+- Replacing the CLI library (Clikt migration — option 3 dropped per 2026-05-03 review).
+- Per-file ETA / bytes-per-second throughput — separate UX work.
+- Re-introducing in-place rewriting under a `--quiet`/`--tidy` flag — file as a follow-on if anyone misses the old behaviour.
+
+## Why now
+
+User test-drive feedback 2026-05-03 right after the CLI batch landed: "much better CLI impression. Successor: remove the output width limitation(s), don't let the output lines overwrite themselves → switch to 1:1 lines output (like `tail -f`)."
+
+## Related
+
+- UD-735 (closed) — introduced the truncation + overwrite behaviour. UD-408 reverses the visual policy choice; the underlying `terminalWidth()` detection helper can stay (other code may want it).
+- UD-742 (closed) — added `inlineActive`/`commitInline` to fix the "next println glues onto the cursor" bug. UD-408 obsoletes the machinery by removing the cursor-state itself.
+- UD-404 — broader CLI restructure proposal; orthogonal, not a blocker.
