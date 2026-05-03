@@ -5422,3 +5422,85 @@ There's a sibling at [Reconciler.kt:99-118](core/app/sync/src/main/kotlin/org/kr
 ## Surfaced
 
 2026-05-03 00:30 — user ran `--sync-path /internal` expecting ~100-action work, saw 107,988 actions. Daemon's reconcile log line `Reconciling... 106 / 106 items · 0:00` (the heartbeat from UD-240g) confirmed scope filter worked at the main loop; the gap to `Reconciled: 107988 actions` revealed the recovery-loop bypass.
+---
+id: UD-901b
+title: Reconciler UD-901 upload-recovery emits Upload without parent CreateRemoteFolder — orphans never resolve
+category: core
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:352
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:387
+opened: 2026-05-03
+---
+**`Reconciler`'s UD-901 upload-recovery loop emits `SyncAction.Upload(entry.path)` but never `SyncAction.CreateRemoteFolder(...)` for the parent directory tree. When a pending-upload row's parent folder doesn't exist on remote (because the original sync that produced the row was cancelled/failed before its `CreateRemoteFolder` ran), Pass 2 fires the upload, the provider's `resolveFolder` walks the path and throws `Folder not found`. **The orphan stays orphaned: every subsequent sync re-emits the same Upload, fails identically, and the row never resolves itself.** No `--reset` short of wiping `state.db` will recover.**
+
+## Repro (live, 2026-05-03 00:25)
+
+```
+2026-05-03 00:25:37.693 WARN  o.k.u.sync.SyncEngine - Upload failed for /Project Notes/.~lock.report.xlsx#:
+                              ProviderException: Folder not found: Project Notes in /Project Notes
+2026-05-03 00:25:37.702 WARN  Upload failed for /Project Notes/Subfolder1/business_plan.docx: …
+2026-05-03 00:25:38.057 WARN  Upload failed for /Project Notes/Subfolder1/report.xlsx: …
+… (dozens more, every file in the AfA tree)
+```
+
+Daemon log shows zero `POST /drive/folders` requests during the entire scan — i.e. no `CreateRemoteFolder` action existed for these paths in the action set. The pending-upload rows came from the UD-901 recovery loop ([Reconciler.kt:127](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127)); that loop only emits `Upload`, not the prerequisite folder creates.
+
+## Root cause
+
+[Reconciler.kt:127-136](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127):
+
+```kotlin
+for (entry in allDbEntries) {
+    if (entry.isFolder) continue                    // ← folders explicitly skipped
+    if (entry.remoteId != null) continue
+    if (!entry.isHydrated) continue
+    if (entry.path in coveredPaths) continue
+    …
+    actions.add(SyncAction.Upload(entry.path))      // ← only Upload; no CreateRemoteFolder
+}
+```
+
+The loop's contract is "resurrect any pending upload the previous run didn't complete." It correctly identifies orphan files but treats the parent-folder existence as an unstated precondition. That precondition holds iff the previous run successfully landed the parent's `CreateRemoteFolder` before crashing — which is exactly the scenario UD-901 was trying to recover from. **The recovery is incomplete by design.**
+
+Sibling: the UD-225 download-recovery loop at [Reconciler.kt:99-118](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:99) emits `DownloadContent` but never `CreatePlaceholder` for the parent placeholder. Same shape; same bug for download orphans on a fresh disk.
+
+## Permanent failure mode
+
+Once a UD-901 row exists for `/X/Y/Z/file.dat` and `/X/Y/Z/` doesn't exist on remote:
+
+1. Sync runs. Reconciler.UD-901 emits `Upload(/X/Y/Z/file.dat)`. No `CreateRemoteFolder(/X/Y/Z)` because the loop doesn't think to.
+2. Pass 1 runs (no folder creates). Pass 2 runs the Upload. Provider walks `resolveFolder("/X/Y/Z")`, fails. Engine logs WARN, increments `transferFailures`, continues.
+3. Cursor is NOT promoted (UD-222 invariant — any transfer failure blocks cursor promotion).
+4. Next sync re-runs. Same path. Same failure. The row stays in DB, untouched. The file stays on disk, never uploaded.
+
+`failures.jsonl` accumulates duplicate entries for the same path; the user sees uploads "fail" forever despite the local file existing.
+
+## Acceptance
+
+- UD-901 recovery loop synthesises the `CreateRemoteFolder` action chain for any missing ancestors before emitting `Upload`. Walk `entry.path.split('/').dropLast(1)` from shallowest to deepest, emit `CreateRemoteFolder(prefix)` for each prefix not already covered (by an existing action OR by an existing remote folder verified via cached delta state).
+- Pass 1's existing sequential ordering ensures the folder creates run before Pass 2's parallel Upload. (Already correct — see [SyncEngine.kt:352-355](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:352): `sequentialActions = actions.filter { it !is DownloadContent && it !is Upload }` — `CreateRemoteFolder` is in Pass 1.)
+- The action-priority sort in `Reconciler.sortActions` already places `CreateRemoteFolder` at priority 0 (before Upload at 2), so within Pass 1's sequential apply, parents will be created before children deeper in the same prefix.
+- Sibling fix in the UD-225 download-recovery loop: emit `CreatePlaceholder(parent, isFolder=true)` for missing local parent dirs.
+- New `ReconcilerTest` case: pre-seed DB with one pending-upload row at `/X/Y/Z/file.dat`, no remote items, no local changes; assert reconcile emits 3 `CreateRemoteFolder` (`/X`, `/X/Y`, `/X/Y/Z`) ahead of the `Upload`. Idempotency: second call with the same DB state still produces the same action set if the remote tree didn't get updated meanwhile.
+- Live verification: with the user's existing pending rows under `/Project Notes/*`, after the fix lands and the daemon re-runs, the AfA tree is created on Internxt and the files upload.
+
+## Mitigation for affected users until the fix lands
+
+- **Manual recovery**: pre-create the missing folders on Internxt's web UI (or via API), then re-run `unidrive sync --upload-only`. Pending uploads will succeed once their parent folder exists.
+- **Last-resort**: `unidrive sync --upload-only --reset` — wipes `state.db`, re-walks local files, re-emits `CreateRemoteFolder + Upload` from the main reconcile path (which DOES emit folder creates). Loses any cached delta state.
+
+## Related
+
+- **UD-405** (filed alongside): the silent backslash-path scope drop is what most often EXPOSES this bug — users invoke a scoped sync, get 100k+ orphan resurrections, see this failure cascade for paths they didn't ask about.
+- **UD-901a** (filed alongside): the syncPath-bypass that surfaces orphans the user didn't ask about. Fixing 901a contains the bleed; fixing 901b is the actual repair.
+- **UD-901** (parent, closed): introduced the pending-upload rows in `LocalScanner.scan` so the engine could survive interrupted uploads. The recovery contract was incomplete — landed without considering "what if the parent never made it to remote either."
+- **UD-225** (closed sibling): the download-recovery loop has the same shape. Apply the parallel fix here.
+- **UD-222** (closed): the "no NUL stub" invariant; same code area, related concerns.
+
+## Surfaced
+
+2026-05-03 00:25 user-session diagnostic. Confirmed by code reading + log inspection (no `POST /drive/folders` for any failing-upload path during the scan). Fix is mechanical given the action priority sort already favours folder creates ahead of uploads in Pass 1.
