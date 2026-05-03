@@ -60,6 +60,22 @@ class InternxtApiServiceTest {
     }
 
     @Test
+    fun `UD-369 stripExtension removes the last dot-separated segment`() {
+        assertEquals("report", InternxtProvider.stripExtension("report.docx"))
+        assertEquals("archive.tar", InternxtProvider.stripExtension("archive.tar.gz"))
+        assertEquals("noext", InternxtProvider.stripExtension("noext"))
+        assertEquals("", InternxtProvider.stripExtension(".dotfile"))
+    }
+
+    @Test
+    fun `UD-369 newFileType returns the bare extension or null`() {
+        assertEquals("docx", InternxtProvider.newFileType("report.docx"))
+        assertEquals("gz", InternxtProvider.newFileType("archive.tar.gz"))
+        assertEquals(null, InternxtProvider.newFileType("noext"))
+        assertEquals("dotfile", InternxtProvider.newFileType(".dotfile"))
+    }
+
+    @Test
     fun `split path into segments`() {
         val segments = InternxtProvider.pathSegments("/Documents/Work/report.pdf")
         assertEquals(listOf("Documents", "Work", "report.pdf"), segments)

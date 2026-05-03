@@ -189,6 +189,65 @@ class InternxtApiService(
             json.decodeFromString<InternxtFolder>(response.bodyAsText())
         }
 
+    /**
+     * UD-369: rename a file in place via `PUT /files/{uuid}/meta`.
+     *
+     * Spec: `UpdateFileMetaDto` requires `{plainName, type}`. Notably, the endpoint does NOT
+     * accept the `name` (encrypted) field — only the plaintext name + type are updated. The
+     * encrypted-name field stays stale after a rename. Unidrive uses `plainName` for path
+     * resolution everywhere ([InternxtProvider.kt] `fileToCloudItem`, `buildFolderPath`,
+     * `resolveFolder`), so the staleness is invisible to the sync engine — but document it
+     * because it's a sharp edge for any future code that relies on the encrypted name.
+     */
+    suspend fun renameFile(
+        uuid: String,
+        plainName: String,
+        type: String?,
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                    // Spec says type is required; empty string is valid for extensionless files.
+                    put("type", kotlinx.serialization.json.JsonPrimitive(type ?: ""))
+                }
+            val response =
+                httpClient.put("$baseUrl/files/$uuid/meta") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
+
+    /**
+     * UD-369: rename a folder in place via `PUT /folders/{uuid}/meta`.
+     *
+     * Spec: `UpdateFolderMetaDto` requires `{plainName}` only — same encrypted-name caveat
+     * as [renameFile].
+     */
+    suspend fun renameFolder(
+        uuid: String,
+        plainName: String,
+    ): InternxtFolder =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                }
+            val response =
+                httpClient.put("$baseUrl/folders/$uuid/meta") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFolder>(response.bodyAsText())
+        }
+
     suspend fun moveFile(
         uuid: String,
         destinationFolderUuid: String,

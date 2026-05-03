@@ -90,7 +90,7 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/files/recents` | GET | ◯ | — | |
 | `/files/meta` | GET (?path) | ◯ | — | Provider builds metadata via folder-walk + listing (`getMetadata`, `InternxtProvider.kt:73-97`). The server can do this in one round trip. |
 | `/files/{uuid}/meta` | GET | ✅ | `InternxtApiService.kt:108-111` | `getFileMeta`. |
-| `/files/{uuid}/meta` | PUT | ◯ | — | Rename without move. |
+| `/files/{uuid}/meta` | PUT | ✅ | `InternxtApiService.kt` `renameFile` | UD-369: same-parent renames route here instead of the engine's worst-case download → re-encrypt → re-upload cycle. `UpdateFileMetaDto` is `{plainName, type}` only — no `name` (encrypted) field. After rename the encrypted-name stays stale; unidrive uses `plainName` for path resolution everywhere so the staleness is invisible. |
 | `/files/{uuid}/versions` | GET | ◯ | — | Capability gap — no version recovery. |
 | `/files/{uuid}/versions/{versionId}` | DELETE | ◯ | — | |
 | `/files/{uuid}/versions/{versionId}/restore` | POST | ◯ | — | |
@@ -114,7 +114,7 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/folders/content/{uuid}/folders/existence` | POST | ◯ | — | Could replace the 409-recovery dance in `createFolder` (`InternxtProvider.kt:256-267`). |
 | `/folders/content/{uuid}/files/existence` | POST | ◯ | — | |
 | `/folders/{uuid}/meta` | GET | ◯ | — | |
-| `/folders/{uuid}/meta` | PUT | ◯ | — | Rename. |
+| `/folders/{uuid}/meta` | PUT | ✅ | `InternxtApiService.kt` `renameFolder` | UD-369: rename folder. `UpdateFolderMetaDto` is `{plainName}` only — same encrypted-name caveat as `renameFile`. |
 | `/folders/{uuid}` | PATCH | ✅ | `InternxtApiService.kt:199-205` | `moveFolder`. |
 | `/folders/{uuid}` | DELETE | ◯ | — | Provider uses `DELETE /folders` (collection form) instead — see above. |
 | `/folders/{uuid}/stats` | GET | ◯ | — | |

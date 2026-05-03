@@ -316,18 +316,57 @@ class InternxtProvider(
         fromPath: String,
         toPath: String,
     ): CloudItem {
-        val metadata = getMetadata(fromPath)
+        val fromSegments = pathSegments(fromPath)
         val toSegments = pathSegments(toPath)
-        val toParentPath = "/" + toSegments.dropLast(1).joinToString("/")
+        if (fromSegments.isEmpty() || toSegments.isEmpty()) {
+            throw ProviderException("Cannot move from/to root: $fromPath -> $toPath")
+        }
+        val fromParent = fromSegments.dropLast(1)
+        val toParent = toSegments.dropLast(1)
+        val fromName = fromSegments.last()
+        val toName = toSegments.last()
+        val toParentPath = "/" + toParent.joinToString("/")
+
+        val metadata = getMetadata(fromPath)
+        val sameParent = fromParent == toParent
+        val sameName = fromName == toName
+
+        if (sameParent && sameName) return metadata // no-op
+
+        // UD-369: route the rename leg through PUT /…/meta when the parent doesn't change,
+        // avoiding the engine's worst-case download → re-encrypt → re-upload → delete-old
+        // cycle for what is metadata-only on the wire. Cross-parent moves keep PATCH; mixed
+        // (different parent AND different name) does both in sequence.
+        if (sameParent) {
+            return if (metadata.isFolder) {
+                api.renameFolder(metadata.id, toName).toCloudItem(toParentPath)
+            } else {
+                val newType = newFileType(toName)
+                api.renameFile(metadata.id, plainName = stripExtension(toName), type = newType)
+                    .toCloudItem(toParentPath)
+            }
+        }
+
         val destFolderUuid = resolveFolder(toParentPath)
-        return if (metadata.isFolder) {
-            val result = api.moveFolder(metadata.id, destFolderUuid)
-            result.toCloudItem(toParentPath)
+        if (metadata.isFolder) {
+            val moved = api.moveFolder(metadata.id, destFolderUuid)
+            return if (sameName) {
+                moved.toCloudItem(toParentPath)
+            } else {
+                api.renameFolder(moved.uuid, toName).toCloudItem(toParentPath)
+            }
         } else {
-            val result = api.moveFile(metadata.id, destFolderUuid)
-            result.toCloudItem(toParentPath)
+            val moved = api.moveFile(metadata.id, destFolderUuid)
+            return if (sameName) {
+                moved.toCloudItem(toParentPath)
+            } else {
+                val newType = newFileType(toName)
+                api.renameFile(moved.uuid, plainName = stripExtension(toName), type = newType)
+                    .toCloudItem(toParentPath)
+            }
         }
     }
+
 
     override suspend fun delta(
         cursor: String?,
@@ -559,6 +598,13 @@ class InternxtProvider(
         }
 
         fun pathSegments(path: String): List<String> = path.removePrefix("/").split("/").filter { it.isNotEmpty() }
+
+        /** UD-369: split a leaf filename into (plainName, type). Returned type is the bare extension or null. */
+        fun stripExtension(filename: String): String =
+            if (filename.contains('.')) filename.substringBeforeLast('.') else filename
+
+        fun newFileType(filename: String): String? =
+            if (filename.contains('.')) filename.substringAfterLast('.') else null
 
         /**
          * UD-317: strip leading/trailing whitespace (incl. `\n`, `\r`, `\t`)
