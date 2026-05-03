@@ -16,7 +16,11 @@ class CliProgressReporter(
         private set
 
     private var actionStartTime = 0L
-    private val isTty = System.console() != null
+
+    // UD-408: track per-path last-emit time so onTransferProgress doesn't spam
+    // hundreds of lines for a multi-GB upload (now that printInline lands a
+    // fresh scrollback line per call instead of overwriting in place).
+    private val lastTransferEmit = mutableMapOf<String, Long>()
 
     // UD-742: track when each scan phase started so heartbeat lines can show
     // elapsed wall-clock. Cleared as each phase begins (count == 0).
@@ -34,13 +38,6 @@ class CliProgressReporter(
     // based ETA that adapts to actual run speed. Optional — the
     // wall-clock-only path (UD-747) is the fallback.
     private val historicalScanCount = mutableMapOf<String, Int>()
-
-    // UD-742 / UD-735: when printInline emitted text and left the cursor
-    // mid-line (no trailing newline), any subsequent println-using method
-    // would glue its output to the inline tail (e.g. observed
-    // ".mp4Dry-run: ..." in the user's terminal). Track the inline-active
-    // state and commit a newline before the next non-printInline output.
-    private var inlineActive = false
 
     override fun onScanProgress(
         phase: String,
@@ -123,7 +120,6 @@ class CliProgressReporter(
     }
 
     override fun onActionCount(total: Int) {
-        commitInline()
         println("Reconciled: $total actions")
     }
 
@@ -134,6 +130,9 @@ class CliProgressReporter(
         path: String,
     ) {
         actionStartTime = System.currentTimeMillis()
+        // UD-408: clear per-path throttle state on action start so the next
+        // transfer-progress emission for this path lands immediately.
+        lastTransferEmit.remove(path)
         printInline("[$index/$total] $action $path")
     }
 
@@ -142,7 +141,16 @@ class CliProgressReporter(
         bytesTransferred: Long,
         totalBytes: Long,
     ) {
-        if (System.currentTimeMillis() - actionStartTime < 5000) return
+        val now = System.currentTimeMillis()
+        // 5-second initial silence — most uploads finish faster and don't need a progress line at all.
+        if (now - actionStartTime < 5000) return
+        // UD-408: throttle to one line per second per path. Without this,
+        // a multi-GB upload would emit hundreds of progress lines (printInline
+        // no longer overwrites in place, so each call is a fresh scrollback row).
+        val last = lastTransferEmit[path] ?: 0L
+        val isFinal = totalBytes > 0 && bytesTransferred >= totalBytes
+        if (!isFinal && now - last < 1000) return
+        lastTransferEmit[path] = now
         val pct = if (totalBytes > 0) (bytesTransferred * 100 / totalBytes) else 0
         val transferred = formatSize(bytesTransferred)
         val total = formatSize(totalBytes)
@@ -162,7 +170,6 @@ class CliProgressReporter(
         lastConflicts = conflicts
         // UD-204: Locale.ROOT so "1.5s" stays stable across locales.
         val secs = String.format(Locale.ROOT, "%.1f", durationMs / 1000.0)
-        commitInline()
         if (dryRun) {
             val parts = mutableListOf("download $downloaded", "upload $uploaded")
             val extras =
@@ -187,18 +194,16 @@ class CliProgressReporter(
     }
 
     override fun onWarning(message: String) {
-        commitInline()
         System.err.println("  WARN: $message")
     }
 
-    // UD-742: emit a newline iff a printInline call is mid-flight, so the
-    // next println starts on a fresh line instead of gluing onto the
-    // overwrite buffer.
+    // UD-408: commitInline is no longer needed — printInline now lands a real
+    // line per call (no mid-line cursor state to commit). The companion-stub
+    // is left so any external caller that referenced it still compiles, but
+    // the body is a no-op.
+    @Suppress("UNUSED")
     private fun commitInline() {
-        if (inlineActive) {
-            println()
-            inlineActive = false
-        }
+        // intentionally empty — see UD-408
     }
 
     // UD-757: format M:SS for under one hour, H:MM:SS above. Shared by both
@@ -281,20 +286,13 @@ class CliProgressReporter(
         return if (remainingSecs <= 0) null else remainingSecs
     }
 
-    private val cols: Int = terminalWidth()
-
+    // UD-408: emit a real scrollback line per progress event. Was: in-place rewrite via
+    // `\r\u001b[K` + `truncateForWidth(msg, cols-1)` (UD-735 / UD-742). The rewrite +
+    // truncation kept the terminal "tidy" but ate the per-action history and clipped long
+    // paths. Each call now lands a full untruncated line - tail -f-style. Throttling for
+    // chatty paths (transfer progress) lives at the call site (see [onTransferProgress]).
     private fun printInline(msg: String) {
-        if (isTty) {
-            // UD-735: ANSI clear-to-end only clears the current console line.
-            // When a long line wraps to a new row, the previous (longer) tail
-            // stays visible above. Truncate to fit before printing so each
-            // overwrite stays on a single physical row.
-            val displayed = truncateForWidth(msg, cols - 1)
-            print("\r\u001b[K$displayed")
-            inlineActive = true
-        } else {
-            println(msg)
-        }
+        println(msg)
     }
 
     companion object {
@@ -309,31 +307,9 @@ class CliProgressReporter(
                 else -> "${bytes / (1024 * 1024 * 1024)} GiB"
             }
 
-        // UD-735: detect terminal width. Java 21 has no public API for it; fall
-        // back to the COLUMNS env var (set by most Unix shells and PowerShell 7+)
-        // and default to 80 cols if neither is available.
-        internal fun terminalWidth(): Int = System.getenv("COLUMNS")?.toIntOrNull()?.coerceAtLeast(20) ?: 80
-
-        // UD-735: truncate "[N/M] verb /path/to/file" lines so that the whole
-        // line fits in [maxLen] characters. Strategy: keep the [N/M] verb
-        // prefix intact, then "..." + tail of the path — the filename matters
-        // most. We anchor on " /" (space-slash) so [N/M]'s internal slash in
-        // the index doesn't get mistaken for the path start. Falls back to
-        // head-truncate when there's no path or the prefix exceeds the budget.
-        internal fun truncateForWidth(
-            msg: String,
-            maxLen: Int,
-        ): String {
-            if (maxLen <= 0) return ""
-            if (msg.length <= maxLen) return msg
-            val ellipsis = "..."
-            val pathStart = msg.indexOf(" /").let { if (it >= 0) it + 1 else -1 }
-            if (pathStart <= 0 || pathStart >= maxLen - ellipsis.length - 1) {
-                return msg.take(maxLen - ellipsis.length) + ellipsis
-            }
-            val prefix = msg.substring(0, pathStart)
-            val tailLen = maxLen - prefix.length - ellipsis.length
-            return prefix + ellipsis + msg.takeLast(tailLen)
-        }
+        // UD-408: terminalWidth() + truncateForWidth() (UD-735) deleted with the in-place
+        // rewrite they served. Per-line scrollback output makes width detection moot;
+        // the terminal handles wrapping. If a future feature genuinely needs the column
+        // count, restore from the UD-735 commit history.
     }
 }
