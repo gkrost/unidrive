@@ -5504,3 +5504,103 @@ Once a UD-901 row exists for `/X/Y/Z/file.dat` and `/X/Y/Z/` doesn't exist on re
 ## Surfaced
 
 2026-05-03 00:25 user-session diagnostic. Confirmed by code reading + log inspection (no `POST /drive/folders` for any failing-upload path during the scan). Fix is mechanical given the action priority sort already favours folder creates ahead of uploads in Pass 1.
+---
+id: UD-357
+title: Internxt mkdir cascade fails — create returns UUID but resolveFolder re-lists and races eventual consistency
+category: providers
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:228
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:377
+opened: 2026-05-03
+---
+**`InternxtProvider.createFolder` returns the new folder's UUID via `api.createFolder(...)` but throws it away. The next call to `resolveFolder(...)` (which walks the path segment-by-segment via `api.getFolderContents`) hits Internxt's read-after-write inconsistency window: `POST /drive/folders` succeeds, but the immediately-following `GET /drive/folders/{parentUuid}` listing doesn't yet show the just-created folder. Multi-level mkdir cascades fail with "Folder not found: X in /X".**
+
+## Captured live (2026-05-03 09:40, scan f4d637f9)
+
+```
+[1/106458] mkdir-remote /Project Notes        ← step 1: succeeds
+09:40:43.065 WARN Action failed for /Project Notes/Subfolder1:
+                  Folder not found: Project Notes in /Project Notes
+09:40:46.328 WARN Action failed for /Project Notes/Subfolder1/VendorH:
+                  Folder not found: Subfolder1 in /Project Notes/Subfolder1
+```
+
+Step 3's failure progresses past `/Project Notes` (proving step 1 DID create it on the server, ~3 s later when Internxt's listing caught up) but fails at `Subfolder1` because step 2 — running ~milliseconds after step 1's `POST` — couldn't see the just-created `/AfA` in the listing and threw before its own `POST` ran. The cascade leaves an entire subtree never created.
+
+This is independent of UD-405 / UD-901a / UD-901b: those land the right *action set*; UD-357 ensures the *execution* doesn't trip on Internxt's own latency.
+
+## Root cause
+
+[`InternxtProvider.createFolder`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt#L228) at line 237:
+
+```kotlin
+val folder =
+    try {
+        api.createFolder(parentUuid, name, encryptedName)   // ← returns InternxtFolder with .uuid
+    } catch (e: InternxtApiException) { ... }
+return folder.toCloudItem(parentPath)
+```
+
+The `InternxtFolder` returned by the API has the new folder's `uuid`. The provider uses it only to build the `CloudItem` return value, then drops it. Subsequent `resolveFolder` calls re-discover the folder via `api.getFolderContents(parentUuid)` — exactly the call that races Internxt's listing eventual consistency.
+
+[`InternxtProvider.resolveFolder`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt#L377) at line 383-388:
+
+```kotlin
+for (segment in segments) {
+    val content = api.getFolderContents(currentUuid)        // ← always API call
+    val child = content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == segment }
+        ?: throw ProviderException("Folder not found: $segment in $path")
+    currentUuid = child.uuid
+}
+```
+
+No memoisation. Each segment is a fresh round-trip.
+
+## Proposal — process-local folder UUID cache
+
+Tiny `FolderUuidCache` keyed by `(parentUuid, sanitizedName) -> uuid`. Populated on `createFolder` success. Consulted at the top of each `resolveFolder` segment-walk before hitting `getFolderContents`. Cache survives the lifetime of one `InternxtProvider` instance (≈ one daemon process), no eviction needed at this scale.
+
+```kotlin
+class FolderUuidCache {
+    private val map = ConcurrentHashMap<Pair<String, String>, String>()
+    fun put(parentUuid: String, sanitizedName: String, uuid: String) { ... }
+    fun get(parentUuid: String, sanitizedName: String): String? = ...
+}
+
+// In createFolder, after api.createFolder succeeds:
+folderCache.put(parentUuid, sanitizeName(name), folder.uuid)
+
+// In resolveFolder, top of the segment-walk:
+val cached = folderCache.get(currentUuid, segment)
+val childUuid = cached ?: run {
+    val content = api.getFolderContents(currentUuid)
+    val child = content.children.find { ... } ?: throw ProviderException(...)
+    folderCache.put(currentUuid, segment, child.uuid)  // ← also cache on read
+    child.uuid
+}
+currentUuid = childUuid
+```
+
+Caching on read AS WELL as on write means subsequent multi-segment `resolveFolder` calls don't re-list the same parents — a free latency win on top of the bug fix.
+
+## Acceptance
+
+- New `FolderUuidCache.kt` (or a private nested class in `InternxtProvider`) with `put` / `get(parentUuid, name)` and a unit test covering put/get/miss.
+- `InternxtProvider.createFolder` populates the cache with the freshly-created folder's UUID, keyed by `(parentUuid, sanitizeName(name))`.
+- `InternxtProvider.resolveFolder` consults the cache before each `getFolderContents` call; on miss, populates the cache with the discovered child's UUID after listing.
+- Live verification: the user's `--sync-path '/Project Notes'` workload — which previously failed with the cascade above — now creates the entire AfA tree and proceeds to upload files.
+- No regression in existing `InternxtProvider` behaviour (covered by `InternxtNameSanitizationTest`, `InternxtAuthServiceTest`, `InternxtIntegrationTest`).
+- Edge case: a folder created via this cache, then deleted out-of-band (web UI, another sync session), produces a stale cache entry. Subsequent operations using the stale UUID will fail at the next API call (404). Acceptable trade for in-process cache; if it bites in practice, file a follow-up to invalidate on 404.
+
+## Related
+
+- **UD-901b** (closes alongside): the action set is now correct. UD-357 ensures execution doesn't trip on Internxt's own latency window.
+- **UD-317** (closed): handles the symmetric case — `createFolder` returning 409 when the folder already exists. Good shape to mirror; that path also calls `getFolderContents` to recover the existing UUID, and could populate the same cache for free.
+- **UD-241 / UD-330** family: throttle and retry budget. The cache also reduces total API calls under load — fewer chances to trip a 429.
+
+## Surfaced
+
+2026-05-03 09:40, after UD-405 + UD-901a/b were filed but before they were implemented. The user's `--sync-path '/Project Notes'` produced the right action set (CreateRemoteFolder for the AfA root + every subfolder + files) but the second mkdir failed because step 1's create wasn't visible to step 2's `getFolderContents`. Diagnosed by the inconsistency between failure messages: step 2 fails at `Project Notes` segment (depth 1), step 3 fails at `Subfolder1` segment (depth 2 — past the now-visible `AfA`). Same root cause: Internxt's listing endpoint lags create by 1-3 s.
