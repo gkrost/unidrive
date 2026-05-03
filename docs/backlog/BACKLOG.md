@@ -6034,3 +6034,88 @@ When score ≥ 1 isn't satisfied (no candidate shares any parent segment), no mo
 ## Surfaced
 
 2026-05-03 10:51, immediately after UD-240j deployed. The user's full upload sync still showed `move /Sample → /userhome/Pictures/_Photos/Sample` as action #1 — the wrong source despite UD-240j stopping the duplicate. User identified the problem in real time: detectMoves picked an impossible source over the obvious correct one.
+---
+id: UD-205a
+title: applyKeepBoth uploads to original remote path — Internxt 409s on exclusive-create
+category: core
+priority: high
+effort: M
+status: open
+opened: 2026-05-03
+---
+**`SyncEngine.applyKeepBoth` assumes `provider.upload(localPath, action.path)` overwrites whatever sits at `action.path` on remote. That's true for OneDrive (Graph PUT to drive-item path), S3 (PUT object), and WebDAV (PUT). It is NOT true for Internxt: [`InternxtApiService.createFile`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:113) is exclusive-create and returns 409 Conflict — `{"message":"File already exists"}` — when the parent folder already contains a file with the same `plainName`. Result: every NEW/NEW conflict and every MODIFIED/MODIFIED conflict on Internxt fails permanently with KEEP_BOTH policy.**
+
+## Repro (live, 2026-05-03 11:42)
+
+```
+sync: profile=inxt_gernot_krost_posteo type=internxt sync_root=C:\Users\gerno\InternxtDrive mode=upload
+Reconciling... 243,003 / 243,003 items · 0:18
+Reconciled: 106470 actions
+[3/106470] mkdir-remote /Sample/02.11.…
+11:42:30.826 WARN  o.k.u.sync.SyncEngine - Conflict on /AfA - …/Eigene Dokumente/Businessplan_Krost.docx: local=NEW, remote=NEW
+11:42:34.339 WARN  o.k.u.http.RequestId - ← req=e745cc14 409 Conflict (673ms)
+11:42:34.339 WARN  o.k.u.sync.SyncEngine - Action failed for /AfA - …/Eigene Dokumente/Businessplan_Krost.docx (1 consecutive):
+                   InternxtApiException: API error: 409 Conflict - {"message":"File already exists","error":"Conflict","statusCode":409}
+        at o.k.u.internxt.InternxtApiService.checkResponse(InternxtApiService.kt:473)
+        at o.k.u.internxt.InternxtApiService$createFile$2.invokeSuspend(InternxtApiService.kt:141)
+```
+
+## Root cause
+
+[`SyncEngine.applyKeepBoth` lines 983-1012](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:983) for the NEW/NEW + remote-exists branch:
+
+```kotlin
+if (action.remoteItem != null && !action.remoteItem.deleted) {
+    val conflictPath = "$base$conflictSuffix"                          // .conflict-remote-TS.ext
+    val conflictLocal = placeholder.resolveLocal(conflictPath)
+    withEchoSuppression(conflictPath) {
+        provider.download(action.remoteItem.path, conflictLocal)       // ✅ remote → local-renamed
+    }
+    if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
+        if (Files.exists(localPath)) {
+            val result =
+                provider.upload(localPath, action.path) { … }          // ❌ local → remote ORIGINAL path
+            …
+            db.upsertEntry(SyncEntry(path = action.path, remoteId = result.id, …))
+        }
+    }
+}
+```
+
+The MODIFIED/MODIFIED arm at lines ~1019-1027 has the same `provider.upload(localPath, action.path)` shape and the same hidden assumption.
+
+The contract gap: providers' `upload()` semantics around path collision are not defined in the [`CloudProvider`](core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt) interface. Three of four providers happen to overwrite; Internxt rejects.
+
+## Why this hadn't bitten before
+
+Reconciler short-circuits the common NEW/NEW case at [Reconciler.kt:295-302](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:295) when `Files.size(localPath) == remoteItem.size` — emits `CreatePlaceholder` (adopt remote), no Conflict. So this only fires when sizes differ, which on a well-mannered first sync is rare. The operator's 2026-05-03 sync hits it because their state.db has 107k legacy rows from prior partial syncs and the local tree has been edited since those partials landed — sizes diverged.
+
+`KEEP_BOTH` is also the default policy ([SyncEngine.kt:26](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:26)), so any operator on Internxt with conflicts will hit this.
+
+## No tests cover the actual file-op semantics
+
+Searched `core/app/sync/src/test/kotlin/`: only [`ConflictLogTest`](core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ConflictLogTest.kt) and tests that *trigger* `Conflict` actions. Nothing exercises `applyKeepBoth`'s actual download+upload sequence against any provider, real or fake. The bug is purely structural — code review would have caught the missing overwrite-vs-create contract.
+
+## Acceptance
+
+Pick one of:
+
+- **(a) Asymmetric: upload local to renamed remote path.** Smallest patch. After `provider.download(remote → local-conflict-remote)`, `provider.upload(local → remote-conflict-local)`. Both sides keep their original-path file untouched; both sides gain a renamed copy of the other side's bytes. DB tracks the conflict-local upload's remoteId. Same template applies to MODIFIED/MODIFIED. Asymmetric naming (no single "winner" path) but unblocks Internxt without provider work.
+- **(b) Symmetric via Internxt rename.** Confirm `PATCH /files/$uuid` with `plainName` field renames in-place (Internxt API doc check). If yes: server-side rename remote bytes to `.conflict-remote-TS.ext`, then upload local to the now-free original path. Add `provider.rename(remoteId, newName)` to the `CloudProvider` contract; Internxt impl uses PATCH; other providers fall back to a download-rename-upload three-step. Symmetric naming on both sides.
+- **(c) Hash-match short-circuit + 409 graceful adopt.** Two-prong: in `Reconciler` NEW/NEW size-mismatch, fetch remote hash and compare local content hash; if equal, adopt remote (no Conflict emitted) — handles case where size encoding differs but bytes match. In `applyKeepBoth`, on 409 from upload, fall back to registering existing remote in DB and marking local MODIFIED for next round. Wider scope; biggest correctness improvement.
+
+Each option needs:
+- New `applyKeepBothTest` covering NEW/NEW, MODIFIED/MODIFIED with a `FakeCloudProvider` that throws on path collision (mirrors Internxt's contract).
+- Live verification on the operator's `inxt_gernot_krost_posteo` profile against the failing path.
+
+## Related
+
+- **UD-712** (closed) — OneDrive 409 nameAlreadyExists for ZWJ-compound emoji filenames; provider-side handling precedent.
+- **UD-205** (open, needs-verification) — apply-side atomicity. Sister concern: even with the right action emitted, half-applied conflicts leave divergent state.
+- **UD-901c** (closed) — `renamePrefix` PK collision; same pattern (apply-path implementation gap not visible in tests).
+- **UD-222** (closed) — Pass-2 failure aggregation + cursor-promotion guard. The fact that cursor only promotes on zero failures means the 409'd file will be retried next sync — but every retry will fail identically until this is fixed.
+- **`docs/dev/lessons/pending-row-recovery-invariants.md`** — same lesson axis: a code path's quiet contract assumption (here: `provider.upload` overwrites) breaks under data shapes the original author didn't plan for.
+
+## Surfaced
+
+2026-05-03 11:42, while the operator was end-to-end verifying the UD-901 fix-stack against their full ~68k local tree on Internxt. One file failed with the 409; the rest of the sync continued. State.db has 107k legacy rows so the surfacing is high-volume — every conflict-eligible file in the operator's `/AfA - …/` and similar trees is at risk.
