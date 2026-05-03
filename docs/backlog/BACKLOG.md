@@ -5813,3 +5813,119 @@ The double-close (here + in `finally`) is safe: `close()` is idempotent (`?.canc
 ## Surfaced
 
 2026-05-03 11:xx, after the four-fix stack (UD-405 + UD-901a/b/c + UD-357) made fast scoped syncs visible. User reported "it then blocks" after a 6.9-second sync of `/Project Notes`.
+---
+id: UD-240j
+title: detectMoves folder-move emits duplicate MoveRemote — missing matchedFolderCreates dedup
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:393
+opened: 2026-05-03
+---
+**`Reconciler.detectMoves`'s folder-move detection has no `matchedFolderCreates` set — only `matchedFolderDeletes`. Two different `DeleteRemote` actions with the same basename can both match the same `CreateRemoteFolder`, producing duplicate `MoveRemote` actions targeting the same destination, both of which fail at execution time because the source paths don't actually exist on remote.**
+
+## Captured live (2026-05-03 10:41)
+
+```
+[1/107776] move /Sample -> /userhome/Pictures/_Photos/Sample
+10:41:05 WARN Action failed for /userhome/Pictures/_Photos/Sample (1 consecutive):
+              ProviderException: Item not found: /Sample
+[2/107776] move /userhome/Pictures/Sample -> /userhome/Pictures/_Photos/Sample
+10:41:11 WARN Action failed for /userhome/Pictures/_Photos/Sample (2 consecutive):
+              ProviderException: Item not found: /userhome/Pictures/Sample
+```
+
+Two `MoveRemote` actions, **identical destination** `/userhome/Pictures/_Photos/Sample`, different sources. That's structurally impossible for a real folder move — at most one source can become the destination. User flagged this in real time: *"It tries to move a non existing remote folder hence the move was made locally. Does not make sense at all."*
+
+The user is right. The reconciler is hallucinating moves.
+
+## Root cause
+
+[Reconciler.kt:393-432](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt#L393):
+
+```kotlin
+val folderCreates = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
+val matchedFolderDeletes = mutableSetOf<String>()
+for (del in deletes) {
+    val entry = entryByPath[del.path] ?: continue
+    if (!entry.isFolder || entry.remoteId == null) continue
+
+    val oldName = del.path.substringAfterLast("/")
+    for (create in folderCreates) {
+        if (create.path.substringAfterLast("/") != oldName) continue
+        // ↑ matches by BASENAME ONLY. No check whether `create` was already
+        //   consumed by a previous outer-loop iteration.
+        actions.add(SyncAction.MoveRemote(path = create.path, fromPath = del.path, ...))
+        actions.remove(del)
+        actions.remove(create)
+        ...
+        matchedFolderDeletes.add(del.path)
+        break
+    }
+}
+```
+
+`folderCreates` is captured as a **snapshot** of the `actions` list at the start. It never updates. Two outer iterations:
+
+1. `del.path = "/Sample"`, basename = `"Sample"`. Inner loop finds `create.path = "/userhome/Pictures/_Photos/Sample"` (basename match). Emit `MoveRemote(/Sample → /…/_Photos/Sample)`. Remove `create` from `actions` (but not from `folderCreates`).
+2. `del.path = "/userhome/Pictures/Sample"`, basename = `"Sample"`. Inner loop finds the SAME `create.path` in `folderCreates` (still there, snapshot is stale). basename match. Emit `MoveRemote(/userhome/Pictures/Sample → /…/_Photos/Sample)`. `actions.remove(create)` is a no-op (already gone).
+
+Both `MoveRemote` actions land in `actions`. Pass 1 runs them sequentially — both fail because the source folders don't exist on remote.
+
+## Why both source paths exist as DeleteRemote actions
+
+The user's local sync history has accumulated stale DB rows. Several syncs over time, with different sync_root paths and partial successes, left rows at `/Sample` (legacy, top-level), `/userhome/Pictures/Sample` (current after sync_root change), and likely others. The current sync sees:
+
+- `/Sample` not on disk locally → LocalScanner marks `ChangeState.DELETED` for the DB row
+- `/userhome/Pictures/Sample` not on disk locally (user moved it) → same DELETED
+- `/userhome/Pictures/_Photos/Sample` IS on disk locally, NEW → emits `CreateRemoteFolder`
+
+`resolveAction` on each DELETED-with-DB-row path emits `DeleteRemote`. Reconcile's main loop is doing the right thing.
+
+`detectMoves` is where it goes off the rails.
+
+## Proposal
+
+Add `matchedFolderCreates: MutableSet<String>` and skip already-consumed creates:
+
+```kotlin
+val folderCreates = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
+val matchedFolderDeletes = mutableSetOf<String>()
+val matchedFolderCreates = mutableSetOf<String>()  // ← UD-240j
+for (del in deletes) {
+    val entry = entryByPath[del.path] ?: continue
+    if (!entry.isFolder || entry.remoteId == null) continue
+
+    val oldName = del.path.substringAfterLast("/")
+    for (create in folderCreates) {
+        if (create.path in matchedFolderCreates) continue   // ← UD-240j
+        if (create.path.substringAfterLast("/") != oldName) continue
+        actions.add(SyncAction.MoveRemote(...))
+        ...
+        matchedFolderDeletes.add(del.path)
+        matchedFolderCreates.add(create.path)              // ← UD-240j
+        break
+    }
+}
+```
+
+The file-move loop directly below uses the symmetric pattern with `matchedUploads` already; folder-move was the missing parallel.
+
+## Acceptance
+
+- A `ReconcilerTest` case pre-seeds DB with two folder rows sharing a basename (`/Sample` and `/Pictures/Sample`, both `isFolder=true`, both with `remoteId`), and a local-scan that produces a single `CreateRemoteFolder(/Pictures/_Photos/Sample)`. Calling `reconcile` produces **at most one** `MoveRemote` action targeting `/Pictures/_Photos/Sample`.
+- The other `DeleteRemote` survives untouched (the engine's apply path will then propagate it as a real delete-remote, OR — better — UD-205-style it stays a Conflict for the user to resolve; but that's out of scope for UD-240j).
+- Existing folder-move tests still pass.
+- Live verification: the user's full upload sync no longer emits the `[1/107776] move /Sample …` + `[2/107776] move /userhome/Pictures/Sample …` duplicate pair. At most one of them becomes a MoveRemote (the more-specific one if both basenames are equal — exact tie-break left to the iteration order; document this).
+
+## Related
+
+- **UD-240i** (closed): refactored the file-move detection to be O(U) with a bySize map. The file-move side already has `matchedUploads` dedup. UD-240i didn't touch the folder-move side, so the bug pre-dated UD-240i and persists.
+- **UD-205** (open, "atomicity across sync transfer phases"): a deeper concern is that detectMoves is matching folder names *across totally different parent paths* (basename-only). A `/Sample` at root vs `/Pictures/Sample` halfway down the tree are not the same folder. Even with UD-240j's dedup, the algorithm can pick the WRONG match. A stricter heuristic — match only when the parent path is also a sibling-rename (one common ancestor change) — would reduce false positives further. Out of scope here; file as UD-240k if desired.
+- **UD-901c** (closed): renamePrefix PK collision. UD-901c made renames survive when the destination already had pending rows; UD-240j keeps detectMoves from emitting impossible renames in the first place. Pair well.
+
+## Surfaced
+
+2026-05-03 10:41, after UD-901a/b/c + UD-357 + UD-405 + UD-406 deployed. The user re-ran a full upload-only sync and got two MoveRemote actions targeting the same destination path. They flagged it: "It tries to move a non existing remote folder hence the move was made locally. does not make sense at all." Confirmed by code-read of `Reconciler.detectMoves` folder-move loop — missing `matchedFolderCreates` dedup.
