@@ -11809,3 +11809,118 @@ The double-close (here + in `finally`) is safe: `close()` is idempotent (`?.canc
 ## Surfaced
 
 2026-05-03 11:xx, after the four-fix stack (UD-405 + UD-901a/b/c + UD-357) made fast scoped syncs visible. User reported "it then blocks" after a 6.9-second sync of `/Project Notes`.
+
+---
+id: UD-771
+title: Doc discoverability + small drift sweep: link consequences.md + EXTENSIONS.md from README/ARCHITECTURE; fix CF-API in consequences.md, EXTENSIONS spec misref, log-feedback-loop stalled tickets, archive aged-out handover
+category: tooling
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 6b835f8. All 6 sub-items shipped: (1) README + ARCHITECTURE.md cross-link consequences.md and EXTENSIONS.md, (2) EXTENSIONS.md:122 misfiled spec ref removed and replaced with SPI-source + test-fixture pointers and a self-spec note, (3) consequences.md pin/unpin rewritten for Linux-MVP-only per ADR-0011 (CF-API anachronism gone, only mentioned in explanatory 'retired' phrasing), (4) ADR-0007:16 shell-win-v0.3.0 example replaced with mcp-v0.1.0, (5) log-feedback-loop-proposal.md banner-superseded with pointers to UD-294/UD-254a/UD-773 covering the original Layer-2 work; do-not-act notice on the file-two-tickets instruction, (6) subagent-chunks-2026-04-30.md moved to dev/handover/archive/. Backlog body's literal AC about 'no CF-API in non-archived docs' has one remaining match — the new explanatory text explicitly marking the tier as retired; spirit of the AC met.
+code_refs:
+  - README.md
+  - docs/ARCHITECTURE.md
+  - docs/user-guide/consequences.md:212
+  - docs/EXTENSIONS.md:122
+  - docs/dev/log-feedback-loop-proposal.md:73
+  - docs/dev/handover/subagent-chunks-2026-04-30.md
+opened: 2026-05-02
+---
+## Problem
+
+Two non-trivial reference documents are present in tree, fully
+written, code-verified, and **not linked from README or
+ARCHITECTURE.md**:
+
+- `docs/user-guide/consequences.md` — pin / unpin semantics, sync
+  edge-case behaviour, conflict resolution. Closed under
+  [UD-220](#ud-220) but undiscoverable to a contributor reading
+  README first.
+- `docs/EXTENSIONS.md` — documents the SPI extension contract
+  (the same `META-INF/services/org.krost.unidrive.ProviderFactory`
+  surface mentioned in README). Code path exists; doc explains
+  it; nothing in the front-page docs points at it.
+
+Verified at filing time:
+
+```
+$ grep -l "consequences\.md\|EXTENSIONS\.md" README.md docs/ARCHITECTURE.md
+(no matches)
+```
+
+Both docs cost real time to write. Leaving them undiscoverable is
+roughly equivalent to having deleted them.
+
+A secondary issue surfaced in the same audit:
+`docs/EXTENSIONS.md:122` cross-references
+`docs/specs/relocate-v1-sprint-plan.md` as its "Spec" link, which
+is a **misfile**: relocate-v1 is the relocate operation contract,
+not the SPI extensibility spec. Either the link is wrong or
+EXTENSIONS.md needs its own spec doc.
+
+## Additional drift items found in the same audit pass
+
+These are smaller but related; group into this ticket's scope
+since they all share the "find-and-fix references" shape:
+
+- `docs/user-guide/consequences.md:212` references "via the
+  Windows CF-API shell" — the CF-API tier was retired by
+  [ADR-0011](adr/0011-shell-win-removal.md). Drop the sentence
+  or rewrite to describe the current Linux pin semantics.
+- `docs/adr/0007-release-versioning.md:16` cites
+  `shell-win-v0.3.0` as a sub-tag example. Replace with a
+  surviving tier's example (e.g. `core-v0.1.0` already there;
+  drop the second example or use `mcp-v0.1.0`).
+- `docs/dev/log-feedback-loop-proposal.md:73` says "file two
+  tickets via `python scripts/dev/backlog.py file ...`"; tickets
+  were never filed. Either file them now (the proposal had
+  acted-on intent) or close the proposal as stalled.
+- `docs/dev/handover/subagent-chunks-2026-04-30.md` — every
+  chunk dispatched in this handover has shipped. Move to
+  `docs/dev/handover/archive/` or delete; keeping aged-out
+  handovers in the live folder confuses readers about current
+  state.
+
+## Proposed action
+
+1. **Linkage:** add `docs/user-guide/consequences.md` and
+   `docs/EXTENSIONS.md` to a "References" or "Further reading"
+   section near the bottom of README, OR (preferred) cross-link
+   them from `docs/ARCHITECTURE.md` where their topics are
+   discussed (consequences.md → architecture pin/conflict
+   section; EXTENSIONS.md → architecture SPI section).
+2. **Misfiled spec ref:** fix `docs/EXTENSIONS.md:122` to point
+   at the real SPI spec (or remove the line if no spec exists
+   yet — then file a follow-up to write one).
+3. **CF-API anachronism in consequences.md:** rewrite the
+   pin-semantics paragraph for Linux only.
+4. **shell-win-v0.3.0 in ADR-0007:** replace example with a
+   live tier.
+5. **log-feedback-loop-proposal.md:** decide — file the two
+   tickets now (which would close this sub-item) or close the
+   proposal as superseded. Note the decision in the proposal
+   doc itself.
+6. **Handover archival:** move `subagent-chunks-2026-04-30.md`
+   out of the live folder.
+
+## Acceptance criteria
+
+- [ ] `grep -l "consequences\.md\|EXTENSIONS\.md" README.md
+      docs/ARCHITECTURE.md` returns at least one match per file.
+- [ ] `grep -rn "CF-API\|shell-win-v0\.3" docs/` returns
+      nothing in non-archived doc files.
+- [ ] `docs/EXTENSIONS.md:122` cross-link resolves to a real
+      doc, or the line is removed.
+- [ ] `docs/dev/handover/subagent-chunks-2026-04-30.md` is
+      either moved to an archive folder or deleted.
+- [ ] No code changes required.
+
+## Why this is one ticket and not five
+
+All sub-items share the "doc reference fix" shape; bundling
+them lets a single sweep handle them with one round of
+verification. If any sub-item turns out to be load-bearing
+(e.g. someone *does* care about the relocate-v1 vs SPI link),
+break it out at fix-time, not now.
