@@ -40,6 +40,37 @@ class InternxtApiService(
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
 
+        /**
+         * UD-358: query params shared by `listFiles` and `listFolders`. The
+         * Drive API exposes `sort` ∈ {`updatedAt`, `uuid`} and `order` ∈
+         * {`ASC`, `DESC`}; without an explicit stable sort, paginated
+         * full-scans can drop or duplicate rows whenever the server-side
+         * default order reshuffles between requests (a row inserted /
+         * updated / deleted mid-walk shifts every subsequent page boundary).
+         * `sort=uuid&order=ASC` is the only choice that's stable under
+         * concurrent mutation: UUID is opaque and immutable per row, where
+         * `updatedAt` is reshuffled by every write.
+         *
+         * Extracted as a pure helper so a unit test can pin the wire shape
+         * without HTTP infrastructure.
+         */
+        internal fun listingQueryParams(
+            updatedAt: String?,
+            limit: Int,
+            offset: Int,
+        ): Map<String, String> {
+            val params =
+                mutableMapOf(
+                    "status" to "ALL",
+                    "limit" to limit.toString(),
+                    "offset" to offset.toString(),
+                    "sort" to "uuid",
+                    "order" to "ASC",
+                )
+            if (updatedAt != null) params["updatedAt"] = updatedAt
+            return params
+        }
+
         // UD-353: throughput floor for OVH temporal-uploads-bucket PUTs.
         // Internxt's shard-upload backend is `s3.gra.io.cloud.ovh.net`,
         // a third-party S3-compatible endpoint with no Internxt-side SLA.
@@ -78,14 +109,7 @@ class InternxtApiService(
         limit: Int = 50,
         offset: Int = 0,
     ): List<InternxtFile> {
-        val params =
-            mutableMapOf(
-                "status" to "ALL",
-                "limit" to limit.toString(),
-                "offset" to offset.toString(),
-            )
-        if (updatedAt != null) params["updatedAt"] = updatedAt
-        val body = authenticatedGet("$baseUrl/files", params)
+        val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset))
         return json.decodeFromString<List<InternxtFile>>(body)
     }
 
@@ -94,14 +118,7 @@ class InternxtApiService(
         limit: Int = 50,
         offset: Int = 0,
     ): List<InternxtFolder> {
-        val params =
-            mutableMapOf(
-                "status" to "ALL",
-                "limit" to limit.toString(),
-                "offset" to offset.toString(),
-            )
-        if (updatedAt != null) params["updatedAt"] = updatedAt
-        val body = authenticatedGet("$baseUrl/folders", params)
+        val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset))
         return json.decodeFromString<List<InternxtFolder>>(body)
     }
 

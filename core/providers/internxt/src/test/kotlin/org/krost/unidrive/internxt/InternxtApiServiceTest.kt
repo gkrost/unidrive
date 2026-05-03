@@ -198,6 +198,31 @@ class InternxtApiServiceTest {
     }
 
     @Test
+    fun `UD-358 listing query params include sort=uuid and order=ASC`() {
+        // Without sort/order, paginated /files and /folders walks can drop or
+        // duplicate rows on concurrent mutation. uuid is the only stable sort
+        // key (immutable per row); order=ASC is conventional.
+        val params = InternxtApiService.listingQueryParams(updatedAt = null, limit = 50, offset = 0)
+        assertEquals("uuid", params["sort"])
+        assertEquals("ASC", params["order"])
+        assertEquals("ALL", params["status"], "tombstones must remain visible")
+        assertEquals("50", params["limit"])
+        assertEquals("0", params["offset"])
+        kotlin.test.assertNull(params["updatedAt"], "no updatedAt when null")
+    }
+
+    @Test
+    fun `UD-358 listing query params pass through updatedAt cursor`() {
+        val cursor = "2026-03-29T12:00:00Z"
+        val params = InternxtApiService.listingQueryParams(updatedAt = cursor, limit = 100, offset = 50)
+        assertEquals(cursor, params["updatedAt"])
+        assertEquals("uuid", params["sort"])
+        assertEquals("ASC", params["order"])
+        assertEquals("100", params["limit"])
+        assertEquals("50", params["offset"])
+    }
+
+    @Test
     fun `UD-353 sub-floor files still get the 600s floor under the OVH override`() {
         // A 2 MiB shard at 10 KiB/s = 205 s, below the 600 s floor. Floor
         // wins — sub-floor files are unchanged from the default behaviour.
