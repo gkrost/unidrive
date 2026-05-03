@@ -149,6 +149,50 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-225b applyDownload routes through downloadById when remoteItem has id`() =
+        runTest {
+            // The fast/robust path: when the action carries a non-empty remoteId,
+            // applyDownload (and the other DownloadContent dispatch sites) must
+            // call provider.downloadById, not provider.download. Path-based
+            // dispatch on Internxt triggers per-segment folder traversal and
+            // fails ~44 % of files when an intermediate folder name can't be
+            // resolved (live 2026-05-03 incident on the UD-225a recovery sync).
+            provider.files["/folder/file.txt"] = ByteArray(50)
+            provider.deltaItems = listOf(cloudItem("/folder/file.txt", size = 50))
+
+            engine.syncOnce()
+
+            assertTrue(
+                provider.downloadByIdCalls.any { (id, path) -> id == "id-/folder/file.txt" && path == "/folder/file.txt" },
+                "expected downloadById dispatch, got byId=${provider.downloadByIdCalls} byPath=${provider.downloadByPathCalls}",
+            )
+            assertTrue(
+                provider.downloadByPathCalls.isEmpty(),
+                "path-based download must NOT fire when remoteItem.id is set; got: ${provider.downloadByPathCalls}",
+            )
+        }
+
+    @Test
+    fun `UD-225b applyDownload falls back to path-based when remoteItem id is empty`() =
+        runTest {
+            // Defensive: synthesised CloudItems with no remoteId (an entry whose
+            // remote_id was null in the DB) fall through to path-based download.
+            // Should be unreachable in practice post-UD-225a (which routes
+            // pending-upload rows to RemoveEntry instead), but pin the safety
+            // valve so a future refactor doesn't accidentally NPE on empty id.
+            provider.files["/orphan.txt"] = ByteArray(20)
+            provider.deltaItems = listOf(cloudItem("/orphan.txt", size = 20).copy(id = ""))
+
+            engine.syncOnce()
+
+            assertTrue(
+                provider.downloadByPathCalls.contains("/orphan.txt"),
+                "expected path-based fallback, got byId=${provider.downloadByIdCalls} byPath=${provider.downloadByPathCalls}",
+            )
+            assertTrue(provider.downloadByIdCalls.isEmpty(), "downloadById must NOT fire when id is empty")
+        }
+
+    @Test
     fun `UD-360 partial delta gather suppresses detectMissingAfterFullSync`() =
         runTest {
             // First sync: item appears in delta and is hydrated locally.
@@ -976,6 +1020,31 @@ class SyncEngineTest {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
             }
+            downloadByPathCalls.add(remotePath)
+            val content = files[remotePath] ?: ByteArray(0)
+            Files.createDirectories(destination.parent)
+            Files.write(destination, content)
+            return content.size.toLong()
+        }
+
+        // UD-225b: track id-vs-path dispatch separately so tests can verify the
+        // engine takes the fast/robust path when the action carries a remoteId.
+        // Default base impl in CloudProvider delegates to download(); this
+        // override lets us count both call paths distinctly.
+        val downloadByIdCalls = mutableListOf<Pair<String, String>>() // (remoteId, remotePath)
+        val downloadByPathCalls = mutableListOf<String>()
+
+        override suspend fun downloadById(
+            remoteId: String,
+            remotePath: String,
+            destination: Path,
+        ): Long {
+            if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (downloadFailCount > 0) {
+                downloadFailCount--
+                throw ProviderException("Network timeout on download")
+            }
+            downloadByIdCalls.add(remoteId to remotePath)
             val content = files[remotePath] ?: ByteArray(0)
             Files.createDirectories(destination.parent)
             Files.write(destination, content)

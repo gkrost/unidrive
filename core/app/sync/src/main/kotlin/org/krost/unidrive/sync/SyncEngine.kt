@@ -778,7 +778,10 @@ class SyncEngine(
             }
 
             if (shouldDownload) {
-                provider.download(action.path, localPath)
+                // UD-225b: prefer id-based dispatch — path-based download triggers
+                // a per-segment folder traversal in resolveFolder which can fail
+                // on transient 503s or sanitization edge cases (UD-317).
+                downloadByIdOrPath(item, action.path, localPath)
                 placeholder.restoreMtime(action.path, item.modified)
             }
         }
@@ -799,7 +802,8 @@ class SyncEngine(
         withEchoSuppression(action.path) {
             if (action.wasHydrated && !item.isFolder) {
                 try {
-                    provider.download(action.path, placeholder.resolveLocal(action.path))
+                    // UD-225b: id-based dispatch (see applyCreatePlaceholder).
+                    downloadByIdOrPath(item, action.path, placeholder.resolveLocal(action.path))
                     placeholder.restoreMtime(action.path, item.modified)
                 } catch (e: Exception) {
                     restoreToPlaceholder(action.path, item)
@@ -813,6 +817,37 @@ class SyncEngine(
         db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
     }
 
+    /**
+     * UD-225b: prefer id-based download dispatch when the action's CloudItem
+     * carries a remoteId. Path-based `provider.download(remotePath, dest)`
+     * forces providers like Internxt to walk the folder tree segment-by-
+     * segment via `getFolderContents` (`InternxtProvider.resolveFolder`),
+     * which is wasteful (one round-trip per path component) and fragile
+     * (any segment that fails sanitization or hits a transient 503 fails
+     * the whole download with `Folder not found: <segment>`). Live impact
+     * 2026-05-03 on the UD-225a recovery sync: ~44 % of 1,426 files failed
+     * with that error before this fix.
+     *
+     * The `CloudProvider.downloadById` default delegates to path-based
+     * `download` for providers that don't override, so the change is safe
+     * across the SPI: providers with a real id-based path (Internxt's
+     * Bridge fileUuid lookup, OneDrive Graph item-id GET) take it; others
+     * keep existing semantics.
+     *
+     * Empty `item.id` falls through to path-based download — defensive for
+     * synthesized CloudItems where `entry.remoteId` was null.
+     */
+    private suspend fun downloadByIdOrPath(
+        item: CloudItem,
+        remotePath: String,
+        destination: java.nio.file.Path,
+    ): Long =
+        if (item.id.isNotEmpty()) {
+            provider.downloadById(item.id, remotePath, destination)
+        } else {
+            provider.download(remotePath, destination)
+        }
+
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
         val localPath = placeholder.resolveLocal(action.path)
         if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
@@ -820,7 +855,8 @@ class SyncEngine(
             versionManager.pruneByCount(action.path, maxVersions)
         }
         withEchoSuppression(action.path) {
-            provider.download(action.path, localPath)
+            // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
+            downloadByIdOrPath(action.remoteItem, action.path, localPath)
             placeholder.restoreMtime(action.path, action.remoteItem.modified)
         }
 
@@ -1001,7 +1037,8 @@ class SyncEngine(
             val conflictPath = "$base$conflictSuffix"
             val conflictLocal = placeholder.resolveLocal(conflictPath)
             withEchoSuppression(conflictPath) {
-                provider.download(action.remoteItem.path, conflictLocal)
+                // UD-225b: id-based dispatch (see applyCreatePlaceholder).
+                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, conflictLocal)
             }
             if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
                 if (Files.exists(localPath)) {
