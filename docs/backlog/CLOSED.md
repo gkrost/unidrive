@@ -11979,3 +11979,53 @@ Extend the close line:
 ## Why now
 
 Surfaced 2026-05-02 alongside [UD-240g](docs/backlog/BACKLOG.md): user asked for per-provider DL/UL throughput, the analyser script could only deliver ops/min because of this gap. Closing the gap unlocks both throughput stats today AND the cross-provider benchmark harness motivation in [UD-247](docs/backlog/BACKLOG.md) — UD-247 will need bytes/sec to be apples-to-apples across providers anyway.
+
+---
+id: UD-753
+title: Move per-operation debug log lines (Download/Upload/Delete/Move) to engine via decorator
+category: tooling
+priority: low
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit d4b9365. 11 redundant log.debug lines deleted from WebDav/S3/OneDrive ApiServices; replaced by 4 unified log.debug lines at SyncEngine.applyDownload/applyUpload/applyDeleteRemote/applyMoveRemote. Provider-specific WARN/ERROR sites untouched (those carry diagnostic detail like itemId/key that the engine doesn't have).
+opened: 2026-04-30
+---
+**From the 2026-04-30 provider-duplication survey.**
+
+Same per-operation log shape repeated across providers. Five providers
+each emit `Download: X` / `Upload: X (N bytes)` / `Delete: X` /
+`Move: X -> Y` at debug. The wrapping engine call already knows the
+path + bytes; logging there once would suffice.
+
+- `core/providers/onedrive/.../GraphApiService.kt:207, 432, 451, 487`
+- `core/providers/hidrive/.../HiDriveApiService.kt:111, 176, 216, 252, 277, 301`
+- `core/providers/s3/.../S3ApiService.kt:52, 85, 133, 161`
+- `core/providers/webdav/.../WebDavApiService.kt:294, 349, 418, 439, 460`
+
+## Proposal
+
+Either:
+
+(a) Wrap providers in a `LoggingCloudProvider` decorator that emits
+the debug lines around delegate calls. Drop per-provider lines.
+
+(b) Just log at the engine `applyAction` call site. Drop per-provider
+lines.
+
+## Acceptance
+
+- `git grep "log.debug.\"(Download|Upload|Delete|Move):"` in
+  providers/ shrinks to provider-specific detail only (e.g.
+  HiDrive's home-relative dir resolution is genuinely useful and
+  stays).
+
+## Effort / agent-ability
+
+**S effort**, agent-able partial — judgment call: which provider-
+specific log details are worth keeping vs deleting?
+
+## Related
+
+- **1.2 delta-log-line** (sibling) — same shape lift.
+- **1.3 provider-auth-banner** (sibling) — same shape lift.
