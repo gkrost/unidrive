@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * UD-240i: lightweight stand-in for `Files.isRegularFile` + `Files.size`
@@ -710,19 +711,32 @@ class Reconciler(
                 null
             }
 
+        // UD-373: cache of compiled glob → Regex. Keyed by the cleaned pattern string
+        // (post `removePrefix("/")`). Cardinality is bounded by the number of distinct
+        // exclude/pin patterns the user configures (typically <50); no eviction needed.
+        // ConcurrentHashMap because the daemon shares the companion across syncs.
+        private val globCache = ConcurrentHashMap<String, Regex>()
+
+        // Visible-for-test counter so UD-373's cache-hit assertion can verify that
+        // buildGlobRegex is invoked exactly once per distinct pattern.
+        internal val buildGlobRegexInvocations = java.util.concurrent.atomic.AtomicLong(0)
+
         fun matchesGlob(
             path: String,
             pattern: String,
         ): Boolean {
             val cleanPath = path.removePrefix("/")
             val cleanPattern = pattern.removePrefix("/")
-            val regex = buildGlobRegex(cleanPattern)
+            val regex =
+                globCache.computeIfAbsent(cleanPattern) {
+                    buildGlobRegexInvocations.incrementAndGet()
+                    Regex("^${buildGlobRegex(it)}$")
+                }
             // If pattern has no '/', also match against just the filename (basename match)
             return if ('/' !in cleanPattern) {
-                val baseName = cleanPath.substringAfterLast('/')
-                Regex("^$regex$").matches(baseName)
+                regex.matches(cleanPath.substringAfterLast('/'))
             } else {
-                Regex("^$regex$").matches(cleanPath)
+                regex.matches(cleanPath)
             }
         }
 

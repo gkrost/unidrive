@@ -128,6 +128,35 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `UD-373 matchesGlob compiles each distinct pattern exactly once (cached across calls)`() {
+        // Reset the spy counter so this test sees only its own invocations even if other
+        // tests in the suite ran first and warmed the cache for unrelated patterns.
+        Reconciler.buildGlobRegexInvocations.set(0)
+        // Same pattern, many different paths → single buildGlobRegex call.
+        repeat(50) { i ->
+            Reconciler.matchesGlob("/dir/file-$i.tmp", "**/*.tmp")
+        }
+        // A second distinct pattern → second compile.
+        repeat(50) { i ->
+            Reconciler.matchesGlob("/dir/file-$i.bak", "**/*.bak")
+        }
+        // The first pattern again — must not recompile (cache hit).
+        Reconciler.matchesGlob("/dir/file-99.tmp", "**/*.tmp")
+        assertEquals(2L, Reconciler.buildGlobRegexInvocations.get())
+    }
+
+    @Test
+    fun `UD-373 matchesGlob preserves basename-vs-full-path semantics under cache`() {
+        // Pattern without `/` matches against basename only — verify the cache doesn't break
+        // the path-side branching at matchesGlob.
+        assertTrue(Reconciler.matchesGlob("/deep/nested/path/file.log", "*.log"))
+        assertTrue(Reconciler.matchesGlob("/file.log", "*.log"))
+        // Pattern with `/` matches the full path.
+        assertTrue(Reconciler.matchesGlob("/_INBOX/foo.txt", "_INBOX/*.txt"))
+        assertEquals(false, Reconciler.matchesGlob("/other/foo.txt", "_INBOX/*.txt"))
+    }
+
+    @Test
     fun `UD-366 local modified uploads carry existing remoteId for replace-in-place`() {
         // The MODIFIED+UNCHANGED branch must plumb entry.remoteId into SyncAction.Upload
         // so InternxtProvider can route through PUT /files/{uuid} instead of POSTing a
