@@ -11392,3 +11392,70 @@ In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/uni
 - UD-317 (closed) — folder name sanitisation; the 409-recovery dance in `createFolder` already deals with eventual-consistency races. The batch form needs a similar partial-success handler (a single batch can return some 200s and some 409s).
 - UD-357 (closed) — `folderCache` already tracks created UUIDs; the batch path needs to populate it for each returned folder, not just the last one.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) line 107.
+
+---
+id: UD-372
+title: Internxt timestamps re-parsed per row in delta() — eager-parse at deserialise (perf)
+category: providers
+priority: low
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 6b267ba. Eager-parsed timestamps via @Transient body properties on InternxtFile + InternxtFolder; the 4 toCloudItem/toDeltaCloudItem call sites read the cached Instant? directly. The legacy parseTime helper + ?.let lambda pattern is gone. Behaviour unchanged (lenient parse — malformed/empty → null preserved). 4 unit tests verify deserialise-time parsing through Json.decodeFromString. Modest wall-clock win (1-2% on cold delta walks for large inventories) per the JFR baseline.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:708
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:788
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt:19
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:18
+opened: 2026-05-03
+---
+**JFR-confirmed perf hotspot.** `InternxtProvider.parseTime(iso)` calls `Instant.parse(iso)` once per timestamp field per `delta()`/listing call. Each `InternxtFile`/`InternxtFolder` carries up to four ISO-8601 timestamp fields stored as `String?` (`creationTime`, `modificationTime`, `createdAt`, `updatedAt`) — and `toCloudItem` / `toDeltaCloudItem` invoke `parseTime` on `creationTime` + `modificationTime` per call site, **6 call sites total** ([InternxtProvider.kt:708-709, 731-732, 758-759, 780-781](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:708)).
+
+Worse: `parseTime` is wrapped in `try { ... } catch (_: Exception) { null }` at [InternxtProvider.kt:788-793](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:788), so each malformed-or-null timestamp generates an exception throw. JFR trace from the 2026-05-03 .safe-DL profiling (`recording_2026_05_03_20_23_10.jfr`) shows:
+
+- `java.time.format.DateTimeFormatterBuilder$CompositePrinterParser.parse` at **1.46% of CPU samples** (top 10 hot methods)
+- `DateTimeFormatterBuilder.toFormatter` at **0.97%**
+- Allocation pressure: `DateTimeParseContext` 0.69%, `Parsed` 0.69%, `DateTimeFormatterBuilder$DateTimePrinterParser[]` 0.69% — combined ~2% of total allocations
+
+Net cost on a 60k-item delta walk: ≈360k `Instant.parse` calls. Cold sync wall-clock impact estimate: 1–2%.
+
+## What to change
+
+### Option A (preferred — eager parse at deserialise)
+
+In [`model/InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) and [`model/InternxtFolder.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt):
+
+1. Keep the `String?` wire fields (don't break the JSON deserialiser — kotlinx-serialization needs to round-trip them).
+2. Add lazy-initialised `Instant?` properties:
+   ```kotlin
+   val modificationTimeInstant: Instant? by lazy { modificationTime?.let { tryParseInstant(it) } }
+   val creationTimeInstant: Instant?     by lazy { creationTime?.let { tryParseInstant(it) } }
+   ```
+3. `tryParseInstant` is a top-level helper that does `try { Instant.parse(s) } catch { null }` — same semantics as today's `parseTime`, but only invoked **once per row per JVM** instead of once per call site per call.
+
+### Option B (transient cache field)
+
+If `by lazy` adds too much per-instance overhead (Kotlin `lazy` allocates a `Lazy<T>` wrapper per property per row — would partially defeat the win), use a `@Transient` field initialised in an `init {}` block.
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+
+4. Replace the 6 `parseTime(it)` call sites with the cached property — `file.modificationTimeInstant` instead of `file.modificationTime?.let { parseTime(it) }`.
+5. The standalone `parseTime` private helper can stay (other potential callers, low cost) or be removed.
+
+## Acceptance
+
+- A unit test in `InternxtModelTest` (or similar) creates an `InternxtFile` with a timestamp, calls the cached property twice, and asserts the underlying `parseTime` is invoked exactly once (use a counter spy).
+- A second test asserts a malformed timestamp returns `null` from the cached property without throwing past the call site.
+- Audit doc [internxt-api-vs-spi.md](docs/audits/internxt-api-vs-spi.md) DTO table notes that timestamp fields are now eagerly parsed (the existing ⚠️ on `size` String parsing should not change).
+- Re-profile a delta walk: expect the `DateTimeFormatterBuilder.parse` row to drop out of the top-25 hot methods.
+
+## Out of scope
+
+- `cursor` / `updatedAt` / `createdAt` (the delta cursor fields) — only `creationTime`/`modificationTime` are read per item by `toCloudItem`. The cursor fields are read once at the end of `delta()` and don't have the per-row multiplier.
+- Switching to a `Long` epoch-millis wire format — Internxt returns ISO-8601 strings, no negotiation possible.
+
+## Related
+
+- JFR profile snapshot: `core/recording_2026_05_03_20_23_10.jfr` (144 s recording during the user's `.safe`-dir DL test, 2026-05-03 20:23 local).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) DTO table notes `creationTime`/`modificationTime` as `String?`.
+- UD-329 et al — Internxt provider correctness work; this ticket is purely perf, no correctness change.
