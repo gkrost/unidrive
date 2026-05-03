@@ -13,20 +13,6 @@ Each item is a frontmatter block + prose. Required fields: `id`, `title`, `categ
 ## Security (UD-100..199)
 
 ---
-id: UD-113
-title: Structured sync-action audit log (durable record of every local/remote mutation)
-category: security
-priority: low
-effort: M
-status: open
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
-adr_refs: [ADR-0004]
-opened: 2026-04-17
----
-Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD-111 covers "structured audit log per action" — but UD-111 is about token-refresh failure telemetry only, not a per-action audit trail. The STRIDE R-row (Repudiation) therefore has a gap: the sync engine emits WARN/INFO logs but nothing durable enough to prove "this run deleted X at Y on behalf of Z". Scope: an append-only JSONL log with `{ts, action, path, size, oldHash, newHash, result, profile}` per action, rotated daily, surfaced via MCP `unidrive_audit` tool (new). Acceptance: run `unidrive -p x sync` on a non-trivial change, observe `{profile}/audit.jsonl` grows with one entry per action. Deferred past v0.1.0 unless compliance need arises.
-
----
 
 ## Core daemon (UD-200..299)
 

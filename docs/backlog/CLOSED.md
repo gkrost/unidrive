@@ -12029,3 +12029,19 @@ specific log details are worth keeping vs deleting?
 
 - **1.2 delta-log-line** (sibling) — same shape lift.
 - **1.3 provider-auth-banner** (sibling) — same shape lift.
+
+---
+id: UD-113
+title: Structured sync-action audit log (durable record of every local/remote mutation)
+category: security
+priority: low
+effort: M
+status: closed
+closed: 2026-05-03
+resolved_by: commit d401384. AuditLog writer in :app:sync emits JSONL entries to {profileConfigDir}/audit-YYYY-MM-DD.jsonl. Hooked into SyncEngine.applyDownload/applyUpload/applyDeleteRemote/applyMoveRemote/applyCreateRemoteFolder for both success and failure paths. Schema {ts, action, path, size, oldHash, newHash, result, profile, fromPath?} per ticket. Per-day rotation is implicit in filename; emit is fail-soft (WARN + swallow on IO error). Always-on; wired from SyncCommand startup with profile name + providerConfigDir. MCP unidrive_audit tool deferred per ticket body's 'deferred past v0.1.0 unless compliance need arises' note — file-growth acceptance met. Three unit tests cover JSONL shape, UTC day rotation, fail-soft IO.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+adr_refs: [ADR-0004]
+opened: 2026-04-17
+---
+Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD-111 covers "structured audit log per action" — but UD-111 is about token-refresh failure telemetry only, not a per-action audit trail. The STRIDE R-row (Repudiation) therefore has a gap: the sync engine emits WARN/INFO logs but nothing durable enough to prove "this run deleted X at Y on behalf of Z". Scope: an append-only JSONL log with `{ts, action, path, size, oldHash, newHash, result, profile}` per action, rotated daily, surfaced via MCP `unidrive_audit` tool (new). Acceptance: run `unidrive -p x sync` on a non-trivial change, observe `{profile}/audit.jsonl` grows with one entry per action. Deferred past v0.1.0 unless compliance need arises.
