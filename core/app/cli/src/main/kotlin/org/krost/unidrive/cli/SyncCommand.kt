@@ -472,6 +472,16 @@ class SyncCommand : Runnable {
                         forceDelete = forceDelete,
                         reason = org.krost.unidrive.sync.SyncReason.MANUAL,
                     )
+                    // UD-406: cancel the IPC accept loop so runBlocking can return.
+                    // ipcServer.start(this) at line ~366 above launches an infinite
+                    // accept-loop coroutine into this scope; runBlocking { } would
+                    // otherwise block forever waiting for it to complete. The
+                    // finally{} below ALSO calls ipcServer.close(), but that runs
+                    // only AFTER runBlocking returns — chicken-and-egg.
+                    //
+                    // close() is idempotent (acceptJob?.cancel() is a no-op on
+                    // already-cancelled jobs), so the double-close is harmless.
+                    ipcServer.close()
                 }
             }
         } catch (e: AuthenticationException) {
