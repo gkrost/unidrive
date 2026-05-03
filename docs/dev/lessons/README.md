@@ -29,6 +29,7 @@ for the gitignore policy.
 | [one-truth-sync-discipline.md](one-truth-sync-discipline.md) | Code change ↔ docs / open tickets / lessons must move together | Refactoring; lifting helpers; renaming public symbols |
 | [crlf-autocrlf-gitattributes.md](crlf-autocrlf-gitattributes.md) | Phantom diffs from `core.autocrlf=true` fighting `.gitattributes` | First-time Windows contributor; or any time `git status` shows a file modified whose bytes match HEAD |
 | [silent-phases-look-like-hangs.md](silent-phases-look-like-hangs.md) | A long-running engine phase with no log/heartbeat is indistinguishable from a deadlock | Adding or auditing any pass inside `SyncEngine.doSyncOnce` |
+| [pending-row-recovery-invariants.md](pending-row-recovery-invariants.md) | Adding a write site means auditing every read site for the new invariants | Introducing a new persistent row shape (new column, new "pending" flag, new null-remoteId state) — *before* the PR merges |
 
 ## Adding new lessons
 
