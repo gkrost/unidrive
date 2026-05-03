@@ -10946,3 +10946,41 @@ In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/u
 
 - UD-360 / UD-361 (delta-partial-gather signalling) — this ticket is a prerequisite; without stable sort, even a complete-looking gather can be missing rows.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3 (pagination correctness).
+
+---
+id: UD-359
+title: Add removed/deleted fields to InternxtFile DTO
+category: providers
+priority: high
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 4be5a87. InternxtFile gains removed:Boolean=false / deleted:Boolean=false fields. Both file converters OR them into CloudItem.deleted matching folder helpers. 8 unit tests cover deserialisation defaults + conversion semantics + regression pin for the status-only path.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-03
+---
+**`InternxtFile` does not deserialise `removed` or `deleted`, so any deletion signal that doesn't come through `status` is silently dropped.** The folder DTO ([`InternxtFolder.kt:21-22`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:21)) has both fields with `Boolean = false` defaults, but [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) is missing them entirely. The Internxt OpenAPI `FileDto` exposes both, and `fileToDeltaCloudItem` in [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) only flags `deleted` when `status == "TRASHED" || status == "DELETED"`. Server schema drift to `removed=true` / `deleted=true` while leaving `status="EXISTS"` would mask deletions entirely.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§DTO comparison, §6 mechanism 5).
+
+## What to change
+
+In [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) add:
+```kotlin
+val removed: Boolean = false,
+val deleted: Boolean = false,
+```
+
+In `InternxtProvider.fileToDeltaCloudItem` (companion-object section), OR `removed` and `deleted` into the emitted `deleted` flag, mirroring the folder helper.
+
+## Acceptance
+
+- `InternxtFile` has both `removed` and `deleted` fields with `Boolean = false` defaults.
+- `fileToDeltaCloudItem` ORs them into the emitted `deleted` flag analogous to `folderToDeltaCloudItem`.
+- A unit test parses a payload with `status="EXISTS"` and `removed=true` and asserts the resulting `CloudItem` has `deleted=true`.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §DTO comparison.

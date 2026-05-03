@@ -6213,41 +6213,6 @@ Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once 
 
 2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
 ---
-id: UD-359
-title: Add removed/deleted fields to InternxtFile DTO
-category: providers
-priority: high
-effort: S
-status: open
-code_refs:
-  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt
-  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
-opened: 2026-05-03
----
-**`InternxtFile` does not deserialise `removed` or `deleted`, so any deletion signal that doesn't come through `status` is silently dropped.** The folder DTO ([`InternxtFolder.kt:21-22`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:21)) has both fields with `Boolean = false` defaults, but [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) is missing them entirely. The Internxt OpenAPI `FileDto` exposes both, and `fileToDeltaCloudItem` in [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) only flags `deleted` when `status == "TRASHED" || status == "DELETED"`. Server schema drift to `removed=true` / `deleted=true` while leaving `status="EXISTS"` would mask deletions entirely.
-
-Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§DTO comparison, §6 mechanism 5).
-
-## What to change
-
-In [`InternxtFile.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt) add:
-```kotlin
-val removed: Boolean = false,
-val deleted: Boolean = false,
-```
-
-In `InternxtProvider.fileToDeltaCloudItem` (companion-object section), OR `removed` and `deleted` into the emitted `deleted` flag, mirroring the folder helper.
-
-## Acceptance
-
-- `InternxtFile` has both `removed` and `deleted` fields with `Boolean = false` defaults.
-- `fileToDeltaCloudItem` ORs them into the emitted `deleted` flag analogous to `folderToDeltaCloudItem`.
-- A unit test parses a payload with `status="EXISTS"` and `removed=true` and asserts the resulting `CloudItem` has `deleted=true`.
-
-## Related
-
-- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §DTO comparison.
----
 id: UD-362
 title: Narrow Internxt delta() request to --sync-path scope when set
 category: providers
