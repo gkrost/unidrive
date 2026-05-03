@@ -10830,3 +10830,39 @@ opened: 2026-04-17
 milestone: v0.1.0
 ---
 Root `settings.gradle.kts` composite scaffold landed; JVM unification to 21 LTS landed. Pending: verify `./gradlew build` from root green.
+
+---
+id: UD-361
+title: Surface collectFilesFromFolders skip count to delta() caller
+category: providers
+priority: critical
+effort: S
+status: closed
+closed: 2026-05-03
+resolved_by: commit 8219183. Fail-loud ProviderException on subtree 500/503 + 5 unit tests covering the recursion (happy path, 503-on-subtree-with-siblings, 500 parity, non-transient propagation, tombstone guard). UD-360 will refine to complete:Boolean on DeltaPage.
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:329
+opened: 2026-05-03
+---
+**`collectFilesFromFolders()` ([InternxtProvider.kt:375-398](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375)) silently swallows 500/503 on individual folder fetches** — it `log.warn`s and continues, but the caller has no signal that an entire subtree was skipped. The result is a partial inventory presented as complete (see UD-360); a single `/folders/content/{INBOX_uuid}` returning 503 makes every file under `/_INBOX` invisible to `delta()`, which the engine then turns into `del-local` actions.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§4 mechanism i, §6 mechanism 3). Sub-ticket of UD-360.
+
+## What to change
+
+In [`collectFilesFromFolders()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:375):
+- Accept a `skipCounter: AtomicInteger` (or pass back via return value).
+- On 500/503 catch, increment the counter before continuing.
+- Caller in `delta()` ([InternxtProvider.kt:329-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:329) area) reads the counter; if `> 0`, sets the partial-gather flag from UD-360 (or raises a `ProviderException` if UD-360 isn't yet landed).
+
+## Acceptance
+
+- `collectFilesFromFolders` exposes a skip count via parameter or return value.
+- `delta()` consumes the skip count and either marks the gather partial (post-UD-360) or raises `ProviderException` (if UD-361 lands first).
+- A unit test injects a 503 on one nested folder and asserts the skip count is exactly 1 and the page is marked partial.
+
+## Related
+
+- UD-360 — parent ticket; this signal is the input to the partial-gather flag.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §4.
