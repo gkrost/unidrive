@@ -5351,3 +5351,74 @@ Same trap applies to `sync_path` in `config.toml` if a Windows user transcribes 
 ## Surfaced
 
 2026-05-03 session, while diagnosing why `--sync-path '\Project Notes'` produced 106,455 unrelated upload failures. The user's first attempt (`\AfA - …`) silently filtered to nothing; the second (`/internal`) revealed UD-901a still bypasses scope. Bug A on its own is small; it's the gateway that exposes UD-901a/b.
+---
+id: UD-901a
+title: Reconciler UD-901 upload-recovery loop ignores syncPath filter
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:99
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163
+opened: 2026-05-03
+---
+**`Reconciler.reconcile`'s UD-901 upload-recovery loop iterates `db.getAllEntries()` and emits `SyncAction.Upload(...)` for every pending-upload row, regardless of the `syncPath` filter. A `--sync-path /internal` invocation that should have ~100 actions ended up with 107,988 actions — including pending uploads from `/Project Notes`, `/Album2`, and every other orphan in the DB.**
+
+## Repro (live, 2026-05-03 00:30)
+
+```
+PS C:\> unidrive -p inxt_user sync --upload-only --sync-path /internal
+sync: profile=inxt_user type=internxt sync_root=C:\Users\gerno\InternxtDrive sync_path=/internal mode=upload
+Reconciling... 106 / 106 items · 0:00              ← scope filter worked: 106 in-scope changes
+Reconciled: 107988 actions                          ← but 107k actions appeared
+[111/107988] up …Album2/IMG_001.jpg   ← out of scope
+```
+
+Reconcile main loop saw 106 paths (correct — `/internal` scope). Recovery loop added ~107k. Same symptom in UD-405's repro: `--sync-path '\Project Notes'` produced 170k actions despite reconcile-main seeing 0 remote / 0 local.
+
+## Root cause
+
+[Reconciler.kt:127-136](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:127):
+
+```kotlin
+// UD-901: previously-interrupted uploads leave DB entries with remoteId=null and
+// isHydrated=true …
+for (entry in allDbEntries) {                      // ← iterates ALL DB entries
+    if (entry.isFolder) continue
+    if (entry.remoteId != null) continue
+    if (!entry.isHydrated) continue
+    if (entry.path in coveredPaths) continue
+    if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+    val localPath = safeResolveLocal(syncRoot, entry.path)
+    if (!Files.isRegularFile(localPath)) continue
+    actions.add(SyncAction.Upload(entry.path))
+}
+```
+
+Compared to the main path-walk loop above (Reconciler.kt:92-120), which only considers `(remoteChanges.keys + localChanges.keys)` — a set already filtered by the `SyncEngine.doSyncOnce` syncPath gate. The recovery loop bypasses that gate. The `excludePatterns` filter is preserved but `syncPath` is not.
+
+There's a sibling at [Reconciler.kt:99-118](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:99) (the UD-225 download-recovery loop) with the same shape and the same syncPath bypass — it should get the same fix.
+
+## Acceptance
+
+- Both recovery loops (UD-225 download + UD-901 upload) accept a `syncPath: String?` parameter (passed from `SyncEngine` alongside `entryByPath`/`entryByLcPath`/`entryByRemoteId`).
+- When `syncPath != null`, each loop additionally filters out entries whose `entry.path` is neither the syncPath nor a descendant of it. Same predicate as the main filter in [SyncEngine.kt:163-168](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163):
+  ```kotlin
+  entry.path == syncPath || entry.path.startsWith("$syncPath/")
+  ```
+- Live repro: with `--sync-path /internal` and 107k orphans in DB outside that prefix, reconcile produces ≤ ~110 actions (the 106 in-scope changes + a few cross-action housekeeping additions), not 107k.
+- New `ReconcilerTest` case: pre-seed the DB with 5 pending-upload rows under different prefixes (`/internal/a.bin`, `/AfA - …/b.bin`, `/AnonA/c.bin`, …); call `reconcile(remote=empty, local=empty, syncPath="/internal")`; assert exactly one `Upload` action emitted (`/internal/a.bin`).
+- Existing `ReconcilerTest` cases (none currently pass `syncPath`) still pass.
+
+## Related
+
+- **UD-405 (filed alongside)**: enables this bug to bite Windows users via silent backslash-path scope drop. Fix landed independently.
+- **UD-901b (filed alongside)**: even when in-scope, UD-901 recovery emits Upload without parent CreateRemoteFolder. Fixing UD-901a stops the bleed *outside* scope; UD-901b stops the failure *inside* scope.
+- **UD-225** (closed, the download-recovery sibling) — adopt the same syncPath fix for the download recovery loop in this commit.
+- **UD-901** (the parent ticket that introduced pending-upload rows in `LocalScanner`) — closed; this is a follow-up invariant violation.
+
+## Surfaced
+
+2026-05-03 00:30 — user ran `--sync-path /internal` expecting ~100-action work, saw 107,988 actions. Daemon's reconcile log line `Reconciling... 106 / 106 items · 0:00` (the heartbeat from UD-240g) confirmed scope filter worked at the main loop; the gap to `Reconciled: 107988 actions` revealed the recovery-loop bypass.
