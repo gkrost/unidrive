@@ -288,13 +288,56 @@ data class SyncConfig(
     companion object {
         private val home: String = System.getenv("HOME") ?: System.getProperty("user.home")
 
-        fun defaultConfigDir(): Path {
-            val appData = System.getenv("APPDATA")
-            return if (appData != null) {
-                Paths.get(appData, "unidrive")
-            } else {
-                Paths.get(home, ".config", "unidrive")
-            }
+        /**
+         * UD-407: canonical config-dir resolver, used by both the CLI and MCP
+         * entry points so the same `unidrive` invocation lands on the same
+         * config file regardless of how it was launched.
+         *
+         * Precedence (highest first):
+         *  1. [explicitOverride] — the CLI's `-c/--config-dir` flag, when set.
+         *  2. `UNIDRIVE_CONFIG_DIR` env var. Documented at [Main.kt:reportConfigMissing]
+         *     as the workaround for MSIX-virtualised `%APPDATA%`; before
+         *     UD-407 the CLI advertised but ignored it.
+         *  3. `~/.config/unidrive/` if `config.toml` exists there. Lets users
+         *     opt out of `%APPDATA%` per-machine without setting an env var,
+         *     and converges Linux/Mac/Windows-MSIX users on the same default.
+         *  4. `%APPDATA%\unidrive\` on Windows.
+         *  5. `~/.config/unidrive/` as the cross-platform fallback.
+         *
+         * The MSIX angle: Claude Desktop and other MSIX-packaged hosts
+         * redirect `%APPDATA%` reads/writes to a per-package overlay
+         * (memory: project_msix_sandbox.md). A subprocess spawned from such
+         * a host sees a different on-disk file at the same nominal path
+         * than a native PowerShell does. Setting `UNIDRIVE_CONFIG_DIR` to a
+         * non-`%APPDATA%` path (or letting `~/.config/unidrive/` win)
+         * makes both views converge on the same file.
+         */
+        fun defaultConfigDir(explicitOverride: Path? = null): Path =
+            resolveConfigDir(
+                explicitOverride = explicitOverride,
+                envConfigDir = System.getenv("UNIDRIVE_CONFIG_DIR"),
+                appData = System.getenv("APPDATA"),
+                home = home,
+                xdgConfigExists = { Files.exists(it) },
+            )
+
+        /**
+         * UD-407: pure resolver, exposed for unit-testing the precedence
+         * order without env-var mutation. The OS-bound [defaultConfigDir]
+         * delegates here. See its doc-comment for the precedence rationale.
+         */
+        internal fun resolveConfigDir(
+            explicitOverride: Path?,
+            envConfigDir: String?,
+            appData: String?,
+            home: String,
+            xdgConfigExists: (Path) -> Boolean,
+        ): Path {
+            if (explicitOverride != null) return explicitOverride
+            if (envConfigDir != null) return Paths.get(envConfigDir)
+            val xdg = Paths.get(home, ".config", "unidrive")
+            if (xdgConfigExists(xdg.resolve("config.toml"))) return xdg
+            return if (appData != null) Paths.get(appData, "unidrive") else xdg
         }
 
         fun defaultConfigPath(): Path = defaultConfigDir().resolve("config.toml")

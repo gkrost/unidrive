@@ -908,4 +908,116 @@ class SyncConfigTest {
             assertEquals(cliResolved, mcpResolved, "CLI/MCP divergence for '${case.name}'")
         }
     }
+
+    // ------------------------------------------------------------------
+    // UD-407: defaultConfigDir / resolveConfigDir precedence
+    // ------------------------------------------------------------------
+    //
+    // Pin the precedence so a future refactor can't accidentally drop the
+    // UNIDRIVE_CONFIG_DIR escape hatch (the single mechanism that lets MSIX
+    // sandboxed processes and native shells converge on the same on-disk
+    // config). The pure resolver takes its inputs as parameters so we can
+    // test without mutating the JVM's environment.
+
+    @Test
+    fun `UD-407 explicit override wins over everything`() {
+        val explicit = Paths.get("C:/explicit/path")
+        val resolved =
+            SyncConfig.resolveConfigDir(
+                explicitOverride = explicit,
+                envConfigDir = "/should/be/ignored",
+                appData = "/should/be/ignored/too",
+                home = "/home/user",
+                xdgConfigExists = { true },
+            )
+        assertEquals(explicit, resolved)
+    }
+
+    @Test
+    fun `UD-407 UNIDRIVE_CONFIG_DIR wins over APPDATA and XDG`() {
+        val resolved =
+            SyncConfig.resolveConfigDir(
+                explicitOverride = null,
+                envConfigDir = "C:/Users/alice/.unidrive",
+                appData = "C:/Users/alice/AppData/Roaming",
+                home = "C:/Users/alice",
+                xdgConfigExists = { true },
+            )
+        assertEquals(Paths.get("C:/Users/alice/.unidrive"), resolved)
+    }
+
+    @Test
+    fun `UD-407 XDG wins over APPDATA when config_toml exists there`() {
+        val resolved =
+            SyncConfig.resolveConfigDir(
+                explicitOverride = null,
+                envConfigDir = null,
+                appData = "C:/Users/alice/AppData/Roaming",
+                home = "C:/Users/alice",
+                xdgConfigExists = { it == Paths.get("C:/Users/alice/.config/unidrive/config.toml") },
+            )
+        assertEquals(Paths.get("C:/Users/alice/.config/unidrive"), resolved)
+    }
+
+    @Test
+    fun `UD-407 falls back to APPDATA when XDG config_toml does not exist`() {
+        val resolved =
+            SyncConfig.resolveConfigDir(
+                explicitOverride = null,
+                envConfigDir = null,
+                appData = "C:/Users/alice/AppData/Roaming",
+                home = "C:/Users/alice",
+                xdgConfigExists = { false },
+            )
+        assertEquals(Paths.get("C:/Users/alice/AppData/Roaming/unidrive"), resolved)
+    }
+
+    @Test
+    fun `UD-407 falls back to XDG on platforms with no APPDATA`() {
+        // Linux/macOS path: APPDATA is unset, XDG path returned regardless of
+        // whether the file exists yet (so first-run setup writes there).
+        val resolved =
+            SyncConfig.resolveConfigDir(
+                explicitOverride = null,
+                envConfigDir = null,
+                appData = null,
+                home = "/home/alice",
+                xdgConfigExists = { false },
+            )
+        assertEquals(Paths.get("/home/alice/.config/unidrive"), resolved)
+    }
+
+    @Test
+    fun `UD-407 precedence ladder is consistent end-to-end`() {
+        // Each row mutates one input from the previous row, asserting the
+        // expected resolved path advances down the precedence ladder.
+        data class Case(
+            val name: String,
+            val explicit: Path?,
+            val env: String?,
+            val xdgExists: Boolean,
+            val appData: String?,
+            val expected: String,
+        )
+        val home = "/home/alice"
+        val cases =
+            listOf(
+                Case("explicit wins", Paths.get("/explicit"), "/env", true, "/appdata", "/explicit"),
+                Case("env wins when no explicit", null, "/env", true, "/appdata", "/env"),
+                Case("xdg wins when env unset and config exists", null, null, true, "/appdata", "/home/alice/.config/unidrive"),
+                Case("appdata wins when xdg empty", null, null, false, "/appdata", "/appdata/unidrive"),
+                Case("xdg fallback when appdata also unset", null, null, false, null, "/home/alice/.config/unidrive"),
+            )
+        for (c in cases) {
+            val resolved =
+                SyncConfig.resolveConfigDir(
+                    explicitOverride = c.explicit,
+                    envConfigDir = c.env,
+                    appData = c.appData,
+                    home = home,
+                    xdgConfigExists = { c.xdgExists },
+                )
+            assertEquals(Paths.get(c.expected), resolved, "case: ${c.name}")
+        }
+    }
 }

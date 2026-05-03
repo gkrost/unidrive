@@ -78,15 +78,7 @@ class Main : Runnable {
     lateinit var spec: CommandSpec
 
     private val baseConfigDir: Path
-        get() {
-            if (configDir != null) return Paths.get(configDir!!)
-            val appData = System.getenv("APPDATA")
-            return if (appData != null) {
-                Paths.get(appData, "unidrive")
-            } else {
-                Paths.get(System.getenv("HOME") ?: System.getProperty("user.home"), ".config", "unidrive")
-            }
-        }
+        get() = SyncConfig.defaultConfigDir(explicitOverride = configDir?.let { Paths.get(it) })
 
     private var _profile: ProfileInfo? = null
     private var _vaultData: Map<String, Map<String, String>>? = null
@@ -787,8 +779,10 @@ internal fun renderConfigMissingMessage(
             appendLine("wcifs virtualization may be redirecting %APPDATA% reads to a sandbox-private")
             appendLine("copy, so the file a sibling native shell sees at this path may differ from")
             appendLine("what we see here. Workaround:")
-            appendLine("  1. Pass `-c <non-virtualized-path>`, e.g. `-c C:\\Users\\<you>\\unidrive-config`.")
+            appendLine("  1. Pass `-c <non-virtualized-path>`, e.g. `-c C:\\Users\\<you>\\.unidrive`.")
             appendLine("  2. Or set the UNIDRIVE_CONFIG_DIR env var to a path outside %APPDATA%.")
+            appendLine("  3. Or move your config to %USERPROFILE%\\.config\\unidrive\\config.toml — it")
+            appendLine("     wins over %APPDATA% when present (UD-407) and is outside the MSIX overlay.")
             appendLine("  Parent process: $parentProcessCommand")
             appendLine("  NTFS FileID at this path (compare against your native shell's view): $fileId")
         }
