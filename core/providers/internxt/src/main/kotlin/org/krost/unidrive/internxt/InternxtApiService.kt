@@ -131,6 +131,41 @@ class InternxtApiService(
             json.decodeFromString<InternxtFile>(response.bodyAsText())
         }
 
+    /**
+     * UD-366: replace an existing file's content in place via `PUT /files/{uuid}`.
+     *
+     * Spec: `ReplaceFileDto` accepts only `fileId` (new bridge bucket-entry id), `size`
+     * (required), and optional `modificationTime`. The endpoint preserves the existing
+     * file's bucket, encrypted name, parent folder, and encryptVersion — there is nothing
+     * to re-derive on the client side. Returns the updated `FileDto` (same `uuid`,
+     * swapped `fileId`).
+     */
+    suspend fun replaceFile(
+        uuid: String,
+        size: Long,
+        fileId: String,
+        modificationTime: java.time.Instant? = null,
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
+                    put("size", kotlinx.serialization.json.JsonPrimitive(size))
+                    if (modificationTime != null) {
+                        put("modificationTime", kotlinx.serialization.json.JsonPrimitive(modificationTime.toString()))
+                    }
+                }
+            val response =
+                httpClient.put("$baseUrl/files/$uuid") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
+
     suspend fun createFolder(
         parentUuid: String,
         plainName: String,

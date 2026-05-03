@@ -75,8 +75,10 @@ class S3Provider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        // UD-366: existingRemoteId unused — S3 PutObject is naturally replace-in-place.
         val key = api.pathToKey(remotePath)
         val etag = api.putObject(key, localPath, onProgress)
         val size =

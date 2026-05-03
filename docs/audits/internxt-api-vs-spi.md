@@ -94,7 +94,7 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/files/{uuid}/versions` | GET | ◯ | — | Capability gap — no version recovery. |
 | `/files/{uuid}/versions/{versionId}` | DELETE | ◯ | — | |
 | `/files/{uuid}/versions/{versionId}/restore` | POST | ◯ | — | |
-| `/files/{uuid}` | PUT | ◯ | — | Replace-in-place (rather than create-new). Provider always creates a new file UUID on update. |
+| `/files/{uuid}` | PUT | ✅ | `InternxtApiService.kt` `replaceFile` | UD-366: replace-in-place. `ReplaceFileDto` accepts `fileId` (new bridge entry), `size`, optional `modificationTime` — endpoint preserves bucket/encryptedName/folderUuid. Routed via MODIFIED `SyncAction.Upload(remoteId=…)` from the reconciler. |
 | `/files/{uuid}` | PATCH | ✅ | `InternxtApiService.kt:179-185` | `moveFile`. |
 | `/files/{uuid}` | DELETE | ✅ | `InternxtApiService.kt:208-215` | `deleteFile`. |
 | `/files/{bucketId}/{fileId}` | DELETE | ◯ | — | Alternate delete by bridge fileId. |

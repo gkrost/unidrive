@@ -348,7 +348,10 @@ class Reconciler(
                 }
             }
             localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED ->
-                SyncAction.Upload(path)
+                // UD-366: pass the existing remote UUID so the provider can route through
+                // PUT /files/{uuid} (replace-in-place) rather than POSTing a duplicate that
+                // 409s on Internxt.
+                SyncAction.Upload(path, remoteId = entry?.remoteId)
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
                 when {
                     // UD-901: a pending-upload row (entry.remoteId == null) that vanished

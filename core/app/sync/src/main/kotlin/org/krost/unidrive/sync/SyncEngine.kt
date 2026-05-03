@@ -873,7 +873,9 @@ class SyncEngine(
     private suspend fun applyUpload(action: SyncAction.Upload) {
         val localPath = placeholder.resolveLocal(action.path)
         val result =
-            provider.upload(localPath, action.path) { transferred, total ->
+            // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
+            // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
+            provider.upload(localPath, action.path, existingRemoteId = action.remoteId) { transferred, total ->
                 reporter.onTransferProgress(action.path, transferred, total)
             }
         val mtime = Files.getLastModifiedTime(localPath).toMillis()
@@ -1043,7 +1045,13 @@ class SyncEngine(
             if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
                 if (Files.exists(localPath)) {
                     val result =
-                        provider.upload(localPath, action.path) { transferred, total ->
+                        // UD-366: COPY-MERGE conflict — remote already has a UUID; overwrite
+                        // it in place rather than POSTing a duplicate that 409s.
+                        provider.upload(
+                            localPath,
+                            action.path,
+                            existingRemoteId = action.remoteItem.id,
+                        ) { transferred, total ->
                             reporter.onTransferProgress(action.path, transferred, total)
                         }
                     val mtime = Files.getLastModifiedTime(localPath).toMillis()
@@ -1117,7 +1125,10 @@ class SyncEngine(
         if (remoteWins && action.remoteItem != null && !action.remoteItem.deleted) {
             applyCreatePlaceholder(SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = true))
         } else if (!remoteWins && Files.exists(localPath)) {
-            applyUpload(SyncAction.Upload(action.path))
+            // UD-366: conflict-loser is the remote — overwrite it in place rather than
+            // POSTing a duplicate. action.remoteItem is non-null on this branch because
+            // remoteWins=false implies a remote modification was the conflict trigger.
+            applyUpload(SyncAction.Upload(action.path, remoteId = action.remoteItem?.id))
         }
     }
 

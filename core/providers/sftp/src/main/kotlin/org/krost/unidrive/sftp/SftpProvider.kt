@@ -55,8 +55,10 @@ class SftpProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        // UD-366: existingRemoteId unused — SFTP overwrite is naturally replace-in-place.
         val entry = api.upload(localPath, remotePath, onProgress)
         return entry.toCloudItem()
     }

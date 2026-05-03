@@ -60,6 +60,7 @@ class ThrottledProviderTest {
         override suspend fun upload(
             localPath: Path,
             remotePath: String,
+            existingRemoteId: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
             uploadCalled = true

@@ -39,9 +39,24 @@ interface CloudProvider {
         destination: Path,
     ): Long = download(remotePath, destination)
 
+    /**
+     * Upload a local file to [remotePath].
+     *
+     * UD-366: providers that support replace-in-place (e.g. Internxt's `PUT /files/{uuid}`)
+     * use [existingRemoteId] when non-null to overwrite an existing remote entry instead of
+     * creating a new one. The reconciler passes [SyncEntry.remoteId] for MODIFIED actions;
+     * NEW uploads pass null. Providers without explicit replace semantics (path-based PUT
+     * like OneDrive, or filesystem overwrite) ignore the parameter.
+     *
+     * `existingRemoteId` precedes `onProgress` in the signature so trailing-lambda call sites
+     * `provider.upload(localPath, remotePath) { transferred, total -> … }` keep binding the
+     * lambda to `onProgress` (Kotlin trailing-lambda convention — see memory
+     * `feedback_kotlin_default_param_ordering`).
+     */
     suspend fun upload(
         localPath: Path,
         remotePath: String,
+        existingRemoteId: String? = null,
         onProgress: ((Long, Long) -> Unit)? = null,
     ): CloudItem
 

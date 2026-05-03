@@ -128,6 +128,32 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `UD-366 local modified uploads carry existing remoteId for replace-in-place`() {
+        // The MODIFIED+UNCHANGED branch must plumb entry.remoteId into SyncAction.Upload
+        // so InternxtProvider can route through PUT /files/{uuid} instead of POSTing a
+        // duplicate that 409s. NEW uploads (no entry) keep remoteId=null.
+        db.upsertEntry(dbEntry("/mod.txt", isHydrated = true))
+        val actions =
+            reconciler.reconcile(
+                emptyMap(),
+                mapOf("/mod.txt" to ChangeState.MODIFIED),
+            )
+        val upload = actions.single() as SyncAction.Upload
+        assertEquals("id-/mod.txt", upload.remoteId)
+    }
+
+    @Test
+    fun `UD-366 local-new uploads have null remoteId (no replace-in-place attempt)`() {
+        val actions =
+            reconciler.reconcile(
+                emptyMap(),
+                mapOf("/new.txt" to ChangeState.NEW),
+            )
+        val upload = actions.single() as SyncAction.Upload
+        assertEquals(null, upload.remoteId)
+    }
+
+    @Test
     fun `local deleted deletes remote`() {
         // Hydrated entry + local-missing → real user delete → propagate.
         db.upsertEntry(dbEntry("/del.txt", isHydrated = true))

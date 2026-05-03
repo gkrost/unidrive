@@ -144,6 +144,7 @@ class InternxtProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val segments = pathSegments(remotePath)
@@ -154,8 +155,9 @@ class InternxtProvider(
         val plainName = if (ext != null) fileName.substringBeforeLast('.') else fileName
         val parentPath = "/" + segments.dropLast(1).joinToString("/")
 
-        // 1. Get file size without loading into memory
+        // 1. Get file size + mtime without loading into memory
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
+        val localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
         onProgress?.invoke(0L, fileSize)
 
         // 2. Generate random 32-byte index; derive key + iv
@@ -220,18 +222,52 @@ class InternxtProvider(
         // 8. Finish upload → get bridge fileId
         val bucketEntry = api.finishUpload(bucket, indexHex, hashHex, descriptor.uuid)
 
-        // 9. Register file in drive metadata
+        // 9. Register file in drive metadata.
+        // UD-366: MODIFIED uploads route through PUT /files/{uuid} (replace-in-place);
+        // NEW uploads POST /files (create). Defensive fallback below catches the 409 that
+        // appears when the reconciler thought a path was new but the remote already has it.
+        if (existingRemoteId != null) {
+            val replaced =
+                api.replaceFile(
+                    uuid = existingRemoteId,
+                    size = fileSize,
+                    fileId = bucketEntry.id,
+                    modificationTime = localMtime,
+                )
+            return replaced.toCloudItem(parentPath)
+        }
+
         val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
         val created =
-            api.createFile(
-                bucket = bucket,
-                folderUuid = parentUuid,
-                plainName = plainName,
-                encryptedName = encryptedName,
-                size = fileSize,
-                type = ext,
-                fileId = bucketEntry.id,
-            )
+            try {
+                api.createFile(
+                    bucket = bucket,
+                    folderUuid = parentUuid,
+                    plainName = plainName,
+                    encryptedName = encryptedName,
+                    size = fileSize,
+                    type = ext,
+                    fileId = bucketEntry.id,
+                )
+            } catch (e: InternxtApiException) {
+                // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
+                // path that already exists on remote. Re-resolve the UUID and retry as PUT
+                // rather than stranding the local edit.
+                if (e.statusCode != 409) throw e
+                log.warn(
+                    "UD-366: 409 on POST /files for {} despite existingRemoteId=null — " +
+                        "reconciler/DB drift; re-resolving UUID and retrying as PUT /files/{{uuid}}",
+                    remotePath,
+                )
+                val existing = getMetadata(remotePath)
+                if (existing.isFolder) throw e
+                api.replaceFile(
+                    uuid = existing.id,
+                    size = fileSize,
+                    fileId = bucketEntry.id,
+                    modificationTime = localMtime,
+                )
+            }
         return created.toCloudItem(parentPath)
     }
 

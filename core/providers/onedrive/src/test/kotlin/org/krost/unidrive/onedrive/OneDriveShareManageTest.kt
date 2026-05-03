@@ -61,6 +61,7 @@ class OneDriveShareManageTest {
                     override suspend fun upload(
                         localPath: java.nio.file.Path,
                         remotePath: String,
+                        existingRemoteId: String?,
                         onProgress: ((Long, Long) -> Unit)?,
                     ) = throw UnsupportedOperationException()
 
@@ -112,6 +113,7 @@ class OneDriveShareManageTest {
                     override suspend fun upload(
                         localPath: java.nio.file.Path,
                         remotePath: String,
+                        existingRemoteId: String?,
                         onProgress: ((Long, Long) -> Unit)?,
                     ) = throw UnsupportedOperationException()
 

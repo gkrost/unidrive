@@ -17,6 +17,7 @@ class XtraEncryptedProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val fileKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
@@ -31,7 +32,7 @@ class XtraEncryptedProvider(
                     strategy.encrypt(input, out, fileKey, iv)
                 }
             }
-            return inner.upload(tmp, remotePath, onProgress)
+            return inner.upload(tmp, remotePath, existingRemoteId, onProgress)
         } finally {
             Files.deleteIfExists(tmp)
         }

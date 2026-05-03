@@ -146,6 +146,7 @@ private class InMemoryProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         storage[remotePath] = Files.readAllBytes(localPath)

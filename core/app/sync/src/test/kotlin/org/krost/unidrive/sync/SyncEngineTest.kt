@@ -77,6 +77,29 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-366 modify-upload forwards existing remoteId to provider for replace-in-place`() =
+        runTest {
+            // First upload registers the file with a remoteId in the DB.
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            Files.writeString(syncRoot.resolve("mod.txt"), "v1")
+            engine.syncOnce()
+            val firstRemoteId = db.getEntry("/mod.txt")?.remoteId
+            assertNotNull(firstRemoteId)
+            // NEW upload: existingRemoteId must be null.
+            assertNull(provider.lastUploadExistingRemoteId)
+
+            // Modify locally and re-sync. The reconciler emits MODIFIED+UNCHANGED →
+            // SyncAction.Upload(remoteId = entry.remoteId). The dispatcher must forward
+            // it as upload(existingRemoteId = firstRemoteId).
+            Thread.sleep(20) // ensure mtime advances on filesystems with second-level resolution
+            Files.writeString(syncRoot.resolve("mod.txt"), "v2-longer-content-to-bump-size")
+            engine.syncOnce()
+
+            assertEquals(firstRemoteId, provider.lastUploadExistingRemoteId)
+        }
+
+    @Test
     fun `sync deletes local file when remote deleted`() =
         runTest {
             provider.deltaItems = listOf(cloudItem("/will-delete.txt", size = 100))
@@ -1051,11 +1074,16 @@ class SyncEngineTest {
             return content.size.toLong()
         }
 
+        var lastUploadExistingRemoteId: String? = null
+            private set
+
         override suspend fun upload(
             localPath: Path,
             remotePath: String,
+            existingRemoteId: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
+            lastUploadExistingRemoteId = existingRemoteId
             if (uploadFailCount > 0) {
                 uploadFailCount--
                 throw ProviderException("Network timeout on upload")
