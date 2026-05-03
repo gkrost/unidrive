@@ -20,6 +20,13 @@ data class InternxtFile(
     val modificationTime: String? = null,
     val createdAt: String? = null,
     val updatedAt: String? = null,
+    // UD-359: server-provided deletion flags. Until 2026-05-03 these were not
+    // deserialised, so server schema drift to `removed=true`/`deleted=true`
+    // while leaving `status="EXISTS"` would mask deletions. Folder DTO already
+    // had both — files now match (see InternxtProvider.fileToCloudItem and
+    // fileToDeltaCloudItem for the OR-into-deleted handling).
+    val removed: Boolean = false,
+    val deleted: Boolean = false,
 )
 
 @Serializable

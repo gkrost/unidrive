@@ -557,7 +557,9 @@ class InternxtProvider(
                 created = file.creationTime?.let { parseTime(it) },
                 hash = null,
                 mimeType = cleanType,
-                deleted = file.status == "TRASHED" || file.status == "DELETED",
+                // UD-359: surface `removed`/`deleted` boolean flags alongside
+                // the `status` enum. Mirrors the folder helper at line ~562.
+                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
             )
         }
 
@@ -605,7 +607,9 @@ class InternxtProvider(
                 created = file.creationTime?.let { parseTime(it) },
                 hash = null,
                 mimeType = cleanType,
-                deleted = file.status == "TRASHED" || file.status == "DELETED",
+                // UD-359: surface `removed`/`deleted` boolean flags alongside
+                // the `status` enum. Mirrors the folder helper at line ~562.
+                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
             )
         }
 
