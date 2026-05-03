@@ -119,5 +119,9 @@ subcommand is reachable.
 
 ## Reference
 
-- Spec: `docs/specs/relocate-v1-sprint-plan.md`
 - SPI source: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ext/`
+- Test fixture: `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ext/fixtures/DummyExtension.kt`
+- This document IS the spec — there is no separate spec file. The previous
+  cross-reference to `docs/specs/relocate-v1-sprint-plan.md` was a misfile
+  (relocate-v1 is the relocate-operation contract, not the SPI extensibility
+  spec). UD-771 doc-sweep, 2026-05-03.

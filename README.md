@@ -30,7 +30,13 @@ Early public preview. Linux is the MVP target; macOS and Windows may build on be
 - **Threat model** — [docs/SECURITY.md](docs/SECURITY.md) (STRIDE, file:line-anchored).
 - **ADR trail** — [docs/adr/](docs/adr/).
 - **Spec-vs-code intent catalog** — [docs/SPECS.md](docs/SPECS.md).
+- **Per-verb mutation / cancel / rollback semantics** — [docs/user-guide/consequences.md](docs/user-guide/consequences.md).
 - **Reporting security issues** — [`SECURITY.md`](SECURITY.md), `unidrive@krost.org`, subject `[SECURITY] …`.
+
+## Extending
+
+- **Architecture overview** — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- **CLI extension SPI** — [docs/EXTENSIONS.md](docs/EXTENSIONS.md) (`org.krost.unidrive.cli.ext.CliExtension` via `META-INF/services`).
 
 ## License & contributing
 

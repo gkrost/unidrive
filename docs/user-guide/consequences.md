@@ -240,9 +240,13 @@ stay materialised on local disk regardless of cache eviction; `unpin`
 allows it to be de-hydrated back to a placeholder.
 
 **Mutates:**
-- **local**: the file is downloaded (pin) or dehydrated to a
-  placeholder (unpin) via the Windows CF-API shell. Files already in
-  the desired state are no-ops.
+- **local**: the file is downloaded (pin) or removed (unpin) via
+  ordinary file I/O. The placeholder/dehydration semantics that the
+  retired Windows CF-API tier provided are out of MVP scope per
+  [ADR-0011](../adr/0011-shell-win-removal.md); on Linux, unpin
+  removes the local copy outright. `state.db` retains the hash + size
+  so the next sync recognises the file as legitimately absent rather
+  than user-deleted. Files already in the desired state are no-ops.
 - **state.db**: `pin_state` column is updated.
 - **remote**: nothing.
 

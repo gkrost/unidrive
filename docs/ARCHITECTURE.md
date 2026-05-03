@@ -57,6 +57,7 @@ schema directory, see [ADR-0012 §Re-opening criteria](adr/0012-linux-mvp-protoc
 - **Discovery:** `java.util.ServiceLoader` on `ProviderFactory` SPI.
 - **Contract:** `core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt` (list, read, write, delete, delta, quota, share, webhook).
 - **Capability gaps:** `deltaWithShared()` and `handleWebhookCallback()` are only overridden by `onedrive`; others no-op. UD-302 / UD-303 formalize this via an `UNSUPPORTED` return per ADR-0005.
+- **CLI extension SPI** (orthogonal to provider SPI — for adding subcommands, not providers): [docs/EXTENSIONS.md](EXTENSIONS.md). `org.krost.unidrive.cli.ext.CliExtension` discovered the same way.
 
 ## Persistence
 
@@ -201,3 +202,5 @@ Only `localfs`, `s3`, `sftp` are in-scope for the MVP release quality gate. Othe
 - [ADR-0011 shell-win Removal](adr/0011-shell-win-removal.md)
 - [ADR-0012 Linux MVP & protocol/ Removal](adr/0012-linux-mvp-protocol-removal.md)
 - [ADR-0013 ui/ Removal](adr/0013-ui-removal.md)
+- [User-guide: per-verb consequences](user-guide/consequences.md) — mutation / cancel / rollback / remote-side-effects per CLI verb.
+- [CLI extension SPI](EXTENSIONS.md) — adding subcommands without forking core.

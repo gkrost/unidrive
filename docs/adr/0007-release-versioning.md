@@ -13,7 +13,7 @@ With three tiers now in one repo ([ADR-0001](0001-monorepo-layout.md)), a versio
 
 - **Primary version** is a single monorepo SemVer: `vMAJOR.MINOR.PATCH` (e.g., `v0.1.0`, `v1.2.3`).
 - **Scope per release** is declared in `docs/CHANGELOG.md` — not every tier needs to change each release.
-- **Component sub-tags** are permitted as additional tags on the same commit when a tier needs an independently-citable build (e.g., `core-v0.1.0`, `shell-win-v0.3.0`). They are *not* primary and must match the monorepo tag's commit.
+- **Component sub-tags** are permitted as additional tags on the same commit when a tier needs an independently-citable build (e.g., `core-v0.1.0`, `mcp-v0.1.0`). They are *not* primary and must match the monorepo tag's commit. (The original second example here was `shell-win-v0.3.0`; the shell-win tier was retired by [ADR-0011](0011-shell-win-removal.md), so this ADR was updated 2026-05-03 under UD-771 to cite a surviving tier.)
 - **Pre-release identifiers** allowed: `v0.1.0-mvp`, `v0.2.0-rc.1`.
 - **Build metadata** after `+` (e.g., `v0.1.0+sha.abc123`) permitted in artifact names but not in tags.
 

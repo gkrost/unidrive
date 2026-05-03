@@ -1,5 +1,24 @@
 # Log → code feedback loop (proposal, 2026-04-29)
 
+> **STATUS — superseded 2026-05-03 (UD-771 sweep).** The Layer-2 follow-up
+> tickets in this proposal were never filed. The motivating gaps have since
+> been addressed by a different chain of work:
+>
+> - **UD-294** (closed) — fixed the `MDC ?????? on 132k+ log lines` regression
+>   on OneDrive download / WebDAV upload paths (the second proposal item).
+> - **UD-254a** (open) — the canonical MDC-in-suspend follow-on, replacing the
+>   broader "restore MDC propagation" framing here with a JFR-grounded scope
+>   (80% of allocation pressure under MDCContext clone storm).
+> - **UD-773** (queued) — `RequestId ←` enhancement to carry payload byte
+>   counts; addresses the response-line observability gap surfaced here at
+>   a more useful granularity than the 2.2 GB OneDrive download outlier.
+> - The 2.2 GB Graph download OOM (first proposal item) has not recurred in
+>   the JFR-instrumented runs since 2026-05-03; if it returns, file a fresh
+>   ticket against the live trace rather than reviving this proposal.
+>
+> Document kept for historical context; do not act on the "file two tickets"
+> instruction below.
+
 Source: evaluation of `~/AppData/Local/unidrive/unidrive*.log` from 2026-04-29
 (~32 MB across 4 rolled files plus the live tail).
 
