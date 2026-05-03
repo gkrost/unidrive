@@ -104,7 +104,7 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 
 | Endpoint | Verb | Status | Provider site | Notes |
 |---|---|---|---|---|
-| `/folders` | POST | ✅ | `InternxtApiService.kt:158-163` | Single-folder create (uses `parentFolderUuid` + `plainName` + `name`). Multi-folder batch form is unused. |
+| `/folders` | POST | ✅ | `InternxtApiService.kt` `createFolder` + `createFoldersBatch` | UD-368: bulk form wired (`createFoldersBatch`). Endpoint is polymorphic — body is either `{plainName, parentFolderUuid}` (single, today's path) OR `{folders: [{plainName}], parentFolderUuid}` (bulk, **5-item cap per call**). 200 response shape for bulk is undocumented; we parse `{result: [FolderDto]}` (`ResultFoldersDto`) with fallbacks. 409 returns `CreateBulkFoldersConflictResponseDto` with conflicting plain names only — provider falls back to serial `createFolder` on bulk 409 for correctness. **Engine-side dispatch wiring (group `CreateRemoteFolder` actions in SyncEngine Pass 1) is deferred to a follow-on ticket** — `CloudProvider.createFolders` SPI default still loops `createFolder`, so the bulk path is unused in production until that wiring lands. |
 | `/folders` | GET | ⚠️ | `InternxtApiService.kt:92-106` | Same divergence as `/files` GET — hardcoded `limit=50`, no `sort`/`order`. |
 | `/folders` | DELETE | ✅ | `InternxtApiService.kt:217-240` | `deleteFolder` (sends `items: [{uuid, type: "folder"}]`). |
 | `/folders/count` | GET | ◯ | — | |

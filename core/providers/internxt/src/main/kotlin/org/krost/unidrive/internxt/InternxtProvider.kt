@@ -312,6 +312,74 @@ class InternxtProvider(
         return folder.toCloudItem(parentPath)
     }
 
+    /**
+     * UD-368: bulk-aware override. Groups paths by their parent folder, resolves each parent
+     * UUID once, and calls [InternxtApiService.createFoldersBatch] in chunks of 5 (the
+     * Internxt server cap). Falls back to the per-path [createFolder] (which carries the
+     * UD-317 409-recovery dance and UD-357 cache population) for cross-parent groups,
+     * preserving today's correctness guarantees.
+     *
+     * **Caveat — partial-success on bulk 409.** The server returns
+     * `CreateBulkFoldersConflictResponseDto` for any conflict in the batch, listing only the
+     * conflicting plain names. Recovering UUIDs for the non-conflicting ones from a bulk
+     * response is awkward; on 409 we fall back to serial [createFolder] for the entire
+     * group, which trades round-trips for correctness.
+     */
+    override suspend fun createFolders(paths: List<String>): List<CloudItem> {
+        if (paths.isEmpty()) return emptyList()
+        if (paths.size == 1) return listOf(createFolder(paths.single()))
+
+        // Preserve input order in the result.
+        data class Indexed(val originalIndex: Int, val path: String, val name: String, val parentPath: String)
+        val indexed =
+            paths.mapIndexed { i, p ->
+                val segs = pathSegments(p)
+                require(segs.isNotEmpty()) { "Cannot create root: $p" }
+                Indexed(i, p, segs.last(), "/" + segs.dropLast(1).joinToString("/"))
+            }
+        val byParent = indexed.groupBy { it.parentPath }
+        val results = arrayOfNulls<CloudItem>(paths.size)
+
+        for ((parentPath, group) in byParent) {
+            val parentUuid = resolveFolder(parentPath)
+            val creds = authService.getValidCredentials()
+            // Chunk against the server's 5-item cap.
+            for (chunk in group.chunked(5)) {
+                val items =
+                    chunk.map { idx ->
+                        val encryptedName = crypto.encryptName(idx.name, "${creds.mnemonic}-$parentUuid")
+                        idx.name to encryptedName
+                    }
+                try {
+                    val created = api.createFoldersBatch(parentUuid, items)
+                    require(created.size == chunk.size) {
+                        "createFoldersBatch returned ${created.size} folders for ${chunk.size} requested"
+                    }
+                    chunk.zip(created).forEach { (idx, folder) ->
+                        // UD-357: populate cache so later resolveFolder calls don't race.
+                        folderCache.put(parentUuid, sanitizeName(idx.name), folder.uuid)
+                        results[idx.originalIndex] = folder.toCloudItem(parentPath)
+                    }
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode != 409) throw e
+                    // UD-368 caveat: bulk 409 doesn't tell us per-item success/failure.
+                    // Fall back to serial createFolder which handles 409 per-item via UD-317.
+                    log.warn(
+                        "UD-368: bulk POST /folders returned 409 for parent {}; falling back to " +
+                            "serial createFolder for {} item(s)",
+                        parentPath,
+                        chunk.size,
+                    )
+                    chunk.forEach { idx ->
+                        results[idx.originalIndex] = createFolder(idx.path)
+                    }
+                }
+            }
+        }
+        @Suppress("UNCHECKED_CAST")
+        return (results as Array<CloudItem>).toList()
+    }
+
     override suspend fun move(
         fromPath: String,
         toPath: String,

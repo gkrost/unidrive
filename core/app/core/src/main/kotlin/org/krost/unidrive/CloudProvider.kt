@@ -64,6 +64,18 @@ interface CloudProvider {
 
     suspend fun createFolder(path: String): CloudItem
 
+    /**
+     * UD-368: create multiple folders in a single round-trip when the underlying API
+     * supports it (e.g. Internxt's polymorphic `POST /folders` bulk form, capped at 5
+     * per call). Default implementation loops [createFolder] one at a time so providers
+     * without bulk semantics keep working unchanged.
+     *
+     * Returns one [CloudItem] per requested path, in the same order. Implementations
+     * that issue bulk calls are responsible for chunking against the server's per-call
+     * cap and for handling partial-success / 409-conflict semantics per their backend.
+     */
+    suspend fun createFolders(paths: List<String>): List<CloudItem> = paths.map { createFolder(it) }
+
     suspend fun move(
         fromPath: String,
         toPath: String,

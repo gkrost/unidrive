@@ -158,6 +158,31 @@ class InternxtApiServiceTest {
         }
 
     @Test
+    fun `UD-368 createFoldersBatch rejects empty list`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.createFoldersBatch("parent-uuid", emptyList())
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("at least one item"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-368 createFoldersBatch rejects more than 5 items (server cap)`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            val tooMany = (1..6).map { "name-$it" to "enc-$it" }
+            try {
+                service.createFoldersBatch("parent-uuid", tooMany)
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("server-capped at 5"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
     fun `UD-367 trashItems rejects empty list`() =
         kotlinx.coroutines.test.runTest {
             val service = mkService()

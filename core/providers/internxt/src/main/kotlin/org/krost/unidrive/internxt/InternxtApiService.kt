@@ -166,6 +166,80 @@ class InternxtApiService(
             json.decodeFromString<InternxtFile>(response.bodyAsText())
         }
 
+    /**
+     * UD-368: bulk folder creation under a single parent via the polymorphic `POST /folders`.
+     *
+     * Spec: `CreateFolderDto` accepts either `{plainName}` (single) OR
+     * `{folders: [{plainName}], parentFolderUuid}` (bulk, 1–5 items per call). The bulk
+     * response is undocumented in the swagger 200 schema (which lists only single-folder
+     * `FolderDto`) — we parse as `ResultFoldersDto = {result: [FolderDto]}` based on the
+     * sibling endpoint convention; if Internxt ships an integration test or the live API
+     * returns a different shape, this will fail loudly at deserialise time.
+     *
+     * The 409 conflict response is bulk-specific: `CreateBulkFoldersConflictResponseDto` =
+     * `{message, existentFolders: [string]}` (names, not UUIDs). Caller is responsible for
+     * the 409-recovery dance — there is no per-item partial-success path on the wire.
+     *
+     * Note: the bulk DTO documents `plainName` only per item; the existing single-folder
+     * `createFolder` also sends `name` (encrypted) as an undocumented field that the server
+     * accepts. We mirror that here for parity, even though the spec is silent.
+     */
+    suspend fun createFoldersBatch(
+        parentUuid: String,
+        items: List<Pair<String, String>>,
+    ): List<InternxtFolder> {
+        require(items.isNotEmpty()) { "createFoldersBatch requires at least one item" }
+        require(items.size <= 5) { "POST /folders bulk form is server-capped at 5; got ${items.size}" }
+        return retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("parentFolderUuid", kotlinx.serialization.json.JsonPrimitive(parentUuid))
+                    put(
+                        "folders",
+                        kotlinx.serialization.json.buildJsonArray {
+                            items.forEach { (plainName, encryptedName) ->
+                                add(
+                                    kotlinx.serialization.json.buildJsonObject {
+                                        put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                                        put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+            val response =
+                httpClient.post("$baseUrl/folders") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            // Try ResultFoldersDto shape `{result: [FolderDto]}`; fall back to bare array.
+            val text = response.bodyAsText()
+            val rootElement = json.parseToJsonElement(text)
+            val arr =
+                when {
+                    rootElement is kotlinx.serialization.json.JsonObject && "result" in rootElement ->
+                        rootElement["result"]!!
+                    rootElement is kotlinx.serialization.json.JsonObject && "folders" in rootElement ->
+                        rootElement["folders"]!!
+                    rootElement is kotlinx.serialization.json.JsonArray ->
+                        rootElement
+                    else ->
+                        throw InternxtApiException(
+                            "createFoldersBatch: unexpected response shape (no result/folders array): ${text.take(200)}",
+                            statusCode = 0,
+                        )
+                }
+            json.decodeFromJsonElement(
+                kotlinx.serialization.builtins.ListSerializer(InternxtFolder.serializer()),
+                arr,
+            )
+        }
+    }
+
     suspend fun createFolder(
         parentUuid: String,
         plainName: String,
