@@ -218,8 +218,10 @@ class SyncEngine(
         }
 
         // Phase 2: Reconcile (UD-240g: pass reporter so the phase emits a
-        // heartbeat instead of going silent for many seconds on big first-syncs)
-        val allActions = reconciler.reconcile(remoteChanges, localChanges, reporter)
+        // heartbeat instead of going silent for many seconds on big first-syncs;
+        // UD-901a: pass syncPath so the recovery loops respect scope and don't
+        // resurrect orphans outside the user's requested subtree).
+        val allActions = reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {

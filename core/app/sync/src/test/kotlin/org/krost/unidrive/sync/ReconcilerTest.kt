@@ -326,6 +326,331 @@ class ReconcilerTest {
         assertEquals(ChangeState.MODIFIED, action.remoteState)
     }
 
+    // ── UD-901a: recovery loops respect syncPath scope ──────────────────────
+    // Pre-fix the UD-225 download-recovery and UD-901 upload-recovery loops
+    // iterated `db.getAllEntries()` without any scope filter. A
+    // `--sync-path /internal` invocation that should produce ~100 actions
+    // surfaced 107,988 actions on the user's 2026-05-03 session — every
+    // pending-upload row in the DB regardless of where it sat. Confirmed by
+    // the daemon's `Reconciling... 106 / 106 items` (correct in-scope main
+    // loop) followed by `Reconciled: 107988 actions` (recovery bypass).
+
+    @Test
+    fun `UD-901a UD-901 upload recovery respects syncPath scope`() {
+        // Seed three pending-upload rows under different prefixes.
+        val pendingPaths =
+            listOf(
+                "/internal/file-a.bin",
+                "/Project Notes/file-b.bin",
+                "/AnonA/file-c.bin",
+            )
+        for (p in pendingPaths) {
+            // remoteId=null + isHydrated=true is the UD-901 pending-upload shape.
+            db.upsertEntry(
+                SyncEntry(
+                    path = p,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = 1711627200000,
+                    localSize = 100,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.EPOCH,
+                ),
+            )
+            // Materialise the file on disk so Files.isRegularFile passes.
+            val abs = syncRoot.resolve(p.removePrefix("/"))
+            Files.createDirectories(abs.parent)
+            Files.writeString(abs, "x".repeat(100))
+        }
+
+        val actions =
+            reconciler.reconcile(
+                remoteChanges = emptyMap(),
+                localChanges = emptyMap(),
+                syncPath = "/internal",
+            )
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        assertEquals(
+            1,
+            uploads.size,
+            "UD-901a: only the in-scope orphan should surface; got: ${uploads.map { it.path }}",
+        )
+        assertEquals("/internal/file-a.bin", uploads[0].path)
+    }
+
+    @Test
+    fun `UD-901a UD-225 download recovery respects syncPath scope`() {
+        // Seed three half-downloaded rows (isHydrated=false, remoteSize>0)
+        // under different prefixes. UD-225's recovery loop should respect
+        // syncPath the same way UD-901's does.
+        val pendingPaths =
+            listOf(
+                "/internal/file-a.bin",
+                "/Project Notes/file-b.bin",
+                "/AnonA/file-c.bin",
+            )
+        for (p in pendingPaths) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = p,
+                    remoteId = "id-$p",
+                    remoteHash = "hash-$p",
+                    remoteSize = 100,
+                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = 1711627200000,
+                    localSize = 0,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+
+        val actions =
+            reconciler.reconcile(
+                remoteChanges = emptyMap(),
+                localChanges = emptyMap(),
+                syncPath = "/internal",
+            )
+        val downloads = actions.filterIsInstance<SyncAction.DownloadContent>()
+        assertEquals(
+            1,
+            downloads.size,
+            "UD-901a: only the in-scope orphan should surface; got: ${downloads.map { it.path }}",
+        )
+        assertEquals("/internal/file-a.bin", downloads[0].path)
+    }
+
+    @Test
+    fun `UD-901a no syncPath means all orphans are recovered as before`() {
+        // Regression guard: when syncPath is null (the default), every orphan
+        // continues to be recovered — i.e. the new filter is a strict
+        // restriction added on top of existing behaviour, not a behavioural
+        // change for the no-scope case.
+        val pendingPaths = listOf("/x/a.bin", "/y/b.bin", "/z/c.bin")
+        for (p in pendingPaths) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = p,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = 1711627200000,
+                    localSize = 100,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.EPOCH,
+                ),
+            )
+            val abs = syncRoot.resolve(p.removePrefix("/"))
+            Files.createDirectories(abs.parent)
+            Files.writeString(abs, "x".repeat(100))
+        }
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        assertEquals(3, uploads.size, "no-scope recovery must surface all 3 orphans")
+    }
+
+    @Test
+    fun `UD-901a pathInSyncScope matches the engine scope filter exactly`() {
+        // Direct unit test of the predicate so future refactors of the engine's
+        // own filter (SyncEngine.kt:163) and this one stay in lockstep.
+        // null syncPath → everything in scope.
+        assertTrue(Reconciler.pathInSyncScope("/anything", null))
+        // Exact match.
+        assertTrue(Reconciler.pathInSyncScope("/internal", "/internal"))
+        // Strict descendant.
+        assertTrue(Reconciler.pathInSyncScope("/internal/sub/file.bin", "/internal"))
+        // Sibling that shares a prefix is OUT of scope (the bug `/foo` matching
+        // `/footer.txt` if we'd used startsWith naively).
+        assertFalse(Reconciler.pathInSyncScope("/internal-other", "/internal"))
+        assertFalse(Reconciler.pathInSyncScope("/footer.txt", "/foo"))
+        // Out-of-tree.
+        assertFalse(Reconciler.pathInSyncScope("/Project Notes/x", "/internal"))
+    }
+
+    // ── UD-901b: orphan upload synthesises parent CreateRemoteFolder ────────
+    // Pre-fix the UD-901 recovery loop emitted Upload but not the prerequisite
+    // CreateRemoteFolder for the parent tree. When a pending-upload row's
+    // parent doesn't exist on remote (e.g. previous run was killed before its
+    // folder creates landed), Pass 2 fires the upload, the provider's
+    // resolveFolder walks the path-segments looking for the parent, doesn't
+    // find it, throws "Folder not found." Confirmed live 2026-05-03 00:25:
+    // every file under /Project Notes failed identically — the orphan
+    // rows would stay in DB forever, every retry failing the same way.
+
+    @Test
+    fun `UD-901b orphan upload emits CreateRemoteFolder chain for missing ancestors`() {
+        // Single orphan at /a/b/c/file.bin; no folder rows in DB; no remote
+        // changes. Expect CreateRemoteFolder for /a, /a/b, /a/b/c, then Upload.
+        val orphanPath = "/a/b/c/file.bin"
+        db.upsertEntry(
+            SyncEntry(
+                path = orphanPath,
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        val abs = syncRoot.resolve(orphanPath.removePrefix("/"))
+        Files.createDirectories(abs.parent)
+        Files.writeString(abs, "x".repeat(100))
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
+        val uploads = actions.filterIsInstance<SyncAction.Upload>().map { it.path }
+        assertEquals(
+            listOf("/a", "/a/b", "/a/b/c"),
+            mkdirs.sortedBy { it.length },
+            "must emit CreateRemoteFolder for every missing ancestor; got: $mkdirs",
+        )
+        assertEquals(listOf(orphanPath), uploads)
+    }
+
+    @Test
+    fun `UD-901b orphan upload skips ancestors already on remote`() {
+        // Pre-existing folder /a (remoteId set) + orphan at /a/b/file.bin.
+        // /a's remoteId proves it's on remote — must NOT re-emit. Only /a/b
+        // gets a CreateRemoteFolder.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/a",
+                remoteId = "id-folder-a",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        db.upsertEntry(
+            SyncEntry(
+                path = "/a/b/file.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        val abs = syncRoot.resolve("a/b/file.bin")
+        Files.createDirectories(abs.parent)
+        Files.writeString(abs, "x".repeat(100))
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
+        assertEquals(
+            listOf("/a/b"),
+            mkdirs,
+            "/a is already on remote; must NOT re-emit. Only /a/b is missing.",
+        )
+    }
+
+    @Test
+    fun `UD-901b multiple orphans sharing ancestors emit each ancestor once`() {
+        // Three orphans under /a/shared/* — all need /a and /a/shared.
+        // Expect exactly two CreateRemoteFolder, not six.
+        for (leaf in listOf("file1.bin", "file2.bin", "file3.bin")) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/a/shared/$leaf",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = 1711627200000,
+                    localSize = 100,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.EPOCH,
+                ),
+            )
+            val abs = syncRoot.resolve("a/shared/$leaf")
+            Files.createDirectories(abs.parent)
+            Files.writeString(abs, "x".repeat(100))
+        }
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        assertEquals(2, mkdirs.size, "exactly /a and /a/shared, no duplicates; got: $mkdirs")
+        assertTrue("/a" in mkdirs && "/a/shared" in mkdirs)
+        assertEquals(3, uploads.size)
+    }
+
+    @Test
+    fun `UD-901b sortActions places ancestor mkdirs before uploads`() {
+        // Pass 1's sequential apply runs CreateRemoteFolder before Upload because
+        // sortActions assigns priority 0 to CreateRemoteFolder vs 2 to Upload.
+        // Within priority 0, slash-count ascending puts shallow parents first.
+        // This test pins the contract: in the returned action list, every
+        // CreateRemoteFolder appears before the Upload it's a prerequisite for.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/x/y/z/file.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        val abs = syncRoot.resolve("x/y/z/file.bin")
+        Files.createDirectories(abs.parent)
+        Files.writeString(abs, "x".repeat(100))
+
+        val actions = reconciler.reconcile(emptyMap(), emptyMap())
+        val uploadIdx = actions.indexOfFirst { it is SyncAction.Upload }
+        val mkdirIdxs =
+            actions.withIndex()
+                .filter { it.value is SyncAction.CreateRemoteFolder }
+                .map { it.index }
+        assertTrue(uploadIdx > 0, "expected at least one mkdir before upload; actions=$actions")
+        for (mkdirIdx in mkdirIdxs) {
+            assertTrue(
+                mkdirIdx < uploadIdx,
+                "every CreateRemoteFolder must precede the Upload; actions=$actions",
+            )
+        }
+        // Within mkdirs, shallower path comes first.
+        val mkdirPaths = mkdirIdxs.map { (actions[it] as SyncAction.CreateRemoteFolder).path }
+        assertEquals(
+            listOf("/x", "/x/y", "/x/y/z"),
+            mkdirPaths,
+            "mkdirs must be ordered shallow→deep so Pass-1 sequential apply creates parents before children",
+        )
+    }
+
     // ── UD-240i: detectMoves perf bound + file-move correctness ─────────────
     // Pre-fix detectMoves did Files.isRegularFile + Files.size on every
     // (DeleteRemote, Upload) pair — O(D × U) Windows GetFileAttributesEx
