@@ -352,22 +352,27 @@ class InternxtProvider(
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull() ?: cursor ?: Instant.now().toString()
 
-        // UD-361: refuse to return a partial inventory. The /files-fallback
-        // path (collectFilesFromFolders) silently treats per-subtree 500/503
-        // as "skip and continue", which the engine's detectMissingAfterFullSync
-        // would interpret as a remote-deletion of every file under that
-        // subtree (e.g. /_INBOX/wiederherstellungs_codes.txt → del-local).
-        // Fail loud here; UD-360 will refine this to a partial-flag the
-        // engine can honour without raising an exception.
+        // UD-360: signal partial gather to the engine instead of throwing.
+        // Replaces the UD-361 fail-loud ProviderException — the engine now
+        // honours `complete=false` by skipping detectMissingAfterFullSync,
+        // so we no longer need to abort the run to prevent spurious
+        // del-local. Sync continues with whatever was successfully gathered;
+        // the missing subtree is picked up on the next run.
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
-            throw ProviderException(
-                "Internxt delta gather skipped $skipped folder(s) due to 500/503; " +
-                    "refusing to return partial inventory (UD-361). Retry on next sync run.",
+            log.warn(
+                "Internxt delta gather skipped {} folder(s) due to 500/503; " +
+                    "returning DeltaPage(complete=false). detectMissingAfterFullSync will be suppressed.",
+                skipped,
             )
         }
 
-        return DeltaPage(items = items, cursor = latestUpdatedAt, hasMore = false)
+        return DeltaPage(
+            items = items,
+            cursor = latestUpdatedAt,
+            hasMore = false,
+            complete = skipped == 0,
+        )
     }
 
     private fun buildFolderPath(

@@ -651,6 +651,13 @@ class SyncEngine(
             reporter.onScanProgress("remote", itemsSoFar)
         }
 
+        // UD-360: providers signal partial gathers via DeltaPage.complete=false.
+        // We track that across pages and skip the absence-implies-deletion sweep
+        // (detectMissingAfterFullSync) when any page was incomplete — otherwise
+        // a transient subtree error on the provider side would synthesize bogus
+        // DeleteLocal actions for every file under that subtree.
+        var allComplete = true
+
         suspend fun nextPage(c: String?): DeltaPage {
             val page =
                 if (useShared) {
@@ -664,6 +671,9 @@ class SyncEngine(
             // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
             // of the five providers that used to emit the same data per-page.
             log.debug("Delta: {} items, hasMore={}", page.items.size, page.hasMore)
+            if (!page.complete) {
+                allComplete = false
+            }
             return page
         }
 
@@ -689,8 +699,15 @@ class SyncEngine(
             reporter.onScanProgress("remote", changes.size)
         }
 
-        if (isFullSync) {
+        if (isFullSync && allComplete) {
             detectMissingAfterFullSync(changes)
+        } else if (isFullSync) {
+            val msg =
+                "UD-360: at least one delta page returned complete=false; " +
+                    "skipping detectMissingAfterFullSync to avoid spurious del-local actions. " +
+                    "The missing inventory will be picked up on the next sync run."
+            log.warn(msg)
+            reporter.onWarning(msg)
         }
         return changes
     }

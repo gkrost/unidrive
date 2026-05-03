@@ -149,6 +149,64 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-360 partial delta gather suppresses detectMissingAfterFullSync`() =
+        runTest {
+            // First sync: item appears in delta and is hydrated locally.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/tracked.txt"))
+            assertTrue(Files.exists(syncRoot.resolve("tracked.txt")))
+
+            // Reset cursor to force a full resync. The item is absent from the
+            // delta — but the provider signals complete=false (e.g. an Internxt
+            // subtree returned 503 and got skipped). Without UD-360, the engine
+            // would interpret the absence as a remote-deletion and emit del-local.
+            // With UD-360, the deletion sweep is suppressed and the local file
+            // survives until a complete delta succeeds on a later run.
+            db.setSyncState("delta_cursor", "")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deltaComplete = false
+
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce()
+
+            // File survives — this is the regression UD-360 prevents.
+            assertNotNull(db.getEntry("/tracked.txt"), "DB entry must NOT be removed on partial delta")
+            assertTrue(
+                Files.exists(syncRoot.resolve("tracked.txt")),
+                "local file must NOT be deleted on partial delta",
+            )
+            assertTrue(
+                reporter.warnings.any { it.contains("UD-360") && it.contains("complete=false") },
+                "expected UD-360 partial-gather warning, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-360 complete=true preserves the absence-implies-deletion sweep`() =
+        runTest {
+            // Inverse of the test above: complete=true (the default) MUST keep
+            // detectMissingAfterFullSync's behaviour. Pin this so a future
+            // refactor can't accidentally always-suppress the deletion sweep.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/tracked.txt"))
+
+            db.setSyncState("delta_cursor", "")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deltaComplete = true
+
+            engine.syncOnce()
+
+            assertNull(db.getEntry("/tracked.txt"))
+            assertFalse(Files.exists(syncRoot.resolve("tracked.txt")))
+        }
+
+    @Test
     fun `remote modification re-downloads local file`() =
         runTest {
             // UD-222: remote-modified re-hydrates (always true for non-folders under new semantics).
@@ -980,6 +1038,10 @@ class SyncEngineTest {
             return createFolder(toPath)
         }
 
+        // UD-360: when set, delta() returns DeltaPage(complete=false) so that
+        // tests can exercise the engine's partial-gather suppression path.
+        var deltaComplete = true
+
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -989,7 +1051,12 @@ class SyncEngineTest {
                 deltaFailCount--
                 throw ProviderException("Network timeout on delta")
             }
-            return DeltaPage(items = deltaItems, cursor = deltaCursor, hasMore = false)
+            return DeltaPage(
+                items = deltaItems,
+                cursor = deltaCursor,
+                hasMore = false,
+                complete = deltaComplete,
+            )
         }
 
         override suspend fun quota() = QuotaInfo(total = 1000, used = 100, remaining = 900)
