@@ -7,6 +7,8 @@
   <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
     <target>System.err</target>
     <encoder>
+      <!-- UTF-8 forced; see core/app/cli logback.xml for rationale. -->
+      <charset>UTF-8</charset>
       <pattern>%d{HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] %logger{36} - %msg%n</pattern>
     </encoder>
   </appender>
@@ -23,6 +25,8 @@
       <totalSizeCap>50MB</totalSizeCap>
     </rollingPolicy>
     <encoder>
+      <!-- UTF-8 forced; see core/app/cli logback.xml for rationale. -->
+      <charset>UTF-8</charset>
       <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] [%thread] %logger{36} - %msg%n</pattern>
     </encoder>
   </appender>

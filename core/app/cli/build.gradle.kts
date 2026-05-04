@@ -138,7 +138,11 @@ tasks.register("deploy") {
         val jarFile = shadowJarFile.get().asFile
         val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
 
-        println("[deploy] starting — version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
+        // ASCII separator instead of em-dash: Gradle daemon's System.out
+        // encoding inherits the JVM platform default (cp437/cp850 on Windows
+        // produces 'ÔÇö' mojibake). Logback messages get UTF-8 via the encoder
+        // <charset>; gradle println doesn't go through logback.
+        println("[deploy] starting -- version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
 
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion)
@@ -200,7 +204,7 @@ fun deployWindows(
             println("[deploy] could not kill pid=${ph.pid()}: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
-    if (killed.isEmpty()) println("[deploy] no running CLI process to kill — proceeding to copy")
+    if (killed.isEmpty()) println("[deploy] no running CLI process to kill -- proceeding to copy")
 
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
