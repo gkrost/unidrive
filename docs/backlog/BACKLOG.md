@@ -17,21 +17,6 @@ Each item is a frontmatter block + prose. Required fields: `id`, `title`, `categ
 ## Core daemon (UD-200..299)
 
 ---
-id: UD-205
-title: Peer-review — atomicity across sync transfer phases (Gemma, needs-verification)
-category: core
-priority: high
-effort: M
-status: needs-verification
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
-adr_refs: []
-opened: 2026-04-17
----
-Peer-review (local Gemma) claim: `SyncEngine` wraps its metadata actions in a `db.beginBatch()` / `commitBatch()` but runs concurrent transfers (Pass 2) **outside** that batch. **Spot-check (2026-04-17):** structurally confirmed at `SyncEngine.kt:172-218` (sequential batch) vs `:220-277` (`coroutineScope { launch { ... applyDownload/applyUpload ... } }` outside batch). However the peer's "dirty reads / phantom updates" framing overreaches: SQLite single-row writes are atomic and `ProcessLock` prevents overlapping sync runs, so concurrent row updates on *different* paths are safe. The real risk is **interruption recovery** — if Pass-2 is killed mid-transfer, state DB and local files diverge. Acceptance: audit resume logic (`Reconciler` + placeholder re-entry) against a SIGKILL-during-transfer test; decide whether a cross-phase transaction or a transfer-state marker column is warranted.
-
----
 id: UD-206
 title: Delete-recreate corner case on providers without server delta (refined Gemma claim)
 category: providers
@@ -47,20 +32,6 @@ adr_refs: [ADR-0005]
 opened: 2026-04-17
 ---
 Spot-check (2026-04-17) refined the original peer-review claim. Change detection in `Reconciler.kt:34-35` compares **both** `hash` AND `modified`, not metadata alone — so Gemma's "size+mtime collision" framing is too strong. The real corner case: SFTP/WebDAV without server-side ETags, file deleted and recreated within the same OS-mtime tick with identical size, where there is also no content hash available. Rare in practice. Acceptance: add a "same-second delete+recreate" integration test fixture for SFTP; if the test can force the collision, add a defensive content-hash check on suspicion. Otherwise close as unreachable.
-
----
-id: UD-208
-title: Peer-review — SyncAction refactor to type + payload split (Gemma, deferred)
-category: core
-priority: low
-effort: M
-status: deferred
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync
-adr_refs: []
-opened: 2026-04-17
----
-Peer-review structural suggestion: split `SyncAction` (sealed class today) into `SyncActionType` enum + `SyncActionPayload` data classes to shrink the `when` block in `SyncEngine`. **Deferred** because refactor-for-structure without a concrete bug-motivation violates the "don't refactor speculatively" guidance; reopen if `SyncEngine`'s action-dispatch becomes a maintenance bottleneck.
 
 ---
 id: UD-209
@@ -80,22 +51,6 @@ opened: 2026-04-17
 ---
 
 ## Providers (UD-300..399)
-
----
-id: UD-302
-title: deltaWithShared gap closure (S3, SFTP, Rclone, LocalFS, WebDAV, HiDrive, Internxt)
-category: providers
-priority: medium
-effort: L
-status: open
-code_refs:
-  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
-  - core/providers
-adr_refs: [ADR-0005]
-opened: 2026-04-17
-chunk: sg5
----
-All non-OneDrive providers silently return empty. Either implement a meaningful `deltaWithShared()` or declare `Unsupported` per UD-301.
 
 ---
 id: UD-305
