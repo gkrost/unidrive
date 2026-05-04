@@ -1,0 +1,13 @@
+# gitleaks fingerprint allowlist.
+# Format: <commit-sha>:<file>:<rule-id>:<line>
+#
+# Each entry must reference a finding that has been audited and confirmed
+# benign. Add a comment above each fingerprint with the audit date and the
+# reason. Never silence a real secret — rotate it and rewrite history.
+
+# 2026-05-04 — UUID example value `0f8fad5b-d9cb-469f-a165-70867728950e`
+# (RFC-4122 v4 nil-ish illustrative UUID) appearing in a JSON spec snippet
+# that documents Internxt's `RegisterNotificationTokenDto`. The value was
+# replaced with `<device-token>` in a later commit, but gitleaks scans full
+# history. Not a real token.
+47320d17a1d1a8bb82103495dd6293f144f1d992:docs/audits/internxt-notifications-feasibility.md:generic-api-key:40
