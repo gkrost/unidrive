@@ -4977,3 +4977,87 @@ Verify the macOS path against whatever the daemon actually writes (likely `~/Lib
 
 - Pure scripting fix, no Kotlin changes.
 - Could also affect the JFR scripts (`scripts/dev/unidrive-jfr.sh` / `.ps1`) — worth a quick grep for sibling paths while in there.
+---
+id: UD-202
+title: Provider-specific CLI flags should be registered via the provider SPI, not hardcoded in core CLI commands
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-05-04
+---
+Provider-specific CLI flags should not be hard-coded in the core CLI. Providers should register their own flags via the capability/SPI surface, and the CLI should surface them in `--help` only for the active provider.
+
+## Symptom (2026-05-04)
+
+`unidrive sync --help` always shows:
+
+```
+--fast-bootstrap   UD-223: skip first-sync enumeration by adopting the
+                   remote's current state as the cursor. Items already
+                   present on the remote before this moment stay invisible
+                   until they next mutate. OneDrive only; other providers
+                   warn + ignore.
+```
+
+The flag is **hard-coded in `SyncCommand.kt`** but is declared OneDrive-only in its own help text. On every other provider (Internxt, S3, SFTP, WebDAV, …) it's a footgun: the user reads the option, tries it, and gets a runtime warning ("provider 'X' does not declare the capability"). It pollutes help, confuses first-time users, and locks an extension point into the wrong layer.
+
+## What the architecture already supports
+
+The capability machinery is there:
+- `core/app/core/src/main/kotlin/org/krost/unidrive/Capability.kt:11` — `sealed class Capability` with `FastBootstrap`, `DeltaShared`, etc.
+- `core/providers/onedrive/.../OneDriveProvider.kt:43` — declares `Capability.FastBootstrap`.
+- `core/app/sync/.../SyncEngine.kt:641-678` — checks `Capability.FastBootstrap in provider.capabilities()` at runtime.
+
+What's missing is the **CLI binding side**: providers can't register CLI options/flags scoped to a particular command (`sync`, `quota`, …), so `SyncCommand` ends up with a hard-coded list that includes every provider's special-case flag.
+
+## Code refs
+
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:104-111` — hardcoded `--fast-bootstrap` declaration
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:365` — flag plumbed into `SyncEngine`
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:226` — config-side wiring, also generic
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:635-678` — capability gate (correct layer for the runtime check)
+- `core/providers/onedrive/.../OneDriveProvider.kt:43` — `Capability.FastBootstrap`
+
+## Proposed shape
+
+Two layers:
+
+1. **Provider SPI for command-scoped CLI options.** Each provider can declare options it supports per command:
+   ```kotlin
+   interface CloudProvider {
+       fun cliOptions(command: CliCommand): List<CliOption> = emptyList()
+   }
+
+   data class CliOption(
+       val names: List<String>,                  // ["--fast-bootstrap"]
+       val description: String,                  // "skip first-sync enumeration..."
+       val arity: Arity = Arity.FLAG,            // FLAG | SINGLE | REPEATABLE
+       val capability: Capability? = null,       // for capability-gated runtime check
+       val configKey: String? = null,            // optional config-file mirror, e.g. "fast_bootstrap"
+   )
+   ```
+2. **CLI command resolves provider at parse time** (the active profile is known via `-p`/`--account` or default), then composes the provider's `cliOptions(SYNC)` into the picocli command's option list before parsing.
+
+When `-p` selects a non-OneDrive profile, `unidrive sync --help` shows no `--fast-bootstrap`. When `-p` selects OneDrive, it does. Multi-provider invocations (no `-p`, fleet mode after UD-200 lands) show only options that are common to *all* configured providers, with a hint that provider-specific flags exist via `unidrive -p <name> sync --help`.
+
+## Acceptance
+
+- `unidrive -p <internxt-profile> sync --help` does **not** list `--fast-bootstrap`.
+- `unidrive -p <onedrive-profile> sync --help` **does** list `--fast-bootstrap`, sourced from `OneDriveProvider.cliOptions(SYNC)`.
+- Adding a new provider-specific flag requires zero edits to `SyncCommand.kt` — only a `cliOptions()` override on the provider.
+- `SyncCommand.kt` no longer references `FastBootstrap` or any other provider-specific feature by name.
+- Runtime capability check at `SyncEngine.kt:641-678` stays — the SPI registers the option, the engine still gates execution.
+- Test: provider with no special options → vanilla `sync` help. Provider with one option → option appears. Two providers each with their own option → composing `sync --help` for one shows only that provider's option.
+
+## Notes
+
+- Mirrors UD-200 thread #1 spirit (CLI surface should match the operator's mental model). Implementations are independent — file separately, can land in either order.
+- Picocli supports dynamic option registration via `CommandLine.addSubcommand` / `CommandLine.addOption` at runtime (or via `IFactory`). Picking the right hook so `--help` rendering works correctly is the implementation crux.
+- Same pattern should apply to *every* command that today includes provider-specific behaviour: `quota` (some providers don't have quotas), `share` (provider-specific link-type flags), `versions` (some providers have no version history). Don't add the SPI just for `sync` — design it command-agnostic.
+- Out of scope: profile-level config keys (e.g. `fast_bootstrap = true` in `config.toml`). Those should also be capability-gated but live on a different surface; flag this in implementation as a follow-up.
+
+## Cross-refs
+
+- UD-223 — original `--fast-bootstrap` ticket.
+- UD-200 — first-time UX (terminology, default-account, inline auth) — sibling but mechanically separate.
