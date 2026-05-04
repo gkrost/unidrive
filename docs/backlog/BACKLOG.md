@@ -119,8 +119,7 @@ Surfaced during the 2026-04-17 e2e test drive against sg5 (192.168.0.63) and kro
 
 ## UI / tray (UD-500..599)
 
-> **Out of scope for unidrive-cli.** UI / tray work moved to
-> [`UI_UD.md`](../../UI_UD.md) at the repo root on 2026-04-30.
+> **Out of scope for unidrive-cli.** 
 > File new UI tickets there (or in the future UI repo), not here.
 
 ---
