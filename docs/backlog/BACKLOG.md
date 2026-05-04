@@ -4842,3 +4842,138 @@ If a user has 23 accounts and none is authed, they should expect to be walked th
 - Threads 1 and 3 share a documentation refresh (README, `--help` text, every `man-page-style` doc). Worth doing in one pass to keep terminology consistent.
 - Thread 2 is the smallest and a good first commit.
 - Thread 4b touches every command's error handler — could be implemented as a single `runRequiringAuth` wrapper so the prompt logic lives in exactly one place.
+---
+id: UD-201
+title: CLI sync summary misleading: 'Reconciled: 0 actions' when --upload-only/--download-only filters everything out
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+CLI sync summary line is misleading when reconciler actions are filtered out by `--upload-only` / `--download-only`.
+
+## Repro (2026-05-04 session)
+
+Empty local sync root, fresh Internxt profile with ~165k remote items. Ran:
+
+```
+unidrive -p internxt_gernot_krost_posteo sync --upload-only
+```
+
+CLI output:
+
+```
+Scanning remote changes... 10,700 items · 1:58
+Reconciling... 165,509 / 165,509 items · 0:00
+Reconciled: 0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+`~/Internxt` stayed empty. User concluded "I'm doing something wrong" — the CLI gave no signal that 165k actions were reconciled and then thrown away by the upload-only filter.
+
+## What the log actually says
+
+```
+2026-05-04 17:04:24.835 INFO  Reconciler - Reconcile started: 165509 remote, 0 local
+2026-05-04 17:04:25.549 INFO  Reconciler - Reconcile complete: 165509 actions in 714ms
+```
+
+So the reconciler decided on 165,509 actions (all download-side, given local is empty). The executor then dropped all of them because `--upload-only` filters out download actions, and the CLI summary reported the post-filter count as if it were the reconciler verdict.
+
+## Bug shape
+
+`Reconciled: N actions` should reflect what the reconciler decided, not what the executor accepted after directional filtering. The current behaviour conflates two distinct numbers: "what the reconciler *wanted* to do" vs "what the executor *did* after `--upload-only` / `--download-only` filtering". They can differ by 165k.
+
+## Proposed fix
+
+Differentiate the counters in the CLI summary:
+
+```
+Reconciled: 165,509 actions
+  └─ 165,509 skipped (--upload-only filtered out download actions)
+Executed:   0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+Or, more compact:
+
+```
+Reconciled: 165,509 actions (165,509 skipped by --upload-only); 0 executed
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+Either form makes it impossible to misread "0 actions" as "nothing to do" when in reality the user told us to ignore everything.
+
+## Acceptance
+
+- Test scenario: empty local + N>0 remote + `--upload-only` → CLI reports a non-zero "reconciled" count and a non-zero "skipped" count whose reason mentions `--upload-only`.
+- Inverse: full local + empty remote + `--download-only` → reconciled count > 0, skipped count > 0 referencing `--download-only`.
+- Bidirectional sync (no flag) → skipped count is 0 (or absent).
+- Bonus: when `skipped > 0` print a one-line hint: `Hint: re-run without --upload-only to actually download these items.` Hint suppressible via `--no-hints` for scripted callers.
+
+## Notes
+
+- The log line `Reconcile complete: 165509 actions in 714ms` is correct and stays — only the CLI presentation layer needs the differentiation.
+- This pairs nicely with UD-200's "first-time UX" theme but is mechanically separate (reconciler/executor accounting, not terminology). Keep the tickets independent.
+- `--dry-run` already prints "would do X" semantics correctly; the same accounting shape is the precedent to follow.
+---
+id: UD-700
+title: log-watch.sh hardcodes Windows log path; fails on Linux/macOS by default
+category: tooling
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+`scripts/dev/log-watch.sh` hardcodes a Windows-only default log path and fails immediately on Linux/macOS.
+
+## Repro (2026-05-04 session)
+
+```
+$ bash scripts/dev/log-watch.sh --summary
+log not found: /home/gernot/AppData/Local/unidrive/unidrive.log
+```
+
+The actual log on Linux lives at `~/.local/share/unidrive/unidrive.log` (XDG `$XDG_DATA_HOME`).
+
+## Root cause
+
+`scripts/dev/log-watch.sh:22`:
+
+```bash
+LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+```
+
+The default path is Windows-only. The escape hatch (`UNIDRIVE_LOG=… bash log-watch.sh …`) works but every Linux/macOS contributor — i.e. all of them — has to discover this and set it manually every time.
+
+## Proposed fix
+
+Detect platform and pick the right XDG-style path. The skill `unidrive-log-anomalies` invokes this script unconditionally at session start; right now it silently fails on Linux every session.
+
+```bash
+default_log_path() {
+  case "$(uname -s)" in
+    Darwin)         echo "$HOME/Library/Logs/unidrive/unidrive.log" ;;
+    Linux)          echo "${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log" ;;
+    MINGW*|MSYS*|CYGWIN*) echo "$HOME/AppData/Local/unidrive/unidrive.log" ;;
+    *)              echo "${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log" ;;
+  esac
+}
+LOG="${UNIDRIVE_LOG:-$(default_log_path)}"
+```
+
+Verify the macOS path against whatever the daemon actually writes (likely `~/Library/Logs/unidrive/`, but could be `~/Library/Application Support/unidrive/` if the logger config says so — check `core/app/cli/src/main/resources/logback.xml` or whichever logger config the JVM uses, and align).
+
+## Acceptance
+
+- `bash scripts/dev/log-watch.sh --summary` works out of the box on Linux without setting `UNIDRIVE_LOG`.
+- macOS path is verified against the daemon's actual writer config.
+- Windows path remains the default for `MINGW*`/`MSYS*`/`CYGWIN*`.
+- `unidrive-log-anomalies` skill produces a real summary at session start on Linux instead of "log not found".
+- Bonus: if no log file exists at the resolved default *and* `UNIDRIVE_LOG` is unset, print a one-line hint pointing to where the daemon would write it on this OS, instead of just `log not found:`.
+
+## Notes
+
+- Pure scripting fix, no Kotlin changes.
+- Could also affect the JFR scripts (`scripts/dev/unidrive-jfr.sh` / `.ps1`) — worth a quick grep for sibling paths while in there.
