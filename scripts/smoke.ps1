@@ -1,5 +1,5 @@
-# smoke.ps1 — Windows variant of the v0.1.0 core-only smoke test.
-# Mirrors scripts/smoke.sh. See docs/CHANGELOG.md [0.1.0-mvp] for criteria.
+# smoke.ps1 — Windows variant of the v0.0.1 core-only smoke test.
+# Mirrors scripts/smoke.sh. See docs/CHANGELOG.md [0.0.1-mvp] for criteria.
 
 $ErrorActionPreference = 'Stop'
 

@@ -45,7 +45,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ── Resolve jar ────────────────────────────────────────────────────────────
-$jarName = if ($Mcp) { 'unidrive-mcp-0.0.0-greenfield.jar' } else { 'unidrive-0.0.0-greenfield.jar' }
+$jarName = if ($Mcp) { 'unidrive-mcp-0.0.1.jar' } else { 'unidrive-0.0.1.jar' }
 $jar = if ($JarOverride) { $JarOverride } else { Join-Path $env:LOCALAPPDATA "unidrive\$jarName" }
 if (-not (Test-Path $jar)) {
     Write-Error "jar not found: $jar`nRun `./gradlew :app:cli:deploy :app:mcp:deploy` from core/ first."

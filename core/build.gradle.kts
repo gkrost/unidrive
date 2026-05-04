@@ -11,8 +11,8 @@ plugins {
 
 allprojects {
     group = "org.krost.unidrive"
-    // Greenfield monorepo restart baseline. Next planned release: 0.1.0-mvp. See docs/CHANGELOG.md.
-    version = "0.0.0-greenfield"
+    // Greenfield monorepo restart baseline. Next planned release: 0.0.1. See docs/CHANGELOG.md.
+    version = "0.0.1"
 
     repositories {
         mavenCentral()

@@ -8,7 +8,7 @@
 +-----------------+
 |   core daemon   |
 |   (Kotlin/JVM)  |
-|   v0.1.0 GA     |
+|   v0.0.1 GA     |
 +--+-----+--------+
    |     |
    | CLI | MCP (stdio JSON-RPC)
@@ -17,7 +17,7 @@
  user / scripts / model clients
 ```
 
-**Single product, single tier, Linux MVP.** v0.1.0 ships the `core/`
+**Single product, single tier, Linux MVP.** v0.0.1 ships the `core/`
 Kotlin daemon on Linux. The CLI emits NDJSON sync events over UDS via
 [`IpcProgressReporter.kt`](../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt)
 — `unidrive log --watch` consumes them, and so can any third-party
@@ -76,7 +76,7 @@ schema directory, see [ADR-0012 §Re-opening criteria](adr/0012-linux-mvp-protoc
 - Rclone adapter spawns a subprocess via array-form `ProcessBuilder` (safe against shell injection).
 - SFTP: Apache SSHD. HTTP providers: Ktor client.
 
-## Key files (v0.1.0 scope)
+## Key files (v0.0.1 scope)
 
 - `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` — CLI entry, config+vault merge.
 - `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt` — JSON-RPC dispatch.
@@ -122,7 +122,7 @@ SFTP and LocalFs are non-HTTP and use only the JSON / I/O helpers.
 
 > The MVP target is **Linux**. macOS and Windows are listed for honesty
 > about what does or does not currently boot the JVM modules, but
-> neither platform is in scope for v0.0.x → v0.1.0. See
+> neither platform is in scope for v0.0.x → v0.0.1. See
 > [ADR-0012](adr/0012-linux-mvp-protocol-removal.md) for the
 > reasoning.
 
@@ -157,7 +157,7 @@ Legend: ✅ supported · 🟡 community best-effort (no support) · ❌ not in s
 
 Legend: ✅ supported · 🟡 partial (degrades gracefully) · ❌ `Capability.Unsupported` · ❓ unknown / needs audit
 
-| Provider | list | read | write | delete | delta | deltaShared | webhook | share | quotaExact | MVP v0.1.0 |
+| Provider | list | read | write | delete | delta | deltaShared | webhook | share | quotaExact | MVP v0.0.1 |
 |----------|:----:|:----:|:-----:|:------:|:-----:|:-----------:|:-------:|:-----:|:----------:|:----------:|
 | **localfs** | ✅ | ✅ | ✅ | ✅ | ✅ (walk) | ❌ | ❌ | ❌ | ✅ | ✅ **in scope** |
 | **s3** | ✅ | ✅ | ✅ | ✅ | 🟡 (snapshot) | ❌ | ❌ | ✅ (presigned) | 🟡 (estimate) | ✅ **in scope** |
@@ -190,9 +190,9 @@ Adding a new snapshot adapter: pick the pair that gives the lowest false-positiv
 - **share**: first-class "give me a URL I can share" API. Generic "copy file & email it" is not this capability.
 - **quotaExact**: the provider returns true free/used/total. Estimated or derived values (from `df`, `about`, presence-based) are 🟡.
 
-### Gating for v0.1.0
+### Gating for v0.0.1
 
-Only `localfs`, `s3`, `sftp` are in-scope for the MVP release quality gate. Others are preview: present, buildable, testable, but their bugs do not block v0.1.0.
+Only `localfs`, `s3`, `sftp` are in-scope for the MVP release quality gate. Others are preview: present, buildable, testable, but their bugs do not block v0.0.1.
 
 ## References
 

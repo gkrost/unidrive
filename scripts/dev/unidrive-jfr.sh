@@ -65,10 +65,10 @@ APP_ARGS=("$@")
 
 # ── Resolve jar ────────────────────────────────────────────────────────────
 if [[ "$MCP" -eq 1 ]]; then
-  JAR_NAME="unidrive-mcp-0.0.0-greenfield.jar"
+  JAR_NAME="unidrive-mcp-0.0.1.jar"
   KIND="mcp"
 else
-  JAR_NAME="unidrive-0.0.0-greenfield.jar"
+  JAR_NAME="unidrive-0.0.1.jar"
   KIND="cli"
 fi
 

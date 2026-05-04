@@ -9,7 +9,7 @@ data class InternxtConfig(
     companion object {
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
         const val CLIENT_NAME = "unidrive"
-        const val CLIENT_VERSION = "0.0.1-alpha"
+        const val CLIENT_VERSION = "0.0.1"
         const val DESKTOP_HEADER = "internxt-desktop-dev-header"
 
         // Public encryption salt from Internxt's open-source desktop client (not a secret).

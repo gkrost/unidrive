@@ -18,7 +18,7 @@ import java.time.ZoneOffset
  * carrying enough context to prove "this run mutated X at Y on behalf of Z" without
  * relying on the verbose DEBUG-level log file (which rotates aggressively + loses MDC
  * under coroutine resumption per UD-254a). Closes the STRIDE Repudiation gap noted in
- * the v0.0.0 SECURITY.md seed (UD-111 covers token-refresh failure telemetry only;
+ * the v0.0.1 SECURITY.md seed (UD-111 covers token-refresh failure telemetry only;
  * UD-113 covers the per-action audit trail).
  *
  * **File layout.** One file per UTC day per profile:

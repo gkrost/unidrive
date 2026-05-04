@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# smoke.sh — end-to-end smoke test for the v0.1.0 core-only MVP.
+# smoke.sh — end-to-end smoke test for the v0.0.1 core-only MVP.
 #
 # Scope: CLI + MCP + localfs provider. UI and shell-win are NOT exercised here.
-# See docs/CHANGELOG.md [0.1.0-mvp] for the acceptance criteria this backs.
+# See docs/CHANGELOG.md [0.0.1-mvp] for the acceptance criteria this backs.
 #
 # Exit 0 on full pass. Any failure returns the failing step's exit code.
 

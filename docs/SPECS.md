@@ -34,7 +34,7 @@ so a single trailing 4 KiB page is allocated, regardless of JDK. See
 rationale.
 
 **Platform scope (per [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)):** Linux is the MVP target.
-Windows and macOS are out of scope for v0.0.x → v0.1.0. The CLI and
+Windows and macOS are out of scope for v0.0.x → v0.0.1. The CLI and
 MCP server still build on the JVM on either platform; provider
 adapters are JVM-only and platform-agnostic; but neither non-Linux
 platform has CI, packaging, or support claims. See ADR-0012
@@ -65,7 +65,7 @@ have to change to bring them back.
 
 | Tier | Code | Role |
 |------|------|------|
-| JVM daemon | [`core/`](../core) | CLI + MCP + sync + providers — the entire v0.0.x → v0.1.0 product |
+| JVM daemon | [`core/`](../core) | CLI + MCP + sync + providers — the entire v0.0.x → v0.0.1 product |
 
 Removed (kept here for historical context — re-import criteria in each ADR):
 - **`ui/`** — Swing/Compose-Desktop system-tray applet. Removed via [ADR-0013](adr/0013-ui-removal.md). Third-party trays / indicators can still consume the UDS event stream.
@@ -151,7 +151,7 @@ A `profile` field inside a tool-call's `arguments` object is **silently ignored*
 | internxt | ✅ | 🟡 | ❌ | ❌ | ❓ | ❓ | REST + client-side AES-256 |
 | localfs | ✅ | ✅ (`Files.walk`) | ❌ | ❌ | 🟡 (`file://` URI, see `LocalFsProvider.kt:189-192`) | ✅ | N/A |
 
-**Release gating:** [ADR-0008](adr/0008-greenfield-restart.md) keeps v0.1.0-mvp to `localfs + s3 + sftp` only — matches [ARCHITECTURE.md §Provider capability matrix](ARCHITECTURE.md#provider-capability-matrix).
+**Release gating:** [ADR-0008](adr/0008-greenfield-restart.md) keeps v0.0.1-mvp to `localfs + s3 + sftp` only — matches [ARCHITECTURE.md §Provider capability matrix](ARCHITECTURE.md#provider-capability-matrix).
 
 ### 3.1 Provider quirks
 
@@ -259,14 +259,14 @@ Out-of-tree:
 
 ## 8. Version anchors
 
-Context-setting only — this repo restarted at `0.0.0-greenfield`. Pre-restart:
+Context-setting only — this repo restarted at `0.0.1`. Pre-restart:
 
 - **0.2.8 (prior greenfield)** — "project restructure, 977 tests, 45% coverage"; shell-win test fixture still referenced this version before the session's version unification.
 - **0.2.7** — cloud speed ranking spec+plan; CodeQL fix; #174 provider subdir restructure.
 - **0.1.0 — 2026-04-12** — initial public release; 8 modules; 5 built-in providers (OneDrive, S3, SFTP, WebDAV, Rclone); ServiceLoader SPI.
 - **[Unreleased] (post-0.1.0, pre-0.2.x restart)** — 30+ feature items (#104 OneDrive shared folders, #111 share-link CLI, #130 expiry, #143 vault in systemd, #137 file versioning, #100 deletion safeguards, #101 HashVerifier, #102 parallel transfers, #96 Entra ID multi-tenant, #37 X-tra encryption, etc.).
 
-Interpretation: the current greenfield **inherits all those features in code** — the restart was about structure, not feature rewrite. The reset to `0.0.0-greenfield` is a version-space reset, not a functional one.
+Interpretation: the current greenfield **inherits all those features in code** — the restart was about structure, not feature rewrite. The reset to `0.0.1` is a version-space reset, not a functional one.
 
 ## 9. Intent-vs-code delta — things the docs assumed that the code doesn't do
 
@@ -283,7 +283,7 @@ Items where the spec assumes behaviour the current code does not yet exhibit. Ro
 
 ## 10. Open questions
 
-Long-running unresolved items not on the v0.1.0 critical path:
+Long-running unresolved items not on the v0.0.1 critical path:
 
 - **Pluggable encryption** — strategy interface undecided.
 - **Block-level delta** — librsync JVM viability unknown.
