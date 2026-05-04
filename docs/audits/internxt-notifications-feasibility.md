@@ -37,10 +37,14 @@ The example payload is literally a Black Friday promotional banner. The schema h
 
 ```json
 {
-  "token": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "token": "<device-token>",
   "type":  "macos"
 }
 ```
+
+(Spec example UUID elided — gitleaks's `generic-api-key` heuristic
+flagged the literal high-entropy string. The shape is what matters for
+this analysis, not the example value.)
 
 `type` enumerates device platforms (`macos`, presumably also `ios`/`android`/`windows`). This is a **push channel for marketing pings to end-user devices** — same shape as APNs/FCM device-token registration.
 
