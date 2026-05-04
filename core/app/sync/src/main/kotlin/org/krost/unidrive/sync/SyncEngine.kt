@@ -900,10 +900,6 @@ class SyncEngine(
         }
 
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
-        // UD-753: log per-operation lines once at the engine instead of N times across
-        // providers (was repeated in WebDav, S3, OneDrive ApiServices). Provider-specific
-        // detail (itemId, S3 key, …) lives at provider WARN/ERROR sites where it's
-        // diagnostic rather than per-action noise.
         log.debug("Download: {} ({} bytes)", action.path, action.remoteItem.size)
         val localPath = placeholder.resolveLocal(action.path)
         if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {

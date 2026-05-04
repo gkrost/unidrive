@@ -173,7 +173,6 @@ class GraphApiService(
         itemId: String,
         destPath: Path,
     ) {
-        // UD-753: per-operation log moved to SyncEngine.applyDownload.
         val item = getItemById(itemId)
         val url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
         val authNeeded = item.downloadUrl == null
@@ -333,7 +332,6 @@ class GraphApiService(
     }
 
     suspend fun deleteItem(itemId: String) {
-        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val response =
             httpClient.request("$baseUrl/me/drive/items/$itemId") {
                 bearerAuth(tokenProvider(false))

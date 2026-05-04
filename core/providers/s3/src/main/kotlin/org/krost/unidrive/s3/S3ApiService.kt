@@ -52,17 +52,8 @@ open class S3ApiService(
         destination: Path,
     ): Long {
         val url = objectUrl(key)
-        // UD-753: per-operation log moved to SyncEngine.applyDownload.
         val headers = SigV4Signer.sign("GET", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         log.debug("SigV4: GET {}", url)
-        // UD-349: switch from `httpClient.get(url)` + `response.body<ByteReadChannel>()`
-        // (Ktor 3.x trap — buffers the entire body into a single
-        // `byte[contentLength]` before exposing the channel; > 2 GiB objects
-        // OOM at allocation time) to `prepareGet().execute { bodyAsChannel() }`
-        // (true streaming, only the 8 KiB ring buffer below holds bytes).
-        // Same fix as UD-329 (OneDrive) and UD-332 (HiDrive). UD-340
-        // assertNotHtml guards against captive-portal HTML masquerading as
-        // the file body.
         var written = 0L
         httpClient
             .prepareGet(url) { headers.forEach { (k, v) -> header(k, v) } }
@@ -110,19 +101,10 @@ open class S3ApiService(
             )
         val response =
             httpClient.put(url) {
-                // UD-337: size-adaptive request timeout. Replaces the
-                // default HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat
-                // cap so a multi-GB upload at typical link speed isn't
-                // torn down mid-PUT. copyObject below stays on the
-                // default cap — it's a metadata-plane operation
-                // (server-side copy, no body).
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
                 }
                 headers.forEach { (k, v) -> header(k, v) }
-                // UD-342: shared streamingFileBody adds UD-287
-                // finally-flushAndClose (S3's previous inline body
-                // lacked it).
                 setBody(streamingFileBody(localPath, fileSize))
             }
         checkResponse(response, url)

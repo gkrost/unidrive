@@ -38,9 +38,7 @@ import java.util.Locale
  * PROPFIND uses `Depth: 1` per-directory in a BFS traversal to avoid
  * servers that reject `Depth: infinity` (Nextcloud, SharePoint).
  */
-// UD-291: open so tests can inject a throwing override on quota / propfind
-// without a heavyweight HTTP-stub harness. No behaviour change for production
-// callers; the only consumers are WebDavProvider and the in-tree tests.
+
 open class WebDavApiService(
     private val config: WebDavConfig,
 ) : AutoCloseable {
@@ -69,10 +67,6 @@ open class WebDavApiService(
         followRedirects = false
     }
 
-    // UD-807: visible to tests so the Apache5-vs-CIO branch decision is
-    // assertable directly (the user-visible TLS behaviour depends on which
-    // engine was constructed for `trust_all_certs = true`). No production
-    // caller — package-internal.
     @PublishedApi
     internal val httpClient =
         if (config.trustAllCerts) {
@@ -117,12 +111,6 @@ open class WebDavApiService(
                 org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder
                     .create()
                     .setTlsStrategy(tlsStrategy)
-                    // UD-287: probe pooled connections before reuse if they've
-                    // been idle ≥ 2 s. Cheap; eliminates the WSAECONNABORTED
-                    // cascade that follows a UD-285 request-timeout — Ktor
-                    // cancels the in-flight write but Apache5 returns the
-                    // connection to the pool half-closed; without this probe
-                    // the next PUT picks it up and Windows TCP returns 10053.
                     .setDefaultConnectionConfig(
                         org.apache.hc.client5.http.config.ConnectionConfig
                             .custom()
@@ -153,19 +141,6 @@ open class WebDavApiService(
         }
 
     override fun close() = httpClient.close()
-
-    // ── Retry budget (UD-288) ────────────────────────────────────────────────
-    //
-    // Mirrors the pattern OneDrive's GraphApiService established under
-    // UD-227 / UD-232: retry transient failures (HttpRequestTimeoutException,
-    // selected IOException subclasses, retriable HTTP statuses) up to 5 times
-    // with exponential backoff. CancellationException always propagates
-    // (UD-300 carve-out). Pre-UD-288, WebDAV had **no** retry — one
-    // transient = one permanently failed file in the relocate run.
-    //
-    // The function is `internal` so WebDavApiServiceRetryTest can pin the
-    // contract directly without going through HTTP. `backoffMs` is injectable
-    // so tests can use sub-millisecond delays without slowing the suite.
 
     /**
      * UD-288: wrap a WebDAV operation in a 5-attempt retry budget.
@@ -293,29 +268,7 @@ open class WebDavApiService(
         destination: Path,
     ): Long =
         withRetry("download", remotePath) {
-            // UD-753: per-operation log moved to SyncEngine.applyDownload.
             val url = resourceUrl(remotePath)
-            // UD-285 / UD-277: data-plane requests must NOT inherit the
-            // 10-min REQUEST_TIMEOUT_MS wall-clock cap from HttpDefaults
-            // (a 5 GB file at 1 MB/s legitimately takes ~85 min). UD-285
-            // chose Long.MAX_VALUE; UD-277 keeps that for downloads
-            // specifically because Content-Length is unknown until the
-            // response arrives, so we cannot pre-compute a size-adaptive
-            // bound the way upload() does. Body-streaming is still bounded
-            // by the 60 s SOCKET_TIMEOUT_MS no-bytes watchdog — that's the
-            // right safety property for "completely stuck" reads. (UD-277
-            // policy IS applied to upload() below where fileSize is known
-            // up-front.)
-            //
-            // UD-349: switch from `httpClient.get(url)` + `response.body()`
-            // (Ktor 3.x trap — buffers the entire body into a single
-            // `byte[contentLength]` before exposing the channel; > 2 GiB
-            // resources OOM at allocation time) to
-            // `prepareGet().execute { bodyAsChannel() }` (true streaming).
-            // Same fix as UD-329 (OneDrive) and UD-332 (HiDrive).
-            // UD-340 assertNotHtml guards against captive-portal HTML.
-            // UD-288 re-open-on-retry semantics preserved by withRetry's
-            // outer block resetting `written` per attempt.
             var written = 0L
             httpClient
                 .prepareGet(url) {
@@ -356,32 +309,14 @@ open class WebDavApiService(
         onProgress: ((Long, Long) -> Unit)?,
     ): WebDavEntry {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        // UD-753: per-operation log moved to SyncEngine.applyUpload.
         val url = resourceUrl(remotePath)
         ensureParentCollections(remotePath)
-        // UD-277: size-adaptive request-timeout. Pre-fix this was
-        // Long.MAX_VALUE (UD-285) — fine for "slow but completing" but no
-        // defence against "indefinitely slow" (a connection emitting 1 byte
-        // every 30 s never trips the 60 s socket-no-bytes watchdog yet
-        // takes days to finish a 1 GB file). Now bounded to
-        // max(uploadFloorTimeoutMs, fileSize / uploadMinThroughputBytesPerSecond).
-        // For the empirical 277 MB / 50 KiB-per-sec defaults that's ~90 min —
-        // above DSM's 22-min server-side abort, well below "forever".
-        // UD-337: WebDavTimeoutPolicy lifted to :app:core/http as
-        // UploadTimeoutPolicy so Internxt / OneDrive / HiDrive / S3 share
-        // the same size-adaptive bound. WebDAV's per-config defaults
-        // (uploadFloorTimeoutMs, uploadMinThroughputBytesPerSecond) still
-        // win at the call site — operators can override per-profile.
         val uploadTimeout =
             UploadTimeoutPolicy.computeRequestTimeoutMs(
                 fileSize = fileSize,
                 floorMs = config.uploadFloorTimeoutMs,
                 minThroughputBytesPerSecond = config.uploadMinThroughputBytesPerSecond,
             )
-        // UD-342: shared streamingFileBody embeds UD-287's flushAndClose-
-        // in-finally guard. WebDAV had this inline pre-UD-342; lifting
-        // means HiDrive / Internxt / S3 (which silently lacked UD-287)
-        // inherit the fix.
         val response =
             httpClient.put(url) {
                 timeout { requestTimeoutMillis = uploadTimeout }
@@ -396,7 +331,6 @@ open class WebDavApiService(
 
     /** Delete resource or empty collection at [remotePath]. 404 is silently ignored. */
     suspend fun delete(remotePath: String) {
-        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val url = resourceUrl(remotePath)
         val response = httpClient.delete(url)
         if (response.status != HttpStatusCode.NotFound) checkResponse(response, url)
@@ -406,8 +340,6 @@ open class WebDavApiService(
     suspend fun mkcol(remotePath: String) {
         val normalized = normalizeCollectionKey(remotePath)
         if (normalized in knownCollections) return
-        // UD-288: retry around the network call only (the cache check above
-        // is local; no point re-running it after a transient failure).
         withRetry("mkcol", remotePath) {
             mkcolOnce(remotePath, normalized)
         }
@@ -438,7 +370,6 @@ open class WebDavApiService(
         fromPath: String,
         toPath: String,
     ) {
-        // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val fromUrl = resourceUrl(fromPath)
         val toUrl = resourceUrl(toPath)
         log.debug("MOVE destination: {}", toUrl)
@@ -460,8 +391,6 @@ open class WebDavApiService(
      */
     suspend fun listAll(
         remotePath: String = "",
-        // UD-352: invoked after each PROPFIND-batch is appended so the engine
-        // can fire scan progress during long BFS walks. Optional.
         onProgress: ((itemsSoFar: Int) -> Unit)? = null,
     ): List<WebDavEntry> {
         val results = mutableListOf<WebDavEntry>()
@@ -491,11 +420,6 @@ open class WebDavApiService(
      * PROPFIND Depth:1 on [remotePath]. Returns all direct children plus the
      * resource itself.
      *
-     * UD-291: `open` so tests can override with a no-op fake — used together
-     * with the `quotaPropfind` override to validate the catch behaviour in
-     * [WebDavProvider.quota] without an HTTP-stub harness. (Production calls
-     * propfind from `WebDavProvider.authenticate` to flip `isAuthenticated`
-     * to `true`; the test fake makes that a free no-op.)
      */
     open suspend fun propfind(remotePath: String): List<WebDavEntry> =
         withRetry("propfind", remotePath) {
@@ -526,9 +450,6 @@ open class WebDavApiService(
      * `quota-available-bytes` and `quota-used-bytes`. Returns null when the
      * server does not advertise these properties (e.g. Synology DSM 7.x,
      * Apache mod_dav).
-     *
-     * UD-291: `open` so tests can override to verify that
-     * [WebDavProvider.quota] logs + propagates cancellation cleanly.
      */
     open suspend fun quotaPropfind(): QuotaInfo? =
         withRetry("quotaPropfind", "/") {
