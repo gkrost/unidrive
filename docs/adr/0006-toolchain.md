@@ -12,7 +12,6 @@ Imported trees diverged:
 
 - `core/` — root Kotlin compiler `jvmTarget = JVM_21` but per-module `jvmToolchain(25)`. Effective bytecode target was 21 while toolchain required 25 at build.
 - `ui/` (removed in [ADR-0013](0013-ui-removal.md)) — was `jvmToolchain(25)`.
-- `shell-win/` (removed in [ADR-0011](0011-shell-win-removal.md)) — was C++20, Windows SDK 10.0.22621+ or 10.0.26100+.
 
 JVM 25 is a six-month feature release (Sept 2025); JVM 21 is the current LTS through 2028. Kotlin 2.3.20 supports both. There is no feature in the codebase that requires > JVM 21 (`--enable-native-access` is JVM 21+; virtual threads are JVM 21+).
 
