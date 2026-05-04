@@ -4777,3 +4777,68 @@ The savings are real but bounded. Time-box this against the dispatch-loop refact
 - UD-901b (closed) — the orphan-recovery cascade emitter that's the main beneficiary on the breadth-first edge.
 - UD-317 (closed) — the per-item 409 recovery dance that the bulk path falls back to on conflict.
 - [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) — `POST /folders` row already notes the deferral.
+---
+id: UD-200
+title: First-time CLI UX: profile/account terminology, default-account handling, inline auth prompts
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-05-04
+---
+First-time CLI experience surfaces several friction points (drive-by feedback from a fresh `~/.config/unidrive/` walkthrough, 2026-05-04). Issues cluster into four orthogonal threads — fix individually, share the same UX-language refresh.
+
+## 1. Profile vs provider terminology is muddled
+
+`profile add` is named "Add a new provider profile (interactive wizard)" but the underlying entity is closer to an **account** (an authenticated identity at a provider). `profile list` shows columns `PROFILE / TYPE / SYNC ROOT / AUTH` — `TYPE` is the provider, `PROFILE` is the user-facing account label. Help text and column headings should agree.
+
+Proposed naming pass:
+- `profile` → keep as the CLI verb (it's accurate: a saved configuration), but reframe the help as "Manage cloud accounts (a profile binds one account at one provider to one local sync root)".
+- Column rename: `PROFILE → ACCOUNT`, `TYPE → PROVIDER`. Matches the `STORAGE PROVIDER / ACCOUNT` column already used in `unidrive status`.
+- `--provider` flag is doubly-overloaded — it accepts either a profile name *or* a provider type ("Provider profile name or type"). Split into `--account <name>` (preferred) with `--provider` kept as a deprecated alias for one minor version. Disambiguates the most common confusion: "is `internxt` the provider or my account?".
+
+## 2. `unidrive profile add <type> <name>` positional form silently rejected
+
+The error message advertises `Run 'unidrive profile add <type> <name>' to create your first profile`, but invoking it that way prints `Unmatched arguments from index 2`. The wizard-only form is the only working path. Either:
+- (a) implement the positional form (`profile add <provider-type> <account-name> [--sync-root PATH]`), so the bootstrap message is honest and scriptable, or
+- (b) fix the bootstrap message to say `Run 'unidrive profile add' to launch the interactive wizard.`
+
+(a) is the right fix — Picocli supports it trivially and it unblocks scripted onboarding. The wizard stays as the default when args are absent.
+
+## 3. Default-account handling is half-implemented and confusing
+
+After `profile add internxt_gernot_…`, `unidrive status` showed:
+
+```
+⚠︎ Microsoft OneDrive  [– –]  …  never
+```
+
+i.e. the "default" provider fell through to a hard-coded OneDrive shape rather than the only configured account. Two clean options:
+
+- **Option A (preferred): drop "default account" entirely.** Promote `--all` to be the default of `status`, `quota`, `log`, etc. Then `--all` becomes a no-op flag (deprecated alias) and bare `unidrive status` shows every configured account. Disambiguate via `-p <name>` for single-account view. Eliminates an entire class of "why is it showing OneDrive when I added Internxt?" surprises and matches user mental model (the CLI manages a *fleet* of accounts).
+- Option B: track default-account explicitly. Add `profile set-default <name>` and pick the most recently added account if no default is set. Fine but more state to maintain — A is simpler.
+
+## 4. Auth flow is disconnected from `profile add` and from "needs auth" errors
+
+`profile add` finishes without ever offering to authenticate. Then `status --all` (or any operation) tries to query the unauthorized account and surfaces only error noise. Two integration points:
+
+- **(a)** After a successful `profile add`, prompt: `Authenticate now? [Y/n]` — if yes, run the same auth flow as `unidrive auth -p <name>`. Skippable for non-interactive contexts (`--no-auth` flag or `UNIDRIVE_NONINTERACTIVE=1`).
+- **(b)** Any command that hits `AccountNotAuthenticated` should offer to start the auth flow inline: `Account 'foo' is not authenticated. Run 'unidrive auth -p foo' now? [Y/n]` and, on confirmation, exec it. Same gate via `--no-prompt`/non-interactive env.
+
+If a user has 23 accounts and none is authed, they should expect to be walked through 23 auth flows — that's the truth of "I have 23 unauthed accounts," not a UX bug. The bug is silently failing at the operation layer.
+
+## Acceptance criteria
+
+- Help text and column headings consistently use **account** for the user-facing identity and **provider** for the storage system. (#1)
+- `profile add <provider> <name>` works as a positional form, in addition to the wizard. (#2)
+- `unidrive status` (no flags) shows every configured account; `--all` becomes a deprecated no-op alias. Same for `quota`, `log`, and any other inventory-style command. Single-account view via `-p <name>`. (#3)
+- The hard-coded OneDrive fallback in `unidrive status` is removed. (#3)
+- `profile add` prompts for auth-now after success in interactive mode; suppressible. (#4a)
+- `AccountNotAuthenticated`-class errors offer to start the auth flow; suppressible. (#4b)
+- Smoke test: empty `~/.config/unidrive/` → `profile add internxt name --sync-root …` → auth prompt → `unidrive status` shows the new account, `[– –]` until first sync.
+
+## Notes
+
+- Threads 1 and 3 share a documentation refresh (README, `--help` text, every `man-page-style` doc). Worth doing in one pass to keep terminology consistent.
+- Thread 2 is the smallest and a good first commit.
+- Thread 4b touches every command's error handler — could be implemented as a single `runRequiringAuth` wrapper so the prompt logic lives in exactly one place.
