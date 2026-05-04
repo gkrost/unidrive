@@ -187,3 +187,64 @@ For specific operations that can exceed 500 ms without emitting progress (large 
 ## Priority
 
 **Medium, M effort** as an umbrella. **240a alone is XS and worth landing tomorrow** regardless of the rest. 240d is next easiest standalone win.
+
+---
+id: UD-240h
+title: LocalScanner pending-upload upserts — 67k single-row writes inside file walk
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-04
+resolved_by: commit 4496cfb. LocalScanner.scan now wraps Files.walkFileTree in a single db.beginBatch/commitBatch so the 67k UD-901 pending-upload pre-writes from a first-sync coalesce into one SQLite commit (was N transactions). finally{} rolls back on partial-walk failure to restore autoCommit, so the engine's later Pass-1 beginBatch isn't silently piggybacked. Two regression tests cover the happy path + cross-run autoCommit invariant. Estimated 50-100x wall-clock speedup on first-sync local scan dominated by the per-commit fsync going from N to 1.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:72
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-02
+---
+**`LocalScanner.scan` issues one synchronous `db.upsertEntry` per NEW local file inside `Files.walkFileTree`. On a 67k-file first-sync that's 67k single-row INSERTs interleaved with the disk walk, plus all the SQLite per-statement overhead.**
+
+## Where
+
+[LocalScanner.kt:72-86](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:72) — inside `visitFile`:
+
+```kotlin
+if (entry == null) {
+    changes[relativePath] = ChangeState.NEW
+    val sparseLeftover = isSparseLeftover(file, attrs.size())
+    db.upsertEntry(SyncEntry(...))   // <-- one synchronous SQLite write per NEW file
+}
+```
+
+This is UD-901's pending-upload row write — correct semantically, but the I/O pattern is one transaction per file. The walk holds no lock, so each upsert acquires-commits-releases the SQLite write lock individually. With 67k NEW files the cumulative wall time is dominated by this storm, not the actual file-tree walk.
+
+## Adjacent context (UD-240g sibling)
+
+UD-240g found and fixed the silent-reconcile-with-86k-SELECTs problem in `Reconciler`. The LocalScanner-during-walk pattern is the same shape (synchronous DB-per-item inside a hot loop), just on the write side. Doing both makes the first-sync path's DB cost basically negligible.
+
+## Proposal
+
+Wrap the walk in `db.batch { ... }`:
+
+```kotlin
+db.batch {
+    Files.walkFileTree(syncRoot, object : SimpleFileVisitor<Path>() { ... })
+}
+```
+
+`StateDatabase.batch` already exists (used by `SyncEngine.updateRemoteEntries`) — it runs the block inside a single transaction, deferring commit to the end. With WAL mode the in-walk upserts become a single fsync at commit time instead of 67k individual fsyncs.
+
+## Acceptance
+
+- `LocalScanner.scan` runs entirely inside one `db.batch { ... }`. The block must include the post-walk deletion-detection loop ([LocalScanner.kt:142](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:142)) so that whole pass is one transaction.
+- On a 67k-NEW first-sync, the local-scan wall time drops by ≥ 5× on Windows (where SQLite per-statement fsync is the worst). Measured via the `last_scan_secs_local` metric SyncEngine already records.
+- Existing `LocalScannerTest` cases still pass.
+- A new test asserts that an exception thrown from `visitFile` rolls back the in-progress upserts (no half-written rows in `state.db`) — `db.batch` already handles this via JDBC transaction semantics, but pin the contract.
+
+## Why filed as 240h
+
+Sibling of UD-240g: same first-sync-pain class, same symptom (long silent stretch), same root cause shape (per-row DB call inside a hot loop). Different file, separable commit. Numbered `h` to make the relationship obvious in `git log` and BACKLOG / CLOSED searches.
+
+## Surfaced
+
+2026-05-02 session, while diagnosing UD-240g. Code reading made the pattern visible; not yet validated by direct profiling. The acceptance criterion above (`5×` wall-clock reduction) is the measurable test.
