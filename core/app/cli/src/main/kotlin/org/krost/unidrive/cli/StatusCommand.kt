@@ -88,6 +88,15 @@ class StatusCommand : Runnable {
     @Option(names = ["--audit"], description = ["Cross-check state.db against remote quota and surface the enumeration gap (UD-316)"])
     var audit: Boolean = false
 
+    @Option(
+        names = ["--pending"],
+        description = [
+            "UD-236: print the count of pending transfers (downloads + uploads) that a follow-up `unidrive apply`",
+            "would drain. Reads state.db only — no network calls. Useful as a no-op preview.",
+        ],
+    )
+    var pending: Boolean = false
+
     override fun run() {
         if (checkAuth) {
             showCredentialHealthReport()
@@ -97,11 +106,65 @@ class StatusCommand : Runnable {
             showAuditReport()
             return
         }
+        if (pending) {
+            showPendingReport()
+            return
+        }
         if (all) {
             showMultiProviderStatus()
         } else {
             showSingleProviderStatus()
         }
+    }
+
+    /**
+     * UD-236: report pending transfers without fetching anything from the network.
+     * Walks state.db for the same row patterns the Reconciler's UD-225 / UD-901
+     * recovery loops surface as DownloadContent / Upload actions:
+     *   - `isHydrated = false` non-folder rows → download pending
+     *   - `remoteId IS NULL` rows  → upload pending (UD-901 pre-write)
+     */
+    private fun showPendingReport() {
+        val profile = parent.resolveCurrentProfile()
+        val configDir = parent.configBaseDir().resolve(profile.name)
+        val stateDbPath = configDir.resolve("state.db")
+        if (!Files.exists(stateDbPath)) {
+            println("No state.db for profile '${profile.name}' — nothing pending.")
+            return
+        }
+        val db = StateDatabase(stateDbPath)
+        var downloadsPending = 0
+        var uploadsPending = 0
+        var downloadBytes = 0L
+        var uploadBytes = 0L
+        try {
+            db.initialize()
+            for (entry in db.getAllEntries()) {
+                if (entry.isFolder) continue
+                if (!entry.isHydrated) {
+                    downloadsPending++
+                    downloadBytes += entry.remoteSize
+                } else if (entry.remoteId == null) {
+                    uploadsPending++
+                    uploadBytes += entry.localSize ?: 0L
+                }
+            }
+        } finally {
+            db.close()
+        }
+        val total = downloadsPending + uploadsPending
+        if (total == 0) {
+            println("No pending transfers for profile '${profile.name}'. (state.db has no UD-225/UD-901 markers — nothing for `apply` to do.)")
+            return
+        }
+        println("Pending transfers for ${AnsiHelper.bold(profile.name)}:")
+        if (downloadsPending > 0) {
+            println("  Download: $downloadsPending file(s), ${CliProgressReporter.formatSize(downloadBytes)}")
+        }
+        if (uploadsPending > 0) {
+            println("  Upload:   $uploadsPending file(s), ${CliProgressReporter.formatSize(uploadBytes)}")
+        }
+        println("Run `unidrive -p ${profile.name} apply` to drain.")
     }
 
     private fun showAuditReport() {

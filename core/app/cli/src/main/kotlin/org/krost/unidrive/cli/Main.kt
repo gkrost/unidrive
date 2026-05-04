@@ -29,6 +29,10 @@ import java.nio.file.Paths
         AuthCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
+        // UD-236: git-style three-verb split — refresh = sync without byte
+        // transfers; apply = drain pending transfers without re-fetching deltas.
+        RefreshCommand::class,
+        ApplyCommand::class,
         SweepCommand::class,
         StatusCommand::class,
         GetCommand::class,

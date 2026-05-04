@@ -80,6 +80,22 @@ class SyncEngine(
         // UD-254: classifies WHY a sync pass started so post-incident log review
         // can separate a normal watch poll from e.g. a rescan-after-retry burst.
         reason: SyncReason = SyncReason.MANUAL,
+        // UD-236: refresh-mode cut. Run Gather + Reconcile + Pass 1 (placeholder
+        // ops, deletes, moves, mkdirs — all metadata) and SKIP Pass 2 (the actual
+        // byte transfers). Pending transfers persist as remoteId=null (upload
+        // pending) or isHydrated=false (download pending) DB rows that the next
+        // sync — or a follow-up `unidrive apply` — picks up via the UD-225/UD-901
+        // recovery loops in Reconciler.reconcile.
+        //
+        // pending_cursor is NOT promoted to delta_cursor when transfers are
+        // skipped — apply will do the promotion when the bytes actually move.
+        skipTransfers: Boolean = false,
+        // UD-236: apply-mode cut. SKIP the remote Gather phase (no provider.delta()
+        // call). Local scan still runs (cheap; catches local edits made since the
+        // previous refresh). The recovery loops in Reconciler emit actions for
+        // any unhydrated / no-remoteId DB rows from the prior refresh — apply's
+        // reason for being is to drain those.
+        skipRemoteGather: Boolean = false,
     ) {
         // UD-254: short random scan id pushed into MDC so every DEBUG/WARN line
         // emitted inside this pass inherits it (e.g. InternxtProvider's
@@ -95,7 +111,7 @@ class SyncEngine(
         val startTime = System.currentTimeMillis()
         log.info("Scan started scan={} reason={} dryRun={}", scanId, reason, dryRun)
         try {
-            doSyncOnce(dryRun, forceDelete, scanId, reason, startTime)
+            doSyncOnce(dryRun, forceDelete, scanId, reason, startTime, skipTransfers, skipRemoteGather)
         } finally {
             val duration = System.currentTimeMillis() - startTime
             log.info("Scan ended scan={} reason={} duration={}ms", scanId, reason, duration)
@@ -113,6 +129,8 @@ class SyncEngine(
         @Suppress("UNUSED_PARAMETER") scanId: String,
         @Suppress("UNUSED_PARAMETER") reason: SyncReason,
         startTime: Long,
+        skipTransfers: Boolean = false,
+        skipRemoteGather: Boolean = false,
     ) {
         val downloaded = AtomicInteger(0)
         val uploaded = AtomicInteger(0)
@@ -161,7 +179,16 @@ class SyncEngine(
         }
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
-        val allRemoteChanges = gatherRemoteChanges()
+        // UD-236: skipRemoteGather (apply mode) bypasses provider.delta() entirely.
+        // The recovery loops in Reconciler.reconcile pick up any pending UD-225/UD-901
+        // rows from a prior refresh and emit DownloadContent / Upload actions for them.
+        val allRemoteChanges =
+            if (skipRemoteGather) {
+                log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
+                emptyMap()
+            } else {
+                gatherRemoteChanges()
+            }
 
         val remoteChanges =
             if (syncPath != null) {
@@ -436,6 +463,27 @@ class SyncEngine(
         } catch (e: Exception) {
             db.rollbackBatch()
             throw e
+        }
+
+        // UD-236: refresh-mode short-circuit. Pass 1 (metadata) is done; transfers
+        // remain pending in the DB as remoteId=null / isHydrated=false rows. The
+        // pending_cursor stays unpromoted so the next `apply` (or `sync`) finalises.
+        if (skipTransfers) {
+            val pendingTransfers = actions.count { it is SyncAction.DownloadContent || it is SyncAction.Upload }
+            log.info(
+                "Refresh mode: skipping Pass 2; {} pending transfer(s) deferred (downloads + uploads)",
+                pendingTransfers,
+            )
+            val duration = System.currentTimeMillis() - startTime
+            reporter.onSyncComplete(
+                downloaded = 0,
+                uploaded = 0,
+                conflicts = conflicts.get(),
+                durationMs = duration,
+                actionCounts = actions.groupingBy { actionLabel(it) }.eachCount(),
+                failed = passOneFailures.get(),
+            )
+            return
         }
 
         // Pass 2: concurrent transfers (downloads and uploads)

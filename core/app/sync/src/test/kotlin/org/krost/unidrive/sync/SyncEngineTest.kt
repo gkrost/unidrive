@@ -77,6 +77,54 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-236 refresh skips Pass 2 — local file gets pending row but is not uploaded`() =
+        runTest {
+            // First sync establishes baseline (no items, no actions).
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            // Add a local file. A normal sync would upload it; refresh just records the intent.
+            Files.writeString(syncRoot.resolve("pending-up.txt"), "draft")
+            engine.syncOnce(skipTransfers = true)
+
+            // Pending-upload row exists (UD-901 pre-write) but provider was never called.
+            val entry = db.getEntry("/pending-up.txt")
+            assertNotNull(entry, "refresh must persist a pending-upload row for the new local file")
+            assertNull(entry.remoteId, "remoteId stays null until apply uploads")
+            assertTrue(provider.uploadedPaths.isEmpty(), "refresh must NOT call provider.upload")
+        }
+
+    @Test
+    fun `UD-236 apply drains pending uploads from a prior refresh`() =
+        runTest {
+            // Refresh records a pending upload.
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            Files.writeString(syncRoot.resolve("apply-me.txt"), "go")
+            engine.syncOnce(skipTransfers = true)
+            assertTrue(provider.uploadedPaths.isEmpty())
+
+            // Apply: skip remote gather, let recovery loops surface the pending UD-901 row.
+            engine.syncOnce(skipRemoteGather = true)
+
+            // The upload must have happened.
+            assertTrue(provider.uploadedPaths.contains("/apply-me.txt"))
+            val finalEntry = db.getEntry("/apply-me.txt")
+            assertNotNull(finalEntry?.remoteId, "apply must promote the pending row to a fully-synced state")
+        }
+
+    @Test
+    fun `UD-236 apply is no-op when nothing pending`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            // Apply with no pending entries — must complete without contacting provider for transfers.
+            val uploadedBefore = provider.uploadedPaths.size
+            engine.syncOnce(skipRemoteGather = true)
+            assertEquals(uploadedBefore, provider.uploadedPaths.size, "apply with no pending entries must not upload anything")
+        }
+
+    @Test
     fun `UD-366 modify-upload forwards existing remoteId to provider for replace-in-place`() =
         runTest {
             // First upload registers the file with a remoteId in the DB.
