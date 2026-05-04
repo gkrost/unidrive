@@ -8,7 +8,6 @@ set -euo pipefail
 # Companion to test-matrix.sh (which only covers localfs).
 #
 # Coverage:
-#   - Adapter registration (provider info <type>)
 #   - Config + profile discovery (status --all)
 #   - Live auth + read-only API (quota)
 #   - Full round-trip (local -> sync --upload-only -> side-channel verify)
@@ -113,19 +112,6 @@ setup_mc() {
 }
 
 # ── per-provider smoke ─────────────────────────────────────────────────────
-
-# Every provider adapter should answer `provider info <type>` without
-# hitting the network — validates the adapter is registered at all.
-# All provider descriptors include a `Tier:` row (see ProviderCommand.kt),
-# which is a stable contract-level marker across adapters.
-test_provider_info() {
-    local type="$1"
-    if ${JAVA} -c "${CONFIG_DIR}" provider info "${type}" 2>&1 | grep -q "Tier:"; then
-        pass "provider info ${type}"
-    else
-        fail "provider info ${type}" "no Tier: row in descriptor"
-    fi
-}
 
 # `status --all` enumerates configured profiles. No network I/O; proves
 # config parse + profile-discovery path.
@@ -280,10 +266,6 @@ main() {
     write_config
     write_rclone_config
     setup_mc
-
-    echo "=== Adapter Registration ==="
-    for t in sftp webdav s3 rclone; do test_provider_info "${t}"; done
-    echo ""
 
     echo "=== Config + Profile Discovery ==="
     for p in sftp-local webdav-local s3-local rclone-local; do

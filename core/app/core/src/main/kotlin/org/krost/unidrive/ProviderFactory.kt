@@ -13,7 +13,7 @@ interface ProviderFactory {
     /** Provider type identifier (e.g. "sftp", "onedrive"). */
     val id: String
 
-    /** Display metadata for `provider list` / `provider info` commands. */
+    /** Display metadata for the provider (id, displayName, tier, etc.). */
     val metadata: ProviderMetadata
 
     /**

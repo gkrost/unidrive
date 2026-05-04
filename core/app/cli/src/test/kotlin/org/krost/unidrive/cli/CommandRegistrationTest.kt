@@ -22,7 +22,6 @@ class CommandRegistrationTest {
         assertTrue("unpin" in names)
         assertTrue("vault" in names)
         assertTrue("conflicts" in names)
-        assertTrue("provider" in names)
         assertTrue("profile" in names)
         assertTrue("relocate" in names)
         assertTrue("share" in names)
@@ -43,18 +42,6 @@ class CommandRegistrationTest {
         assertTrue("sftp" in types, "sftp missing")
         assertTrue("webdav" in types, "webdav missing")
         assertTrue("localfs" in types, "localfs missing")
-    }
-
-    @Test
-    fun `provider has list subcommand`() {
-        val providerCmd = cmd.subcommands["provider"]!!
-        assertTrue("list" in providerCmd.subcommands.keys)
-    }
-
-    @Test
-    fun `provider has info subcommand`() {
-        val providerCmd = cmd.subcommands["provider"]!!
-        assertTrue("info" in providerCmd.subcommands.keys)
     }
 
     @Test

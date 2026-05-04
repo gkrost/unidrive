@@ -45,7 +45,6 @@ import java.nio.file.Paths
         ProfileCommand::class,
         VaultCommand::class,
         ConflictsCommand::class,
-        ProviderCommand::class,
         RelocateCommand::class,
         ShareCommand::class,
         TrashCommand::class,
@@ -61,7 +60,7 @@ class Main : Runnable {
     // the default via [SyncConfig.resolveDefaultProfile] in [resolveCurrentProfile]
     // so the CLI honours [general] default_profile from config.toml. The MCP jar
     // uses the same resolver, keeping the two invocation surfaces in lock-step.
-    @Option(names = ["-p", "--provider"], description = ["Provider profile name or type (see 'provider list')"])
+    @Option(names = ["-p", "--provider"], description = ["Provider profile name or type"])
     var provider: String? = null
 
     // UD-271: scope = INHERIT propagates -v / --verbose down to every subcommand
@@ -585,7 +584,7 @@ class Main : Runnable {
     override fun run() {
         val profile = resolveCurrentProfile()
         val authenticated = isProviderAuthenticated()
-        val alwaysAvailable = setOf("log", "profile", "vault", "provider")
+        val alwaysAvailable = setOf("log", "profile", "vault")
         val cmd = spec.commandLine()
 
         // Print standard PicoCLI help header (synopsis + options)
