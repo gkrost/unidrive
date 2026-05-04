@@ -70,11 +70,10 @@ val result =
         arg2,
     )
 
-// NOT: val result = someComputation(
-//     arg1,
-//     arg2,
-// )
-```
+/* NOT: val result = someComputation(
+     arg1,
+     arg2,
+ ) */
 
 ktlintFormat applies this automatically; naming it explicitly here
 prevents reviewers (human or agent) from "un-fixing" it. Why: three
@@ -82,8 +81,8 @@ separate commits in 2026-04-19 flipped this back and forth.
 
 ## 5. Line length
 
-140-char soft cap (ktlint `max-line-length`). Docstrings and prose in
-`.md` hard-wrap at 100 for readability on narrow terminals and in
+160-char soft cap (ktlint `max-line-length`). Docstrings and prose in
+`.md` hard-wrap at 120 for readability on narrow terminals and in
 side-by-side diff viewers.
 
 Oversized lines already past the cap are grandfathered in baselines;
