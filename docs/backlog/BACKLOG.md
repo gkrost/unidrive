@@ -5857,3 +5857,184 @@ Temp dir under `${java.io.tmpdir}/unidrive-mp-<random>/` — co-located on the s
 - swift-core `NetworkFacade.swift` and `UploadMultipart.swift` — the in-memory variant we're explicitly *not* copying.
 - UD-304 (multipart constants) — sibling, must land together.
 - Cross-repo synthesis: "Memory profile of upload parts: ... swift-core holds whole encrypted chunk in `Data`; ... the streaming model is preferable on a Linux JVM with bounded heap."
+---
+id: UD-212
+title: HttpRetryBudget.decide(status, exception, retryAfter): make the canonical retry matrix actually enforceable
+category: core
+priority: medium
+effort: L
+status: open
+opened: 2026-05-04
+---
+**Source:** UD-207 implementation report (agent `ab7efd3`, 2026-05-04). The canonical retry-policy matrix is now documented in `HttpRetryBudget.kt` KDoc and locked-where-possible by `HttpRetryBudgetMatrixTest`, but **the matrix is aspirational, not enforced** — per-provider `withRetry` / `authenticatedRequest` loops each carry their own status-code matrix, retry caps, and backoff scheme. Four of six matrix tests are `@Ignore`d with TODO references to this ticket because the budget has no surface to test against.
+
+To make the matrix actually enforceable, refactor `HttpRetryBudget` from "coordination layer (token bucket + circuit breaker + IOException classifier)" into "coordination layer **plus** status-code policy engine."
+
+## Code refs (today's reality, post-UD-207)
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc has the matrix; runtime has no `decide(...)` entry point, no `maxRetries` field, no `maxRetryAfter` field, no backoff helper.
+- `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:162-228` — `maxAttempts: Int = 5`, `backoffMs: (attempt: Int) -> Long = { 1000L * (1L shl it) }` (no jitter), `isRetriableStatus(status) = status.value in setOf(408, 425, 429, 500, 502, 503, 504)`.
+- `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt` — constants `MAX_THROTTLE_ATTEMPTS = 5`, `MAX_FLAKE_ATTEMPTS = 3`, `MAX_SINGLE_BACKOFF_MS = 300_000`. Inline `if (status == 429) … if (status in 400..499) throw … else fall-through to retry`.
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `authenticatedGet` retries 500/503/EOF only; non-GET verbs are one-shot (UD-330 is the rollout ticket).
+- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetMatrixTest.kt` — 4 cases skipped: `4xx (404) does not retry`, `408 retries`, `5xx (503) retries`, `unknown caps at 3`.
+
+## Proposed shape
+
+Five sub-tasks. Land in this order; each can be its own PR.
+
+### Sub-task A — fields + decide() entry point
+Add to `HttpRetryBudget`:
+```kotlin
+val maxRetries: Int = 5,                // default; provider can override
+val maxRetryAfter: Duration = 5.minutes, // cap on Retry-After honoring
+
+sealed class RetryDecision {
+    data class Retry(val delay: Duration) : RetryDecision()
+    object Fail : RetryDecision()
+}
+
+fun decide(
+    attempt: Int,
+    status: Int? = null,           // null when no HTTP response (network error)
+    exception: Throwable? = null,  // null on plain HTTP non-2xx
+    retryAfter: Duration? = null,  // from response header, if any
+): RetryDecision
+```
+
+The `decide(...)` body implements the matrix verbatim:
+- `attempt >= maxRetries` (or for Unknown: `>= min(3, maxRetries)`) → `Fail`.
+- `status == 200..299` → caller shouldn't be calling decide; document as precondition violation.
+- `status == 408 || 429 || in 500..599` → `Retry(backoff)`. For 429, `Retry(retryAfter.coerceAtMost(maxRetryAfter))` if `retryAfter != null`, else `Retry(backoff)`.
+- `status in 400..499 && status !in setOf(408, 429)` → `Fail`.
+- `exception != null && status == null` (network error: IOException, SocketTimeout) → `Retry(backoff)`.
+- `exception` not classified above (Unknown class) → `Retry(backoff)` capped at `min(3, maxRetries)` attempts.
+
+### Sub-task B — backoff helper with full jitter
+Add to `HttpRetryBudget`:
+```kotlin
+fun nextBackoff(attempt: Int, base: Duration = 1.seconds): Duration {
+    val expCap = base * (1L shl attempt.coerceAtMost(10))
+    val capped = expCap.coerceAtMost(maxRetryAfter)
+    val jitterMs = Random.nextLong(capped.inWholeMilliseconds + 1)
+    return jitterMs.milliseconds
+}
+```
+Full-jitter pattern (AWS Architecture Blog, 2015) — equally distributed across `[0, capped]`, smooths thundering-herd retry storms without sacrificing throughput. Existing per-provider exponential-without-jitter is the regression target.
+
+### Sub-task C — `RetryClass` for caller-classified Unknown
+Add an enum the caller can pass to `decide`:
+```kotlin
+enum class RetryClass { Http, Network, Unknown }
+```
+`Unknown` is for "exception didn't match any known retriable predicate but the caller wants to give it a few tries." Caps at `min(3, maxRetries)`.
+
+### Sub-task D — wire each provider into `decide()`
+- Internxt `InternxtApiService.authenticatedGet` and the rest of UD-330's rollout list.
+- OneDrive `GraphApiService.authenticatedRequest` + chunk uploader.
+- WebDAV `WebDavApiService.withRetry`.
+- HiDrive (separate module if it lands).
+- S3 `S3ApiService` (UD-330 scope).
+- Document any **legitimate** divergence as a constructor-arg override (e.g. WebDAV's 425 Too Early — pass `additionalRetriableStatuses = setOf(425)`).
+
+### Sub-task E — un-skip the matrix tests
+Remove the four `@Ignore` annotations on `HttpRetryBudgetMatrixTest` once `decide(...)` is in place; rewrite each to call `decide` directly with a synthetic status/exception/retry-after. The test class becomes the canonical contract.
+
+## Acceptance
+
+- `HttpRetryBudget` exposes `decide(...)` with the matrix-prescribed semantics.
+- `HttpRetryBudgetMatrixTest` runs 6/6 PASS, no skips.
+- Each provider's `withRetry`/`authenticatedRequest` calls into `budget.decide(...)` rather than carrying its own matrix.
+- Provider-specific divergences (WebDAV 425, S3 SlowDown, MinIO 507) appear as constructor overrides, not parallel matrices.
+- Adding a new provider requires zero changes to `HttpRetryBudget` and zero new retry matrices.
+- Documentation updated: lesson note moves from "aspirational matrix" to "enforced matrix"; KDoc gains a "How to use `decide`" example.
+
+## Notes
+
+- **Sub-tasks can be filed separately** if this turns out to be a multi-PR effort. The natural cut is A+B+C in one PR (engine), D+E in a second PR (rollout).
+- Pairs with UD-330 (cross-provider retry rollout). Likely UD-330 should be re-scoped to "rollout via `budget.decide`" once this lands; otherwise UD-330 ships per-provider matrices that this ticket then has to undo.
+- Out of scope: per-provider divergence beyond status-set additions. If a provider needs entirely different backoff semantics (e.g. honour `x-amz-retry-after-millis`), that's a follow-up.
+- Out of scope: distributed retry budget (cross-process). In-process token bucket only.
+
+## Cross-refs
+
+- UD-207 — surfaced this finding; closed once-per-row tests with @Ignore TODOs.
+- UD-228 — original HTTP-robustness audit that produced the matrix.
+- UD-330 — cross-provider rollout, must coordinate.
+- UD-232 — Retry-After / throttle handling, lives at the same surface.
+- drive-desktop `client-wrapper.service.ts` — the matrix's source.
+---
+id: UD-308
+title: Internxt: getValidCredentials should refresh proactively, not wait for a 401
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** UD-208 audit finding (agent `a876235`, 2026-05-04). `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:175` — `getValidCredentials()` returns the stored `InternxtCredentials` or throws if absent. It does **not** itself check `isJwtExpired()` or call `refreshToken()`. Refresh only happens via:
+1. `authenticate()` (one-shot, at session start)
+2. Implicitly when the API call sees a 401 and re-asks `authenticate()` (via the existing recovery path)
+
+Result: a long-running daemon's first call after 24h of idle time hits a guaranteed-expired token before it ever gets refreshed, paying a full retry round-trip plus a `refreshToken` call in the critical path of an otherwise-fine API request.
+
+## Why this matters
+
+- **Cold-start latency**: every cold start of any operation pays the 401 + refresh round-trip if the token expired during idle.
+- **Concurrent calls thunder**: if N coroutines each notice the 401 simultaneously, they each fire their own `refreshToken()` unless the mutex inside `refreshToken` serialises them. Worth verifying.
+- **Compares unfavorably with the rest of the auth surface**: `InternxtProvider.authenticate()` (`InternxtProvider.kt:53-58`) does check `isJwtExpired()` proactively. The inconsistency between the entry point (proactive) and the call-site path (reactive-on-401) is the smell.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:41-62` — `isJwtExpired()` (pure, no network)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:175-...` — `getValidCredentials()` — **the call this ticket targets**
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:201-224` — `refreshToken()` (mutex-serialised, `NonCancellable`)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:622-653` — `authenticatedGet()` consumer of `getValidCredentials()`
+
+## Proposed shape
+
+Make `getValidCredentials` *actually* return valid credentials:
+
+```kotlin
+suspend fun getValidCredentials(): InternxtCredentials {
+    val current = storedCredentials ?: throw NotAuthenticatedException(...)
+    return if (isJwtExpired(current.token)) {
+        refreshToken().also { /* persisted by refreshToken */ }
+    } else {
+        current
+    }
+}
+```
+
+Refresh-token mutex (`refreshToken`'s existing serialisation + double-check) ensures concurrent callers fire one network refresh, not N. Add a unit test to lock the dedup behaviour explicitly.
+
+If the JWT is "near-expiry" but not yet expired, we *could* still pre-emptively refresh — but that's optional polish; the main win is removing the guaranteed-expired-on-call class.
+
+Pairs naturally with UD-205 (in-flight dedup): `getValidCredentials` itself becomes a candidate dedup target so that even the `isJwtExpired() == true` branch doesn't fan out N refresh attempts.
+
+## Acceptance
+
+- `AuthService.getValidCredentials()` returns valid (non-expired) credentials by construction; throws if no token is available **or** refresh fails.
+- Unit test: 100 concurrent `getValidCredentials()` calls observing a near-expired token → exactly one refresh network call (verify via mock).
+- Unit test: `getValidCredentials()` with an expired token whose refresh fails → throws a refresh-specific exception, does not return stale credentials.
+- Unit test: `getValidCredentials()` with a valid token → returns immediately, no refresh attempt.
+- `InternxtApiService.authenticatedGet` receives credentials that are ≤30s from expiry **or fresher** at the moment of the API call.
+- The reactive-401 fallback path stays as a belt-and-braces safety net — do not remove it.
+- Documentation update in `docs/providers/auth-refresh-model.md` flips the "sharp edge" callout to "resolved (UD-308)".
+
+## Notes
+
+- Out of scope: refresh-token rotation policy, cross-session token sharing, encrypted-at-rest token storage. Just the call-time refresh trigger.
+- Out of scope: applying the same fix to OneDrive — the audit found OneDrive already does it correctly. Verify in the test, but don't refactor.
+- Pairs with UD-205. Could even use the InFlightDedup primitive directly:
+  ```kotlin
+  private val refreshDedup = InFlightDedup<Unit, InternxtCredentials>()
+  suspend fun refreshToken(): InternxtCredentials =
+      refreshDedup.load(Unit) { /* existing refresh logic */ }
+  ```
+  …if the existing mutex inside `refreshToken` doesn't already serve this purpose. Audit before duplicating.
+
+## Cross-refs
+
+- UD-208 — surfaced this finding (audit doc).
+- UD-205 — InFlightDedup primitive, potential reuse.
+- UD-310 / UD-331 — token-refresh mutex / NonCancellable carry-over (the existing serialisation surface).
