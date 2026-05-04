@@ -41,6 +41,18 @@ class LocalScanner(
         var visited = 0
         val heartbeat = onProgress?.let { cb -> ScanHeartbeat(cb) }
 
+        // UD-240h: wrap the walk in a single SQLite transaction. The walk's
+        // visitFile pre-writes a UD-901 pending-upload row for every NEW file
+        // it sees — on a 67k-file first sync that's 67k single-row INSERTs,
+        // each its own transaction (LocalScanner runs in the engine's Gather
+        // phase, before SyncEngine.kt:361's beginBatch). Wrapping here drops
+        // those 67k commits to one. Failures roll back the whole walk's
+        // UD-901 pre-writes — safer than partial rows for the next sync's
+        // recovery loops to interpret.
+        db.beginBatch()
+        var batchCommitted = false
+        try {
+
         // Walk local filesystem
         Files.walkFileTree(
             syncRoot,
@@ -149,7 +161,21 @@ class LocalScanner(
             }
         }
 
+        db.commitBatch()
+        batchCommitted = true
         return changes
+        } finally {
+            // UD-240h: roll back any UD-901 pre-writes if the walk threw past
+            // commitBatch. Without this, autoCommit stays false and the
+            // engine's later beginBatch silently piggybacks on our open tx.
+            if (!batchCommitted) {
+                try {
+                    db.rollbackBatch()
+                } catch (e: Exception) {
+                    log.warn("UD-240h: rollbackBatch failed in scan() finally", e)
+                }
+            }
+        }
     }
 
     // UD-209b: detect sparse-file leftovers (interrupted-sync placeholders) so they
