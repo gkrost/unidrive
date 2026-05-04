@@ -4548,6 +4548,15 @@ Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once 
 ## Surfaced
 
 2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
+
+## 2026-05-04 update — concrete throughput target from a 165k-item baseline
+
+A fresh-profile sync against a 165,509-item Internxt account took 2012s end-to-end (Reconcile started: 165509 remote, 0 local; scan duration 2012178ms in `unidrive.log`). That is **~82 items/sec sequential**, broadly consistent with this ticket's 22,700-item ÷ 220s = ~103 items/sec earlier observation.
+
+**Acceptance addition** for the parallel-pagination fix: at parallelism = 8, observed throughput should be **≥500 items/sec** on a 165k-item account, i.e. the same 165,509-item scan completes in ≤350s. Verified by re-running the same `unidrive -p <profile> sync --download-only --sync-path /` and asserting the `Scan ended ... duration=Xms` log line shows `X ≤ 350000`.
+
+Also: pair the parallel pagination with **UD-303 (tie-break by `(updatedAt, lastUuid)`)** so concurrent paginators don't race each other into duplicate or dropped items at page boundaries. UD-303 must land first or alongside.
+
 ---
 id: UD-362
 title: Narrow Internxt delta() request to --sync-path scope when set
@@ -5061,3 +5070,790 @@ When `-p` selects a non-OneDrive profile, `unidrive sync --help` shows no `--fas
 
 - UD-223 — original `--fast-bootstrap` ticket.
 - UD-200 — first-time UX (terminology, default-account, inline auth) — sibling but mechanically separate.
+---
+id: UD-203
+title: Capture x-request-id (and provider equivalents) in provider exception types for log correlation
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's single best observability lever is `AxiosResponseError.xRequestId` — extracted from the `x-request-id` response header at error normalization time. unidrive's provider exception types should carry the same field so `unidrive.log` ERROR lines correlate with server-side support tickets.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiException.kt` (or wherever the type lives) — add `xRequestId: String?`
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `parseError`-style helper, populate from response headers
+- `core/providers/onedrive/...` — same pattern (already partially captures `request-id`?)
+- `core/providers/hidrive/...`, `core/providers/s3/...` — extend pattern
+- BACKLOG.md line 1100s — the existing error-parsing audit ticket already enumerates per-provider error fields; this extends it to capture the request-id specifically
+
+## Header-name matrix per provider
+
+| Provider | Response header | Notes |
+|----------|-----------------|-------|
+| Internxt | `x-request-id` | confirmed by SDK research |
+| OneDrive | `request-id` and/or `client-request-id` | Microsoft Graph standard |
+| S3 | `x-amz-request-id` + `x-amz-id-2` | both useful for AWS support |
+| HiDrive | TBD — verify | |
+| WebDAV | none standard — skip | |
+| SFTP | n/a (not HTTP) | |
+
+## Acceptance
+
+- Provider-specific exception types each gain a `requestId: String?` (or provider-specific name) field.
+- Error-construction sites populate it from response headers when available; null otherwise.
+- Logging interceptor surfaces `requestId=<value>` on every ERROR log line that originated from a provider exception.
+- Unit tests: forced 500 from each provider's mock, with synthetic header → exception carries the value, log line contains it.
+- `docs/providers/<provider>-robustness.md` documents the header name being captured.
+
+## Notes
+
+- This is the cheapest observability win in the research reports. ~30 LOC per provider plus the logging interceptor.
+- Pairs with UD-330 — when retries fail and the budget gives up, the final ERROR log should include the last-attempt's `requestId`.
+- Out of scope: client-side request-id generation (we'd send our own correlator). Useful but separate ticket.
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 ideas to steal` #3.
+- BACKLOG ticket near line 1095-1130 (existing error-parsing audit) — this is the captured-fields extension for the request-id specifically.
+---
+id: UD-204
+title: Per-call HTTP timeout matrix across providers (metadata vs upload vs download vs auth)
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's axios setup omits `timeout`, so a slow-loris server hangs everything indefinitely. unidrive's OkHttp clients across providers should have an explicit per-call timeout matrix, calibrated by call class (metadata vs upload-PUT vs download-GET).
+
+## Code refs
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/` — shared HTTP helpers
+- `core/providers/*/src/main/kotlin/.../*ApiService.kt` — per-provider OkHttpClient builders (verify each has timeouts set, document the matrix)
+
+## Proposed timeout matrix
+
+| Call class | Connect | Read | Write | Call (overall) | Notes |
+|------------|---------|------|-------|----------------|-------|
+| Metadata (list/get/move/delete) | 5 s | 15 s | 5 s | 30 s | Internxt API typical |
+| Upload PUT (single shard, multipart part) | 10 s | 5 min | 5 min | 10 min | 50 MB at modest throughput |
+| Download GET (shard) | 10 s | 5 min | n/a | 10 min | Same shape |
+| Auth (login, refresh) | 5 s | 10 s | 5 s | 30 s | Fast or fail |
+
+Overall `callTimeout` (OkHttp 3.12+) bounds the whole request including retries within one budget. Read timeout bounds inter-byte gaps. Connect timeout bounds initial socket establishment.
+
+## Acceptance
+
+- All provider OkHttp clients explicitly set `connectTimeout`, `readTimeout`, `writeTimeout`, `callTimeout`.
+- The four call classes (metadata / upload / download / auth) each have their own client or per-call override (OkHttp `newBuilder().callTimeout(...)`).
+- Unit test: slow-loris mock that drips 1 byte/sec on a metadata call gets aborted within `readTimeout` (15s); same on an upload PUT gets aborted within `callTimeout` (10min).
+- Documented in `docs/providers/<provider>-robustness.md` per provider.
+- Tunable via env or config for power users (`UNIDRIVE_HTTP_UPLOAD_CALL_TIMEOUT_S`, etc.) — not exposed in CLI.
+
+## Notes
+
+- This is mostly a doc-and-verify ticket if the timeouts are already set; an audit will tell.
+- Belt-and-braces against `ThrottleBudget` / `HttpRetryBudget` — those handle backpressure and retry, timeouts handle "the connection is just dead, give up."
+- **Circuit breaker is explicitly out of scope** — premature for current scale. Note in the ticket as a future ticket if the timeout-only model proves insufficient.
+
+## Cross-refs
+
+- internxt/sdk research — `Cons / footguns` per area, recurring "no timeout" theme.
+- UD-228 / UD-330 — retry budget rollout; timeouts are the floor under retry.
+---
+id: UD-205
+title: InFlightDedup<K,V>: share concurrent identical requests via ConcurrentHashMap<K, Deferred<V>>
+category: core
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-server-wip + swift-core + drive-desktop research (agent `a876235`, 2026-05-04). The single highest-leverage finding across all three repos. Drive-desktop's `get-in-flight-request.ts` keeps a `Map<key, Promise<T>>` so concurrent callers asking for the same logical request share one HTTP round-trip. Trivial to port to Kotlin coroutines as `ConcurrentHashMap<K, Deferred<V>>`.
+
+## Why
+
+Reconciler enumeration, status polling, UI fan-out, and the scheduler all hit the same provider methods (`listChildren`, `getMetadata`, `delta`) concurrently. Without dedup, N callers = N round-trips. With dedup, N callers = 1 round-trip + (N-1) cache hits on the in-flight `Deferred`.
+
+## Code refs
+
+- New file: `core/app/core/src/main/kotlin/org/krost/unidrive/http/InFlightDedup.kt`
+- Wire into provider call sites that are reasonably idempotent and frequently fan-out:
+  - `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `getFolderContents`, `getFileInfo`, `getFolderTree`
+  - `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveApiService.kt` — `getMetadata`, listings
+  - `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt` — `getValidCredentials` (token refresh under concurrent callers must dedup)
+
+## Proposed shape
+
+```kotlin
+class InFlightDedup<K : Any, V> {
+    private val inFlight = ConcurrentHashMap<K, Deferred<V>>()
+
+    suspend fun load(key: K, loader: suspend () -> V): V = coroutineScope {
+        // Hot path: existing in-flight Deferred.
+        inFlight[key]?.let { return@coroutineScope it.await() }
+        val deferred = async(start = CoroutineStart.LAZY) { loader() }
+        val winner = inFlight.putIfAbsent(key, deferred) ?: deferred
+        try {
+            winner.await()
+        } finally {
+            // Whoever started it is responsible for clearing it; losers no-op.
+            inFlight.remove(key, winner)
+        }
+    }
+}
+```
+
+Key choice: `(provider-id, method, args)` — e.g. `"internxt:listChildren:/Documents"`. Document the hashing requirement on `K`.
+
+## Acceptance
+
+- `InFlightDedupTest`: 100 concurrent `load("k", { delay(500); 42 })` calls — exactly one loader invocation, all 100 callers receive 42.
+- Failure propagation: loader throws → all callers receive the same exception, in-flight map is cleared.
+- Cancellation: caller cancels → if it's the only caller, loader is cancelled; if other callers are still awaiting, loader continues.
+- Wired into Internxt's `getFolderContents`: integration test with mock that delays 500ms — 100 parallel `listChildren("/Documents")` calls produce one mock invocation.
+- Token refresh: 100 concurrent calls observing a near-expired JWT → exactly one refresh call.
+
+## Notes
+
+- Cache scope is **in-flight only** — not a TTL cache. Once the request completes, the entry is removed. Successful results may be cached separately by callers; this ticket does not introduce a stale-data concern.
+- Pairs naturally with UD-352a (parallel pagination) — the dedup map prevents the parallel paginators from racing on the same offset under the offset-walled-pagination model.
+- Out of scope: distributed dedup across processes. In-process only.
+
+## Cross-refs
+
+- drive-desktop `src/infra/drive-server-wip/in/get-in-flight-request.ts` — direct shape source.
+- Cross-repo synthesis: "the single highest-leverage finding."
+---
+id: UD-207
+title: Codify HTTP retry-policy matrix (5xx/4xx/network/unknown) in HttpRetryBudget KDoc + tests
+category: core
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). Drive-desktop's `client-wrapper.service.ts` carries this comment as the cleanest retry-policy doc-comment in any of the three Internxt repos:
+
+> 2XX: success, 3XX/4XX: don't retry (except 408/429), 5XX: retry always, network errors: retry always, unknown exceptions: retry up to 3.
+
+unidrive's `HttpRetryBudget` (UD-228) should adopt this as its **canonical, documented matrix** — written into the budget's KDoc, locked in unit tests, and cross-linked from `docs/dev/lessons/`. Currently the policy lives in code and per-provider audits but isn't centralised.
+
+## Code refs
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc target
+- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetTest.kt` — extend with explicit matrix-row tests
+
+## Proposed matrix (verbatim)
+
+| Class | HTTP status / signal | Retry? | Cap | Backoff | Notes |
+|-------|----------------------|--------|-----|---------|-------|
+| Success | 2xx | n/a | n/a | n/a | |
+| Permanent client error | 4xx (except 408, 429) | **No** | n/a | n/a | Fail fast |
+| Timeout | 408 | Yes | budget.maxRetries | exp + jitter | |
+| Throttle | 429 | Yes | budget.maxRetries | honor `Retry-After` (cap = budget.maxRetryAfter) | UD-232 alignment |
+| Server error | 5xx | Yes | budget.maxRetries | exp + jitter | |
+| Network error (connect/read/SSL) | (no status) | Yes | budget.maxRetries | exp + jitter | |
+| Unknown exception | (caller-classified `Unknown`) | Yes | min(3, budget.maxRetries) | exp + jitter | The lower cap is deliberate |
+
+`exp + jitter` = exponential backoff with full jitter, base=1s, cap=`budget.maxRetryAfter`.
+
+## Acceptance
+
+- `HttpRetryBudget.kt` KDoc includes the table verbatim (markdown table fine).
+- `HttpRetryBudgetTest` has one test per row, asserting the budget's `decide(...)` returns the expected outcome.
+- A second test: removing any row (mocked) fails the suite — locks the matrix as a contract.
+- `docs/dev/lessons/http-retry-policy.md` (new) summarises the matrix with a link back to the budget code.
+- Per-provider audit docs (`docs/providers/*-robustness.md`) cross-link to the matrix instead of restating it.
+
+## Notes
+
+- This is documentation + test-locking, not a behaviour change (assuming the current `HttpRetryBudget` already implements the matrix). If implementation diverges from the matrix, file follow-up tickets per divergence — do not silently rewrite the budget here.
+- Pairs with UD-330 (cross-provider rollout) — when reviewers ask "what's the retry policy?" they should be able to point to this doc, not the code.
+- Out of scope: per-provider override hooks. The budget is intentionally one-policy-fits-all; provider-specific exceptions get their own ticket.
+
+## Cross-refs
+
+- drive-desktop `src/infra/drive-server-wip/in/client-wrapper.service.ts` — quotation source.
+- UD-228 / UD-330 — the budget itself and its rollout.
+- UD-232 — throttle / Retry-After.
+---
+id: UD-208
+title: Audit JWT-refresh model across providers; verify per-call check vs scheduler-based
+category: core
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop's `TokenScheduler.ts` uses `setTimeout(refresh, exp - now - 1d)` to schedule JWT refresh. This is **fragile under suspend/resume** — if the system was suspended for >24h, the `setTimeout` doesn't catch up.
+
+unidrive's `AuthService.kt` *appears* to use a per-call refresh model (`isJwtExpired()` checked at every operation, see `InternxtProvider.kt:54-58`), which is robust. But this hasn't been confirmed across the AuthService surface. **First step is verification, not implementation.**
+
+## Investigation
+
+1. Read `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt` end-to-end.
+2. Confirm: is JWT expiry checked at every API call site, or is there any background scheduler / `setInterval`-style refresh?
+3. Audit the same question for OneDrive (`core/providers/onedrive/.../auth/`) and any other provider with token refresh.
+4. Document findings in `docs/providers/auth-refresh-model.md` (new) — short doc, one paragraph per provider, citing code refs.
+
+## Decision tree
+
+- **All providers refresh per-call:** No code change. Land the `auth-refresh-model.md` audit doc, close ticket as informational.
+- **Any provider uses a wall-clock scheduler:** File a follow-up ticket per offending provider, scoped to "replace scheduler with per-call check OR add a wall-clock-aware re-arm on resume."
+
+## Acceptance
+
+- `docs/providers/auth-refresh-model.md` exists, lists each provider's auth refresh strategy with one code-ref per provider.
+- A clear verdict: "robust per-call" or "scheduler-based with risk".
+- If risk found: linked follow-up tickets.
+- If no risk found: a one-line note in this ticket's resolution explaining why the drive-desktop pattern is worse than what unidrive already does.
+
+## Notes
+
+- This is verify-then-decide. Don't pre-commit to an implementation strategy.
+- Out of scope: token storage encryption, refresh-token rotation policy, OAuth flow specifics. Just refresh-trigger model.
+- Cheap ticket — one read pass per provider's `AuthService`.
+
+## Cross-refs
+
+- drive-desktop `src/apps/main/token-scheduler/TokenScheduler.ts` — fragile pattern source.
+- drive-desktop research, "Cons / footguns" → token refresh.
+---
+id: UD-300
+title: Internxt: streaming AES-CTR decrypt during download (no buffer-then-decrypt)
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's `decryptFile(...)` callback is invoked **after** the full encrypted file lands on disk — forcing any consumer to write ciphertext to a temp file then read+decrypt to the final file (2× I/O).
+
+unidrive's Internxt provider should not inherit this anti-pattern. AES-CTR is seekable, so streaming decrypt is mechanically simple: a single `Cipher.getInstance("AES/CTR/NoPadding")` instance updated chunk-by-chunk while the bytes flow into the final file.
+
+## Code refs (verify before editing)
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtCrypto.kt` — current decrypt path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` — `getContent` / download orchestration
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — HTTP body handling for shard GETs
+
+## Proposed shape
+
+```kotlin
+val cipher = Cipher.getInstance("AES/CTR/NoPadding").apply {
+    init(Cipher.DECRYPT_MODE, key, IvParameterSpec(iv))
+}
+response.body!!.byteStream().use { src ->
+    Files.newOutputStream(target, CREATE, TRUNCATE_EXISTING).use { dst ->
+        CipherOutputStream(dst, cipher).use { cos ->
+            src.copyTo(cos, bufferSize = 64 * 1024)
+        }
+    }
+}
+```
+
+Variant for multi-shard downloads: the same `Cipher` instance is updated across shards in shard-index order, since CTR is a stream cipher with state preserved across chunks.
+
+## Acceptance
+
+- `dd if=/dev/urandom of=/tmp/big bs=1M count=500` → upload → `unidrive free /big` → re-hydrate via `unidrive get`. Peak write byte count (`iotop -d 1` or `pidstat -d`) equals file size, not 2×.
+- Integration test: hydrate a 100 MB file, assert no temp files remain in `${java.io.tmpdir}` or `XDG_CACHE_HOME` matching `unidrive-*` after success.
+- Throughput regression test: hydrate of a 500 MB file completes ≥30 % faster than the buffer-then-decrypt baseline (one-shot benchmark, recorded in PR).
+- Existing `InternxtIntegrationTest` and `InternxtCryptoTest` pass unchanged.
+
+## Notes
+
+- Pairs with UD-301 (shard SHA-256 verification) — the streaming pipeline must interleave `MessageDigest.update` with `Cipher.update` so verification happens before plaintext reaches disk. Land them together.
+- Memory profile: O(buffer size = 64 KB), independent of file size.
+- Out of scope: parallel multi-shard download (single seekable stream is fine for v1).
+
+## Cross-refs
+
+- internxt/sdk research report — `Top 5 ideas to steal` #2.
+- swift-core's `Encrypt.swift` uses the same single-`StreamCryptor` pattern in reverse for upload — borrow the shape.
+---
+id: UD-301
+title: Internxt: client-side shard SHA-256 verification before fsync
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). AES-CTR provides confidentiality but **no integrity** — a bit-flip in cloud storage silently corrupts plaintext at the same offset. The SDK exposes `shards[].hash` (SHA-256 of encrypted bytes) but **never verifies it**. unidrive must, since the AES-CTR + RIPEMD-160(SHA-256) bridge contract puts the integrity burden on the client.
+
+## Code refs (verify before editing)
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` — `getContent`, shard iteration
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `getFileInfo` returns `shards: [{index, size, hash, url}]`
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/` — shard DTO
+
+## Proposed shape
+
+Per shard, during the streaming decrypt path (UD-300):
+
+```kotlin
+val sha = MessageDigest.getInstance("SHA-256")
+val cipher = Cipher.getInstance("AES/CTR/NoPadding")...
+
+while (src.read(buffer).also { n = it } > 0) {
+    sha.update(buffer, 0, n)            // hash the *encrypted* bytes
+    cipher.update(buffer, 0, n, plain)  // decrypt
+    dst.write(plain, 0, ...)
+}
+
+val computed = sha.digest()              // 32 bytes raw
+val expected = HexFormat.of().parseHex(shard.hash)
+if (!MessageDigest.isEqual(computed, expected)) {
+    throw ShardHashMismatchException(shard.index, expected, computed)
+}
+```
+
+Hash check happens **before** `dst.flush()` / fsync. If verification fails, delete the partial output and fail the hydrate cleanly so retry semantics work.
+
+The SDK derives the upload-side shard hash as `RIPEMD-160(SHA-256(encrypted_bytes))` (see swift-core `Encrypt.getFileContentHash`). Confirm the **download-side** `shard.hash` field is the same form (RIPEMD-160 of SHA-256) before wiring; if so, the comparison runs both digests in sequence over the same bytes.
+
+## Acceptance
+
+- New `ShardHashMismatchException(shardIndex: Int, expected: ByteArray, computed: ByteArray)` in `internxt.error`.
+- Unit test corrupts 1 byte mid-stream via mock `Source` wrapper → download throws `ShardHashMismatchException`, target file does not exist after the throw.
+- Multi-shard test: 5-shard file with shard 3 corrupted → download throws referencing `shardIndex=3`.
+- Happy path: 100 MB file integration test passes; manifest hash matches end-to-end.
+- Log line on mismatch contains `shardIndex`, expected/computed hex prefixes (8 bytes each), and the file's plain-name.
+
+## Notes
+
+- **Land together with UD-300.** Streaming verify on top of streaming decrypt is one PR; bolting verification onto a buffer-then-decrypt path doubles the I/O before the perf fix lands.
+- Hash algorithm verification: confirm `RIPEMD-160(SHA-256(...))` vs raw `SHA-256(...)` against a known-good fixture before committing the comparison code. The two SDK reports disagree slightly on framing.
+- This is a security-relevant change. Add to `docs/SECURITY.md` "client-side integrity verification" section.
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 things to avoid` #3 ("Don't trust AES-CTR ciphertext without out-of-band integrity").
+- swift-core `Encrypt.getFileContentHash` documents the hash construction.
+- UD-300 (streaming decrypt) — sibling, must land together.
+---
+id: UD-302
+title: Internxt: idempotency-key on mutations (header + dedup-by-natural-key fallback)
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). Internxt's REST API exposes no idempotency-key contract. With UD-330 expanding retry coverage to non-GET verbs, a retried `POST /folders` after a network blip can create a duplicate folder with a different UUID. Same for `POST /files/start`, `POST /files/finish`, `POST /folders/{uuid}/move`, etc.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — every `POST/PATCH/DELETE/PUT` call site
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` (UD-228 budget that gates retry behaviour)
+
+## Two-layer fix
+
+**Layer 1 — opportunistic header.** Generate a v4 UUID per *logical* mutation (not per HTTP attempt). Pass it through the retry budget so all attempts share the same key. Header name candidates: `X-Idempotency-Key`, `Idempotency-Key`. **Server support unverified** — if the server ignores the header, this is a no-op; if accepted later, it just starts working. Free upside, near-zero cost.
+
+**Layer 2 — client-side dedup-by-natural-key fallback.** Required because we cannot trust the server. For mutations that *should* be unique, dedup by:
+- `createFolder(parentUuid, plainName)` — pre-flight `POST /folders/content/{parentUuid}/folders/existence` (batch existence, see drive-server-wip §1) before retry. If exists, treat retry as success and return the existing UUID.
+- `createFile(parentUuid, plainName, ...)` — same shape, different endpoint (`/files/existence`).
+- `moveFile`, `renameFile`, `deleteFile` — naturally idempotent if the target state matches; can be retried safely without dedup.
+
+For the upload finish endpoint specifically: a retried `POST /files/finish` with the same `(uuid, index, shards[].hash)` payload should be treated by the server as the same file (uuid is server-assigned by `/start`). Verify server behavior; document.
+
+## Acceptance
+
+- `InternxtApiService` carries an opaque `idempotencyKey: String?` parameter into every mutation method; the retry budget reuses the same key for all attempts of one logical call.
+- Unit test: mock returns 503 once then 200; `createFolder` is invoked once at the SyncEngine level, results in exactly one folder remotely (`listChildren` count == 1), HTTP is observed twice with identical `X-Idempotency-Key` header.
+- Existence-check fallback: forced retry where the first attempt actually succeeded server-side (mock returns 503 to client but persisted) — second attempt detects the existing folder via existence-check and returns its UUID instead of creating a duplicate.
+- Documented in `docs/providers/internxt-robustness.md` — header sent unconditionally, dedup-fallback active for create-class mutations.
+
+## Notes
+
+- This ticket has a research dependency: confirm by testing whether the server respects `X-Idempotency-Key` (or any sibling header). If yes, Layer 2 is a belt-and-braces safety net; if no, Layer 2 is the only defence.
+- Pairs with UD-330 — adding retry to non-GETs without idempotency safety = duplicate-storm risk. **Block UD-330 rollout to non-GETs on this ticket landing.**
+- Out of scope: cross-provider idempotency model. Each provider has its own contract (S3 has request-id, OneDrive uses ETag preconditions).
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 things to avoid` #1 ("No idempotency-key on POSTs").
+- UD-330 — HttpRetryBudget cross-provider rollout (must coordinate).
+- drive-server-wip research — `/files/existence` and `/folders/existence` batch endpoints (200-item arrays).
+---
+id: UD-303
+title: Internxt: tie-break delta walk by (updatedAt, lastUuid) to defeat offset-pagination boundary drift
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-server-wip + drive-desktop research (agent `a876235`, 2026-05-04). The Internxt API's only delta-ish surface is `(updatedAt ASC, status=ALL, limit=N, offset=M)` walked from a saved high-water-mark. The server has no secondary sort key. Items sharing an `updatedAt` value that fall on a page boundary can be **dropped or duplicated** between pages. Drive-desktop's checkpoint store has the same vulnerability — confirmed in `sync-remote-files.ts`.
+
+## Why this is silent
+
+If items A, B, C all have `updatedAt = T`, and the page break falls between B and C:
+- Page N ends with [..., A, B] @ `updatedAt = T`.
+- Cursor saved as `T`. Next sync queries `updatedAt > T` — **C is missed**.
+- Or: cursor saved as `T` inclusive, page N+1 returns [B, C, ...] — **B is duplicated** and treated as a new mutation.
+
+165k-item account → at any non-trivial timestamp granularity, the boundary collision is statistically inevitable on first cold sync.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313-340` — `delta()` paginates flat
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `listFiles(cursor, limit, offset)`
+- Sync state DB schema — wherever the cursor is persisted (likely `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/state/`)
+
+## Proposed shape
+
+Extend the cursor from `Instant` to `(Instant, lastUuid: String)`:
+
+```kotlin
+data class InternxtCursor(val updatedAt: Instant, val lastUuid: String?)
+```
+
+Walk:
+1. Query `updatedAt >= cursor.updatedAt` (inclusive) — ASC by `(updatedAt, uuid)` if the server supports it; otherwise sort client-side post-fetch.
+2. Drop items where `updatedAt == cursor.updatedAt && uuid <= cursor.lastUuid` (already seen).
+3. After processing batch, set new cursor to `(lastItem.updatedAt, lastItem.uuid)`.
+4. If the entire batch shares one `updatedAt`, *do not advance the timestamp* — only advance `lastUuid` until a different `updatedAt` is seen.
+
+If the API doesn't return `uuid` in the listing payload, fall back to `(updatedAt, lastPlainNameLexicographic)` as a weaker tiebreak. Document the choice.
+
+## Acceptance
+
+- Synthetic fixture: 5 items all with `updatedAt = T`, paginated with `limit=2`, straddling a 2-page boundary at item index 2 → all 5 items observed exactly once across the walk.
+- Regression test: removing the tiebreak causes the test to fail (drops 1 or duplicates 1).
+- Persisted cursor schema gains `lastUuid` column with backwards-compatibility migration.
+- Resumed sync from saved `(T, "uuid-X")` cursor against a remote that has gained new items at `updatedAt = T` after `uuid-X` lexicographically picks them up; items at `updatedAt = T` before `uuid-X` are not re-seen.
+
+## Notes
+
+- **Verify server sort behavior first.** If `/files?sort=updatedAt&order=ASC` actually does secondary sort on `uuid` server-side, the client-side dedup is enough; otherwise we need post-fetch resort. Drive-server-wip controllers don't show secondary sort in the audit — assume client-side resort is needed.
+- Pairs with UD-352a (parallel pagination) — parallelizing the walk across non-overlapping `(updatedAt, lastUuid)` ranges is harder than sequential; ordering matters. Sequence: B2 first, then UD-352a builds on the cursor shape.
+- Out of scope: stable cursor across server-side cluster failover (Internxt's server may have its own consistency story; not our problem until proven otherwise).
+
+## Cross-refs
+
+- drive-server-wip `src/lib/http/limits.ts` (offset cap = 1M).
+- drive-server-wip `src/modules/file/dto/get-files.dto.ts` (the DTO shape).
+- drive-desktop `src/apps/main/remote-sync/files/sync-remote-files.ts` (the mirror-image bug in their checkpoint code).
+- Cross-repo synthesis: "the single highest-leverage takeaway."
+---
+id: UD-304
+title: Internxt: adopt swift-core multipart constants (100 MB threshold, 50 MB chunk, 6 parallel)
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** swift-core research (agent `a876235`, 2026-05-04). The bridge contract is empirically tuned to:
+
+```
+MULTIPART_MIN_SIZE   = 100 * 1024 * 1024   // 100 MB threshold
+MULTIPART_CHUNK_SIZE =  50 * 1024 * 1024   //  50 MB per part
+maxConcurrent        = 6                   // (or 1 in low-bandwidth mode)
+```
+
+Confirmed in `Sources/InternxtSwiftCore/Services/Network/NetworkFacade.swift`. The JS SDK delegates to `inxt-js` which mirrors the same numbers. **Diverging from these constants risks finish-API edge cases** (unverified server expectations on part size, count, alignment).
+
+unidrive's Internxt provider should adopt the same constants as defaults.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtConfig.kt` — add three named constants
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` (or wherever `upload()` lives) — branch on size, dispatch to multipart path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `startMultipart`, `finishMultipart` endpoints (verify present; if not, build them on the bridge contract)
+
+## Proposed shape
+
+```kotlin
+data class InternxtConfig(
+    ...
+    val multipartMinSize: Long = 100L * 1024 * 1024,
+    val multipartChunkSize: Long = 50L * 1024 * 1024,
+    val maxParallelParts: Int = 6,
+)
+```
+
+Configurable per profile (`config.toml`) for power users; defaults match swift-core exactly. Document in `docs/providers/internxt.md` that diverging from the defaults is unsupported.
+
+## Acceptance
+
+- `InternxtConfig` exposes the three knobs with the swift-core defaults.
+- Upload of a 200 MB synthetic file uses the multipart path with: 4 parts of 50 MB, ≤6 in-flight at peak, finish-API payload `parts: [{ETag, PartNumber}]` of length 4.
+- Upload of a 50 MB file uses the **single-PUT** path (below threshold).
+- Upload of a 99 MB file uses single-PUT; 101 MB uses multipart.
+- Integration test asserts the size threshold is exclusive at 100 MB and the chunking math (`ceil(size / 50MB) = partCount`).
+- `--reduce-bandwidth` (or equivalent config flag) caps concurrency to 1.
+
+## Notes
+
+- **Memory profile warning**: 6 × 50 MB = 300 MB peak RSS if parts are held in `ByteArray`/`Buffer` like swift-core does. UD-307 (stream parts via temp file) is the mitigation; **land UD-304 and UD-307 together** so we never ship the in-memory variant.
+- Out of scope: dynamic chunk sizing based on observed throughput. Static defaults match the upstream contract.
+- Out of scope: parallel multipart-finish (the bridge accepts one finish call per upload).
+
+## Cross-refs
+
+- swift-core `Sources/InternxtSwiftCore/Services/Network/NetworkFacade.swift`.
+- swift-core `Sources/InternxtSwiftCore/Services/Network/Encrypt.swift` — chunking + encryption interleave.
+- UD-307 (streaming parts via temp file) — required co-landing.
+---
+id: UD-306
+title: Internxt: investigate WebSocket NOTIFICATIONS_URL — change-feed or marketing-only?
+category: providers
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop opens a `socket.io-client` connection to `process.env.NOTIFICATIONS_URL` and uses received events as **wake signals** (not source-of-truth) to trigger a checkpointed re-sync. UD-370 (CLOSED, 2026-05-03) disproved that Internxt's `/notifications` REST endpoint is a change feed — it's marketing-only.
+
+Open question: **does the WebSocket endpoint expose a different surface than the REST `/notifications`?** drive-desktop subscribes via socket.io and forwards to `RemoteNotificationsModule.processWebSocketEvent`, but the message schema lives in a closed-source `@internxt/drive-desktop-core/build/backend` package — not visible from the public repo.
+
+This ticket is **research-only**. If the answer is "yes, real change-feed exists," design follow-up. If "no, it's the same marketing surface," close as duplicate-of-UD-370.
+
+## Investigation steps
+
+1. Run drive-desktop locally with a test account, capture the WebSocket frames (browser devtools or `wireshark` against the unencrypted socket if possible — likely TLS, so use mitmproxy or the Electron devtools).
+2. Inspect message types and payload shapes. Look specifically for `file.created`, `file.updated`, `file.deleted`, `folder.*` events.
+3. Note the `NOTIFICATIONS_URL` value (config-published or hardcoded in the binary).
+4. Document findings in `docs/audits/internxt-websocket-feasibility.md` (companion to the existing `internxt-notifications-feasibility.md`).
+
+## Acceptance
+
+- `docs/audits/internxt-websocket-feasibility.md` exists and contains:
+  - The endpoint URL.
+  - Sample message frames (with sensitive fields elided).
+  - A one-sentence verdict: "real change feed" / "marketing only" / "ambiguous".
+  - If real: a sketch of how it would slot into unidrive's sync engine (wake signal triggering checkpointed re-sync, NOT source-of-truth).
+- If real → file a follow-up implementation ticket.
+- If not → close this ticket as resolved-with-no-action and update `internxt-notifications-feasibility.md` with the cross-reference.
+
+## Notes
+
+- Investigation only. No code changes.
+- Even if the WebSocket is a real change feed, the implementation is **DEFER post-MVP** — the offset-walked checkpoint walk works (UD-352a improvements + UD-303 tiebreak make it more robust) and adding a real-time push surface is an optimization, not a correctness gap.
+- This ticket's value is binary: either it kills speculation about a phantom optimization, or it surfaces a real one. Either way, the audit is cheap.
+
+## Cross-refs
+
+- UD-370 (closed) — `/notifications` REST is marketing-only.
+- drive-desktop `src/apps/main/realtime.ts` — socket.io subscription site.
+- drive-desktop `src/apps/main/remote-notifications-module/` — handler layer (private package, not directly inspectable).
+---
+id: UD-210
+title: Re-stat-during-upload abort guard: detect local file mutation mid-upload
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop's `upload-file.ts` calls `fs.stat(path)` inside the upload progress callback and aborts the upload if `stats.size !== sizeAtStart`. This catches the "user edited the file mid-upload" case which would otherwise corrupt the remote with a truncated tail or mixed-version content.
+
+unidrive should apply this provider-agnostic guard across **every** provider's upload path.
+
+## Code refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Executor.kt` (or wherever `upload` is dispatched per-action)
+- `core/providers/internxt/.../InternxtProvider.kt` — `upload` / `putContent`
+- `core/providers/onedrive/.../OneDriveProvider.kt` — `upload`
+- `core/providers/s3/...`, `core/providers/sftp/...`, `core/providers/webdav/...` — same surface
+
+## Proposed shape
+
+Two compatible places for the check:
+
+**Option A (per-provider, in the upload coroutine):** progress callback re-stats and cancels the parent `Job`.
+
+**Option B (orchestrator-level, in Executor):** wrap the upload call in a coroutine that periodically (or in the progress callback) re-stats and cancels. Provider doesn't need to know.
+
+Option B is preferable because it covers all providers uniformly without per-provider patches. Sketch:
+
+```kotlin
+suspend fun uploadWithMutationGuard(
+    file: Path,
+    upload: suspend (progress: (Long) -> Unit) -> Unit,
+) {
+    val sizeAtStart = Files.size(file)
+    val mtimeAtStart = Files.getLastModifiedTime(file)
+    upload { _ ->
+        val current = Files.size(file)
+        val mtime = Files.getLastModifiedTime(file)
+        if (current != sizeAtStart || mtime != mtimeAtStart) {
+            throw LocalFileMutatedDuringUploadException(file, sizeAtStart, current)
+        }
+    }
+}
+```
+
+Both `size` and `mtime` checked: an editor that overwrites in place with the same size still bumps mtime. A `truncate -s 1k` followed by an append back to original size *might* preserve size; mtime catches it.
+
+## Acceptance
+
+- New `LocalFileMutatedDuringUploadException(path, sizeBefore, sizeAfter)` with the path and sizes for the operator log.
+- Integration test: upload a 100 MB file, mid-flight `truncate -s 1k` it. Upload aborts. Remote contains no half-uploaded file (or contains an aborted multipart that gets cleaned up by the provider's existing abort path).
+- Test variant: append data instead of truncate — same outcome.
+- Test variant: rewrite in place same size, but mtime moves forward — same outcome.
+- Test variant: file size and mtime stable for the whole upload — happy path passes.
+- Sync resumes the file in the next pass since the file change was detected.
+
+## Notes
+
+- Out of scope: editor atomic-rename pattern (vim, jetbrains "atomic save" via `tmpfile + rename`). That's a separate watcher concern (UD-211). The mutation guard fires when the underlying inode has changed during upload — `Files.size(originalPath)` follows the path to the *new* inode and detects the size mismatch naturally.
+- Memory cost: zero (just two stat calls per progress event).
+- This is a UX safety net more than a correctness fix; the alternative ("upload corrupted, sync re-detects mismatch on next pass and re-uploads") works but is expensive in bytes and confusing if the user notices a "wrong" file in cloud storage temporarily.
+
+## Cross-refs
+
+- drive-desktop `src/infra/inxt-js/file-uploader/upload-file.ts` — direct shape source.
+- Top 3 ideas to steal from drive-desktop research, item #3.
+---
+id: UD-211
+title: Watcher: debounce + atomic-edit detection for vim/JetBrains-style rename-on-save
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop's watcher debounces events at 2s and post-event-verifies existence to handle Windows' atomic-edit pattern (delete + create with different `internalId`). The same problem exists on Linux: editors like vim, Emacs, JetBrains IDEs save by writing a temp file and then `rename(2)`-ing over the original — inotify emits `IN_MOVED_FROM` + `IN_MOVED_TO` (or `IN_DELETE` + `IN_CREATE` depending on the editor's strategy), not a single `IN_MODIFY`.
+
+Without debounce + atomic-edit detection, unidrive's local watcher can:
+- Emit a DELETE upload action for the original file (cloud loses the file).
+- Followed by a CREATE upload action for the new file (cloud gets it back, but with a new UUID and lost version history).
+
+Net effect: every `:w` in vim creates a "delete + create" cycle in the cloud, churning version history and (on providers without true atomic semantics) creating a window where the file is missing.
+
+## Code refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/watcher/` — wherever the inotify integration lives
+- Look for existing `WatchService` or `java.nio.file.WatchService` usage; may be using the JDK polling watcher fallback on some platforms
+- Cross-platform abstraction: macOS uses `FSEvents`, Linux uses `inotify`, Windows uses `ReadDirectoryChangesW` — same logical surface
+
+## Proposed shape
+
+Two-phase coalescer:
+
+```kotlin
+class AtomicEditCoalescer(
+    private val window: Duration = Duration.ofSeconds(2),
+) {
+    private val pendingByPath = ConcurrentHashMap<Path, MutableList<WatchEvent>>()
+
+    fun onEvent(event: WatchEvent) {
+        val path = canonicalize(event.path)
+        val list = pendingByPath.computeIfAbsent(path) { mutableListOf() }
+        synchronized(list) { list += event }
+        scheduleFlush(path, window)
+    }
+
+    private fun scheduleFlush(path: Path, after: Duration) { /* coroutine delay */ }
+
+    private fun flush(path: Path) {
+        val events = pendingByPath.remove(path) ?: return
+        // Heuristics:
+        // 1. (DELETE, CREATE) within window + path exists → MODIFY
+        // 2. (CREATE) only + path didn't exist before → CREATE
+        // 3. (DELETE) only + path doesn't exist → DELETE
+        // 4. (MOVED_FROM tmpA, MOVED_TO origPath) → MODIFY of origPath
+        // 5. Multiple MODIFY → single MODIFY
+        emit(coalesced)
+    }
+}
+```
+
+Post-flush existence verification: before emitting DELETE, `Files.exists(path)` — if it does exist (race re-create or atomic rename completed), emit MODIFY instead.
+
+## Acceptance
+
+- Integration test: simulated vim atomic save (write `.foo.swp`, rename to `foo`) emits **one MODIFY** event for `foo`, not DELETE + CREATE.
+- Integration test: real `:w` in vim against a watched file (test harness can drive vim via `expect` or simply reproduce the syscall sequence) — one MODIFY.
+- Real DELETE (no rename, no recreate) emits one DELETE.
+- Real CREATE of a fresh file emits one CREATE.
+- Rapid 5-event burst (multiple writes within 2s) coalesces to one MODIFY.
+- Window is configurable via env (`UNIDRIVE_WATCHER_DEBOUNCE_MS`); default 2000ms.
+- Test on at least Linux + macOS; Windows path covered by inheritance from the abstraction.
+
+## Notes
+
+- 2s debounce is conservative. drive-desktop uses 2000ms; faster would be desktop-feel but riskier on slow editors. Make it configurable.
+- This ticket touches the watcher layer, **not** the sync engine. Reconciler/Executor are agnostic — they receive coalesced events.
+- Pairs with UD-210 (re-stat-during-upload). UD-210 catches mutations *during* upload; this ticket catches editor-save patterns *before* they become bogus actions. Different defences, both needed.
+- Out of scope: debounce-based event compression for very high-volume directories (e.g. logs that rotate every second). Default behaviour: emit each MODIFY past the debounce; high-volume tuning is a separate ticket.
+
+## Cross-refs
+
+- drive-desktop `src/node-win/watcher/on-event.ts` — direct shape source.
+- B3 — sibling defence (mid-upload mutation).
+---
+id: UD-307
+title: Internxt: stream multipart parts via temp file (not in-memory ByteArray) for bounded heap
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** swift-core research (agent `a876235`, 2026-05-04). swift-core holds each 50 MB encrypted chunk as a `Data` blob in memory until the S3 PUT succeeds. With `maxConcurrent = 6`, peak RSS is ~300 MB per active upload. **Acceptable on a macOS desktop, hostile on a Linux JVM with bounded heap** — a `-Xmx512m` daemon will OOM uploading a single large file.
+
+Solution: stage each encrypted chunk to a temp file, upload via `RequestBody.create(file)`, delete on success. Peak heap usage drops to O(1).
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtCrypto.kt` — encrypt path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` (upload orchestration)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — multipart PUT
+
+## Proposed shape
+
+```kotlin
+val tempDir = Files.createTempDirectory("unidrive-mp-")
+try {
+    val chunkFiles = (0 until partCount).map { i ->
+        val chunk = tempDir.resolve("part-$i.enc")
+        encryptChunkToFile(source, offset = i * chunkSize, len = chunkSize, out = chunk, cipher)
+        chunk
+    }
+    coroutineScope {
+        chunkFiles.mapIndexed { i, chunk ->
+            async(uploadDispatcher) {
+                val body = chunk.toRequestBody("application/octet-stream".toMediaType())
+                val response = httpClient.newCall(...).execute()
+                Part(partNumber = i + 1, etag = response.header("ETag")!!)
+            }
+        }.awaitAll()
+    }
+} finally {
+    tempDir.toFile().deleteRecursively()
+}
+```
+
+Temp dir under `${java.io.tmpdir}/unidrive-mp-<random>/` — co-located on the same filesystem as the daemon's cache when possible (avoid cross-fs `rename` on cleanup). Honor `XDG_CACHE_HOME` if set.
+
+## Acceptance
+
+- Under JVM `-Xmx512m`, uploading a 2 GB file with `maxParallelParts=6` succeeds without OOM.
+- `lsof` (or equivalent) shows ≤6 open temp files at peak during a multipart upload.
+- After successful upload: `find ${java.io.tmpdir} -name 'unidrive-mp-*'` returns nothing.
+- After failed upload (e.g. mock returns 500 mid-multipart): same — temp dir is cleaned up by the `finally` block.
+- After daemon crash mid-upload: a separate cleanup pass at daemon startup removes `unidrive-mp-*` directories older than 1 hour. (Lightweight, no state-file needed.)
+- Integration test injects a 1 GB synthetic file; assertions: peak RSS reported by the test < 200 MB (well under the in-memory variant's ~300 MB), success.
+
+## Notes
+
+- **Land together with UD-304** (multipart constants). The two together make the upload path correct *and* memory-safe.
+- Disk-pressure caveat: multi-GB uploads transiently use ~6 × 50 MB = 300 MB on disk. Document in `docs/providers/internxt.md`.
+- Out of scope: streaming-encrypt-during-upload (encrypt and PUT byte-by-byte without ever materialising the chunk). Possible but more complex; not needed at MVP scale.
+- Out of scope: tmpfs detection / preference. Use `${java.io.tmpdir}` as-is.
+
+## Cross-refs
+
+- swift-core `NetworkFacade.swift` and `UploadMultipart.swift` — the in-memory variant we're explicitly *not* copying.
+- UD-304 (multipart constants) — sibling, must land together.
+- Cross-repo synthesis: "Memory profile of upload parts: ... swift-core holds whole encrypted chunk in `Data`; ... the streaming model is preferable on a Linux JVM with bounded heap."
