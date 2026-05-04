@@ -147,37 +147,6 @@ milestone: v0.1.0
 Imported coverage is ~39% file ratio. Prioritize MCP roundtrip (UD-202), sync reconciler corner cases, provider adapters for `localfs + s3 + sftp`. Uses existing JaCoCo wiring in `core/build.gradle.kts`.
 
 ---
-id: UD-229
-title: Research — Microsoft Graph API feature table: what unidrive uses vs ignores
-category: docs
-priority: low
-effort: M
-code_refs:
-  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive
-status: open
-opened: 2026-04-19
----
-Produce two tables in `docs/providers/onedrive-graph-coverage.md`:
-
-**Table A — Top 10 Graph features unidrive DOES use** — e.g. `/me/drive/root/delta` (delta enum), `/me/drive/items/{id}/content` (download), upload session, webhook subscriptions, `/createLink` sharing, etc. Per row: endpoint, why unidrive calls it, file:line of the caller, known quirks (UD-307-style ZWJ rejections, CDN 429 patterns, Retry-After header habits).
-
-**Table B — Top 10 Graph features unidrive DOES NOT use** — candidates worth evaluating for v0.2.0+. Ideas:
-  * **Drive-level search** (`/me/drive/search(q='...')`) — would let `unidrive search` skip full enumeration.
-  * **Item preview** (`/items/{id}/preview`) — tray hover thumbnails / MCP previews.
-  * **OneNote scope** — currently invisible to unidrive.
-  * **Shared items `/me/drive/sharedWithMe`** — partially wired via UD-301 deltaWithShared, but explicit listings would help UX.
-  * **Sensitivity labels / retention** — compliance features relevant for enterprise pitches.
-  * **Thumbnail sizes** — cheaper than download for tray previews.
-  * **Item versioning** `/items/{id}/versions` — unidrive has its own `.unidrive-versions/` scheme; overlap.
-  * **Long-running operations** (`/async-monitor`) — we probably want these for large moves.
-  * **Audit logs** (enterprise tenants) — relevant for UD-113 audit trail.
-  * **Batch requests** (`/$batch`) — up to 20 ops in one HTTP call, reduces throttle pressure.
-
-Each row: endpoint, what it does, cost (RPS impact, throttle class), unidrive-side integration cost (S/M/L), priority.
-
-Companion cross-reference to ADR-0005 (Provider capability contract).
-
----
 id: UD-230
 title: Research — cross-provider client-implementation recommendations
 category: docs
