@@ -55,16 +55,16 @@ level, not at the caller. Only idempotent verbs (PROPFIND, GET, PUT with
 `If-Match`, DELETE, MKCOL, MOVE with the target-not-exists precondition)
 are safe to retry transparently.
 
-Retry matrix:
+Retry matrix follows the [canonical matrix](../dev/lessons/http-retry-policy.md);
+the rows below document **WebDAV-specific divergences** that the canonical
+table does not cover. The shared 408 / 429 / 5xx / network-I/O rows are NOT
+restated here — see the canonical doc.
 
-| Status | Retry? | Cap | Backoff base |
-|---|---|---|---|
-| 408 Request Timeout | yes | 3 | 1 s × 2ⁿ + jitter |
-| 423 Locked | yes, bounded | 2 | 5 s fixed (lock holders usually release quickly) |
-| 429 Too Many Requests | yes | 5 | `Retry-After` if present, else 2 s × 2ⁿ + jitter |
-| 502/503/504 | yes | 5 | `Retry-After` if present, else 1 s × 2ⁿ + jitter |
-| 507 Insufficient Storage | no | — | fatal, surface to user |
-| Network I/O | yes | 3 | 500 ms × 2ⁿ + jitter |
+| Status | Retry? | Cap | Backoff base | Why WebDAV-specific |
+|---|---|---|---|---|
+| 423 Locked | yes, bounded | 2 | 5 s fixed (lock holders usually release quickly) | RFC 4918 verb; not present in OneDrive / Internxt / S3 |
+| 425 Too Early | yes | 5 | `Retry-After` if present, else 2 s × 2ⁿ + jitter | DSM mod_dav surfaces this under load; canonical matrix does not list it |
+| 507 Insufficient Storage | no | — | fatal, surface to user | RFC 4331 quota signal; canonical matrix's 4xx rule already implies "no retry" but 507 deserves an explicit user-facing surface |
 
 Jitter: ±20% of the base delay to avoid synchronised retries from
 parallel workers.

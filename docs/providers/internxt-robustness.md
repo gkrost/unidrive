@@ -43,6 +43,11 @@ The Internxt-specific risk on the third row is heavier than OneDrive's: the down
 
 ## 2. Retry placement
 
+The target policy is the [canonical matrix](../dev/lessons/http-retry-policy.md);
+the table below is a **gap audit** showing which call sites diverge from it
+today. Internxt currently has zero retry on most verbs — the divergence is
+"absence", not "different policy".
+
 [`authenticatedGet`](../../core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:383) hosts an inline ladder for GETs only with delays `[2 s, 4 s, 8 s]` and a `500/503 + EOFException` predicate.
 
 | Verb / endpoint | 429 retry? | 5xx retry? | I/O retry? | Cite |

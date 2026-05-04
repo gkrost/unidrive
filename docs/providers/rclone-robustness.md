@@ -82,6 +82,12 @@ structurally. Wiring it would replace the substring regex with
 
 ## 2. Retry placement (rclone-flag passthrough)
 
+The [canonical HTTP retry matrix](../dev/lessons/http-retry-policy.md)
+applies inside rclone (per-backend pacers honour `Retry-After` etc.) but
+the wrapper sees none of it — the section below documents what flags we
+pass and what defaults rclone silently inherits, which is a fundamentally
+different concern from the canonical matrix.
+
 There is no retry loop in the wrapper. Between the caller and
 `ProcessBuilder.start()` is one absolute timeout, nothing else.
 

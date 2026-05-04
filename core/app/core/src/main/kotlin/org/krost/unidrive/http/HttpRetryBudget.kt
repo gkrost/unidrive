@@ -9,6 +9,29 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * UD-232: shared throttle coordinator for a single `GraphApiService`.
  *
+ * ## Canonical HTTP retry policy matrix (UD-207)
+ *
+ * | Class                     | HTTP status / signal           | Retry? | Cap                    | Backoff               | Notes              |
+ * |---------------------------|--------------------------------|--------|------------------------|-----------------------|--------------------|
+ * | Success                   | 2xx                            | n/a    | n/a                    | n/a                   |                    |
+ * | Permanent client error    | 4xx (except 408, 429)          | No     | n/a                    | n/a                   | Fail fast          |
+ * | Timeout                   | 408                            | Yes    | budget.maxRetries      | exp + jitter          |                    |
+ * | Throttle                  | 429                            | Yes    | budget.maxRetries      | honor Retry-After (cap = budget.maxRetryAfter) | UD-232 alignment |
+ * | Server error              | 5xx                            | Yes    | budget.maxRetries      | exp + jitter          |                    |
+ * | Network error             | (no status)                    | Yes    | budget.maxRetries      | exp + jitter          |                    |
+ * | Unknown exception         | (caller-classified `Unknown`)  | Yes    | min(3, budget.maxRetries) | exp + jitter       | The lower cap is deliberate |
+ *
+ * This is the canonical policy used across all unidrive provider HTTP clients
+ * (OneDrive `GraphApiService`, WebDAV `WebDavApiService`, and the rclone /
+ * Internxt / S3 / SFTP / HiDrive adapters under UD-330). The matrix mirrors
+ * drive-desktop's `client-wrapper.service.ts` doc-comment and is the single
+ * source of truth: any per-provider exception (e.g. WebDAV also retries 425
+ * Too Early) requires its own backlog ticket and a corresponding update to
+ * this table — silent divergence is forbidden. See
+ * `docs/dev/lessons/http-retry-policy.md` for the cross-linked rationale.
+ *
+ * ## Coordination role
+ *
  * Per-request retry (UD-207, UD-227) handles 429/503 for one call at a time. It does not
  * brake global request rate while other coroutines keep firing. On the UD-712 live sync
  * this let 6 medium-download coroutines all hit 429 at once, each wait its own timer, then

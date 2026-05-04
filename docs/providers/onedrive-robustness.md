@@ -54,6 +54,8 @@ The download path additionally guards against **HTML-content responses** that pa
 
 ## 2. Retry placement
 
+Retry policy follows the [canonical matrix](../dev/lessons/http-retry-policy.md). The provider-specific notes below cover where the loops live and the constants OneDrive picks for its caps; the per-status decision (4xx fail-fast except 408/429, 5xx retry, network retry, unknown capped at 3) is unchanged from the matrix.
+
 Every HTTP entry point has its retry loop **inline at the HTTP layer**:
 
 - [`authenticatedRequest(url, method)`](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt:721) — bodyless GET / DELETE

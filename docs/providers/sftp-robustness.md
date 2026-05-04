@@ -91,7 +91,10 @@ This recycles a single channel correctly but does not distinguish:
   catches never-connected, not was-connected-now-dead.
 - **Transport-level failure** (`SocketException`, `EOFException`).
 
-Recommended retry matrix (modelled on OneDrive's `MAX_FLAKE_ATTEMPTS`):
+Recommended retry matrix (modelled on OneDrive's `MAX_FLAKE_ATTEMPTS` and
+the [canonical HTTP matrix](../dev/lessons/http-retry-policy.md), reframed
+for SFTP error codes — SFTP has no HTTP status codes so the table cannot be
+collapsed to a cross-reference):
 
 | Failure class | Detection | Action | Cap | Backoff |
 |---|---|---|---|---|
