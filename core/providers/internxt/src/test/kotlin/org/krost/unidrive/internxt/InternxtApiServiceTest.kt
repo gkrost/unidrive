@@ -1,9 +1,18 @@
 package org.krost.unidrive.internxt
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.Mirror
 import org.krost.unidrive.internxt.model.StartUploadResponse
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -336,6 +345,56 @@ class InternxtApiServiceTest {
         assertEquals("100", params["limit"])
         assertEquals("50", params["offset"])
     }
+
+    @Test
+    fun `UD-205 folderContents dedup collapses concurrent loads for the same uuid into one`() =
+        runBlocking {
+            // Demonstrates the wiring shape: getFolderContents now routes through
+            // an InFlightDedup keyed on folder UUID. Tested by exercising the
+            // dedup field directly with a synthetic loader — exactly mirrors the
+            // production code path (`folderContentsDedup.load(uuid) { ...HTTP... }`)
+            // without standing up a MockEngine.
+            val service = mkService()
+            val loaderInvocations = AtomicInteger(0)
+            val gate = CompletableDeferred<Unit>()
+            val payload = FolderContentResponse()
+
+            val results =
+                coroutineScope {
+                    val deferreds =
+                        (1..20).map {
+                            async(Dispatchers.Default) {
+                                service.folderContentsDedup.load("folder-uuid-A") {
+                                    loaderInvocations.incrementAndGet()
+                                    gate.await()
+                                    payload
+                                }
+                            }
+                        }
+                    // Spin until at least one caller has installed itself.
+                    repeat(50) {
+                        if (loaderInvocations.get() >= 1) return@repeat
+                        delay(10)
+                    }
+                    gate.complete(Unit)
+                    deferreds.awaitAll()
+                }
+
+            assertEquals(20, results.size)
+            kotlin.test.assertTrue(results.all { it === payload })
+            assertEquals(
+                1,
+                loaderInvocations.get(),
+                "concurrent getFolderContents calls for same UUID must share one underlying load",
+            )
+
+            // Different UUID → fresh loader invocation (no cross-key interference).
+            service.folderContentsDedup.load("folder-uuid-B") {
+                loaderInvocations.incrementAndGet()
+                payload
+            }
+            assertEquals(2, loaderInvocations.get())
+        }
 
     @Test
     fun `UD-353 sub-floor files still get the 600s floor under the OVH override`() {

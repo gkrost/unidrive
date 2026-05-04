@@ -15,6 +15,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.http.InFlightDedup
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
@@ -71,10 +72,19 @@ class InternxtApiService(
     private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
-    suspend fun getFolderContents(folderUuid: String): FolderContentResponse {
-        val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
-        return json.decodeFromString<FolderContentResponse>(body)
-    }
+    // UD-205: read-heavy folder-listing calls are a known dedup target.
+    // Concurrent sync-engine coroutines descending overlapping subtrees can
+    // legitimately ask for the same folder UUID at the same time; the dedup
+    // collapses those into one HTTP round-trip without changing call-site
+    // semantics. Other read-heavy call sites (getFileMeta, getValidCredentials)
+    // are tracked under follow-up tickets — this is the proof-of-concept wiring.
+    internal val folderContentsDedup = InFlightDedup<String, FolderContentResponse>()
+
+    suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
+        folderContentsDedup.load(folderUuid) {
+            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
+            json.decodeFromString<FolderContentResponse>(body)
+        }
 
     suspend fun listFiles(
         updatedAt: String? = null,
