@@ -83,6 +83,7 @@ Trust boundaries:
 - **Never log frame contents** (`IpcProgressReporter.kt`) — attacker-supplied payloads are not echoed into logs.
 - **UDS event server** (`IpcServer.kt`) bound at `$XDG_RUNTIME_DIR/unidrive-<profile>.sock` with mode `0600`.
 - **No first-party GUI surface for credentials** — auth lives in the daemon.
+- **Per-call token-refresh model** — every provider with token semantics (Internxt, OneDrive) checks expiry at each API call site rather than scheduling refresh on a wall clock. Robust under suspend/resume, unlike drive-desktop's `setTimeout`-based `TokenScheduler`. Audit: [`docs/providers/auth-refresh-model.md`](providers/auth-refresh-model.md) (UD-208).
 
 ## STRIDE
 
