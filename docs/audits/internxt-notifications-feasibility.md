@@ -59,3 +59,7 @@ If Internxt ever ships a real change feed (likely under a new tag like `webhooks
 ## Audit-doc cross-reference
 
 The capability matrix in [internxt-api-vs-spi.md](internxt-api-vs-spi.md) line 148 noted `/notifications` as `◯ Available-unused` with the speculation *"Could feed real-time invalidation instead of polling delta()."* That speculation is now retired; the line should be updated to reflect the marketing-only purpose so future agents don't re-file the same hypothesis.
+
+## See also: WebSocket surface (UD-306)
+
+The verdict above applies **only to the REST `/notifications` endpoint**. Internxt also operates a separate WebSocket surface, configured on drive-desktop via `process.env.NOTIFICATIONS_URL` and connected to with `socket.io-client`. Companion audit [internxt-websocket-feasibility.md](internxt-websocket-feasibility.md) (UD-306, 2026-05-04) finds that the WebSocket *is* a real change feed: it carries `FILE_CREATED` / `FILE_UPDATED` / `FOLDER_CREATED` / `FOLDER_UPDATED` / `ITEMS_TO_TRASH` events with full file/folder DTOs, and drive-desktop uses incoming frames as a wake signal that triggers `updateAllRemoteSync()` -> `startSyncByCheckpoint()`. The two surfaces share the `/notifications` name in different layers (REST = marketing-only banners; WebSocket = mutation push channel) and must not be conflated. UD-306 stays open pending an implementation ticket; see the companion doc for the recommended integration sketch.
