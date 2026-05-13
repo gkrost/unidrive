@@ -10,11 +10,13 @@ class UnidriveRunner(
 ) {
     companion object {
         fun findJar(): Path {
-            // Search relative to CWD and parent (handles running from project root or submodule)
+            // Search relative to CWD and parent (handles running from project root or submodule).
+            // The `..` paths are dev-mode candidates for running from inside the module build tree;
+            // they're not constructed from user input, so the path-traversal warning doesn't apply.
             val candidates = listOf(
                 Paths.get("core/app/cli-full/build/libs"),
-                Paths.get("../cli-full/build/libs"),
-                Paths.get("../../cli-full/build/libs"),
+                Paths.get("../cli-full/build/libs"), // nosemgrep: path-traversal-literal-dotdot
+                Paths.get("../../cli-full/build/libs"), // nosemgrep: path-traversal-literal-dotdot
             )
             for (dir in candidates) {
                 if (java.nio.file.Files.isDirectory(dir)) {
