@@ -487,3 +487,37 @@ It's a test-architecture refactor.
 ## Out of scope
 
 Other test patterns (the wizard tests, integration tests, capability-matrix tests). This is just the missing-field assertion family.
+
+---
+id: UD-803
+title: GroundTruthRunner: cleanup deletes JSONL report before user can read it
+category: tests
+priority: low
+effort: S
+status: closed
+closed: 2026-05-13
+resolved_by: commit a73ac16. Report now written to <localBase>-reports/report.jsonl sibling; cleanup walk untouched. Adds GroundTruthCleanupTest regression guard.
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:304
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+With the default cleanup_local_after_run = true, GroundTruthRunner
+writes the JSONL report to localBase/report.jsonl just before the
+cleanup walks the same directory and deletes every child except
+localBase itself. Successful groundtruth runs therefore remove their
+own JSONL report, leaving only the console summary and no artifact
+for later inspection.
+
+Fix options:
+- Exclude report.jsonl from the cleanup walk (filter).
+- Move report.jsonl to a sibling 'reports/' directory that the
+  cleanup doesn't touch.
+- Write the report after cleanup completes.
+
+Acceptance: a successful groundtruth run with the default cleanup
+setting leaves report.jsonl intact at a documented, predictable path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed
+(PR #12). Filed separately per the dissolution's strict-scope decision.

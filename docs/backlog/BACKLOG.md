@@ -6011,37 +6011,6 @@ This is a pre-existing bug in the source migrated from unidrive-closed.
 The intake (PR #12) is in-scope for the move only; this fix is filed
 separately per the dissolution spec's strict-scope decision (Decision 1).
 ---
-id: UD-803
-title: GroundTruthRunner: cleanup deletes JSONL report before user can read it
-category: tests
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:304
-opened: 2026-05-13
----
-Found by Codex review on PR #12 (intake of e2e-360).
-
-With the default cleanup_local_after_run = true, GroundTruthRunner
-writes the JSONL report to localBase/report.jsonl just before the
-cleanup walks the same directory and deletes every child except
-localBase itself. Successful groundtruth runs therefore remove their
-own JSONL report, leaving only the console summary and no artifact
-for later inspection.
-
-Fix options:
-- Exclude report.jsonl from the cleanup walk (filter).
-- Move report.jsonl to a sibling 'reports/' directory that the
-  cleanup doesn't touch.
-- Write the report after cleanup completes.
-
-Acceptance: a successful groundtruth run with the default cleanup
-setting leaves report.jsonl intact at a documented, predictable path.
-
-This is a pre-existing bug in the source migrated from unidrive-closed
-(PR #12). Filed separately per the dissolution's strict-scope decision.
----
 id: UD-807
 title: Re-enable UD-205 folderContents dedup test with virtual time
 category: tests

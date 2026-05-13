@@ -74,8 +74,14 @@ class GroundTruthRunner(
             // (e.g. Docker container with /sync vs host's ~/Internxt-Test).
             val knownTypes = setOf("onedrive", "hidrive", "internxt", "rclone", "s3", "sftp", "webdav")
             val configContent = if (ctx.provider in knownTypes) {
-                // Bare provider name — no config.toml needed (resolves by type)
-                ""
+                // UD-802: bare provider type — synthesize a minimal `[providers.<type>]`
+                // block. `Main.resolveCurrentProfile()` exits with "config missing" if
+                // it sees an empty providers map, so the previous "skip config.toml"
+                // branch was unreachable past Phase 1. For env-var-credentialed
+                // providers (s3/sftp/webdav/rclone) we inline the credentials from
+                // env vars matching the factory's envVarMappings() — same shape as
+                // core/docker/test-providers.sh's write_config().
+                Companion.buildBareProviderConfig(ctx.provider, ctx.syncRoot)
             } else {
                 // Named profile — extract full section from host config, override sync_root
                 val realConfigToml = ctx.baseConfigDir.resolve("config.toml")
@@ -420,6 +426,111 @@ class GroundTruthRunner(
             failures = failures,
             skips = skips
         )
+    }
+
+    companion object {
+        /**
+         * UD-802: synthesize a minimal `config.toml` for a bare provider type
+         * (e.g. `groundtruth -p s3`).
+         *
+         * The child unidrive process exits early with "config missing" if it
+         * sees an empty `[providers.*]` map (see `Main.resolveCurrentProfile`
+         * in core/app/cli). For env-var-credentialled providers
+         * (s3/sftp/webdav/rclone) we also need to inline the credentials so
+         * that the factory's `create()` call sees non-blank `properties`.
+         * For OAuth-only providers (onedrive, hidrive, internxt) the
+         * type+sync_root row is enough — the token is picked up from the
+         * symlinked `token.json` later in Phase 1.
+         *
+         * Throws [IllegalStateException] when required env vars are missing,
+         * so a stale invocation fails fast in Phase 1 instead of producing a
+         * confusing downstream `ConfigurationException`.
+         *
+         * [env] is an indirection seam for tests; production callers pass
+         * `System::getenv` (the default).
+         */
+        internal fun buildBareProviderConfig(
+            providerType: String,
+            syncRoot: Path,
+            env: (String) -> String? = System::getenv,
+        ): String {
+            fun envOrFail(name: String): String =
+                env(name)
+                    ?: throw IllegalStateException(
+                        "UD-802: groundtruth -p $providerType requires env var '$name'. " +
+                            "Set it or pass a named profile (-p <profileName>) instead."
+                    )
+            fun envOr(name: String, default: String): String = env(name) ?: default
+            val syncRootQuoted = syncRoot.toString().replace("\\", "\\\\")
+            return when (providerType) {
+                "s3" -> {
+                    val bucket = envOrFail("S3_BUCKET")
+                    val accessKey = envOrFail("AWS_ACCESS_KEY_ID")
+                    val secretKey = envOrFail("AWS_SECRET_ACCESS_KEY")
+                    val region = envOr("S3_REGION", "auto")
+                    val endpoint = envOr("S3_ENDPOINT", "https://s3.amazonaws.com")
+                    """
+                    [providers.s3]
+                    type = "s3"
+                    sync_root = "$syncRootQuoted"
+                    bucket = "$bucket"
+                    region = "$region"
+                    endpoint = "$endpoint"
+                    access_key_id = "$accessKey"
+                    secret_access_key = "$secretKey"
+                    """.trimIndent() + "\n"
+                }
+                "sftp" -> {
+                    val host = envOrFail("SFTP_HOST")
+                    val user = envOr("SFTP_USER", System.getProperty("user.name") ?: "root")
+                    val password = env("SFTP_PASSWORD")
+                    buildString {
+                        appendLine("[providers.sftp]")
+                        appendLine("type = \"sftp\"")
+                        appendLine("sync_root = \"$syncRootQuoted\"")
+                        appendLine("host = \"$host\"")
+                        appendLine("user = \"$user\"")
+                        if (password != null) appendLine("password = \"$password\"")
+                    }
+                }
+                "webdav" -> {
+                    val url = envOrFail("WEBDAV_URL")
+                    val user = envOrFail("WEBDAV_USER")
+                    val password = envOrFail("WEBDAV_PASSWORD")
+                    """
+                    [providers.webdav]
+                    type = "webdav"
+                    sync_root = "$syncRootQuoted"
+                    url = "$url"
+                    user = "$user"
+                    password = "$password"
+                    """.trimIndent() + "\n"
+                }
+                "rclone" -> {
+                    val remote = envOrFail("RCLONE_REMOTE")
+                    """
+                    [providers.rclone]
+                    type = "rclone"
+                    sync_root = "$syncRootQuoted"
+                    rclone_remote = "$remote"
+                    """.trimIndent() + "\n"
+                }
+                "onedrive", "hidrive", "internxt" -> {
+                    // OAuth providers: credentials come from token.json
+                    // symlinked into the per-profile dir in Phase 1, not from
+                    // env vars.
+                    """
+                    [providers.$providerType]
+                    type = "$providerType"
+                    sync_root = "$syncRootQuoted"
+                    """.trimIndent() + "\n"
+                }
+                else -> throw IllegalStateException(
+                    "UD-802: bare provider type '$providerType' not recognised by " +
+                        "buildBareProviderConfig. Pass a named profile (-p <profileName>) instead."
+                )
+            }
+        }
     }
 
 }
