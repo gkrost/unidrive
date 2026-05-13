@@ -91,16 +91,17 @@ immediately; without the jar, `unidrive hello` reports `unknown command`.
 | **No premium strings in public** | The public CLI never mentions "premium", "pro", "upgrade", or paywalling. Extensions are simply present or not. |
 | **Parent-command scope (v1)** | `addSubcommand` takes a direct top-level parent name or the empty string for root. Deeper nesting is out of scope for v1. |
 
-## Known limitations
+## Multi-profile-per-JVM (UD-213 resolved)
 
-- **Single-profile-per-JVM (UD-211).** `CliServices` methods that take a
-  `profileName` parameter (`resolveProfile`, `createProvider`,
-  `loadSyncConfig`, `isProviderAuthenticated`) mutate `Main.provider`
-  under the hood. `Main` memoises profile resolution in a private cache
-  that is not invalidated on mutation, so the SECOND call with a DIFFERENT
-  profile name returns stale data from the first. Extensions that want
-  to iterate over multiple profiles must spawn a fresh JVM per profile
-  until UD-211 lands a cache-bust hook.
+`CliServices` methods that take a `profileName` parameter
+(`resolveProfile`, `createProvider`, `loadSyncConfig`,
+`isProviderAuthenticated`) mutate `Main.provider` under the hood. `Main`
+memoises profile resolution in private `_profile` / `_vaultData` caches.
+Prior to UD-213, those caches were not invalidated on mutation, so the
+second call with a different profile name returned stale data from the
+first. UD-213 added `Main.invalidateProfileCaches()` and wired it into
+`CliServicesImpl.withProfile`, so extensions may iterate over multiple
+profiles within a single JVM.
 
 ## Versioning policy
 

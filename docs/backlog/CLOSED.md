@@ -316,3 +316,37 @@ None for existing scripts that invoke `sync`. Anything new goes under `refresh` 
 ## Priority
 
 **Medium, M effort.** Breaks nothing existing, matches git's proven ergonomics, explicit three-phase visibility makes first-sync ETA + offline-quota queries cleaner. Not v0.1.0 critical but pulls a meaningful weight of UX clarity across several open tickets.
+
+---
+id: UD-213
+title: BenchmarkCommand multi-profile cache invalidation (retroactive)
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-13
+resolved_by: commit 407c664. Retroactive ID for already-shipped profile-cache fix; previously squatted on UD-211 in source/EXTENSIONS.md. Drift caught 2026-05-13 during UD-211 watcher impl docs-sweep.
+opened: 2026-05-13
+---
+**Source:** Codex review on PR #12 caught that `Main.resolveCurrentProfile()` memoises the first resolved profile in a private `_profile` cache (and `_vaultData` likewise). `BenchmarkCommand`'s multi-profile loop mutated `main.provider` per iteration but did not invalidate the cache, so iterations 2..N read the cached first profile while printing later profile names — multi-profile benchmark results would have been silently misattributed.
+
+## Fix shape
+
+- `Main.invalidateProfileCaches()` clears `_profile` and `_vaultData`.
+- `CliServicesImpl.withProfile` calls it both when entering the inner profile and when restoring the saved one.
+- `BenchmarkCommand` calls it after every `main.provider` mutation (3 sites).
+
+## Resolution
+
+Resolved by commit `407c664` (`fix(P1): invalidate profile cache when BenchmarkCommand switches profiles`). The commit subject did not reference a UD ticket at the time, so this ID is being allocated retroactively for archive integrity.
+
+## Drift note (2026-05-13)
+
+Prior to this ticket being filed, the source code and `docs/EXTENSIONS.md` annotated the profile-cache work as "UD-211". UD-211 in BACKLOG.md was already allocated to the LocalWatcher debounce ticket (opened 2026-05-04). The collision was caught during the watcher implementation's docs-sweep. Resolution: this ticket (UD-213) takes the profile-cache concern; UD-211 stays with the watcher.
+
+## Cross-refs
+
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:91-103` — `invalidateProfileCaches()`
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ext/internal/CliServicesImpl.kt:24-92` — `withProfile` cache-bust
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/BenchmarkCommand.kt` — three mutation sites
+- `docs/EXTENSIONS.md` "Known limitations" / multi-profile note

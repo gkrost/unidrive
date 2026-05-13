@@ -21,10 +21,10 @@ import java.nio.file.Path
  * BenchmarkCommand.runSingleProfile used to run by hand, lifted into
  * one place.
  *
- * ## Multi-profile-per-JVM is safe (UD-211 resolved)
+ * ## Multi-profile-per-JVM is safe (UD-213 resolved)
  *
  * [Main] memoises `resolveCurrentProfile()` in a private `_profile` cache
- * (and `_vaultData` likewise). Prior to UD-211, [withProfile] mutated
+ * (and `_vaultData` likewise). Prior to UD-213, [withProfile] mutated
  * `Main.provider` but could not invalidate those caches, so back-to-back
  * calls with different profile names silently returned stale data from
  * the first profile. [withProfile] now calls
@@ -70,7 +70,7 @@ internal class CliServicesImpl(
     /**
      * Save `main.provider`, set it to [name], run [block], restore.
      *
-     * Safe for back-to-back calls against different profiles (UD-211):
+     * Safe for back-to-back calls against different profiles (UD-213):
      * we bust [Main]'s memoised `_profile` / `_vaultData` caches both
      * when entering the inner profile and when restoring the saved one,
      * so neither the inner block nor a subsequent outer call can observe
@@ -82,12 +82,12 @@ internal class CliServicesImpl(
     ): T {
         val saved = main.provider
         main.provider = name
-        main.invalidateProfileCaches() // UD-211: cache was keyed on the previous provider
+        main.invalidateProfileCaches() // UD-213: cache was keyed on the previous provider
         return try {
             block()
         } finally {
             main.provider = saved
-            main.invalidateProfileCaches() // UD-211: don't let the inner profile shadow `saved`
+            main.invalidateProfileCaches() // UD-213: don't let the inner profile shadow `saved`
         }
     }
 }
