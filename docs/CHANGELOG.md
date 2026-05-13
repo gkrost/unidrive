@@ -20,3 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/dev/BENCHMARK_HANDOVER.md` (benchmark operational handover).
 - UD-401 (Enhanced provider table Phase 2).
 - This `CHANGELOG.md` file.
+
+### Fixed
+- UD-211: `LocalWatcher` coalesces editor atomic-save bursts (vim
+  `:w`, JetBrains/Emacs write-tmp-and-rename) into a single
+  trailing-edge emit per path per quiet window. Previous leading-edge
+  emit propagated to providers as destructive delete-then-recreate of
+  the cloud file. Default debounce 2000 ms, configurable via
+  `UNIDRIVE_WATCHER_DEBOUNCE_MS`.
+- UD-213: `BenchmarkCommand` multi-profile loop now invalidates
+  `Main`'s memoised profile / vault caches on each `main.provider`
+  mutation. Previously iterations 2..N read the cached first profile
+  while printing later profile names — multi-profile benchmark
+  results would have been silently misattributed. (Ticket filed
+  retroactively for shipped commit 407c664; previously squatted on
+  UD-211 in source / EXTENSIONS.md.)
