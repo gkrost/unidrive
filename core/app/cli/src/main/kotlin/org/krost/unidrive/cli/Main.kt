@@ -27,6 +27,8 @@ import java.nio.file.Paths
     versionProvider = Main.VersionProvider::class,
     subcommands = [
         AuthCommand::class,
+        BackupCommand::class,
+        BenchmarkCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
         // UD-236: git-style three-verb split — refresh = sync without byte
@@ -49,7 +51,6 @@ import java.nio.file.Paths
         ShareCommand::class,
         TrashCommand::class,
         VersionsCommand::class,
-        BackupCommand::class,
     ],
 )
 class Main : Runnable {
