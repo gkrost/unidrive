@@ -19,6 +19,7 @@ import java.time.temporal.ChronoUnit
 @Command(
     name = "benchmark",
     description = ["Benchmark upload/download performance for a provider profile"],
+    mixinStandardHelpOptions = true,
 )
 class BenchmarkCommand : Runnable {
 
