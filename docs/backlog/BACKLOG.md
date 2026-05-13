@@ -6172,3 +6172,32 @@ setting leaves report.jsonl intact at a documented, predictable path.
 
 This is a pre-existing bug in the source migrated from unidrive-closed
 (PR #12). Filed separately per the dissolution's strict-scope decision.
+---
+id: UD-807
+title: Re-enable UD-205 folderContents dedup test with virtual time
+category: tests
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:350
+opened: 2026-05-13
+---
+Disabled in PR #12 because of timing flakes on Windows CI runners.
+
+The test spawns 20 Dispatchers.Default coroutines and spin-waits with
+delay(10) for up to 500ms. That budget is too tight on slow GitHub
+Actions Windows VMs and the dedup invariant (only one loader callback
+invocation across 20 concurrent calls) intermittently fails to be
+observed.
+
+Fix: rewrite using kotlinx-coroutines-test runTest +
+TestCoroutineScheduler so the dedup wiring is exercised in virtual
+time, not wall-clock. The production InFlightDedup primitive (UD-205)
+is unchanged; this is a test-only refactor.
+
+Acceptance:
+- Test re-enabled (drop @Ignore on InternxtApiServiceTest:350).
+- Runs deterministically on both Ubuntu and Windows CI.
+- Still validates the invariant: one loader invocation across N
+  concurrent load() calls for the same key.
