@@ -115,11 +115,12 @@ class BenchmarkCommand : Runnable {
                 runBlocking { provider.authenticate() }
 
                 val rp = profile.rawProvider
+                // Benchmark endpoint metadata recorded to SQLite for cross-run comparison; not dispatch logic.
                 val endpoint = when (profile.type) {
-                    "s3"     -> rp?.endpoint ?: System.getenv("S3_ENDPOINT") ?: "https://s3.amazonaws.com"
-                    "webdav" -> rp?.url ?: System.getenv("WEBDAV_URL")
-                    "sftp"   -> rp?.host ?: System.getenv("SFTP_HOST")
-                    "onedrive" -> "https://graph.microsoft.com"
+                    "s3"     -> rp?.endpoint ?: System.getenv("S3_ENDPOINT") ?: "https://s3.amazonaws.com" // allow: benchmark metadata, not dispatch
+                    "webdav" -> rp?.url ?: System.getenv("WEBDAV_URL") // allow: benchmark metadata, not dispatch
+                    "sftp"   -> rp?.host ?: System.getenv("SFTP_HOST") // allow: benchmark metadata, not dispatch
+                    "onedrive" -> "https://graph.microsoft.com" // allow: benchmark metadata, not dispatch
                     else -> null
                 }
 
