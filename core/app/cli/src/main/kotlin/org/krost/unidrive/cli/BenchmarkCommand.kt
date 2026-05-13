@@ -104,9 +104,12 @@ class BenchmarkCommand : Runnable {
     }
 
     private fun runSingleProfile(db: BenchmarkDatabase, profileName: String, fileSizes: List<Long>, ipStack: String) {
-        // Resolve profile — sets main.provider temporarily
+        // Resolve profile — sets main.provider temporarily.
+        // Main.resolveCurrentProfile() memoizes; invalidate so the new profileName
+        // is honoured instead of the previous resolution.
         val savedProvider = main.provider
         main.provider = profileName
+        main.invalidateProfileCaches()
         try {
             val profile = main.resolveCurrentProfile()
             val syncConfig = main.loadSyncConfig()
@@ -154,6 +157,7 @@ class BenchmarkCommand : Runnable {
             }
         } finally {
             main.provider = savedProvider
+            main.invalidateProfileCaches()
         }
     }
 
@@ -177,6 +181,10 @@ class BenchmarkCommand : Runnable {
         try {
             for (profileName in profileNames) {
                 main.provider = profileName
+                // Main.resolveCurrentProfile() memoizes — without invalidation the loop
+                // would keep checking and benchmarking the first profile while printing
+                // the name of subsequent ones.
+                main.invalidateProfileCaches()
                 val authenticated = try {
                     main.isProviderAuthenticated()
                 } catch (_: Exception) {
@@ -195,6 +203,7 @@ class BenchmarkCommand : Runnable {
             }
         } finally {
             main.provider = savedProvider
+            main.invalidateProfileCaches()
         }
 
         if (ran.size > 1) {
