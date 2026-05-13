@@ -6038,3 +6038,166 @@ Pairs naturally with UD-205 (in-flight dedup): `getValidCredentials` itself beco
 - UD-208 — surfaced this finding (audit doc).
 - UD-205 — InFlightDedup primitive, potential reuse.
 - UD-310 / UD-331 — token-refresh mutex / NonCancellable carry-over (the existing serialisation surface).
+---
+id: UD-701
+title: Cloud provider speed ranking publication
+category: tooling
+priority: high
+effort: XL
+status: open
+code_refs:
+  - core/app/benchmark/src/main/kotlin/org/krost/unidrive/sync/BenchmarkRunner.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/BenchmarkCommand.kt
+  - docs/CLOUD_PROVIDERS_DATABASE.md
+opened: 2026-05-13
+---
+Sign up for free tiers of viable cloud storage providers, run
+standardized speed tests from Kubuntu (Germany ISP), rank by
+upload/download throughput and latency, publish via static site
+generator. EU-first ordering. Revenue model: affiliate signups.
+
+Phase 1 (static benchmark page generator) shipped in unidrive-closed
+commit 45b9407. This ticket tracks Phase 2: expand provider coverage,
+periodic re-tests, dynamic site updates.
+
+Reference: `docs/CLOUD_PROVIDERS_DATABASE.md` v1.0 (100+ providers).
+
+Was `#63` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-401
+title: Enhanced provider table Phase 2 (remote API, dynamic grades)
+category: cli
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+opened: 2026-05-13
+---
+Remote-API-backed dynamic provider table in CLI output. Phase 1
+(static table baked at compile time) already shipped.
+
+Phase 2: read live grades from the benchmark site (UD-701) with a
+sensible offline fallback to the baked-in table. The exact CLI
+surface depends on whether the public repo still has a `provider list`
+subcommand (it was removed in commit b07d864 on 2026-05-04) — if a
+replacement listing surface is added, it would be the natural host
+for the dynamic table; otherwise this work might expand the `benchmark`
+subcommand itself.
+
+Was `#107` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-800
+title: CloudForge E2E scenario incomplete (Playwright not wired)
+category: tests
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/Main360.kt:71
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/CloudForgeRunner.kt
+opened: 2026-05-13
+---
+`CloudForgeCommand` in `Main360.kt:71` prints a TODO. Playwright
+browser integration not wired. The `--headed` flag is accepted but
+unused. Only `GroundTruthRunner` is fully implemented.
+
+Acceptance: CloudForge (cloud→local) scenario callable from CLI;
+Playwright wired for headed mode; one passing end-to-end test in
+CI or marked `@Tag("manual")`.
+
+Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-802
+title: GroundTruthRunner: bare provider types skip config.toml, hit fatal config-missing
+category: tests
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:78
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+When ctx.provider is a bare type (s3 / sftp / webdav / onedrive / etc.),
+GroundTruthRunner.kt:76-78 sets configContent to '' and skips writing
+config.toml. The child unidrive invocation then calls
+Main.resolveCurrentProfile(), which treats a missing config / empty
+providers as a fatal 'config missing' error before any env-based
+provider setup can run.
+
+As a result groundtruth -p s3/sftp/webdav/... cannot reach the sync
+phase even when credentials are available in the environment.
+
+Acceptance: groundtruth with a bare provider type writes a minimal
+config.toml (or the runner uses some other mechanism that bypasses
+the config-missing exit) and reaches the sync phase. Either way, add
+one passing test that exercises the bare-provider path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed.
+The intake (PR #12) is in-scope for the move only; this fix is filed
+separately per the dissolution spec's strict-scope decision (Decision 1).
+---
+id: UD-803
+title: GroundTruthRunner: cleanup deletes JSONL report before user can read it
+category: tests
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:304
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+With the default cleanup_local_after_run = true, GroundTruthRunner
+writes the JSONL report to localBase/report.jsonl just before the
+cleanup walks the same directory and deletes every child except
+localBase itself. Successful groundtruth runs therefore remove their
+own JSONL report, leaving only the console summary and no artifact
+for later inspection.
+
+Fix options:
+- Exclude report.jsonl from the cleanup walk (filter).
+- Move report.jsonl to a sibling 'reports/' directory that the
+  cleanup doesn't touch.
+- Write the report after cleanup completes.
+
+Acceptance: a successful groundtruth run with the default cleanup
+setting leaves report.jsonl intact at a documented, predictable path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed
+(PR #12). Filed separately per the dissolution's strict-scope decision.
+---
+id: UD-807
+title: Re-enable UD-205 folderContents dedup test with virtual time
+category: tests
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:350
+opened: 2026-05-13
+---
+Disabled in PR #12 because of timing flakes on Windows CI runners.
+
+The test spawns 20 Dispatchers.Default coroutines and spin-waits with
+delay(10) for up to 500ms. That budget is too tight on slow GitHub
+Actions Windows VMs and the dedup invariant (only one loader callback
+invocation across 20 concurrent calls) intermittently fails to be
+observed.
+
+Fix: rewrite using kotlinx-coroutines-test runTest +
+TestCoroutineScheduler so the dedup wiring is exercised in virtual
+time, not wall-clock. The production InFlightDedup primitive (UD-205)
+is unchanged; this is a test-only refactor.
+
+Acceptance:
+- Test re-enabled (drop @Ignore on InternxtApiServiceTest:350).
+- Runs deterministically on both Ubuntu and Windows CI.
+- Still validates the invariant: one loader invocation across N
+  concurrent load() calls for the same key.

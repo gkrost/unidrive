@@ -359,6 +359,7 @@ fun deployLinux(
 }
 
 dependencies {
+    implementation(project(":app:benchmark"))
     implementation(project(":app:core"))
     implementation(project(":providers:internxt"))
     implementation(project(":providers:localfs"))
