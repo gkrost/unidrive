@@ -32,13 +32,23 @@ class ProviderMetadataTest {
         assertNull(ProviderRegistry.getMetadata("nonexistent"))
     }
 
+    // UD-813 audit: this module's test classpath does NOT include the provider
+    // implementations, so `getMetadata("onedrive")` returns null here. The
+    // substantive assertion (OneDrive resolves to "Microsoft OneDrive" / "Global"
+    // / CloudActExposure = true) lives in :app:cli's ProviderRegistryDiscoveryTest
+    // where the providers ARE on the test classpath. The invariant pinned here is
+    // narrower: `getMetadata` is consistent with `get` — if the factory is
+    // discoverable, its metadata is exposed equally via both entry points.
     @Test
-    fun `getMetadata returns correct metadata when discovered`() {
-        val meta = ProviderRegistry.getMetadata("onedrive")
-        if (meta != null) {
-            assertEquals("Microsoft OneDrive", meta.displayName)
-            assertEquals("Global", meta.tier)
-            assertTrue(meta.cloudActExposure)
+    fun `getMetadata is consistent with get`() {
+        for (factory in ProviderRegistry.all()) {
+            val viaGet = factory.metadata
+            val viaGetMetadata = ProviderRegistry.getMetadata(factory.id)
+            assertEquals(
+                viaGet,
+                viaGetMetadata,
+                "getMetadata('${factory.id}') diverges from get('${factory.id}').metadata",
+            )
         }
     }
 

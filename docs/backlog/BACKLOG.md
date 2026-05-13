@@ -5979,3 +5979,113 @@ CI or marked `@Tag("manual")`.
 
 Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
 dissolution.
+---
+id: UD-810
+title: Test cleanup: :app:core misleading + data-class delete-candidates (UD-813 batch A)
+category: tests
+priority: low
+effort: S
+status: open
+opened: 2026-05-13
+---
+## Source
+
+UD-813 audit of `:app:core` tests (2026-05-13). See
+[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
+
+This is the lower-risk batch — misleading test names and data-class
+delete-candidates. Rewrites are mechanical: rename to match the body, or
+delete with a one-line CHANGELOG note. No behaviour changes in production
+code.
+
+## Scope
+
+`core/app/core/src/test/`:
+
+- **`ProviderMetadataTest.allByTier returns sorted metadata`** — name promises
+  sort verification; body iterates without checking sort order. Either
+  rewrite to assert the canonical tier order
+  (`["Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global"]`) or rename
+  to "every entry has non-blank tier" if sort is intentionally not pinned.
+- **`ProviderMetadataTest.allMetadata returns list`** — body's `for (meta in all)`
+  runs 0 iterations on empty list, comment "may be empty" excuses the
+  vacuous pass. Either move the structural assertion to the `:app:cli`
+  classpath-rich variant (see new `ProviderRegistryDiscoveryTest`) and
+  delete here, or keep as a "per-entry structural invariant when present"
+  test with the explicit name.
+- **`ProviderMetadataTest.ProviderMetadata stores all required fields` /
+  `optional fields` / `data class equality and copy`** — assert Kotlin
+  data-class generation. Tests the compiler. Delete with a CHANGELOG note.
+- **`CloudItemTest.equal items have equal hashCodes` /
+  `items differing in any field are not equal` / `hashCode is stable across calls` /
+  `works correctly as HashMap key`** — same delete-candidate class.
+
+## Acceptance
+
+- Rewritten or deleted per the table above.
+- CHANGELOG `[Unreleased] / Removed` entry for each deleted test, naming
+  the file and the reason ("delete-candidate per UD-813 audit").
+- `TEST-AUDIT.md` table updated: each row's "Action" cell flips to the
+  commit that resolved it.
+---
+id: UD-811
+title: Test cleanup: :app:core retry-budget + dedup + request-id (UD-813 batch B)
+category: tests
+priority: medium
+effort: M
+status: open
+opened: 2026-05-13
+---
+## Source
+
+UD-813 audit of `:app:core` tests (2026-05-13). See
+[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
+
+This is the higher-touch batch — misleading retry-budget assertions and
+the dedup tests that share UD-807's `Dispatchers.Default + delay(10)
+spin-wait` flake class.
+
+## Scope
+
+`core/app/core/src/test/`:
+
+- **`HttpRetryBudgetMatrixTest.429 honors Retry-After capped by maxRetryAfter`** —
+  rename to reflect what the body actually checks: the storm-trigger plus
+  max-Retry-After honored in `resumeAfterEpochMs`. The "capped by
+  `maxRetryAfter`" feature does not exist in `HttpRetryBudget` (only in the
+  KDoc matrix comment). Either remove the cap claim from the docstring
+  matrix or implement the cap and add a test asserting it (separate
+  decision; the current test is just misnamed).
+- **`HttpRetryBudgetMatrixTest.network IOException retries with exponential backoff`** —
+  rename to `isRetriableIoException distinguishes transient vs misconfig IO failures`.
+  Body is a classifier-only contract; no backoff assertion is present.
+- **`InFlightDedupTest.concurrent callers for same key share exactly one loader invocation`**
+  and the sibling **`loader failure is rethrown ...`** test — rewrite to
+  use `runTest` + `testScheduler.advanceUntilIdle()` per the UD-807 pattern
+  (see `core/providers/internxt/src/test/kotlin/.../InternxtApiServiceTest.kt`
+  for the template). The 100-coroutine `Dispatchers.Default` flavour is
+  the same flake class as the now-fixed Internxt test; on slow Windows CI
+  the spin-wait budget is too tight for all callers to install themselves
+  before the gate releases.
+- **`RequestIdPluginTest.every request carries X-Unidrive-Request-Id header`** —
+  the `assertEquals(8, id.length)` pin reflects the current id format. If
+  the format changes (e.g. to 12 chars or UUID), the test breaks without
+  the invariant being violated. Replace with "non-blank + unique across N
+  requests" only, leaving the length as an implementation detail.
+- **`RequestIdPluginTest.request attribute exposes the id for caller introspection`** —
+  drop the `if (capturedFromBuilder != null)` guard around the
+  `assertEquals`. Today a regression that returns null silently passes;
+  the test should fail loud.
+
+## Acceptance
+
+- Each test rewritten per the table above.
+- `InFlightDedupTest` runs under `runTest` and finishes in < 50 ms instead
+  of relying on wall-clock spin-wait budgets.
+- `TEST-AUDIT.md` table updated with the resolving commit per row.
+
+## Risk
+
+Higher than UD-810 because the dedup rewrite touches multi-coroutine
+ordering. Reference: UD-807's Internxt fix (commit 5d9f49c) — the same
+pattern translates 1:1.
