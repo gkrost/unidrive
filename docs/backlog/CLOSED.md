@@ -431,3 +431,59 @@ Post-flush existence verification: before emitting DELETE, `Files.exists(path)` 
 
 - drive-desktop `src/node-win/watcher/on-event.ts` — direct shape source.
 - B3 — sibling defence (mid-upload mutation).
+
+---
+id: UD-818
+title: Replace 5x duplicate ProviderFactory required-fields tests with parameterised TestFactory driven by ProviderRegistry + credentialPrompts() (post UD-006/spi-contract)
+category: tests
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-13
+resolved_by: commit eade837. Parametric replacement in :app:cli driven by ProviderRegistry.all() + credentialPrompts(); contract strengthened to assert providerId + message.contains(key). s3/sftp/webdav per-module duplicates deleted; localfs/rclone untouched (no credentialPrompts SPI yet).
+code_refs:
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3ProviderFactoryTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderFactoryTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderFactoryTest.kt
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsProviderFactoryTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneProviderFactoryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 provider-factory test files follow the same shape:
+
+| File | Pattern |
+|---|---|
+| `S3ProviderFactoryTest.kt` | `fullProps()` helper → for each required field: test it missing → test it blank → assert `ConfigurationException` |
+| `SftpProviderFactoryTest.kt` | same |
+| `WebDavProviderFactoryTest.kt` | same |
+| `LocalFsProviderFactoryTest.kt` | same |
+| `RcloneProviderFactoryTest.kt` | same |
+
+Each test class is ~5-15 lines of unique-per-provider data wrapped in identical assertion scaffolding.
+
+## Proposed action
+
+Two options:
+
+**A) Parametric base class.** A `ProviderFactoryRequiredFieldsTestBase<F : ProviderFactory>` in `:app:core/src/testFixtures/` that takes `(factory, requiredKeys, fullProps)` and drives the same tests. Each provider's test class extends it with a 5-line constructor.
+
+**B) JUnit 5 `@TestFactory` style.** A single test in `:app:core/src/test/` that iterates over `ProviderRegistry.all()`, queries each factory's `credentialPrompts()` (now the SPI capability — see UD-006 / refactor-provider-spi-contract), filters to required prompts, and runs the missing-field assertions.
+
+Recommend **B** (TestFactory pattern) — it leverages the new SPI capability `credentialPrompts()` introduced in this session's refactor, so the test stays current as new providers are added without requiring a new test-class subclass per provider. Adding a 9th provider gets free coverage.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented.
+- [ ] Per-provider factory test classes shrink dramatically OR are deleted.
+- [ ] Coverage of "required field missing/blank → ConfigurationException" still in place for all providers (verify by running coverage report).
+- [ ] No new provider can be added without automatically getting required-field coverage.
+
+## Why tests-range
+
+It's a test-architecture refactor.
+
+## Out of scope
+
+Other test patterns (the wizard tests, integration tests, capability-matrix tests). This is just the missing-field assertion family.

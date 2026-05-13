@@ -284,8 +284,14 @@ class GroundTruthRunner(
             ))
 
             // PHASE 7: CLEANUP + REPORT
+            // UD-803: write the JSONL report to a sibling `<localBase>-reports/`
+            // directory that the cleanup walk does not touch, so a successful
+            // run with cleanup_local_after_run = true leaves the artifact
+            // available for inspection at a predictable path.
             val phase7Start = System.currentTimeMillis()
-            val jsonlReportPath = localBase.resolve("report.jsonl")
+            val reportsDir = localBase.resolveSibling("${localBase.fileName}-reports")
+            Files.createDirectories(reportsDir)
+            val jsonlReportPath = reportsDir.resolve("report.jsonl")
 
             // Add all phase reports to JSONL
             for (report in reports) {
@@ -295,8 +301,10 @@ class GroundTruthRunner(
                     provider = ctx.provider
                 ))
             }
-            
-            // Cleanup local if configured
+
+            // Cleanup local if configured. Bounded to localBase itself; the
+            // sibling reports/ directory created above is intentionally out
+            // of the walk root (UD-803).
             if (ctx.config.run.cleanup_local_after_run) {
                 Files.walk(localBase)
                     .sorted(Comparator.reverseOrder())
