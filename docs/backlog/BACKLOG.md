@@ -6110,3 +6110,65 @@ CI or marked `@Tag("manual")`.
 
 Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
 dissolution.
+---
+id: UD-802
+title: GroundTruthRunner: bare provider types skip config.toml, hit fatal config-missing
+category: tests
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:78
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+When ctx.provider is a bare type (s3 / sftp / webdav / onedrive / etc.),
+GroundTruthRunner.kt:76-78 sets configContent to '' and skips writing
+config.toml. The child unidrive invocation then calls
+Main.resolveCurrentProfile(), which treats a missing config / empty
+providers as a fatal 'config missing' error before any env-based
+provider setup can run.
+
+As a result groundtruth -p s3/sftp/webdav/... cannot reach the sync
+phase even when credentials are available in the environment.
+
+Acceptance: groundtruth with a bare provider type writes a minimal
+config.toml (or the runner uses some other mechanism that bypasses
+the config-missing exit) and reaches the sync phase. Either way, add
+one passing test that exercises the bare-provider path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed.
+The intake (PR #12) is in-scope for the move only; this fix is filed
+separately per the dissolution spec's strict-scope decision (Decision 1).
+---
+id: UD-803
+title: GroundTruthRunner: cleanup deletes JSONL report before user can read it
+category: tests
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:304
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+With the default cleanup_local_after_run = true, GroundTruthRunner
+writes the JSONL report to localBase/report.jsonl just before the
+cleanup walks the same directory and deletes every child except
+localBase itself. Successful groundtruth runs therefore remove their
+own JSONL report, leaving only the console summary and no artifact
+for later inspection.
+
+Fix options:
+- Exclude report.jsonl from the cleanup walk (filter).
+- Move report.jsonl to a sibling 'reports/' directory that the
+  cleanup doesn't touch.
+- Write the report after cleanup completes.
+
+Acceptance: a successful groundtruth run with the default cleanup
+setting leaves report.jsonl intact at a documented, predictable path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed
+(PR #12). Filed separately per the dissolution's strict-scope decision.
