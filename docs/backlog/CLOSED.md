@@ -521,3 +521,37 @@ setting leaves report.jsonl intact at a documented, predictable path.
 
 This is a pre-existing bug in the source migrated from unidrive-closed
 (PR #12). Filed separately per the dissolution's strict-scope decision.
+
+---
+id: UD-802
+title: GroundTruthRunner: bare provider types skip config.toml, hit fatal config-missing
+category: tests
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-13
+resolved_by: commit be020a9. Helper buildBareProviderConfig synthesizes [providers.<type>] from env vars (s3/sftp/webdav/rclone) or type+sync_root only (onedrive/hidrive/internxt). Missing env vars now fail fast in Phase 1 with the var name in the message. 10-case test exercises emission, optional fields, env-missing, OAuth-only, and backslash quoting.
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:78
+opened: 2026-05-13
+---
+Found by Codex review on PR #12 (intake of e2e-360).
+
+When ctx.provider is a bare type (s3 / sftp / webdav / onedrive / etc.),
+GroundTruthRunner.kt:76-78 sets configContent to '' and skips writing
+config.toml. The child unidrive invocation then calls
+Main.resolveCurrentProfile(), which treats a missing config / empty
+providers as a fatal 'config missing' error before any env-based
+provider setup can run.
+
+As a result groundtruth -p s3/sftp/webdav/... cannot reach the sync
+phase even when credentials are available in the environment.
+
+Acceptance: groundtruth with a bare provider type writes a minimal
+config.toml (or the runner uses some other mechanism that bypasses
+the config-missing exit) and reaches the sync phase. Either way, add
+one passing test that exercises the bare-provider path.
+
+This is a pre-existing bug in the source migrated from unidrive-closed.
+The intake (PR #12) is in-scope for the move only; this fix is filed
+separately per the dissolution spec's strict-scope decision (Decision 1).

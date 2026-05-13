@@ -1,19 +1,14 @@
 package org.krost.unidrive.internxt
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.Mirror
 import org.krost.unidrive.internxt.model.StartUploadResponse
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -347,45 +342,57 @@ class InternxtApiServiceTest {
         assertEquals("50", params["offset"])
     }
 
-    // Disabled because of timing flakes on Windows CI runners — the test spawns 20
-    // Dispatchers.Default coroutines and spin-waits with delay(10) for 500ms, which
-    // is too tight a budget on slow GitHub Actions Windows VMs. Replace with virtual-time
-    // (kotlinx-coroutines-test runTest + TestCoroutineScheduler) when the dedup invariant
-    // is re-examined. Filed as a follow-up; the production code path is unchanged.
-    @Ignore
+    // UD-807: rewritten to use kotlinx-coroutines-test `runTest` + virtual time.
+    // The previous wall-clock variant spawned 20 `Dispatchers.Default` coroutines
+    // and spin-waited with `delay(10)` for 500 ms; that budget was too tight on
+    // slow Windows CI runners, where the 20 callers occasionally hadn't all
+    // installed themselves before the gate was released. The dedup invariant
+    // (one loader invocation across N concurrent load() calls for the same key)
+    // is timing-independent — InFlightDedup is pure concurrency coordination
+    // (ConcurrentHashMap + async + Deferred). Running on the test scheduler
+    // lets us use `yield()` to deterministically suspend all callers on the
+    // gate before any of them is released, removing the race window without
+    // changing the production code path.
     @Test
     fun `UD-205 folderContents dedup collapses concurrent loads for the same uuid into one`() =
-        runBlocking {
-            // Demonstrates the wiring shape: getFolderContents now routes through
-            // an InFlightDedup keyed on folder UUID. Tested by exercising the
-            // dedup field directly with a synthetic loader — exactly mirrors the
-            // production code path (`folderContentsDedup.load(uuid) { ...HTTP... }`)
-            // without standing up a MockEngine.
+        kotlinx.coroutines.test.runTest {
             val service = mkService()
             val loaderInvocations = AtomicInteger(0)
             val gate = CompletableDeferred<Unit>()
             val payload = FolderContentResponse()
 
-            val results =
-                coroutineScope {
-                    val deferreds =
-                        (1..20).map {
-                            async(Dispatchers.Default) {
-                                service.folderContentsDedup.load("folder-uuid-A") {
-                                    loaderInvocations.incrementAndGet()
-                                    gate.await()
-                                    payload
-                                }
-                            }
+            // Launch 20 concurrent callers on the test scheduler. They all
+            // suspend inside the loader on `gate.await()` (after the winner
+            // increments `loaderInvocations`) or inside `winner.await()` (for
+            // losers awaiting the shared deferred). `yield()` runs all
+            // currently-queued continuations until every caller is parked.
+            val deferreds =
+                (1..20).map {
+                    async {
+                        service.folderContentsDedup.load("folder-uuid-A") {
+                            loaderInvocations.incrementAndGet()
+                            gate.await()
+                            payload
                         }
-                    // Spin until at least one caller has installed itself.
-                    repeat(50) {
-                        if (loaderInvocations.get() >= 1) return@repeat
-                        delay(10)
                     }
-                    gate.complete(Unit)
-                    deferreds.awaitAll()
                 }
+
+            // Drain the scheduler until all 20 callers are suspended:
+            //  - the winner is parked on `gate.await()` after bumping the
+            //    counter once;
+            //  - the 19 losers are parked on `winner.await()` in InFlightDedup.
+            // testScheduler.advanceUntilIdle() runs every queued continuation
+            // that has no outstanding wall-clock dependency.
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                1,
+                loaderInvocations.get(),
+                "exactly one caller should have entered the loader before the gate opens",
+            )
+
+            // Release the loader. All 20 callers now resolve to the same payload.
+            gate.complete(Unit)
+            val results = deferreds.awaitAll()
 
             assertEquals(20, results.size)
             kotlin.test.assertTrue(results.all { it === payload })

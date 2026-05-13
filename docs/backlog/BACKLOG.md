@@ -5980,37 +5980,6 @@ CI or marked `@Tag("manual")`.
 Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
 dissolution.
 ---
-id: UD-802
-title: GroundTruthRunner: bare provider types skip config.toml, hit fatal config-missing
-category: tests
-priority: medium
-effort: S
-status: open
-code_refs:
-  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/GroundTruthRunner.kt:78
-opened: 2026-05-13
----
-Found by Codex review on PR #12 (intake of e2e-360).
-
-When ctx.provider is a bare type (s3 / sftp / webdav / onedrive / etc.),
-GroundTruthRunner.kt:76-78 sets configContent to '' and skips writing
-config.toml. The child unidrive invocation then calls
-Main.resolveCurrentProfile(), which treats a missing config / empty
-providers as a fatal 'config missing' error before any env-based
-provider setup can run.
-
-As a result groundtruth -p s3/sftp/webdav/... cannot reach the sync
-phase even when credentials are available in the environment.
-
-Acceptance: groundtruth with a bare provider type writes a minimal
-config.toml (or the runner uses some other mechanism that bypasses
-the config-missing exit) and reaches the sync phase. Either way, add
-one passing test that exercises the bare-provider path.
-
-This is a pre-existing bug in the source migrated from unidrive-closed.
-The intake (PR #12) is in-scope for the move only; this fix is filed
-separately per the dissolution spec's strict-scope decision (Decision 1).
----
 id: UD-807
 title: Re-enable UD-205 folderContents dedup test with virtual time
 category: tests
