@@ -6038,3 +6038,75 @@ Pairs naturally with UD-205 (in-flight dedup): `getValidCredentials` itself beco
 - UD-208 — surfaced this finding (audit doc).
 - UD-205 — InFlightDedup primitive, potential reuse.
 - UD-310 / UD-331 — token-refresh mutex / NonCancellable carry-over (the existing serialisation surface).
+---
+id: UD-701
+title: Cloud provider speed ranking publication
+category: tooling
+priority: high
+effort: XL
+status: open
+code_refs:
+  - core/app/benchmark/src/main/kotlin/org/krost/unidrive/sync/BenchmarkRunner.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/BenchmarkCommand.kt
+  - docs/CLOUD_PROVIDERS_DATABASE.md
+opened: 2026-05-13
+---
+Sign up for free tiers of viable cloud storage providers, run
+standardized speed tests from Kubuntu (Germany ISP), rank by
+upload/download throughput and latency, publish via static site
+generator. EU-first ordering. Revenue model: affiliate signups.
+
+Phase 1 (static benchmark page generator) shipped in unidrive-closed
+commit 45b9407. This ticket tracks Phase 2: expand provider coverage,
+periodic re-tests, dynamic site updates.
+
+Reference: `docs/CLOUD_PROVIDERS_DATABASE.md` v1.0 (100+ providers).
+
+Was `#63` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-401
+title: Enhanced provider table Phase 2 (remote API, dynamic grades)
+category: cli
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+opened: 2026-05-13
+---
+Remote-API-backed dynamic provider table in CLI output. Phase 1
+(static table baked at compile time) already shipped.
+
+Phase 2: read live grades from the benchmark site (UD-701) with a
+sensible offline fallback to the baked-in table. The exact CLI
+surface depends on whether the public repo still has a `provider list`
+subcommand (it was removed in commit b07d864 on 2026-05-04) — if a
+replacement listing surface is added, it would be the natural host
+for the dynamic table; otherwise this work might expand the `benchmark`
+subcommand itself.
+
+Was `#107` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-800
+title: CloudForge E2E scenario incomplete (Playwright not wired)
+category: tests
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/Main360.kt:71
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/CloudForgeRunner.kt
+opened: 2026-05-13
+---
+`CloudForgeCommand` in `Main360.kt:71` prints a TODO. Playwright
+browser integration not wired. The `--headed` flag is accepted but
+unused. Only `GroundTruthRunner` is fully implemented.
+
+Acceptance: CloudForge (cloud→local) scenario callable from CLI;
+Playwright wired for headed mode; one passing end-to-end test in
+CI or marked `@Tag("manual")`.
+
+Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
