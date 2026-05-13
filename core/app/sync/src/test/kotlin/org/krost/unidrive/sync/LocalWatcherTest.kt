@@ -13,7 +13,9 @@ class LocalWatcherTest {
     @BeforeTest
     fun setUp() {
         syncRoot = Files.createTempDirectory("unidrive-watch-test")
-        watcher = LocalWatcher(syncRoot)
+        // UD-211: use a short debounce in tests so existing post-write sleeps (200–1000 ms)
+        // still see the trailing-edge emit. Production default is 2000 ms.
+        watcher = LocalWatcher(syncRoot, debounceMs = 50L)
     }
 
     @AfterTest
