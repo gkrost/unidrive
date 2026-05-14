@@ -667,12 +667,28 @@ class InternxtApiService(
         applyInternxtHeaders()
     }
 
+    /**
+     * UD-203: pull the Internxt server-side request id off a response.
+     * Header name confirmed from the upstream SDK
+     * (`AxiosResponseError.xRequestId` — extracted at error-normalization
+     * time). Returns null if the header isn't present (e.g. synthetic
+     * MockEngine responses, pre-flight failures).
+     */
+    private fun extractRequestId(response: HttpResponse): String? = response.headers["x-request-id"]
+
     private suspend fun checkResponse(response: HttpResponse) {
         if (response.status == HttpStatusCode.Unauthorized) {
-            throw AuthenticationException("Authentication failed (401): ${response.bodyAsText()}")
+            throw AuthenticationException(
+                "Authentication failed (401): ${response.bodyAsText()}",
+                requestId = extractRequestId(response),
+            )
         }
         if (!response.status.isSuccess()) {
-            throw InternxtApiException("API error: ${response.status} - ${response.bodyAsText()}", response.status.value)
+            throw InternxtApiException(
+                "API error: ${response.status} - ${response.bodyAsText()}",
+                statusCode = response.status.value,
+                requestId = extractRequestId(response),
+            )
         }
     }
 
@@ -732,4 +748,5 @@ data class LimitResponse(
 class InternxtApiException(
     message: String,
     val statusCode: Int = 0,
-) : ProviderException(message)
+    requestId: String? = null,
+) : ProviderException(message, requestId = requestId)
