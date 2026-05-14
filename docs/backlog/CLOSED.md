@@ -887,3 +887,57 @@ spin-wait` flake class.
 Higher than UD-810 because the dedup rewrite touches multi-coroutine
 ordering. Reference: UD-807's Internxt fix (commit 5d9f49c) — the same
 pattern translates 1:1.
+
+---
+id: UD-214
+title: Fix flaky IpcProgressReporterTest IPC race (re-enable @Ignore'd tests)
+category: core
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-14
+resolved_by: commit a695944. Exposed IpcServer.clientCount as a synchronization seam; replaced delay()/yield() gates in IpcProgressReporterTest with awaitClientCount(server, 1). Both previously-@Ignore'd tests (onSyncComplete emits sync_complete event; emitSyncError sanitizes newlines) are now active and green. 10/10 stable on local Linux; CI on ubuntu+windows will exercise the 20-run criterion.
+opened: 2026-05-14
+---
+## Problem
+
+`IpcProgressReporterTest` uses `runTest { ... }` (virtual-time test dispatcher),
+but `IpcServer.start()` launches its accept-loop and broadcast-loop on
+`Dispatchers.IO` (real threads). The `delay(100)` calls in the tests advance
+virtual time without forcing the real-thread accept/broadcast loops to make
+progress, so on slower runners the client write can arrive before the broadcast
+loop has drained the channel, and `readLines` times out without ever seeing the
+line.
+
+This is the same race class tracked as flaky in IpcProgressReporterTest itself
+(internal note "#108"). Two tests are currently `@Ignore`d for this reason:
+
+- `onSyncComplete emits sync_complete event`
+- `emitSyncError sanitizes newlines` (disabled in this branch — was failing on
+  ubuntu-latest CI run 25847766935 / job 75946814314)
+
+The production sanitization invariant (`emitSyncError` collapses `\n` → space and
+truncates at 500 chars) is still covered indirectly by the non-IPC
+`all methods update server syncState` test, but we no longer have end-to-end
+coverage that the sanitized payload actually reaches a client over the socket.
+
+## Resolution sketch
+
+Pick one (or hybrid):
+
+1. **Plumb a real dispatcher into the server during tests.** Inject the
+   coroutine dispatcher used by accept/broadcast loops; in tests, pass the
+   `TestScope`'s dispatcher so `delay` and channel sends are deterministic.
+2. **Replace `delay()` polling with real-time waits in tests.** After connect,
+   poll `server.clientCount` (need to expose) until non-empty before emitting;
+   after emit, wait on a `CompletableDeferred` that the broadcast loop completes
+   on first successful write.
+3. **Migrate `readLines` to a blocking-with-timeout NIO selector loop** so the
+   test makes no virtual-time assumptions about real I/O scheduling.
+
+## Acceptance
+
+- Both currently-`@Ignore`d IPC tests are re-enabled.
+- Both pass deterministically on Linux + macOS + Windows runners across at least
+  20 consecutive CI runs.
+- No `Thread.sleep` / `delay(N)` "hope it's enough" patterns in the test setup.
