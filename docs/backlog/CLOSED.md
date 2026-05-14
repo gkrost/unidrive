@@ -720,3 +720,54 @@ Verify the macOS path against whatever the daemon actually writes (likely `~/Lib
 
 - Pure scripting fix, no Kotlin changes.
 - Could also affect the JFR scripts (`scripts/dev/unidrive-jfr.sh` / `.ps1`) — worth a quick grep for sibling paths while in there.
+
+---
+id: UD-203
+title: Capture x-request-id (and provider equivalents) in provider exception types for log correlation
+category: core
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-14
+resolved_by: commit 80b3cf3. Implemented across 4 commits (53ff21e OneDrive base, b5a52e9 Internxt, 894dc06 S3, 80b3cf3 SyncEngine log surface + per-provider robustness docs). ProviderException base gained requestId; OneDrive reads request-id + client-request-id, Internxt reads x-request-id, S3 reads x-amz-request-id and x-amz-id-2. SyncEngine appends requestIdSuffix(e) to auth-fatal ERROR and per-action WARN lines. Tests: GraphRequestIdPropagationTest (4), InternxtRequestIdPropagationTest (3), S3RequestIdPropagationTest (5), RequestIdSuffixTest (5). HiDrive out of scope — no provider module in repo.
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's single best observability lever is `AxiosResponseError.xRequestId` — extracted from the `x-request-id` response header at error normalization time. unidrive's provider exception types should carry the same field so `unidrive.log` ERROR lines correlate with server-side support tickets.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiException.kt` (or wherever the type lives) — add `xRequestId: String?`
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `parseError`-style helper, populate from response headers
+- `core/providers/onedrive/...` — same pattern (already partially captures `request-id`?)
+- `core/providers/hidrive/...`, `core/providers/s3/...` — extend pattern
+- BACKLOG.md line 1100s — the existing error-parsing audit ticket already enumerates per-provider error fields; this extends it to capture the request-id specifically
+
+## Header-name matrix per provider
+
+| Provider | Response header | Notes |
+|----------|-----------------|-------|
+| Internxt | `x-request-id` | confirmed by SDK research |
+| OneDrive | `request-id` and/or `client-request-id` | Microsoft Graph standard |
+| S3 | `x-amz-request-id` + `x-amz-id-2` | both useful for AWS support |
+| HiDrive | TBD — verify | |
+| WebDAV | none standard — skip | |
+| SFTP | n/a (not HTTP) | |
+
+## Acceptance
+
+- Provider-specific exception types each gain a `requestId: String?` (or provider-specific name) field.
+- Error-construction sites populate it from response headers when available; null otherwise.
+- Logging interceptor surfaces `requestId=<value>` on every ERROR log line that originated from a provider exception.
+- Unit tests: forced 500 from each provider's mock, with synthetic header → exception carries the value, log line contains it.
+- `docs/providers/<provider>-robustness.md` documents the header name being captured.
+
+## Notes
+
+- This is the cheapest observability win in the research reports. ~30 LOC per provider plus the logging interceptor.
+- Pairs with UD-330 — when retries fail and the budget gives up, the final ERROR log should include the last-attempt's `requestId`.
+- Out of scope: client-side request-id generation (we'd send our own correlator). Useful but separate ticket.
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 ideas to steal` #3.
+- BACKLOG ticket near line 1095-1130 (existing error-parsing audit) — this is the captured-fields extension for the request-id specifically.
