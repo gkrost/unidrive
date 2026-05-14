@@ -664,7 +664,11 @@ class GraphApiService(
                 continue
             }
             if (response.status == HttpStatusCode.Unauthorized) {
-                throw AuthenticationException("Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}")
+                // UD-203: capture request-id so the failing call is correlatable in Graph's logs.
+                throw AuthenticationException(
+                    "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
+                    requestId = extractRequestId(response),
+                )
             }
             if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
                 val waitMs = pickBackoffMs(response, throttleAttempts, totalThrottleWaitMs)
@@ -683,9 +687,11 @@ class GraphApiService(
                 continue
             }
             if (!response.status.isSuccess()) {
+                // UD-203: capture request-id for support-ticket correlation.
                 throw GraphApiException(
                     "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
                     response.status.value,
+                    requestId = extractRequestId(response),
                 )
             }
             throttleBudget.recordSuccess()
@@ -716,7 +722,11 @@ class GraphApiService(
                 continue
             }
             if (response.status == HttpStatusCode.Unauthorized) {
-                throw AuthenticationException("Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}")
+                // UD-203: capture request-id so the failing call is correlatable in Graph's logs.
+                throw AuthenticationException(
+                    "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
+                    requestId = extractRequestId(response),
+                )
             }
             if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
                 val waitMs = pickBackoffMs(response, throttleAttempts, totalThrottleWaitMs)
@@ -735,15 +745,35 @@ class GraphApiService(
                 continue
             }
             if (!response.status.isSuccess()) {
+                // UD-203: capture request-id for support-ticket correlation.
                 throw GraphApiException(
                     "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
                     response.status.value,
+                    requestId = extractRequestId(response),
                 )
             }
             throttleBudget.recordSuccess()
             return response
         }
     }
+
+    /**
+     * UD-203: pull the Microsoft Graph server-side request id off a response.
+     *
+     * Graph sets two correlation headers per response: `request-id` (the
+     * server-side trace id, surfaced in Microsoft support tickets and
+     * Graph's own logs) and `client-request-id` (echoed from the request if
+     * the client supplied one). We prefer `request-id` when both are
+     * present; fall back to `client-request-id` so a missing server header
+     * still gives the user something to grep on.
+     *
+     * Returns null when neither header is present, e.g. for synthetic
+     * responses (MockEngine, captive-portal HTML pages) or pre-flight
+     * failures that never reached Graph's edge.
+     */
+    private fun extractRequestId(response: HttpResponse): String? =
+        response.headers["request-id"]
+            ?: response.headers["client-request-id"]
 
     private fun shouldBackoff(
         response: HttpResponse,
@@ -951,4 +981,5 @@ data class DeltaResult(
 class GraphApiException(
     message: String,
     val statusCode: Int = 0,
-) : ProviderException(message)
+    requestId: String? = null,
+) : ProviderException(message, requestId = requestId)
