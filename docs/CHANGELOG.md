@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - UD-401 (Enhanced provider table Phase 2).
 - This `CHANGELOG.md` file.
 
+### Removed
+- UD-810: tests asserting Kotlin data-class-generated machinery on
+  `ProviderMetadata` / `ShareInfo` / `CloudItem`. The deleted tests
+  exercised the compiler's `equals` / `hashCode` / `copy` / generated
+  getters — none of them pinned a domain invariant. If `data class`
+  ever becomes a regular `class`, callers fail at compile time;
+  runtime tests don't add coverage there. Deleted:
+  `ProviderMetadataTest.{ProviderMetadata stores all required fields,
+  ProviderMetadata optional fields, ProviderMetadata data class
+  equality and copy, ShareInfo stores all fields, ShareInfo defaults}`
+  and `CloudItemTest.{equal items have equal hashCodes, items
+  differing in any field are not equal, hashCode is stable across
+  calls, works correctly as HashMap key}`. Per UD-813 audit.
+
 ### Fixed
 - UD-211: `LocalWatcher` coalesces editor atomic-save bursts (vim
   `:w`, JetBrains/Emacs write-tmp-and-rename) into a single

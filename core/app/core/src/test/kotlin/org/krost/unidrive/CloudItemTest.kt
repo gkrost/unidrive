@@ -2,9 +2,7 @@ package org.krost.unidrive
 
 import java.time.Instant
 import kotlin.test.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class CloudItemTest {
@@ -43,86 +41,17 @@ class CloudItemTest {
         assertTrue(item.deleted)
     }
 
-    // ── #161: hashCode/equals consistency (data class contract) ─────────────
-
-    @Test
-    fun `equal items have equal hashCodes`() {
-        val a =
-            CloudItem(
-                id = "1",
-                name = "test.txt",
-                path = "/test.txt",
-                size = 100,
-                isFolder = false,
-                modified = Instant.EPOCH,
-                created = Instant.EPOCH,
-                hash = "abc",
-                mimeType = "text/plain",
-            )
-        val b = a.copy()
-        assertEquals(a, b)
-        assertEquals(a.hashCode(), b.hashCode())
-    }
-
-    @Test
-    fun `items differing in any field are not equal`() {
-        val base =
-            CloudItem(
-                id = "1",
-                name = "test.txt",
-                path = "/test.txt",
-                size = 100,
-                isFolder = false,
-                modified = Instant.EPOCH,
-                created = Instant.EPOCH,
-                hash = "abc",
-                mimeType = "text/plain",
-            )
-        assertNotEquals(base, base.copy(id = "2"))
-        assertNotEquals(base, base.copy(name = "other.txt"))
-        assertNotEquals(base, base.copy(path = "/other.txt"))
-        assertNotEquals(base, base.copy(size = 999))
-        assertNotEquals(base, base.copy(isFolder = true))
-        assertNotEquals(base, base.copy(hash = "xyz"))
-        assertNotEquals(base, base.copy(deleted = true))
-    }
-
-    @Test
-    fun `hashCode is stable across calls`() {
-        val item =
-            CloudItem(
-                id = "1",
-                name = "test.txt",
-                path = "/test.txt",
-                size = 100,
-                isFolder = false,
-                modified = Instant.EPOCH,
-                created = null,
-                hash = null,
-                mimeType = null,
-            )
-        val h1 = item.hashCode()
-        val h2 = item.hashCode()
-        assertEquals(h1, h2)
-    }
-
-    @Test
-    fun `works correctly as HashMap key`() {
-        val item =
-            CloudItem(
-                id = "1",
-                name = "test.txt",
-                path = "/test.txt",
-                size = 100,
-                isFolder = false,
-                modified = Instant.EPOCH,
-                created = Instant.EPOCH,
-                hash = "abc",
-                mimeType = "text/plain",
-            )
-        val map = hashMapOf(item to "value")
-        assertEquals("value", map[item.copy()])
-    }
+    // UD-810 audit: deleted four data-class-contract tests
+    // (`equal items have equal hashCodes`, `items differing in any field are
+    // not equal`, `hashCode is stable across calls`, `works correctly as
+    // HashMap key`). All four exercised Kotlin's generated equals/hashCode
+    // on `data class CloudItem` — i.e., they tested the compiler, not a
+    // domain invariant. If `data class` ever becomes a regular `class`, the
+    // affected sync engine code paths (HashMap keys in `Reconciler`,
+    // `Set<CloudItem>` in the delta walker) would fail loudly; no runtime
+    // test would catch a regression the type-system wouldn't catch first.
+    // The defaults tests (`deleted defaults to false`, `hydrated defaults
+    // to true`) remain below — those pin business invariants. See CHANGELOG.
 
     @Test
     fun `hydrated defaults to true`() {
