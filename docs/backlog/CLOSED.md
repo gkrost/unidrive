@@ -587,3 +587,136 @@ Acceptance:
 - Runs deterministically on both Ubuntu and Windows CI.
 - Still validates the invariant: one loader invocation across N
   concurrent load() calls for the same key.
+
+---
+id: UD-768
+title: scripts/dev/log-watch.sh defaults to Windows AppData path on Linux MVP
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-14
+resolved_by: Duplicate of UD-700 (same bug: log-watch.sh defaults to Windows path). UD-700 has the correct Linux target — `${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log` — verified against `core/app/cli/src/main/resources/logback.xml:3` which writes to `${LOCALAPPDATA:-${user.home}/.local/share}/unidrive`. UD-768 suggested `/.local/state` which would not match the daemon. Closed as wontfix-duplicate; UD-700 carries the fix.
+code_refs:
+  - scripts/dev/log-watch.sh:22
+opened: 2026-05-02
+---
+## Problem
+
+`scripts/dev/log-watch.sh:22` defaults the live-log path to a
+**Windows AppData path** on a project whose MVP is Linux:
+
+```
+LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+```
+
+On Linux (the MVP per ADR-0012), `$HOME/AppData/Local/...` does
+not exist; the daemon writes to either `$XDG_STATE_HOME/unidrive/`
+or `$HOME/.local/state/unidrive/` depending on env. The script
+therefore prints "no such file" until the user remembers to set
+`UNIDRIVE_LOG`.
+
+This default is also the seed of broader doc drift: any reader
+who looks at `log-watch.sh` to understand "where does unidrive
+log on this platform?" gets a misleading answer.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Pick the right Linux default** and document the env-var
+override:
+
+```bash
+LOG="${UNIDRIVE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/unidrive/unidrive.log}"
+```
+
+This matches the daemon's actual write path (verify against
+the daemon's logging config before committing).
+
+**B) Refuse to default at all** if `UNIDRIVE_LOG` is unset on
+Linux, exit with a one-line error pointing at the env var. More
+explicit, less convenience.
+
+Recommend **A**: matches the daemon, removes the cliff for new
+contributors trying out the script.
+
+## Acceptance criteria
+
+- [ ] `log-watch.sh` default resolves to a path the daemon
+      actually writes to on Linux.
+- [ ] If macOS / Windows fallbacks are kept, they're behind an
+      `os.name` check at the top of the script with a comment
+      explaining ADR-0012.
+- [ ] Smoke: `UNIDRIVE_LOG=/tmp/test.log scripts/dev/log-watch.sh
+      --summary` works on Linux without further env setup.
+
+## Why a separate ticket from UD-400
+
+UD-400 sweeps `os.name` branches in **non-test Kotlin code**.
+This is a shell script. Same spirit, different scope. Atomic
+commit lets `git log` show the rationale without dragging the
+Kotlin sweep along.
+
+---
+id: UD-700
+title: log-watch.sh hardcodes Windows log path; fails on Linux/macOS by default
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-14
+resolved_by: commit 12946af. Replaces hardcoded Windows path with default_log_path() branching on uname -s; matches the daemon's logback.xml resolution ($XDG_DATA_HOME/.local/share on Linux, %LOCALAPPDATA% on Windows, ~/Library/Logs/ on macOS). Adds a one-line hint when the default doesn't exist and UNIDRIVE_LOG is unset. Smoke-tested on Linux: finds 8 rolled logs without env override. UD-768 was a duplicate and is already in CLOSED.md (wontfix-duplicate).
+opened: 2026-05-04
+---
+`scripts/dev/log-watch.sh` hardcodes a Windows-only default log path and fails immediately on Linux/macOS.
+
+## Repro (2026-05-04 session)
+
+```
+$ bash scripts/dev/log-watch.sh --summary
+log not found: /home/gernot/AppData/Local/unidrive/unidrive.log
+```
+
+The actual log on Linux lives at `~/.local/share/unidrive/unidrive.log` (XDG `$XDG_DATA_HOME`).
+
+## Root cause
+
+`scripts/dev/log-watch.sh:22`:
+
+```bash
+LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+```
+
+The default path is Windows-only. The escape hatch (`UNIDRIVE_LOG=… bash log-watch.sh …`) works but every Linux/macOS contributor — i.e. all of them — has to discover this and set it manually every time.
+
+## Proposed fix
+
+Detect platform and pick the right XDG-style path. The skill `unidrive-log-anomalies` invokes this script unconditionally at session start; right now it silently fails on Linux every session.
+
+```bash
+default_log_path() {
+  case "$(uname -s)" in
+    Darwin)         echo "$HOME/Library/Logs/unidrive/unidrive.log" ;;
+    Linux)          echo "${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log" ;;
+    MINGW*|MSYS*|CYGWIN*) echo "$HOME/AppData/Local/unidrive/unidrive.log" ;;
+    *)              echo "${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log" ;;
+  esac
+}
+LOG="${UNIDRIVE_LOG:-$(default_log_path)}"
+```
+
+Verify the macOS path against whatever the daemon actually writes (likely `~/Library/Logs/unidrive/`, but could be `~/Library/Application Support/unidrive/` if the logger config says so — check `core/app/cli/src/main/resources/logback.xml` or whichever logger config the JVM uses, and align).
+
+## Acceptance
+
+- `bash scripts/dev/log-watch.sh --summary` works out of the box on Linux without setting `UNIDRIVE_LOG`.
+- macOS path is verified against the daemon's actual writer config.
+- Windows path remains the default for `MINGW*`/`MSYS*`/`CYGWIN*`.
+- `unidrive-log-anomalies` skill produces a real summary at session start on Linux instead of "log not found".
+- Bonus: if no log file exists at the resolved default *and* `UNIDRIVE_LOG` is unset, print a one-line hint pointing to where the daemon would write it on this OS, instead of just `log not found:`.
+
+## Notes
+
+- Pure scripting fix, no Kotlin changes.
+- Could also affect the JFR scripts (`scripts/dev/unidrive-jfr.sh` / `.ps1`) — worth a quick grep for sibling paths while in there.
