@@ -22,8 +22,14 @@ sealed class SyncAction {
         val remoteItem: CloudItem,
     ) : SyncAction()
 
+    /**
+     * UD-366: [remoteId] carries the existing remote UUID for MODIFIED uploads so providers
+     * with replace-in-place semantics (Internxt `PUT /files/{uuid}`) can overwrite the entry
+     * instead of POSTing a duplicate that 409s. NEW uploads leave it null.
+     */
     data class Upload(
         override val path: String,
+        val remoteId: String? = null,
     ) : SyncAction()
 
     data class DeleteLocal(

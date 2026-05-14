@@ -12,6 +12,12 @@
             <level>WARN</level>
         </filter>
         <encoder>
+            <!-- Force UTF-8 so log messages containing non-ASCII (e.g. RequestId's
+                 left/right arrow glyphs) render correctly across platforms instead
+                 of inheriting the JVM's platform-default codepage (cp437/cp850 on
+                 Windows produces 'ÔåÉ' mojibake for '←'). Console rendering still
+                 depends on the user's terminal codepage; Windows needs `chcp 65001`. -->
+            <charset>UTF-8</charset>
             <pattern>%d{HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
@@ -28,6 +34,11 @@
             <totalSizeCap>50MB</totalSizeCap>
         </rollingPolicy>
         <encoder>
+            <!-- Force UTF-8 so unidrive.log is genuinely UTF-8 instead of platform-
+                 default codepage. Pre-fix, '← req=' close lines from RequestIdPlugin
+                 landed in the file as cp437 bytes on Windows and could not be
+                 recovered by any UTF-8-aware viewer. -->
+            <charset>UTF-8</charset>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] [%thread] %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>

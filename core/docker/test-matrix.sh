@@ -53,13 +53,6 @@ TOML
         pass "localfs dry-run sync"
     fi
     
-    # Test: provider list
-    if ${JAVA} -c "${CONFIG_DIR}" provider list 2>&1 | grep -qi "local filesystem"; then
-        pass "provider list shows localfs"
-    else
-        fail "provider list" "localfs not found"
-    fi
-    
     # Test: status
     if ${JAVA} -c "${CONFIG_DIR}" status --all 2>&1 | grep -q "localfs-source"; then
         pass "status shows localfs-source"
@@ -72,13 +65,6 @@ TOML
         pass "quota returns values"
     else
         fail "quota" "no storage info"
-    fi
-    
-    # Test: provider info localfs
-    if ${JAVA} -c "${CONFIG_DIR}" provider info localfs 2>&1 | grep -qi "local"; then
-        pass "provider info localfs"
-    else
-        fail "provider info" "failed"
     fi
     
     # Test: sync command runs without crash (state init)

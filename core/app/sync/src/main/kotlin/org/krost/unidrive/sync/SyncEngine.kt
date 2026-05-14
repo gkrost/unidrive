@@ -49,6 +49,9 @@ class SyncEngine(
     private val maxVersions: Int = 5,
     private val versionRetentionDays: Int = 90,
     private val fastBootstrap: Boolean = false,
+    // UD-113: optional structured audit log of mutations (Download/Upload/Delete/Move/
+    // CreateRemoteFolder). Wired from CLI/MCP startup; null in tests that don't need it.
+    private val auditLog: org.krost.unidrive.sync.audit.AuditLog? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -77,6 +80,22 @@ class SyncEngine(
         // UD-254: classifies WHY a sync pass started so post-incident log review
         // can separate a normal watch poll from e.g. a rescan-after-retry burst.
         reason: SyncReason = SyncReason.MANUAL,
+        // UD-236: refresh-mode cut. Run Gather + Reconcile + Pass 1 (placeholder
+        // ops, deletes, moves, mkdirs — all metadata) and SKIP Pass 2 (the actual
+        // byte transfers). Pending transfers persist as remoteId=null (upload
+        // pending) or isHydrated=false (download pending) DB rows that the next
+        // sync — or a follow-up `unidrive apply` — picks up via the UD-225/UD-901
+        // recovery loops in Reconciler.reconcile.
+        //
+        // pending_cursor is NOT promoted to delta_cursor when transfers are
+        // skipped — apply will do the promotion when the bytes actually move.
+        skipTransfers: Boolean = false,
+        // UD-236: apply-mode cut. SKIP the remote Gather phase (no provider.delta()
+        // call). Local scan still runs (cheap; catches local edits made since the
+        // previous refresh). The recovery loops in Reconciler emit actions for
+        // any unhydrated / no-remoteId DB rows from the prior refresh — apply's
+        // reason for being is to drain those.
+        skipRemoteGather: Boolean = false,
     ) {
         // UD-254: short random scan id pushed into MDC so every DEBUG/WARN line
         // emitted inside this pass inherits it (e.g. InternxtProvider's
@@ -92,7 +111,7 @@ class SyncEngine(
         val startTime = System.currentTimeMillis()
         log.info("Scan started scan={} reason={} dryRun={}", scanId, reason, dryRun)
         try {
-            doSyncOnce(dryRun, forceDelete, scanId, reason, startTime)
+            doSyncOnce(dryRun, forceDelete, scanId, reason, startTime, skipTransfers, skipRemoteGather)
         } finally {
             val duration = System.currentTimeMillis() - startTime
             log.info("Scan ended scan={} reason={} duration={}ms", scanId, reason, duration)
@@ -110,6 +129,8 @@ class SyncEngine(
         @Suppress("UNUSED_PARAMETER") scanId: String,
         @Suppress("UNUSED_PARAMETER") reason: SyncReason,
         startTime: Long,
+        skipTransfers: Boolean = false,
+        skipRemoteGather: Boolean = false,
     ) {
         val downloaded = AtomicInteger(0)
         val uploaded = AtomicInteger(0)
@@ -158,7 +179,16 @@ class SyncEngine(
         }
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
-        val allRemoteChanges = gatherRemoteChanges()
+        // UD-236: skipRemoteGather (apply mode) bypasses provider.delta() entirely.
+        // The recovery loops in Reconciler.reconcile pick up any pending UD-225/UD-901
+        // rows from a prior refresh and emit DownloadContent / Upload actions for them.
+        val allRemoteChanges =
+            if (skipRemoteGather) {
+                log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
+                emptyMap()
+            } else {
+                gatherRemoteChanges()
+            }
 
         val remoteChanges =
             if (syncPath != null) {
@@ -217,8 +247,11 @@ class SyncEngine(
             }
         }
 
-        // Phase 2: Reconcile
-        val allActions = reconciler.reconcile(remoteChanges, localChanges)
+        // Phase 2: Reconcile (UD-240g: pass reporter so the phase emits a
+        // heartbeat instead of going silent for many seconds on big first-syncs;
+        // UD-901a: pass syncPath so the recovery loops respect scope and don't
+        // resurrect orphans outside the user's requested subtree).
+        val allActions = reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
@@ -258,12 +291,9 @@ class SyncEngine(
         reporter.onActionCount(actions.size)
 
         if (actions.isEmpty()) {
-            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
-            val pendingCursor = db.getSyncState("pending_cursor")
-            if (pendingCursor != null) {
-                db.setSyncState("delta_cursor", pendingCursor)
-                db.setSyncState("last_full_scan", Instant.now().toString())
-            }
+            // UD-260 / UD-901e: promote pending cursor only if the gather pass
+            // that wrote it was complete (see promotePendingCursorIfComplete).
+            promotePendingCursorIfComplete()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(0, 0, 0, duration)
             return
@@ -307,12 +337,9 @@ class SyncEngine(
                     else -> {}
                 }
             }
-            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
-            val pendingCursor = db.getSyncState("pending_cursor")
-            if (pendingCursor != null) {
-                db.setSyncState("delta_cursor", pendingCursor)
-                db.setSyncState("last_full_scan", Instant.now().toString())
-            }
+            // UD-260 / UD-901e: promote pending cursor only if the gather pass
+            // that wrote it was complete (see promotePendingCursorIfComplete).
+            promotePendingCursorIfComplete()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration, counts)
             return
@@ -380,19 +407,33 @@ class SyncEngine(
                     consecutiveFailures = 0
                 } catch (e: AuthenticationException) {
                     // UD-253: include exception class + full stack for auth failures.
-                    log.error("Authentication failed, stopping sync: {}: {}", e.javaClass.simpleName, e.message, e)
+                    // UD-203: append `requestId=<id>` when the provider's exception
+                    // carries one, so the ERROR log line points at a Graph / S3 /
+                    // Internxt support trace.
+                    log.error(
+                        "Authentication failed, stopping sync: {}: {}{}",
+                        e.javaClass.simpleName,
+                        e.message,
+                        org.krost.unidrive.requestIdSuffix(e),
+                        e,
+                    )
                     throw e
                 } catch (e: Exception) {
                     consecutiveFailures++
                     passOneFailures.incrementAndGet()
                     // UD-253: class name + throwable (SLF4J renders stack trace when the
                     // last arg is a Throwable) so WARNs are self-diagnosing in the log.
+                    // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
+                    // caught exception is a ProviderException with a non-null id,
+                    // empty string otherwise — same line shape as before for non-
+                    // provider failures.
                     log.warn(
-                        "Action failed for {} ({} consecutive): {}: {}",
+                        "Action failed for {} ({} consecutive): {}: {}{}",
                         action.path,
                         consecutiveFailures,
                         e.javaClass.simpleName,
                         e.message,
+                        org.krost.unidrive.requestIdSuffix(e),
                         e,
                     )
                     reporter.onWarning("Failed: ${action.path} - ${e.message}")
@@ -430,6 +471,27 @@ class SyncEngine(
         } catch (e: Exception) {
             db.rollbackBatch()
             throw e
+        }
+
+        // UD-236: refresh-mode short-circuit. Pass 1 (metadata) is done; transfers
+        // remain pending in the DB as remoteId=null / isHydrated=false rows. The
+        // pending_cursor stays unpromoted so the next `apply` (or `sync`) finalises.
+        if (skipTransfers) {
+            val pendingTransfers = actions.count { it is SyncAction.DownloadContent || it is SyncAction.Upload }
+            log.info(
+                "Refresh mode: skipping Pass 2; {} pending transfer(s) deferred (downloads + uploads)",
+                pendingTransfers,
+            )
+            val duration = System.currentTimeMillis() - startTime
+            reporter.onSyncComplete(
+                downloaded = 0,
+                uploaded = 0,
+                conflicts = conflicts.get(),
+                durationMs = duration,
+                actionCounts = actions.groupingBy { actionLabel(it) }.eachCount(),
+                failed = passOneFailures.get(),
+            )
+            return
         }
 
         // Pass 2: concurrent transfers (downloads and uploads)
@@ -556,10 +618,11 @@ class SyncEngine(
         // otherwise be lost forever: the server-side delta cursor advances past it and future
         // syncs would not re-see it as "new". Failed items keep pending_cursor → next sync redoes
         // the delta from the previous promoted cursor.
-        val cursor = db.getSyncState("pending_cursor")
-        if (cursor != null && transferFailures.get() == 0) {
-            db.setSyncState("delta_cursor", cursor)
-            db.setSyncState("last_full_scan", Instant.now().toString())
+        //
+        // UD-901e additionally gates promotion on the gather pass being complete
+        // (see promotePendingCursorIfComplete).
+        if (transferFailures.get() == 0) {
+            promotePendingCursorIfComplete()
         }
 
         val duration = System.currentTimeMillis() - startTime
@@ -648,6 +711,13 @@ class SyncEngine(
             reporter.onScanProgress("remote", itemsSoFar)
         }
 
+        // UD-360: providers signal partial gathers via DeltaPage.complete=false.
+        // We track that across pages and skip the absence-implies-deletion sweep
+        // (detectMissingAfterFullSync) when any page was incomplete — otherwise
+        // a transient subtree error on the provider side would synthesize bogus
+        // DeleteLocal actions for every file under that subtree.
+        var allComplete = true
+
         suspend fun nextPage(c: String?): DeltaPage {
             val page =
                 if (useShared) {
@@ -661,7 +731,24 @@ class SyncEngine(
             // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
             // of the five providers that used to emit the same data per-page.
             log.debug("Delta: {} items, hasMore={}", page.items.size, page.hasMore)
+            if (!page.complete) {
+                allComplete = false
+            }
             return page
+        }
+
+        // UD-901e: persist the running completeness flag alongside the cursor.
+        // The 3 cursor-promotion sites (apply / dry-run / empty-action) check
+        // `pending_cursor_complete` and refuse to promote when any page in the
+        // gather pass returned complete=false — otherwise a transient subtree
+        // 500/503 would bake the incomplete sweep's cursor into delta_cursor,
+        // and the next sync would resume from a point past items it never
+        // enumerated. Stored as the string "true"/"false"; absent is treated
+        // as "true" by the promotion guards for backwards-compat with state.db
+        // files that predate this flag.
+        fun persistPendingCursor(cursor: String) {
+            db.setSyncState("pending_cursor", cursor)
+            db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
         }
 
         var page = nextPage(cursor)
@@ -669,7 +756,7 @@ class SyncEngine(
             val resolved = resolveItemPath(item) ?: continue
             changes[resolved.path] = resolved
         }
-        db.setSyncState("pending_cursor", page.cursor)
+        persistPendingCursor(page.cursor)
         // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
         // so a 113k-item drive emits ~2260 update events — cheap, and the
         // reporter is responsible for throttling display (CliProgressReporter
@@ -682,14 +769,48 @@ class SyncEngine(
                 val resolved = resolveItemPath(item) ?: continue
                 changes[resolved.path] = resolved
             }
-            db.setSyncState("pending_cursor", page.cursor)
+            persistPendingCursor(page.cursor)
             reporter.onScanProgress("remote", changes.size)
         }
 
-        if (isFullSync) {
+        if (isFullSync && allComplete) {
             detectMissingAfterFullSync(changes)
+        } else if (isFullSync) {
+            val msg =
+                "UD-360: at least one delta page returned complete=false; " +
+                    "skipping detectMissingAfterFullSync to avoid spurious del-local actions. " +
+                    "The missing inventory will be picked up on the next sync run."
+            log.warn(msg)
+            reporter.onWarning(msg)
         }
         return changes
+    }
+
+    /**
+     * UD-901e: promote `pending_cursor` to `delta_cursor` only when the gather
+     * pass that produced it was complete. A `pending_cursor_complete` value
+     * of "false" means at least one delta page returned `complete=false`
+     * (currently: Internxt subtree 500/503 skip path), and promoting that
+     * cursor would silently skip items in the failed subtree on the next run.
+     * Absent flag is treated as complete=true so the gate is backwards-compat
+     * with state.db files written before this flag landed.
+     *
+     * Returns true if promotion happened; false if it was withheld. Callers
+     * use the return value only for `last_full_scan` bookkeeping.
+     */
+    private fun promotePendingCursorIfComplete(): Boolean {
+        val pendingCursor = db.getSyncState("pending_cursor") ?: return false
+        val complete = db.getSyncState("pending_cursor_complete") ?: "true"
+        if (complete != "true") {
+            log.warn(
+                "UD-901e: withholding pending_cursor promotion — gather pass was incomplete. " +
+                    "delta_cursor stays at its previous value so missed inventory is re-enumerated next run.",
+            )
+            return false
+        }
+        db.setSyncState("delta_cursor", pendingCursor)
+        db.setSyncState("last_full_scan", Instant.now().toString())
+        return true
     }
 
     /**
@@ -758,7 +879,10 @@ class SyncEngine(
             }
 
             if (shouldDownload) {
-                provider.download(action.path, localPath)
+                // UD-225b: prefer id-based dispatch — path-based download triggers
+                // a per-segment folder traversal in resolveFolder which can fail
+                // on transient 503s or sanitization edge cases (UD-317).
+                downloadByIdOrPath(item, action.path, localPath)
                 placeholder.restoreMtime(action.path, item.modified)
             }
         }
@@ -779,7 +903,8 @@ class SyncEngine(
         withEchoSuppression(action.path) {
             if (action.wasHydrated && !item.isFolder) {
                 try {
-                    provider.download(action.path, placeholder.resolveLocal(action.path))
+                    // UD-225b: id-based dispatch (see applyCreatePlaceholder).
+                    downloadByIdOrPath(item, action.path, placeholder.resolveLocal(action.path))
                     placeholder.restoreMtime(action.path, item.modified)
                 } catch (e: Exception) {
                     restoreToPlaceholder(action.path, item)
@@ -793,32 +918,105 @@ class SyncEngine(
         db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
     }
 
+    /**
+     * UD-225b: prefer id-based download dispatch when the action's CloudItem
+     * carries a remoteId. Path-based `provider.download(remotePath, dest)`
+     * forces providers like Internxt to walk the folder tree segment-by-
+     * segment via `getFolderContents` (`InternxtProvider.resolveFolder`),
+     * which is wasteful (one round-trip per path component) and fragile
+     * (any segment that fails sanitization or hits a transient 503 fails
+     * the whole download with `Folder not found: <segment>`). Live impact
+     * 2026-05-03 on the UD-225a recovery sync: ~44 % of 1,426 files failed
+     * with that error before this fix.
+     *
+     * The `CloudProvider.downloadById` default delegates to path-based
+     * `download` for providers that don't override, so the change is safe
+     * across the SPI: providers with a real id-based path (Internxt's
+     * Bridge fileUuid lookup, OneDrive Graph item-id GET) take it; others
+     * keep existing semantics.
+     *
+     * Empty `item.id` falls through to path-based download — defensive for
+     * synthesized CloudItems where `entry.remoteId` was null.
+     */
+    private suspend fun downloadByIdOrPath(
+        item: CloudItem,
+        remotePath: String,
+        destination: java.nio.file.Path,
+    ): Long =
+        if (item.id.isNotEmpty()) {
+            provider.downloadById(item.id, remotePath, destination)
+        } else {
+            provider.download(remotePath, destination)
+        }
+
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
+        log.debug("Download: {} ({} bytes)", action.path, action.remoteItem.size)
         val localPath = placeholder.resolveLocal(action.path)
         if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
             versionManager.snapshot(action.path)
             versionManager.pruneByCount(action.path, maxVersions)
         }
-        withEchoSuppression(action.path) {
-            provider.download(action.path, localPath)
-            placeholder.restoreMtime(action.path, action.remoteItem.modified)
-        }
-
-        if (verifyIntegrity) {
-            val verified = HashVerifier.verify(localPath, action.remoteItem.hash, providerId)
-            if (!verified) {
-                reporter.onWarning("Integrity check failed: ${action.path}")
+        // UD-113: capture pre-action hash for the audit oldHash field.
+        val prevHash = db.getEntry(action.path)?.remoteHash
+        try {
+            withEchoSuppression(action.path) {
+                // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
+                downloadByIdOrPath(action.remoteItem, action.path, localPath)
+                placeholder.restoreMtime(action.path, action.remoteItem.modified)
             }
-        }
 
-        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            if (verifyIntegrity) {
+                val verified = HashVerifier.verify(localPath, action.remoteItem.hash, algorithm = provider.hashAlgorithm())
+                if (!verified) {
+                    reporter.onWarning("Integrity check failed: ${action.path}")
+                }
+            }
+
+            db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            auditLog?.emit(
+                action = "Download",
+                path = action.path,
+                size = action.remoteItem.size,
+                oldHash = prevHash,
+                newHash = action.remoteItem.hash,
+                result = "success",
+            )
+        } catch (e: Exception) {
+            auditLog?.emit(
+                action = "Download",
+                path = action.path,
+                size = action.remoteItem.size,
+                oldHash = prevHash,
+                result = "failed:${e.javaClass.simpleName}: ${e.message}",
+            )
+            throw e
+        }
     }
 
     private suspend fun applyUpload(action: SyncAction.Upload) {
         val localPath = placeholder.resolveLocal(action.path)
+        val sizeForLog = if (Files.isRegularFile(localPath)) Files.size(localPath) else -1L
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Upload: {} ({} bytes)", action.path, sizeForLog)
+        // UD-113: capture pre-action remote hash so the audit entry's oldHash reflects
+        // the version we replaced (or null for a fresh upload).
+        val prevHash = db.getEntry(action.path)?.remoteHash
         val result =
-            provider.upload(localPath, action.path) { transferred, total ->
-                reporter.onTransferProgress(action.path, transferred, total)
+            try {
+                // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
+                // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
+                provider.upload(localPath, action.path, existingRemoteId = action.remoteId) { transferred, total ->
+                    reporter.onTransferProgress(action.path, transferred, total)
+                }
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Upload",
+                    path = action.path,
+                    size = if (sizeForLog >= 0) sizeForLog else null,
+                    oldHash = prevHash,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
             }
         val mtime = Files.getLastModifiedTime(localPath).toMillis()
         val size = Files.size(localPath)
@@ -837,12 +1035,34 @@ class SyncEngine(
                 lastSynced = Instant.now(),
             ),
         )
+        // UD-113: success path. Failure path emits inside the try/catch above.
+        auditLog?.emit(
+            action = "Upload",
+            path = action.path,
+            size = size,
+            oldHash = prevHash,
+            newHash = result.hash,
+            result = "success",
+        )
     }
 
     private suspend fun applyMoveRemote(action: SyncAction.MoveRemote) {
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Move: {} -> {}", action.fromPath, action.path)
         val oldEntry = db.getEntry(action.fromPath)
         val isFolder = oldEntry?.isFolder ?: false
-        val result = provider.move(action.fromPath, action.path)
+        val result =
+            try {
+                provider.move(action.fromPath, action.path)
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Move",
+                    path = action.path,
+                    fromPath = action.fromPath,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
         val localPath = placeholder.resolveLocal(action.path)
         val mtime = if (Files.exists(localPath)) Files.getLastModifiedTime(localPath).toMillis() else 0L
         val size =
@@ -854,6 +1074,20 @@ class SyncEngine(
                 oldEntry?.remoteSize ?: 0L
             }
         db.deleteEntry(action.fromPath)
+        // UD-901d: renamePrefix() must run BEFORE the destination upsert.
+        // renamePrefix's UD-901c cleanup phase deletes every row at the
+        // new prefix (including `newPrefix.removeSuffix("/")` — the folder
+        // root row itself) to clear out pre-existing LocalScanner UD-901
+        // placeholder rows that would otherwise collide with the UPDATE.
+        // If we upserted first and renamed second, the cleanup would wipe
+        // the canonical destination row we just wrote, leaving the moved
+        // folder with no remoteId/metadata in state.db — every subsequent
+        // scan would treat the folder as untracked and try to re-create
+        // it remotely. Upserting AFTER the rename keeps cleanup honest
+        // and the canonical row intact.
+        if (isFolder) {
+            db.renamePrefix(action.fromPath, action.path)
+        }
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
@@ -869,9 +1103,15 @@ class SyncEngine(
                 lastSynced = Instant.now(),
             ),
         )
-        if (isFolder) {
-            db.renamePrefix(action.fromPath, action.path)
-        }
+        // UD-113: success path for the remote-side rename/move.
+        auditLog?.emit(
+            action = "Move",
+            path = action.path,
+            fromPath = action.fromPath,
+            oldHash = oldEntry?.remoteHash,
+            newHash = result.hash,
+            result = "success",
+        )
     }
 
     private fun applyMoveLocal(action: SyncAction.MoveLocal) {
@@ -895,10 +1135,14 @@ class SyncEngine(
         }
 
         db.deleteEntry(action.fromPath)
-        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
+        // UD-901d: renamePrefix() must run BEFORE the destination upsert —
+        // see applyMoveRemote for the full rationale. Same bug class:
+        // renamePrefix's UD-901c cleanup deletes the destination root row
+        // it doesn't know was meant to be canonical.
         if (isFolder) {
             db.renamePrefix(action.fromPath, action.path)
         }
+        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
     }
 
     private fun applyDeleteLocal(action: SyncAction.DeleteLocal) {
@@ -915,16 +1159,48 @@ class SyncEngine(
     }
 
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Delete: {}", action.path)
+        // UD-113: capture pre-delete row for the audit entry.
+        val priorEntry = db.getEntry(action.path)
+        var auditResult = "success"
         try {
             provider.delete(action.path)
         } catch (e: ProviderException) {
             log.debug("DeleteRemote skipped for ${action.path}: ${e.message}")
+            auditResult = "skipped:${e.message}"
+        } catch (e: Exception) {
+            auditLog?.emit(
+                action = "Delete",
+                path = action.path,
+                size = priorEntry?.remoteSize,
+                oldHash = priorEntry?.remoteHash,
+                result = "failed:${e.javaClass.simpleName}: ${e.message}",
+            )
+            throw e
         }
         db.deleteEntry(action.path)
+        auditLog?.emit(
+            action = "Delete",
+            path = action.path,
+            size = priorEntry?.remoteSize,
+            oldHash = priorEntry?.remoteHash,
+            result = auditResult,
+        )
     }
 
     private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
-        val result = provider.createFolder(action.path)
+        val result =
+            try {
+                provider.createFolder(action.path)
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "CreateRemoteFolder",
+                    path = action.path,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
@@ -939,6 +1215,12 @@ class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
             ),
+        )
+        // UD-113: success path.
+        auditLog?.emit(
+            action = "CreateRemoteFolder",
+            path = action.path,
+            result = "success",
         )
     }
 
@@ -981,12 +1263,19 @@ class SyncEngine(
             val conflictPath = "$base$conflictSuffix"
             val conflictLocal = placeholder.resolveLocal(conflictPath)
             withEchoSuppression(conflictPath) {
-                provider.download(action.remoteItem.path, conflictLocal)
+                // UD-225b: id-based dispatch (see applyCreatePlaceholder).
+                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, conflictLocal)
             }
             if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
                 if (Files.exists(localPath)) {
                     val result =
-                        provider.upload(localPath, action.path) { transferred, total ->
+                        // UD-366: COPY-MERGE conflict — remote already has a UUID; overwrite
+                        // it in place rather than POSTing a duplicate that 409s.
+                        provider.upload(
+                            localPath,
+                            action.path,
+                            existingRemoteId = action.remoteItem.id,
+                        ) { transferred, total ->
                             reporter.onTransferProgress(action.path, transferred, total)
                         }
                     val mtime = Files.getLastModifiedTime(localPath).toMillis()
@@ -1060,7 +1349,10 @@ class SyncEngine(
         if (remoteWins && action.remoteItem != null && !action.remoteItem.deleted) {
             applyCreatePlaceholder(SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = true))
         } else if (!remoteWins && Files.exists(localPath)) {
-            applyUpload(SyncAction.Upload(action.path))
+            // UD-366: conflict-loser is the remote — overwrite it in place rather than
+            // POSTing a duplicate. action.remoteItem is non-null on this branch because
+            // remoteWins=false implies a remote modification was the conflict trigger.
+            applyUpload(SyncAction.Upload(action.path, remoteId = action.remoteItem?.id))
         }
     }
 

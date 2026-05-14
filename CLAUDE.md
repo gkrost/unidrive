@@ -9,10 +9,7 @@ server + sync engine + provider adapters.
 ## Quick start for a new session
 
 1. Read this file (you're already doing it).
-2. Skim [`docs/dev/lessons/`](docs/dev/lessons/) — six short notes on
-   the rakes contributors keep stepping on (jar hot-swap, ktlint
-   baseline drift, Kotlin trailing-lambda ordering, MDC in suspend
-   functions, verify-before-narrative, halted-agent WIP leaks).
+2. Skim [`docs/dev/lessons/`](docs/dev/lessons/)
 3. For backlog work, use `python scripts/dev/backlog.py` — never
    hand-edit `docs/backlog/BACKLOG.md` / `CLOSED.md`. Per-topic
    detail in §"Before you start mutating BACKLOG.md" below.

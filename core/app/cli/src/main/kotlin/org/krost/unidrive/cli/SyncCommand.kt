@@ -2,7 +2,6 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.slf4j.MDCContext
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
@@ -39,7 +38,15 @@ import java.time.temporal.ChronoUnit
 import kotlin.time.Duration.Companion.seconds
 
 @Command(name = "sync", description = ["Sync files with cloud provider"], mixinStandardHelpOptions = true)
-class SyncCommand : Runnable {
+open class SyncCommand : Runnable {
+    // UD-236: refresh/apply override these via subclass to drive partial syncs.
+    // refresh = skipTransfers=true (Pass 1 only, defer byte transfers).
+    // apply = skipRemoteGather=true (no provider.delta(), let recovery loops drive).
+    // sync = both false (current behaviour).
+    open var skipTransfers: Boolean = false
+    open var skipRemoteGather: Boolean = false
+
+
     @ParentCommand
     lateinit var parent: Main
 
@@ -136,6 +143,14 @@ class SyncCommand : Runnable {
                 "--propagate-deletes is only valid together with --upload-only.",
             )
         }
+        // UD-405: normalise --sync-path at the CLI boundary. PowerShell tab-
+        // completion routinely produces backslash-prefixed values like
+        // `'\Project Notes'`; without normalisation the engine's
+        // scope filter (which compares against forward-slash paths) silently
+        // matches nothing and the sync runs against zero in-scope items.
+        // Mirrors UD-299's sync_root normalisation philosophy: do-what-I-mean
+        // for paths instead of failing loud.
+        syncPath = normalizeSyncPath(syncPath)
         val lock = parent.acquireProfileLock()
         val profile = parent.resolveCurrentProfile()
         val rawProvider = parent.createProvider()
@@ -313,6 +328,13 @@ class SyncCommand : Runnable {
                 null
             }
 
+        // UD-113: structured per-action audit log. JSONL date-stamped under
+        // {profileConfigDir}/audit-YYYY-MM-DD.jsonl. Always-on; emit failures
+        // are swallowed at WARN, never blocks the sync engine.
+        val auditLog =
+            org.krost.unidrive.sync.audit
+                .AuditLog(parent.providerConfigDir(), profile.name)
+
         val engine =
             SyncEngine(
                 provider = xtraProvider ?: provider,
@@ -341,6 +363,7 @@ class SyncCommand : Runnable {
                 versionRetentionDays = config.versionRetentionDays,
                 // UD-223: CLI flag wins over config.toml per-profile setting.
                 fastBootstrap = fastBootstrap || profile.rawProvider?.fast_bootstrap == true,
+                auditLog = auditLog,
             )
 
         Files.createDirectories(config.syncRoot)
@@ -350,11 +373,24 @@ class SyncCommand : Runnable {
         subscriptionStore.initialize()
 
         try {
-            // UD-212: runBlocking(MDCContext()) propagates the `profile=<name>` MDC set by
-            // Main.resolveCurrentProfile() across all dispatched coroutines, including Pass 2's
-            // concurrent downloads on DefaultDispatcher workers. Without this, log lines emitted
-            // from worker threads lose the profile tag.
-            runBlocking(MDCContext()) {
+            // UD-254a: dropped MDCContext() here. Live JFR (2026-05-02) showed
+            // `LogbackMDCAdapter.getPropertyMap` accounting for 80.63 % of all
+            // allocation pressure — every coroutine resume on this hot path was
+            // cloning the MDC HashMap (getCopyOfContextMap save + setContextMap
+            // restore = 2 allocations per dispatch). With Pass-2 upload workers
+            // suspending repeatedly through Ktor's HTTP/2 stack the count went
+            // into the millions.
+            //
+            // UD-212 originally added MDCContext() so worker-thread log lines
+            // would inherit the `profile=<name>` MDC tag. Trade now: worker
+            // log lines lose `[profile]` / `[scan]` interpolation. Acceptable
+            // because (a) one daemon = one profile (logs are unambiguous) and
+            // (b) scan/profile are still on the synchronous main thread for
+            // the engine's banner lines (`Scan started`/`Scan ended`). The
+            // canonical follow-up — id-in-message logging on coroutine paths
+            // per the lessons/mdc-in-suspend.md guidance — is the wider Slice
+            // B in UD-254a's body and out of scope for this single-file fix.
+            runBlocking {
                 ipcServer.start(this)
                 provider.authenticateAndLog()
 
@@ -463,7 +499,20 @@ class SyncCommand : Runnable {
                         dryRun = dryRun,
                         forceDelete = forceDelete,
                         reason = org.krost.unidrive.sync.SyncReason.MANUAL,
+                        // UD-236: refresh / apply set these via subclass.
+                        skipTransfers = skipTransfers,
+                        skipRemoteGather = skipRemoteGather,
                     )
+                    // UD-406: cancel the IPC accept loop so runBlocking can return.
+                    // ipcServer.start(this) at line ~366 above launches an infinite
+                    // accept-loop coroutine into this scope; runBlocking { } would
+                    // otherwise block forever waiting for it to complete. The
+                    // finally{} below ALSO calls ipcServer.close(), but that runs
+                    // only AFTER runBlocking returns — chicken-and-egg.
+                    //
+                    // close() is idempotent (acceptJob?.cancel() is a no-op on
+                    // already-cancelled jobs), so the double-close is harmless.
+                    ipcServer.close()
                 }
             }
         } catch (e: AuthenticationException) {
@@ -612,6 +661,11 @@ class SyncCommand : Runnable {
             count: Int,
         ) = delegates.forEach { it.onScanProgress(phase, count) }
 
+        override fun onReconcileProgress(
+            processed: Int,
+            total: Int,
+        ) = delegates.forEach { it.onReconcileProgress(processed, total) }
+
         override fun onActionCount(total: Int) = delegates.forEach { it.onActionCount(total) }
 
         override fun onActionProgress(
@@ -643,5 +697,36 @@ class SyncCommand : Runnable {
         }
 
         override fun onWarning(message: String) = delegates.forEach { it.onWarning(message) }
+    }
+
+    companion object {
+        /**
+         * UD-405: normalise a `--sync-path` value (or its `sync_path` config
+         * equivalent) to the forward-slash, leading-slash, no-trailing-slash
+         * form the SyncEngine scope filter expects.
+         *
+         * Returns null if the input is null, empty, or normalises to "/"
+         * (which is the same as "no scope" — every path startsWith "/").
+         *
+         * Examples:
+         *   `\Project Notes` → `/Project Notes`
+         *   `\internal\sub\`           → `/internal/sub`
+         *   `internal`                 → `/internal`
+         *   `/`                        → `null` (= no scope)
+         *   `""`                       → `null`
+         */
+        internal fun normalizeSyncPath(raw: String?): String? {
+            if (raw.isNullOrEmpty()) return null
+            // Replace any backslashes with forward slashes (PowerShell-friendly).
+            var s = raw.replace('\\', '/')
+            // Collapse runs of '/' to a single '/' (handles "//", "\\\\", mixed).
+            s = s.replace(Regex("/+"), "/")
+            // Ensure leading '/'.
+            if (!s.startsWith("/")) s = "/$s"
+            // Strip trailing '/' (engine matches startsWith("$syncPath/")).
+            if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
+            // A bare "/" is the whole tree — same as no scope.
+            return if (s == "/") null else s
+        }
     }
 }

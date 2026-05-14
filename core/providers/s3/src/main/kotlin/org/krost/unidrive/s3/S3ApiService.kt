@@ -52,17 +52,8 @@ open class S3ApiService(
         destination: Path,
     ): Long {
         val url = objectUrl(key)
-        log.debug("Download: {}", key)
         val headers = SigV4Signer.sign("GET", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         log.debug("SigV4: GET {}", url)
-        // UD-349: switch from `httpClient.get(url)` + `response.body<ByteReadChannel>()`
-        // (Ktor 3.x trap — buffers the entire body into a single
-        // `byte[contentLength]` before exposing the channel; > 2 GiB objects
-        // OOM at allocation time) to `prepareGet().execute { bodyAsChannel() }`
-        // (true streaming, only the 8 KiB ring buffer below holds bytes).
-        // Same fix as UD-329 (OneDrive) and UD-332 (HiDrive). UD-340
-        // assertNotHtml guards against captive-portal HTML masquerading as
-        // the file body.
         var written = 0L
         httpClient
             .prepareGet(url) { headers.forEach { (k, v) -> header(k, v) } }
@@ -96,7 +87,7 @@ open class S3ApiService(
         onProgress: ((Long, Long) -> Unit)? = null,
     ): String? {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        log.debug("Upload: {} ({} bytes)", key, fileSize)
+        // UD-753: per-operation log moved to SyncEngine.applyUpload.
         val url = objectUrl(key)
         val headers =
             SigV4Signer.sign(
@@ -110,19 +101,10 @@ open class S3ApiService(
             )
         val response =
             httpClient.put(url) {
-                // UD-337: size-adaptive request timeout. Replaces the
-                // default HttpDefaults.REQUEST_TIMEOUT_MS = 600s flat
-                // cap so a multi-GB upload at typical link speed isn't
-                // torn down mid-PUT. copyObject below stays on the
-                // default cap — it's a metadata-plane operation
-                // (server-side copy, no body).
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
                 }
                 headers.forEach { (k, v) -> header(k, v) }
-                // UD-342: shared streamingFileBody adds UD-287
-                // finally-flushAndClose (S3's previous inline body
-                // lacked it).
                 setBody(streamingFileBody(localPath, fileSize))
             }
         checkResponse(response, url)
@@ -138,7 +120,7 @@ open class S3ApiService(
         fromKey: String,
         toKey: String,
     ) {
-        log.debug("Move: {} -> {}", fromKey, toKey)
+        // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val url = objectUrl(toKey)
         val encodedFrom =
             fromKey.removePrefix("/").split("/").joinToString("/") { segment ->
@@ -166,7 +148,7 @@ open class S3ApiService(
 
     /** Delete object at [key]. 204/404 are both treated as success. */
     open suspend fun deleteObject(key: String) {
-        log.debug("Delete: {}", key)
+        // UD-753: per-operation log moved to SyncEngine.applyDeleteRemote.
         val url = objectUrl(key)
         val headers = SigV4Signer.sign("DELETE", url, config.region, config.accessKey, config.secretKey, SigV4Signer.EMPTY_BODY_HASH)
         val response = httpClient.delete(url) { headers.forEach { (k, v) -> header(k, v) } }
@@ -294,6 +276,18 @@ open class S3ApiService(
     /** Convert an S3 key (foo/bar.txt) to a virtual path (/foo/bar.txt). */
     fun keyToPath(key: String): String = "/$key"
 
+    /**
+     * UD-203: pull the AWS S3 correlation headers off a response. AWS
+     * (and S3-compatible backends like MinIO) emit `x-amz-request-id`
+     * (primary; surfaced to AWS support tickets) and `x-amz-id-2` (the
+     * extended datacenter trace). MinIO ships both even though only the
+     * first is meaningful in self-hosted deployments. Returns null when
+     * the header is absent.
+     */
+    private fun extractRequestId(response: HttpResponse): String? = response.headers["x-amz-request-id"]
+
+    private fun extractExtendedRequestId(response: HttpResponse): String? = response.headers["x-amz-id-2"]
+
     private suspend fun checkResponse(
         response: HttpResponse,
         url: String,
@@ -302,12 +296,22 @@ open class S3ApiService(
         val body = response.bodyAsText()
         val code = xmlValue(body, "Code") ?: response.status.value.toString()
         val message = xmlValue(body, "Message") ?: ""
+        val requestId = extractRequestId(response)
+        val extendedRequestId = extractExtendedRequestId(response)
         when {
             response.status == HttpStatusCode.Unauthorized ||
                 response.status == HttpStatusCode.Forbidden ->
-                throw AuthenticationException("S3 auth failed ($code): $message [$url]")
+                throw AuthenticationException(
+                    "S3 auth failed ($code): $message [$url]",
+                    requestId = requestId,
+                )
             else ->
-                throw S3Exception("S3 error ($code): $message [$url]", response.status.value)
+                throw S3Exception(
+                    "S3 error ($code): $message [$url]",
+                    statusCode = response.status.value,
+                    requestId = requestId,
+                    extendedRequestId = extendedRequestId,
+                )
         }
     }
 

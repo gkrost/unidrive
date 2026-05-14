@@ -1,6 +1,5 @@
 package org.krost.unidrive.webdav
 
-import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
 import java.nio.file.Files
 import kotlin.test.*
@@ -62,84 +61,12 @@ class WebDavProviderFactoryTest {
         }
     }
 
-    @Test
-    fun `create throws when url is missing`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            val ex =
-                assertFailsWith<ConfigurationException> {
-                    factory.create(fullProps(mapOf("url" to null)), tokenDir)
-                }
-            assertEquals("webdav", ex.providerId)
-            assertTrue(ex.message.contains("url", ignoreCase = true))
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when url is blank`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("url" to "   ")), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when user is missing`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            val ex =
-                assertFailsWith<ConfigurationException> {
-                    factory.create(fullProps(mapOf("user" to null)), tokenDir)
-                }
-            assertTrue(ex.message.contains("user", ignoreCase = true))
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when user is blank`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("user" to "")), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when password is missing`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            val ex =
-                assertFailsWith<ConfigurationException> {
-                    factory.create(fullProps(mapOf("password" to null)), tokenDir)
-                }
-            assertTrue(ex.message.contains("password", ignoreCase = true))
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when password is blank`() {
-        val tokenDir = Files.createTempDirectory("webdav-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("password" to "  ")), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
+    // Required-field "missing/blank" cases for url/user/password (plus the
+    // providerId == "webdav" and message-mentions-key invariants previously
+    // asserted here) moved to UD-818:
+    // org.krost.unidrive.cli.ProviderFactoryRequiredFieldsTest. That
+    // parametric test drives the contract for every provider whose
+    // credentialPrompts() lists required prompts.
 
     // --- trust_all_certs ---
 

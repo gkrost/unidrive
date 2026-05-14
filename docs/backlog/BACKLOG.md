@@ -13,37 +13,8 @@ Each item is a frontmatter block + prose. Required fields: `id`, `title`, `categ
 ## Security (UD-100..199)
 
 ---
-id: UD-113
-title: Structured sync-action audit log (durable record of every local/remote mutation)
-category: security
-priority: low
-effort: M
-status: open
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
-adr_refs: [ADR-0004]
-opened: 2026-04-17
----
-Surfaced during the UD-112 STRIDE review. The v0.0.0 SECURITY.md seed claimed UD-111 covers "structured audit log per action" — but UD-111 is about token-refresh failure telemetry only, not a per-action audit trail. The STRIDE R-row (Repudiation) therefore has a gap: the sync engine emits WARN/INFO logs but nothing durable enough to prove "this run deleted X at Y on behalf of Z". Scope: an append-only JSONL log with `{ts, action, path, size, oldHash, newHash, result, profile}` per action, rotated daily, surfaced via MCP `unidrive_audit` tool (new). Acceptance: run `unidrive -p x sync` on a non-trivial change, observe `{profile}/audit.jsonl` grows with one entry per action. Deferred past v0.1.0 unless compliance need arises.
-
----
 
 ## Core daemon (UD-200..299)
-
----
-id: UD-205
-title: Peer-review — atomicity across sync transfer phases (Gemma, needs-verification)
-category: core
-priority: high
-effort: M
-status: needs-verification
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
-adr_refs: []
-opened: 2026-04-17
----
-Peer-review (local Gemma) claim: `SyncEngine` wraps its metadata actions in a `db.beginBatch()` / `commitBatch()` but runs concurrent transfers (Pass 2) **outside** that batch. **Spot-check (2026-04-17):** structurally confirmed at `SyncEngine.kt:172-218` (sequential batch) vs `:220-277` (`coroutineScope { launch { ... applyDownload/applyUpload ... } }` outside batch). However the peer's "dirty reads / phantom updates" framing overreaches: SQLite single-row writes are atomic and `ProcessLock` prevents overlapping sync runs, so concurrent row updates on *different* paths are safe. The real risk is **interruption recovery** — if Pass-2 is killed mid-transfer, state DB and local files diverge. Acceptance: audit resume logic (`Reconciler` + placeholder re-entry) against a SIGKILL-during-transfer test; decide whether a cross-phase transaction or a transfer-state marker column is warranted.
 
 ---
 id: UD-206
@@ -63,20 +34,6 @@ opened: 2026-04-17
 Spot-check (2026-04-17) refined the original peer-review claim. Change detection in `Reconciler.kt:34-35` compares **both** `hash` AND `modified`, not metadata alone — so Gemma's "size+mtime collision" framing is too strong. The real corner case: SFTP/WebDAV without server-side ETags, file deleted and recreated within the same OS-mtime tick with identical size, where there is also no content hash available. Rare in practice. Acceptance: add a "same-second delete+recreate" integration test fixture for SFTP; if the test can force the collision, add a defensive content-hash check on suspicion. Otherwise close as unreachable.
 
 ---
-id: UD-208
-title: Peer-review — SyncAction refactor to type + payload split (Gemma, deferred)
-category: core
-priority: low
-effort: M
-status: deferred
-code_refs:
-  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync
-adr_refs: []
-opened: 2026-04-17
----
-Peer-review structural suggestion: split `SyncAction` (sealed class today) into `SyncActionType` enum + `SyncActionPayload` data classes to shrink the `when` block in `SyncEngine`. **Deferred** because refactor-for-structure without a concrete bug-motivation violates the "don't refactor speculatively" guidance; reopen if `SyncEngine`'s action-dispatch becomes a maintenance bottleneck.
-
----
 id: UD-209
 title: Windows sparse-file support for placeholders (PlaceholderManager)
 category: core
@@ -94,22 +51,6 @@ opened: 2026-04-17
 ---
 
 ## Providers (UD-300..399)
-
----
-id: UD-302
-title: deltaWithShared gap closure (S3, SFTP, Rclone, LocalFS, WebDAV, HiDrive, Internxt)
-category: providers
-priority: medium
-effort: L
-status: open
-code_refs:
-  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
-  - core/providers
-adr_refs: [ADR-0005]
-opened: 2026-04-17
-chunk: sg5
----
-All non-OneDrive providers silently return empty. Either implement a meaningful `deltaWithShared()` or declare `Unsupported` per UD-301.
 
 ---
 id: UD-305
@@ -133,8 +74,7 @@ Surfaced during the 2026-04-17 e2e test drive against sg5 (192.168.0.63) and kro
 
 ## UI / tray (UD-500..599)
 
-> **Out of scope for unidrive-cli.** UI / tray work moved to
-> [`UI_UD.md`](../../UI_UD.md) at the repo root on 2026-04-30.
+> **Out of scope for unidrive-cli.** 
 > File new UI tickets there (or in the future UI repo), not here.
 
 ---
@@ -160,37 +100,6 @@ opened: 2026-04-17
 milestone: v0.1.0
 ---
 Imported coverage is ~39% file ratio. Prioritize MCP roundtrip (UD-202), sync reconciler corner cases, provider adapters for `localfs + s3 + sftp`. Uses existing JaCoCo wiring in `core/build.gradle.kts`.
-
----
-id: UD-229
-title: Research — Microsoft Graph API feature table: what unidrive uses vs ignores
-category: docs
-priority: low
-effort: M
-code_refs:
-  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive
-status: open
-opened: 2026-04-19
----
-Produce two tables in `docs/providers/onedrive-graph-coverage.md`:
-
-**Table A — Top 10 Graph features unidrive DOES use** — e.g. `/me/drive/root/delta` (delta enum), `/me/drive/items/{id}/content` (download), upload session, webhook subscriptions, `/createLink` sharing, etc. Per row: endpoint, why unidrive calls it, file:line of the caller, known quirks (UD-307-style ZWJ rejections, CDN 429 patterns, Retry-After header habits).
-
-**Table B — Top 10 Graph features unidrive DOES NOT use** — candidates worth evaluating for v0.2.0+. Ideas:
-  * **Drive-level search** (`/me/drive/search(q='...')`) — would let `unidrive search` skip full enumeration.
-  * **Item preview** (`/items/{id}/preview`) — tray hover thumbnails / MCP previews.
-  * **OneNote scope** — currently invisible to unidrive.
-  * **Shared items `/me/drive/sharedWithMe`** — partially wired via UD-301 deltaWithShared, but explicit listings would help UX.
-  * **Sensitivity labels / retention** — compliance features relevant for enterprise pitches.
-  * **Thumbnail sizes** — cheaper than download for tray previews.
-  * **Item versioning** `/items/{id}/versions` — unidrive has its own `.unidrive-versions/` scheme; overlap.
-  * **Long-running operations** (`/async-monitor`) — we probably want these for large moves.
-  * **Audit logs** (enterprise tenants) — relevant for UD-113 audit trail.
-  * **Batch requests** (`/$batch`) — up to 20 ops in one HTTP call, reduces throttle pressure.
-
-Each row: endpoint, what it does, cost (RPS impact, throttle class), unidrive-side integration cost (S/M/L), priority.
-
-Companion cross-reference to ADR-0005 (Provider capability contract).
 
 ---
 id: UD-230
@@ -518,72 +427,6 @@ Internxt is the notable gap — this harness explicitly can't cross-check it. Th
 - UD-230 (closed — per-provider client notes) — vendor-docs baseline this harness verifies against in practice.
 - UD-808 (open — OAuth test framework, blocked on secret injection) — necessary for the OneDrive half of this harness in CI. Use the UD-723-deployed `unidrive-test-oauth` MCP for local dev; CI waits on UD-808.
 ---
-id: UD-236
-title: CLI: split `sync` into `refresh` + `apply` + `sync` — git-style three-verb model (Direction B chosen)
-category: core
-priority: medium
-effort: M
-status: open
-code_refs:
-  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
-  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
-  - docs/user-guide/consequences.md
-opened: 2026-04-19
-chunk: core
----
-**UX feedback 2026-04-19.** Gernot's paraphrase during the Internxt-auth session: *"sync state of files (from) cloud provider; the action is idempotent to the local files, that changes when download is triggered"* — matches the pre-UD-222 mental model (placeholder stubs until `get`). Post-UD-222 the code actually moves bytes by default because remote-new non-folders emit `DownloadContent` in Pass 2; the user-facing mental model and the implementation drifted apart.
-
-**Direction chosen 2026-04-19: B — git-style three-verb split.** Gernot: *"it's more git'ish style, i like that"*.
-
-## Target shape
-
-```
-unidrive -p X refresh     # Gather + Reconcile only; update state.db with remote changes. Moves ZERO bytes.
-unidrive -p X apply       # Apply pending DB actions (download, upload) without re-gathering.
-unidrive -p X sync        # refresh + apply (the current combined path — kept as-is so existing scripts keep working).
-```
-
-Parallels `git fetch` → `git merge` → `git pull`. Matches unidrive's internal three-phase architecture: Gather → Reconcile → Apply.
-
-## Implementation sketch
-
-- Extract the Gather+Reconcile portion of `SyncCommand.call()` into a `RefreshCommand`. It runs the engine up to the point actions are generated, persists `pending_cursor` + any inserted/updated DB entries, and prints the action summary (e.g. *"12 download, 3 upload, 1 conflict pending — run `apply` to execute"*).
-- Extract the Apply portion into `ApplyCommand`. It reads the persisted pending actions from `state.db` (new table or field per action — needs a design bit), executes Pass 1 + Pass 2, clears pending on success.
-- `SyncCommand` becomes a thin composition: `refresh` then (if refresh produced actions) `apply`. Flags `--download-only` / `--upload-only` propagate to the apply phase.
-- `status --pending` (companion; was direction C's idea, fits here too) prints what a hypothetical `apply` would do — cheap, reads the same pending table.
-
-## Persistence for pending actions
-
-Today `SyncAction` is in-memory only, generated per `sync` run. To make `apply` work as a separate command, the action list needs to survive between processes. Options:
-(a) A new `pending_actions` SQLite table in `state.db` with rows per action (path + type + remote-ref).
-(b) A serialised JSON file alongside `state.db` (`pending.json`).
-(a) is cleaner; (b) is simpler. Lean (a) for rollback-ability + atomic commits.
-
-## Breaking changes
-
-None for existing scripts that invoke `sync`. Anything new goes under `refresh` / `apply`. Old `--download-only` / `--upload-only` semantics preserved on `sync`; propagated to `apply` as well.
-
-## Acceptance
-
-1. `unidrive -p X refresh` updates `state.db` with the current remote delta and prints a summary of pending actions. No bytes moved.
-2. `unidrive -p X apply` executes the pending actions from (1); `state.db` after is identical to what `unidrive -p X sync` would have produced.
-3. `unidrive -p X sync` with no changes behaves identically to today's `sync` (no regressions in MCP round-trip tests).
-4. `unidrive -p X status --pending` (new) prints the action plan without executing.
-5. `docs/user-guide/consequences.md` gets a section "The three verbs" explaining when to use which.
-6. Existing `SyncCommand`-level integration tests pass unchanged. New tests cover the split flow.
-
-## Related
-
-- UD-222 (closed) — the change that drove sync to move bytes by default; this ticket is the UX consequence.
-- UD-220 (open) — `consequences.md` user doc; home for the "three verbs" section.
-- UD-713 (open) — first-sync ETA; with `refresh` as a separate command, the ETA question becomes cleanly scoped to enumeration.
-- UD-237 (open, sibling) — `-p TYPE` auto-resolve polish; both tickets raised at the same verify-the-Internxt-auth moment.
-
-## Priority
-
-**Medium, M effort.** Breaks nothing existing, matches git's proven ergonomics, explicit three-phase visibility makes first-sync ETA + offline-quota queries cleaner. Not v0.1.0 critical but pulls a meaningful weight of UX clarity across several open tickets.
-
----
 id: UD-239
 title: Vault — elevate xtra_encryption to first-class multi-layered OSS-crypto concept (JDK hardening, Bouncy Castle, age)
 category: core
@@ -645,93 +488,6 @@ chunk: core
 ## Priority
 
 **Medium, L effort** as an umbrella; individual children range XS (docs) to L (Bouncy Castle integration + tests). The JDK-hardening child is the highest-leverage chunk and should land first.
----
-id: UD-240
-title: Feedback for long-running (>0.5s) CLI/UI actions — always-on IPC, progress state file, heartbeat, inline CLI progress
-category: core
-priority: medium
-effort: M
-status: open
-opened: 2026-04-19
-chunk: ipc-ui
----
-**Improve feedback for long-running (>0.5s) unidrive actions across both CLI and UI. Research done 2026-04-19; concrete recommendations below.**
-
-## Observed failure mode that motivated this ticket
-
-2026-04-19 session: daemon PID 10792 ran `unidrive -c <config> -p inxt_gernot_krost_posteo sync` (one-shot, no `--watch`) for ~50 min. The UI tray reported "no daemon" the whole time, which read as broken. Root cause is structural, not a UI bug per se.
-
-## Root cause
-
-[`SyncCommand.kt:153-157`](core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:153) only starts `IpcServer` + `NamedPipeServer` when `watch = true`. [`DaemonDiscovery.kt:34-49`](ui/src/main/kotlin/org/krost/unidrive/ui/DaemonDiscovery.kt:34) is pure file-glob on `unidrive-*.sock`. **One-shot syncs never advertise -> UI is blind to them by design.** Compounding: on Internxt-scale backfills (hours), one-shot means "long-running invisible".
-
-## State inventory (where truth lives today)
-
-| Carrier | Scope | Readable by | Liveness |
-|---|---|---|---|
-| `SyncState` (in `DaemonDiscovery`) | in-memory | UI only | only during `--watch` |
-| `state.db` | persistent | anyone | between syncs (not live) |
-| `failures.jsonl` | persistent, append | anyone | record, not liveness signal |
-| `unidrive.log` | persistent, 10 MB rotate | anyone | volatile tail |
-| IPC NDJSON (AF_UNIX / NamedPipe) | volatile stream | UI only | only during `--watch` |
-
-## Proposed concrete wins (each a separate sub-ticket candidate)
-
-### 240a — Always-on IPC (XS-S)
-
-Drop the `if (watch)` guard on `IpcServer`/`NamedPipeServer` creation in `SyncCommand.kt`. Socket advertises for every `sync` run, one-shot or continuous. **UI discovers one-shot daemons automatically; no other change needed on the UI side.** Cheapest + highest-leverage fix.
-
-### 240b — Progress state file (S)
-
-Daemon writes `<profile>/progress.json` atomically every ~500 ms containing phase / items-processed / items-total / transfer-bps / eta / last-action. Survives UI restarts. Lets `unidrive status` (and the stale-UI tooltip) report real progress without requiring a live IPC connection. Also captures progress of already-running daemons after UI restart.
-
-### 240c — Heartbeat + idle-alive event (XS)
-
-Even when engine is quiescent, emit `{event:"idle", since: <ISO8601>, cycles_idle: N}` every 10 s. Distinguishes "alive, nothing to do" from "dead". Kills 90% of the "is the tray ok?" uncertainty.
-
-### 240d — CLI inline progress reporter (XS)
-
-Add a `--progress` flag (default on when stdout is a TTY, off when piped) that prints one compact line re-painted with `\r` every 500 ms:
-```
-[scan] 12,345 items  |  [downloads] 47/200 (23%)  |  2.3 MB/s  |  ETA 4m
-```
-`CliProgressReporter` already receives all the events; just needs a throttled painter.
-
-### 240e — Daemon discovery fallback (S)
-
-When UI sees no socket **but** `<profile>/progress.json` mtime is < 60 s old, show "syncing (legacy non-IPC)" in the tray instead of "no daemon". Graceful handling of old daemons or the transition window before 240a lands everywhere.
-
-### 240f — Action-level "still working" nudges (S)
-
-For specific operations that can exceed 500 ms without emitting progress (large file upload, folder delete, graph listChildren pagination), emit a `{event:"still_working", operation:"uploadLargeFile", elapsed_ms:1200, path:"..."}` nudge every ~1 s. Symmetric coverage so nothing is silent.
-
-## Ordering recommendation
-
-**240a first** (server-side fix is cheap, unblocks UI discovery immediately). Then **240d** (CLI inline progress — independent, user-visible win). Then **240b + 240c** together (progress.json + heartbeat — they co-design nicely). **240e + 240f** last.
-
-## Non-goals
-
-- GUI progress bar rework — out of scope; the tray already has progress rendering.
-- Prometheus metrics / Grafana dashboard — that's a separate observability track.
-- Replacing NDJSON with gRPC / Protobuf — tested previously; not warranted.
-
-## Related
-
-- UD-212 (closed) — MDC profile tag propagation; any new progress fields must respect the profile context.
-- UD-221 (closed) — tray submenu work; same UI module that shows the per-profile status.
-- UD-222 (closed) — "adopt writes zeros" incident; heartbeat + progress.json would have made it 10 min of triage instead of 2 hours.
-- UD-316 (closed 2026-04-19) — `status --audit` computes a snapshot; progress.json would let `status` (no flag) do the same for in-flight syncs.
-
-## Acceptance for the umbrella
-
-- Six sub-tickets filed (240a-f), each scoped to its own commit.
-- Tray correctly shows a running one-shot sync within 10 s of start, with phase + progress%.
-- Piped CLI output preserves current quiet behaviour; interactive CLI gets the new `\r`-painted progress line.
-- No regression in existing `--watch` daemon path.
-
-## Priority
-
-**Medium, M effort** as an umbrella. **240a alone is XS and worth landing tomorrow** regardless of the rest. 240d is next easiest standalone win.
 ---
 id: UD-247
 title: Cross-provider benchmark harness — synthetic workload, per-provider metrics, tracked baselines in docs/benchmarks/
@@ -1498,7 +1254,7 @@ isn't running (or has been uninstalled), the read fails.
 **Real-case (UD-296/297/299 thread, 2026-04-30):** user pointed
 `sync_root` at `C:\Users\gerno\InternxtDrive - <UUID>\` (Internxt
 official-client mount). Opening a file like
-`/dev/zvg/ZVG FileRepo/3A0C20B4...` produced
+`/mnt/nas/nas_share/3A0C20B4...` produced
 > "Die Datei kann nicht geöffnet werden. Stellen Sie Sicher, dass
 > Internxt Drive auf Ihrem Computer ausgeführt wird."
 
@@ -1657,7 +1413,7 @@ side and the remote side may not match, and the planner mis-classifies
 the file as `Upload` (`localState=NEW + remoteState=UNCHANGED`).
 
 **Real-case (2026-04-30, post-UD-296/297/299 dry-run on
-inxt_gernot_krost_posteo):** dry-run plan included 29 spurious uploads
+inxt_user):** dry-run plan included 29 spurious uploads
 of files known to exist on both sides. Example:
 
 * Local path: `/Documents/Calibre/Calibre-Import/Elektroinstallation in
@@ -1776,7 +1532,7 @@ User-supplied mockup:
    Local Windows File System                          Internxt Cloud Drive
    (Profile: gerno)                                   (Profile: inxt_gernot...)
    -------------------------                          -------------------------
-   C:\Users\gerno\InternxtDrive                       /19notte78
+   C:\Users\gerno\InternxtDrive                       /userhome
          |                                                 ^
          |                                                 |
          |--------------- UPLOAD-ONLY SYNC -----------------|
@@ -1790,7 +1546,7 @@ Because you used `--reset` combined with `--upload-only`, the tool ignores
 previous sync history (state.db) and evaluates everything from scratch as a
 one-way push from Local to Remote:
 
- [F] NEW/MODIFIED LOCALLY  ====== COPY/UPLOAD ======>  Added to /19notte78
+ [F] NEW/MODIFIED LOCALLY  ====== COPY/UPLOAD ======>  Added to /userhome
  [X] DELETED LOCALLY       ====== DO NOTHING =======>  Retained on Remote
  [=] IDENTICAL FILES       ====== DO NOTHING =======>  Skipped
 
@@ -2153,53 +1909,6 @@ event shape?).
 - **UD-111** (open) — token-refresh failure telemetry.
 - **2.1 token-refresh-mutex-pattern** (sibling) — addresses the
   silent-failure pit at the same time.
----
-id: UD-753
-title: Move per-operation debug log lines (Download/Upload/Delete/Move) to engine via decorator
-category: tooling
-priority: low
-effort: S
-status: open
-opened: 2026-04-30
----
-**From the 2026-04-30 provider-duplication survey.**
-
-Same per-operation log shape repeated across providers. Five providers
-each emit `Download: X` / `Upload: X (N bytes)` / `Delete: X` /
-`Move: X -> Y` at debug. The wrapping engine call already knows the
-path + bytes; logging there once would suffice.
-
-- `core/providers/onedrive/.../GraphApiService.kt:207, 432, 451, 487`
-- `core/providers/hidrive/.../HiDriveApiService.kt:111, 176, 216, 252, 277, 301`
-- `core/providers/s3/.../S3ApiService.kt:52, 85, 133, 161`
-- `core/providers/webdav/.../WebDavApiService.kt:294, 349, 418, 439, 460`
-
-## Proposal
-
-Either:
-
-(a) Wrap providers in a `LoggingCloudProvider` decorator that emits
-the debug lines around delegate calls. Drop per-provider lines.
-
-(b) Just log at the engine `applyAction` call site. Drop per-provider
-lines.
-
-## Acceptance
-
-- `git grep "log.debug.\"(Download|Upload|Delete|Move):"` in
-  providers/ shrinks to provider-specific detail only (e.g.
-  HiDrive's home-relative dir resolution is genuinely useful and
-  stays).
-
-## Effort / agent-ability
-
-**S effort**, agent-able partial — judgment call: which provider-
-specific log details are worth keeping vs deleting?
-
-## Related
-
-- **1.2 delta-log-line** (sibling) — same shape lift.
-- **1.3 provider-auth-banner** (sibling) — same shape lift.
 ---
 id: UD-754
 title: Research: automate Kotlin code formatting so ktlint passes near-100% post-edit
@@ -2655,50 +2364,6 @@ Each was a self-contained reference doc, not a backlog or session note, so they'
 ## Provenance
 
 `logic-arts-official/unidrive` HEAD `b8e4223` (2026-04-16), `docs/{WEBHOOKS,IPC-PROTOCOL,TEST-CHECKLIST}.md`.
----
-id: UD-764
-title: Regression: unidrive log doesn't print git commit hash per entry (was #122)
-category: tooling
-priority: low
-effort: XS
-status: open
-code_refs:
-  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt
-opened: 2026-05-01
----
-**`unidrive log` no longer prints the git commit hash per entry — regression from old #122.**
-
-CHANGELOG audit on 2026-05-01 against the pre-greenfield repo (`logic-arts-official/unidrive` HEAD `b8e4223`) found this entry:
-
-> **#122**: Git commit hash included in log entries for traceability
-
-Then verified against current `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt` — no `commit`, `commitId`, or `BuildInfo`-derived field is emitted per log line. The build-info object is only used by `--version` (verified in `Main.kt`).
-
-Why this matters: when a user reports a sync bug we ask them for `unidrive log`. Without the commit hash, we don't know which build their daemon was running when the symptoms occurred — even if they ran multiple sync cycles across a deploy boundary.
-
-## Failure mode this regression enables
-
-1. User runs daemon for a week.
-2. We push a fix to main, they `:app:cli:deploy`, daemon restarts on the new build.
-3. They report "sync was wrong yesterday".
-4. We ask for `unidrive log`. The log shows actions from yesterday, but no commit. We can't tell if those actions came from the buggy old build or the fixed new build.
-
-## Acceptance
-
-- `LogCommand.kt` injects the value of `BuildInfo.versionString()` (or just `BuildInfo.commit`) into each emitted log line. Either:
-  - **Option A:** add a `commit:` column to the rendered output table.
-  - **Option B:** prefix each line with `[<commit>]` like systemd journal does for unit names.
-- The unit test for `LogCommand` asserts a representative commit-hash format (`[a-f0-9]{7,40}`) appears in output.
-- For the JSON log output (`unidrive log --json` if it exists, otherwise NDJSON via IPC), add a `commit` field to each event.
-
-## Out of scope
-
-- Backfilling the field for entries written by old daemon builds — those entries simply have no commit, marked as `<unknown>`.
-- Rewriting the on-disk log format — additive change only.
-
-## Provenance
-
-CHANGELOG audit 2026-05-01. Old: `logic-arts-official/unidrive`@`b8e4223`, CHANGELOG entry `#122`. Confirmed missing in current via grep on `LogCommand.kt` for `commit|BuildInfo`.
 ---
 id: UD-765
 title: Comprehensive CHANGELOG audit: pre-greenfield vs current code
@@ -3471,73 +3136,6 @@ would bury it. Filing under `security` range keeps it on the
 right reviewer's radar (anyone scanning the security tier in
 `AGENT-SYNC.md`).
 ---
-id: UD-768
-title: scripts/dev/log-watch.sh defaults to Windows AppData path on Linux MVP
-category: tooling
-priority: low
-effort: XS
-status: open
-code_refs:
-  - scripts/dev/log-watch.sh:22
-opened: 2026-05-02
----
-## Problem
-
-`scripts/dev/log-watch.sh:22` defaults the live-log path to a
-**Windows AppData path** on a project whose MVP is Linux:
-
-```
-LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
-```
-
-On Linux (the MVP per ADR-0012), `$HOME/AppData/Local/...` does
-not exist; the daemon writes to either `$XDG_STATE_HOME/unidrive/`
-or `$HOME/.local/state/unidrive/` depending on env. The script
-therefore prints "no such file" until the user remembers to set
-`UNIDRIVE_LOG`.
-
-This default is also the seed of broader doc drift: any reader
-who looks at `log-watch.sh` to understand "where does unidrive
-log on this platform?" gets a misleading answer.
-
-## Proposed action
-
-Two acceptable paths:
-
-**A) Pick the right Linux default** and document the env-var
-override:
-
-```bash
-LOG="${UNIDRIVE_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/unidrive/unidrive.log}"
-```
-
-This matches the daemon's actual write path (verify against
-the daemon's logging config before committing).
-
-**B) Refuse to default at all** if `UNIDRIVE_LOG` is unset on
-Linux, exit with a one-line error pointing at the env var. More
-explicit, less convenience.
-
-Recommend **A**: matches the daemon, removes the cliff for new
-contributors trying out the script.
-
-## Acceptance criteria
-
-- [ ] `log-watch.sh` default resolves to a path the daemon
-      actually writes to on Linux.
-- [ ] If macOS / Windows fallbacks are kept, they're behind an
-      `os.name` check at the top of the script with a comment
-      explaining ADR-0012.
-- [ ] Smoke: `UNIDRIVE_LOG=/tmp/test.log scripts/dev/log-watch.sh
-      --summary` works on Linux without further env setup.
-
-## Why a separate ticket from UD-400
-
-UD-400 sweeps `os.name` branches in **non-test Kotlin code**.
-This is a shell script. Same spirit, different scope. Atomic
-commit lets `git log` show the rationale without dragging the
-Kotlin sweep along.
----
 id: UD-769
 title: Drop windows-latest from CI core matrix (or demote to allowed-to-fail) per ADR-0011/0012
 category: tooling
@@ -3689,186 +3287,2630 @@ other ✅ / ⚠ label across the catalog. Worth its own atomic
 commit so a future reader can `git log -- docs/SPECS.md` and
 see exactly when the count was reconciled.
 ---
-id: UD-771
-title: Doc discoverability + small drift sweep: link consequences.md + EXTENSIONS.md from README/ARCHITECTURE; fix CF-API in consequences.md, EXTENSIONS spec misref, log-feedback-loop stalled tickets, archive aged-out handover
-category: tooling
+id: UD-404
+title: CLI-Architektur: 3-Ebenen Command-Baum mit Single-Responsibility-Klassen
+category: cli
 priority: medium
+effort: M
+status: open
+opened: 2026-05-02
+---
+### Die Architektur (Clean Code im CLI-Design)
+
+Wenn man die CLI über eine moderne Bibliothek wie `picocli` (oder `clikt` falls Kotlin bevorzugt wird) aufbaut, lässt sich diese 3-Ebenen-Struktur perfekt in kleine, isolierte Klassen zerlegen. Das verhindert die typischen "Gott-Klassen", in denen hunderte Zeilen Argument-Parsing stattfinden.
+
+Die Paketstruktur spiegelt dabei exakt den CLI-Baum wider:
+
+```text
+org.krost.unidrive.cli
+├── UnidriveCommand         (Top-Level: unidrive)
+├── commands
+│   ├── show
+│   │   ├── ShowCommand     (Level 2: show)
+│   │   ├── StatusCommand   (Level 3: status)
+│   │   └── QuotaCommand    (Level 3: quota)
+│   ├── manage
+│   │   ├── ManageCommand   (Level 2: manage)
+│   │   ├── AuthCommand     (Level 3: auth)
+│   │   └── ProfileCommand  (Level 3: profile)
+│   └── run                 (Level 2: run / do)
+│       ├── RunCommand
+│       └── SyncCommand     (Level 3: sync)
+```
+
+Jedes Kommando ist nach dem Single-Responsibility-Prinzip nur für genau *eine* Aufgabe zuständig.
+
+### Umsetzung der Kombination aus Ansatz 5 und 3
+
+Du baust den Baum nach Ansatz 5 auf, nutzt aber die Annotations-Features deiner CLI-Library, um die Hilfe-Ausgabe (Ansatz 3) zu stylen. Hier ist ein Beispiel, wie so etwas konzeptionell aussieht:
+
+```java
+@Command(
+    name = "unidrive",
+    mixinStandardHelpOptions = true,
+    version = "1.0.0",
+    description = "The universal cloud drive synchronization engine.",
+    commandListHeading = "%n🚀 ACTIONS%n",
+    subcommands = {
+        ShowCommand.class,
+        ManageCommand.class,
+        RunCommand.class
+    }
+)
+public class UnidriveCommand implements Runnable { ... }
+```
+
+### Vorteile für den Entwicklungs-Workflow
+
+1. **Wartbarkeit:** Neues Feature → neue Klasse, keine bestehenden Klassen anfassen.
+2. **Git & Teamwork:** Jeder Befehl in eigener Datei → kaum Merge-Konflikte.
+3. **Kontext-Sensitivität:** Subcommands können validieren ob der Nutzer sich in einem aktiven `sync_root` befindet.
+---
+id: UD-006
+title: Lift formatSize/formatBytes (IEC byte formatting) into :app:core/io; eliminate 5+ duplicates
+category: architecture
+priority: high
 effort: S
 status: open
 code_refs:
-  - README.md
-  - docs/ARCHITECTURE.md
-  - docs/user-guide/consequences.md:212
-  - docs/EXTENSIONS.md:122
-  - docs/dev/log-feedback-loop-proposal.md:73
-  - docs/dev/handover/subagent-chunks-2026-04-30.md
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:284
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt:53
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:49
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:374
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:46
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
 opened: 2026-05-02
 ---
 ## Problem
 
-Two non-trivial reference documents are present in tree, fully
-written, code-verified, and **not linked from README or
-ARCHITECTURE.md**:
+`formatSize` / `formatBytes` (IEC-binary byte formatting: `B`/`KiB`/`MiB`/`GiB`/`TiB`) is duplicated across 5 files:
 
-- `docs/user-guide/consequences.md` — pin / unpin semantics, sync
-  edge-case behaviour, conflict resolution. Closed under
-  [UD-220](#ud-220) but undiscoverable to a contributor reading
-  README first.
-- `docs/EXTENSIONS.md` — documents the SPI extension contract
-  (the same `META-INF/services/org.krost.unidrive.ProviderFactory`
-  surface mentioned in README). Code path exists; doc explains
-  it; nothing in the front-page docs points at it.
+| File | Line | Status |
+|---|---|---|
+| `core/app/cli/src/main/kotlin/.../CliProgressReporter.kt` | 284 (companion) | canonical |
+| `core/app/cli/src/main/kotlin/.../VersionsCommand.kt` | 53 | duplicate |
+| `core/app/cli/src/main/kotlin/.../TrashCommand.kt` | 49 | duplicate |
+| `core/app/cli/src/main/kotlin/.../RelocateCommand.kt` | 374 | duplicate |
+| `core/app/cli/src/main/kotlin/.../StatusAudit.kt` | 46 | duplicate |
+| `core/providers/webdav/src/main/kotlin/.../WebDavProvider.kt` | (added by UD-???) | duplicate (this PR added a 6th, deliberately, per the SPI-contract spec §3.5) |
 
-Verified at filing time:
-
-```
-$ grep -l "consequences\.md\|EXTENSIONS\.md" README.md docs/ARCHITECTURE.md
-(no matches)
-```
-
-Both docs cost real time to write. Leaving them undiscoverable is
-roughly equivalent to having deleted them.
-
-A secondary issue surfaced in the same audit:
-`docs/EXTENSIONS.md:122` cross-references
-`docs/specs/relocate-v1-sprint-plan.md` as its "Spec" link, which
-is a **misfile**: relocate-v1 is the relocate operation contract,
-not the SPI extensibility spec. Either the link is wrong or
-EXTENSIONS.md needs its own spec doc.
-
-## Additional drift items found in the same audit pass
-
-These are smaller but related; group into this ticket's scope
-since they all share the "find-and-fix references" shape:
-
-- `docs/user-guide/consequences.md:212` references "via the
-  Windows CF-API shell" — the CF-API tier was retired by
-  [ADR-0011](adr/0011-shell-win-removal.md). Drop the sentence
-  or rewrite to describe the current Linux pin semantics.
-- `docs/adr/0007-release-versioning.md:16` cites
-  `shell-win-v0.3.0` as a sub-tag example. Replace with a
-  surviving tier's example (e.g. `core-v0.1.0` already there;
-  drop the second example or use `mcp-v0.1.0`).
-- `docs/dev/log-feedback-loop-proposal.md:73` says "file two
-  tickets via `python scripts/dev/backlog.py file ...`"; tickets
-  were never filed. Either file them now (the proposal had
-  acted-on intent) or close the proposal as stalled.
-- `docs/dev/handover/subagent-chunks-2026-04-30.md` — every
-  chunk dispatched in this handover has shipped. Move to
-  `docs/dev/handover/archive/` or delete; keeping aged-out
-  handovers in the live folder confuses readers about current
-  state.
+All implement the same algorithm. Highest-ROI cleanup: lift to `:app:core` and replace 5 (or 6, including the WebDAV one this PR introduced) call-sites.
 
 ## Proposed action
 
-1. **Linkage:** add `docs/user-guide/consequences.md` and
-   `docs/EXTENSIONS.md` to a "References" or "Further reading"
-   section near the bottom of README, OR (preferred) cross-link
-   them from `docs/ARCHITECTURE.md` where their topics are
-   discussed (consequences.md → architecture pin/conflict
-   section; EXTENSIONS.md → architecture SPI section).
-2. **Misfiled spec ref:** fix `docs/EXTENSIONS.md:122` to point
-   at the real SPI spec (or remove the line if no spec exists
-   yet — then file a follow-up to write one).
-3. **CF-API anachronism in consequences.md:** rewrite the
-   pin-semantics paragraph for Linux only.
-4. **shell-win-v0.3.0 in ADR-0007:** replace example with a
-   live tier.
-5. **log-feedback-loop-proposal.md:** decide — file the two
-   tickets now (which would close this sub-item) or close the
-   proposal as superseded. Note the decision in the proposal
-   doc itself.
-6. **Handover archival:** move `subagent-chunks-2026-04-30.md`
-   out of the live folder.
+1. Create `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt`:
+
+   ```kotlin
+   package org.krost.unidrive.io
+
+   /**
+    * Format a byte count using IEC binary prefixes (KiB, MiB, ...).
+    * One decimal place above the 1 KiB threshold.
+    */
+   fun formatSize(bytes: Long): String {
+       val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
+       var size = bytes.toDouble()
+       var unit = 0
+       while (size >= 1024 && unit < units.lastIndex) {
+           size /= 1024
+           unit++
+       }
+       return "%.1f %s".format(size, units[unit])
+   }
+   ```
+
+2. Replace each duplicate with `import org.krost.unidrive.io.formatSize`.
+
+3. Verify byte-identical output for representative sizes (1, 1023, 1024, 999_999_999, 50 GiB) before deleting any duplicate.
+
+## Why architecture-range
+
+This is a cross-module helper lift; the tooling category is for build/CI scripts. Architecture range fits cross-module API surface.
 
 ## Acceptance criteria
 
-- [ ] `grep -l "consequences\.md\|EXTENSIONS\.md" README.md
-      docs/ARCHITECTURE.md` returns at least one match per file.
-- [ ] `grep -rn "CF-API\|shell-win-v0\.3" docs/` returns
-      nothing in non-archived doc files.
-- [ ] `docs/EXTENSIONS.md:122` cross-link resolves to a real
-      doc, or the line is removed.
-- [ ] `docs/dev/handover/subagent-chunks-2026-04-30.md` is
-      either moved to an archive folder or deleted.
-- [ ] No code changes required.
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt` exists.
+- [ ] All 5 (or 6) duplicates replaced with `import org.krost.unidrive.io.formatSize`.
+- [ ] Output byte-identical for the 5 fixture sizes above (verify via test).
+- [ ] Build green; `./gradlew build test` reports the same baseline.
 
-## Why this is one ticket and not five
+## Out of scope
 
-All sub-items share the "doc reference fix" shape; bundling
-them lets a single sweep handle them with one round of
-verification. If any sub-item turns out to be load-bearing
-(e.g. someone *does* care about the relocate-v1 vs SPI link),
-break it out at fix-time, not now.
+Locale-aware formatting, decimal-prefix variants (KB vs KiB), or any
+behaviour change to the algorithm itself.
 ---
-id: UD-005
-title: ADR-0007 cites retired shell-win-v0.3.0 sub-tag example after ADR-0011 retired the tier
+id: UD-007
+title: Default logout() on CloudProvider; remove 4-provider boilerplate (WebDAV, S3, Rclone, LocalFs)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+4 of 7 in-tree providers (WebDAV, S3, Rclone, LocalFs) implement `logout()` as the same boilerplate:
+
+```kotlin
+override suspend fun logout() { isAuthenticated = false }
+```
+
+The `CloudProvider` interface should provide this as the default. SFTP, OneDrive, and Internxt would override to add `api.close()` / `tokenManager.logout()` etc.
+
+## Proposed action
+
+1. In `CloudProvider.kt`, change `logout()` from abstract to default-implemented:
+
+   ```kotlin
+   /**
+    * Forget any cached credentials / authenticated state. Default
+    * implementation flips the in-memory flag; providers that own
+    * external resources (token files, network connections) override
+    * to release them.
+    */
+   suspend fun logout() {
+       // Default no-op; subclasses override to release resources.
+       // Note: subclasses that track an in-memory `isAuthenticated`
+       // flag must reset it themselves in their override.
+   }
+   ```
+
+2. Decide: should `isAuthenticated` be lifted into `CloudProvider`? If yes, the default `logout()` can flip it. If not, keep the default a no-op and let each provider's override handle its own state.
+
+3. Delete the boilerplate `override suspend fun logout() { isAuthenticated = false }` in WebDAV, S3, Rclone, LocalFs.
+
+4. Verify SFTP, OneDrive, Internxt overrides still do the right thing (they'll need to set `isAuthenticated = false` themselves now if it was previously inherited from the boilerplate; depends on §2 decision).
+
+## Acceptance criteria
+
+- [ ] `logout()` has a default implementation in `CloudProvider`.
+- [ ] WebDAV, S3, Rclone, LocalFs no longer override `logout()`.
+- [ ] SFTP, OneDrive, Internxt overrides still close their external
+      resources.
+- [ ] Existing `logout`-related tests still pass; no test weakened.
+
+## Out of scope
+
+Lifting `isAuthenticated` is a separate decision that can be made
+inside this ticket OR deferred. Document the choice in the ticket
+resolution note.
+---
+id: UD-008
+title: Abstract SnapshotDeltaProvider helper (or base class) — eliminate 5x deletedItem lambda duplication and shared delta() boilerplate
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngine.kt
+opened: 2026-05-02
+---
+## Problem
+
+All 5 snapshot-based providers (SFTP, WebDAV, S3, Rclone, LocalFs) follow an identical `delta()` structure:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage {
+    val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+    val currentEntries = api.listAll(onProgress = { count -> heartbeat?.tick(count) })
+    val snapshotEntries = buildSnapshotEntries(currentEntries)
+    val itemsByPath = currentEntries.associate { it.path to it.toCloudItem() }
+    return computeSnapshotDelta(
+        currentEntries = snapshotEntries,
+        currentItemsByPath = itemsByPath,
+        prevCursor = cursor,
+        entrySerializer = XxxSnapshotEntry.serializer(),
+        hasChanged = { prev, curr -> /* provider-specific */ },
+        deletedItem = { path, entry ->
+            CloudItem(id = path, name = path.substringAfterLast("/"), path = path,
+                      size = 0, isFolder = entry.isFolder, modified = null,
+                      created = null, hash = null, mimeType = null, deleted = true)
+        },
+    )
+}
+```
+
+Per-provider variations:
+- `listAll()` — API call shape
+- `buildSnapshotEntries()` — entry-type mapping
+- `toCloudItem()` — `CloudItem` mapping
+- `hasChanged` — change-detection predicate
+
+The `deletedItem` lambda is **byte-identical across all 5** providers.
+
+## Proposed action
+
+Two options:
+
+**A) Abstract base class `SnapshotDeltaProvider<E>`** that captures the boilerplate. Concrete providers implement only the four variations:
+
+```kotlin
+abstract class SnapshotDeltaProvider<E>(
+    private val entrySerializer: KSerializer<E>,
+) : CloudProvider {
+    protected abstract suspend fun listAll(heartbeat: ScanHeartbeat?): List<RawEntry<E>>
+    protected abstract fun hasChanged(prev: E, curr: E): Boolean
+
+    final override suspend fun delta(cursor: String?, onPageProgress: ((Int) -> Unit)?): DeltaPage {
+        // shared boilerplate — calls listAll, builds maps, calls computeSnapshotDelta
+    }
+}
+```
+
+**B) Standalone helper function `snapshotDelta(...)`** that takes the four variation points as lambda parameters. Providers retain their flat structure but call into the helper:
+
+```kotlin
+override suspend fun delta(cursor, onPageProgress): DeltaPage =
+    snapshotDelta(
+        cursor = cursor,
+        progress = onPageProgress,
+        listAll = { hb -> api.listAll(...) },
+        toEntry = ::buildSnapshotEntry,
+        toCloudItem = RawEntry<E>::toCloudItem,
+        hasChanged = ::hasChanged,
+        entrySerializer = MySnapshotEntry.serializer(),
+    )
+```
+
+Recommend **B** (helper function) over **A** (abstract base): `CloudProvider` is already an interface, and Kotlin doesn't love abstract-class diamond inheritance when interfaces gain abstract methods. Helper-function pattern keeps providers as plain classes.
+
+Lift `deletedItem` into the helper; per-provider duplicates disappear.
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented in the ticket resolution.
+- [ ] `deletedItem` lambda exists once (in the helper or the base class), zero duplicates across providers.
+- [ ] All 5 snapshot providers' `delta()` methods shrink to ≤10 lines, mostly delegating.
+- [ ] No test regressions; existing `Reconciler` / `delta` tests still pass.
+
+## Why architecture-range
+
+It's a structural change to how snapshot providers compose with the
+sync engine. Architecture range; needs an ADR or short design doc
+before any code moves (decision A vs B is the kind of thing future
+readers will ask about).
+
+## Out of scope
+
+Refactoring OneDrive (it uses `/delta` natively, not snapshot mode)
+or Internxt (its delta path is also custom and is being audited
+separately under UD-354).
+---
+id: UD-009
+title: Lift defaultTokenPath() into :app:core/io; eliminate 5-provider duplicate (SFTP/WebDAV/S3/OneDrive/Internxt)
+category: architecture
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProviderFactory.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 providers (SFTP, WebDAV, S3, OneDrive, Internxt) each define an identical helper:
+
+```kotlin
+fun defaultTokenPath(): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", "<provider-id>")
+}
+```
+
+Only the last path segment varies by provider id.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt
+package org.krost.unidrive.io
+
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * Default per-profile token storage directory:
+ *   $HOME/.config/unidrive/<providerId>
+ *
+ * The caller passes its own `id` (typically `factory.id`) so this
+ * function does not need to know which providers exist.
+ */
+fun defaultTokenPath(providerId: String): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", providerId)
+}
+```
+
+Replace the 5 duplicates with `org.krost.unidrive.io.defaultTokenPath(id)`.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt` exists.
+- [ ] All 5 duplicates removed.
+- [ ] Behaviour byte-identical: `defaultTokenPath("onedrive")` produces the same path string the old `OneDrive`-specific helper did.
+- [ ] No test regressions.
+
+## Why architecture-range
+
+Cross-module helper lift. Same category as UD-006.
+
+## Out of scope
+
+Honouring `XDG_CONFIG_HOME` (currently the helper hardcodes `~/.config`; that's a separate ticket if/when XDG compliance becomes a goal).
+---
+id: UD-010
+title: Lift extractJwtClaim() into :app:core/auth; eliminate 3-site duplicate (OneDrive + 2x Internxt)
 category: architecture
 priority: low
 effort: XS
 status: open
 code_refs:
-  - docs/adr/0007-release-versioning.md:16
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt:49
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt:64-65
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:42-48
 opened: 2026-05-02
 ---
 ## Problem
 
-`docs/adr/0007-release-versioning.md:16` defines component sub-tag
-versioning with two examples:
+JWT body claim extraction is duplicated:
 
-> Component sub-tags are permitted as additional tags on the same
-> commit when a tier needs an independently-citable build
-> (e.g., `core-v0.1.0`, `shell-win-v0.3.0`). They are *not*
-> primary and must match the monorepo tag's commit.
+| File | Function | Lines |
+|---|---|---|
+| `core/providers/onedrive/.../OneDriveProviderFactory.kt:49` | `extractJwtClaim()` (private) | ~10 |
+| `core/providers/internxt/.../InternxtProviderFactory.kt:64-65` | inline | ~5 |
+| `core/providers/internxt/.../AuthService.kt:42-48` | inline | ~7 |
 
-The `shell-win-v0.3.0` example references a **retired tier**:
-[ADR-0011](adr/0011-shell-win-removal.md) removed `shell-win` as
-a tier of the project. The example therefore advertises a
-versioning surface that does not exist.
-
-This is a small but real ADR-vs-ADR coherence drift. ADR-0007
-should reflect the post-amendment state of the project's tier
-list (per ADR-0011/0012/0013 — the v0.1.0 surface).
-
-## Why this is filed under `architecture` and not folded into UD-771
-
-UD-771 sweeps doc-discoverability and small textual drift in
-non-ADR files (README links, EXTENSIONS.md misref, consequences.md
-CF-API mention). ADRs are normative architecture decisions; an
-ADR amendment deserves its own commit and its own audit trail in
-`git log` so the reasoning ("we updated the example because the
-referenced tier was retired") is searchable independently of doc
-hygiene noise.
+All three do: split JWT on `.`, Base64-decode middle segment, find claim by key in JSON body.
 
 ## Proposed action
 
-Two acceptable paths:
+Lift to `:app:core` as a single helper:
 
-**A) Replace the example with a surviving tier.** Pick something
-like `mcp-v0.1.0` or just remove the second example (one is enough
-to make the point):
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt
+package org.krost.unidrive.auth
 
-> e.g., `core-v0.1.0`.
+import kotlinx.serialization.json.*
+import java.util.Base64
 
-**B) Add an "as of v0.1.0" qualifier** with a backreference to
-ADR-0011 explaining that the originally cited `shell-win-v0.3.0`
-was illustrative for a tier that has since been retired. Keeps
-the historical breadcrumb visible.
+/**
+ * Extract a string claim from a JWT body without verifying the signature.
+ *
+ * For unidrive's purposes (sub-claim from a freshly minted refresh-token,
+ * tenant-id from an access-token, etc.) we trust the issuer and just need
+ * the claim value. Signature verification happens at the API layer when
+ * the token is actually used.
+ *
+ * Returns null if the JWT is malformed, the body is unparsable, or the
+ * claim is absent.
+ */
+fun extractJwtClaim(jwt: String, claim: String): String? {
+    val parts = jwt.split(".")
+    if (parts.size < 2) return null
+    val body = try {
+        String(Base64.getUrlDecoder().decode(parts[1]))
+    } catch (_: IllegalArgumentException) {
+        return null
+    }
+    val json = try {
+        Json.parseToJsonElement(body).jsonObject
+    } catch (_: Exception) {
+        return null
+    }
+    return json[claim]?.jsonPrimitive?.contentOrNull
+}
+```
 
-Recommend **A** for line economy; ADR-0011 already explains the
-retirement and is one click away.
+Replace the three duplicates.
 
 ## Acceptance criteria
 
-- [ ] `grep -n "shell-win" docs/adr/0007-release-versioning.md`
-      returns nothing (or only a backreference to ADR-0011 if
-      Option B chosen).
-- [ ] ADR-0007 is consistent with ADR-0011/0012/0013 about
-      which tiers exist.
-- [ ] No code change required.
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/auth/JwtClaim.kt` exists.
+- [ ] OneDrive's `extractJwtClaim` private helper deleted; calls migrated to the new public helper.
+- [ ] Internxt's two inline JWT parses migrated.
+- [ ] Behaviour byte-identical for representative valid + malformed JWTs (verify via test).
+
+## Security note
+
+This helper does NOT verify the JWT signature. Document this in the
+helper's KDoc (already done above) so a future caller doesn't
+mistakenly use it for trust decisions.
 
 ## Out of scope
 
-Broader ADR-0007 review (release cadence, conventional-commit
-enforcement, etc.) — this ticket is **only** the
-`shell-win-v0.3.0` line. Don't scope-creep.
+JWT signature verification, JWKS fetching, expiration checking. Each of those is its own ticket.
+---
+id: UD-011
+title: EPIC: refactor 6 god classes (GraphApiService, Main, WebDavApiService, SyncCommand, StatusCommand, InternxtProvider) — UD-004 already covers SyncEngine
+category: architecture
+priority: medium
+effort: XL
+status: open
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+Audit (2026-05-02) measured 7 god classes by line count + methods per file:
+
+| Class | Lines | Methods | Lines/method |
+|---|---|---|---|
+| `SyncEngine` | 1249 | 16 | 78 |
+| `GraphApiService` (OneDrive) | 1080 | 26 | 42 |
+| `Main` (CLI) | 839 | 30 | 28 |
+| `WebDavApiService` | 699 | 22 | 32 |
+| `SyncCommand` | 647 | 9 | 72 |
+| `StatusCommand` | 646 | 18 | 36 |
+| `InternxtProvider` | 538 | 15 | 36 |
+
+`SyncEngine` already filed (UD-004 — decompose into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor).
+
+This ticket tracks the **remaining 6 god classes** as a single epic so they show up together in any prioritisation, but each will need its own ADR/sub-ticket before refactor lands.
+
+## Per-class quick triage
+
+### `GraphApiService` (1080 LoC, 26 methods, OneDrive HTTP monolith)
+Delta queries, upload/download, share management, retry budgets, error handling all in one. Natural split: `GraphDeltaService`, `GraphUploadService`, `GraphShareService`, with `GraphApiService` as a thin facade. Effort: M-L.
+
+### `Main` (CLI, 839 LoC, 30 methods)
+Picocli annotations, subcommand registration, provider creation, MDC context all inline. The picocli `@Command` annotations on subcommands force a flat shape; the real win is extracting the helper functions (`profilesOfType`, `buildEnvWarnings` (T8), MDC bootstrap) into focused files. Effort: S.
+
+### `WebDavApiService` (699 LoC, 22 methods)
+PROPFIND, upload/download, chunked uploads, quota, auth in one. Mirrors GraphApiService's shape. Same split pattern: `WebDavListService`, `WebDavUploadService`, `WebDavQuotaService`. Effort: M.
+
+### `SyncCommand` (647 LoC, 9 methods, 72 lines/method — second-highest)
+Provider construction, SyncEngine lifecycle, IPC loop, encryption wrapping. The methods are large because each one orchestrates a phase. Splitting into a `SyncOrchestrator` class that `SyncCommand` consumes would shrink `SyncCommand` to a thin CLI shell. Effort: M.
+
+### `StatusCommand` (646 LoC, 18 methods)
+Status rendering, table building, audit reports, credential checks. T11 already migrated some logic to `provider.statusFields()`; further wins from extracting `StatusRenderer` (table building) into its own file. Effort: S.
+
+### `InternxtProvider` (538 LoC, 15 methods, 2× the next-largest provider at 336)
+Multiple `toCloudItem` variants (file/folder × regular/delta) suggest a mapping layer worth extracting. UD-354 (Internxt computeSnapshotDelta verification) overlaps; consider doing both together. Effort: M.
+
+## Proposed sequencing
+
+Recommend tackling in this order:
+
+1. **`Main` (CLI)** — easiest, biggest readability win for newcomers.
+2. **`StatusCommand`** — T11 already cleaned the worst dispatch site; extracting `StatusRenderer` is straightforward.
+3. **`WebDavApiService`** — same pattern as Graph but smaller; rehearse the split shape here.
+4. **`GraphApiService`** — apply the rehearsed pattern.
+5. **`SyncCommand`** — depends on `SyncEngine` decomposition (UD-004) being at least partway through.
+6. **`InternxtProvider`** — couple with UD-354.
+
+## Acceptance criteria for this epic
+
+This is an EPIC; it does not have its own done-criterion. Done when each of the 6 sub-decisions above has its own UD-### ticket and its own ADR (where structural). The completion of each sub-ticket should reference back to this one.
+
+## Why architecture-range
+
+Structural concern across multiple modules. Each child ticket may go
+to its specific category range when filed.
+
+## Out of scope
+
+`SyncEngine` (UD-004 already exists), provider-name-equality dispatch (just resolved by refactor/provider-spi-contract).
+---
+id: UD-356
+title: Lift duplicated Snapshot test boilerplate (empty-snapshot + invalid-base64) up to :app:sync; keep round-trip tests per-provider
+category: providers
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/providers/localfs/src/test/kotlin/org/krost/unidrive/localfs/LocalFsSnapshotTest.kt
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpSnapshotTest.kt
+  - core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3SnapshotTest.kt
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavSnapshotTest.kt
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneSnapshotTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 snapshot test files contain the same 3 tests with provider-specific data:
+
+| File | Tests duplicated |
+|---|---|
+| `core/providers/localfs/src/test/.../LocalFsSnapshotTest.kt` | round-trip encode/decode, empty snapshot, reject invalid base64 |
+| `core/providers/sftp/src/test/.../SftpSnapshotTest.kt` | same 3 |
+| `core/providers/s3/src/test/.../S3SnapshotTest.kt` | same 3 |
+| `core/providers/webdav/src/test/.../WebDavSnapshotTest.kt` | same 3 |
+| `core/providers/rclone/src/test/.../RcloneSnapshotTest.kt` | same 3 |
+
+The empty-snapshot and invalid-base64 tests are **byte-identical** — they don't exercise any provider-specific data, just the generic `Snapshot<E>` wrapper's parse/encode contract.
+
+## Proposed action
+
+1. **Move the two byte-identical tests up to `:app:sync`** (where `Snapshot<E>` is defined). Replace the 5 per-provider duplicates with imports of the shared test (or just delete them — the contract being tested is the `Snapshot` wrapper's, not any provider-specific behaviour).
+
+2. **Keep round-trip tests per-provider** — those use real provider-specific entry types and DO test something provider-specific. Possibly parameterise via a base class or `@TestFactory`-style discovery, but per-provider is acceptable.
+
+## Per-`challenge-test-assertion` skill
+
+Before deleting the 4 duplicates of `empty snapshot returns null`, verify:
+1. **Invariant?** "An empty `Snapshot<E>` round-trips through encode/decode and stays empty" — generic, provider-independent.
+2. **Reasonable alternative impl?** Any implementation of `Snapshot.encode/decode` that handles the empty case. Test asserts the contract.
+3. **Delete harm?** If `:app:sync` has the same test asserting the same invariant, none. Otherwise, hold the test where the contract is most reachable.
+
+## Acceptance criteria
+
+- [ ] Tests moved up where appropriate; per-provider files don't carry generic-contract tests.
+- [ ] Provider-specific round-trip tests remain (or are parameterised; user choice).
+- [ ] Total test count goes down or stays flat; no invariant lost.
+- [ ] CHANGELOG note that 4 tests were deleted as duplicates (with the kept location named).
+
+## Why providers-range
+
+The work is in `:providers:*/src/test/`. Providers range fits.
+
+## Out of scope
+
+Lifting the snapshot wrapper itself (already done; see UD-008's notes on `Snapshot<E>` already shared via `:app:sync`).
+---
+id: UD-012
+title: Replace 8x "onedrive" historical default in SyncConfig.kt with ProviderRegistry-driven default (or document via ADR)
+category: architecture
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:304
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:313
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:359
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:433
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:436
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:441
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:461
+opened: 2026-05-02
+---
+## Problem
+
+`SyncConfig.kt` hardcodes `"onedrive"` as the universal fallback default at 8 sites (verified 2026-05-02 against the post-refactor/provider-spi-contract tree):
+
+| Line | Role |
+|---|---|
+| 304 | `providerId: String = "onedrive"` (default param of `RawProvider.defaults`-helper-style ctor) |
+| 313 | `"onedrive" to "OneDrive"` — display-name override map |
+| 359 | `fun defaults(providerId: String = "onedrive")` |
+| 433 | `if (!Files.exists(configFile)) return "onedrive"` (resolveDefaultProfile waterfall) |
+| 436 | `raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive"` |
+| 441 | `"onedrive"` (last fallback in resolveDefaultProfile) |
+| 461 | `profileName: String = "onedrive"` (default param) |
+
+Plus one help-text reference:
+- `core/app/cli/src/main/kotlin/.../Main.kt:474` — `RCLONE_BINARY ... default: "rclone"` (refers to the rclone *binary* on PATH, not the provider id; mentioned for completeness).
+
+The `SyncConfig` references are the "single-provider-era" artefact: the project had only OneDrive when this default was chosen. With 7 in-tree providers today, the choice is undocumented and inconsistent (display-name map at 313 only covers one provider; the rest get their default-display from elsewhere).
+
+## Proposed action
+
+Replace with a registry-driven default. Two acceptable shapes:
+
+**A) `ProviderRegistry.defaultProvider()`** that returns either:
+- the first SPI-discovered provider (deterministic by classpath order, usually `localfs` since it's pure-Java); or
+- a config-driven choice (`general.default_provider_when_none` in `config.toml`).
+
+Then `SyncConfig.kt` calls `ProviderRegistry.defaultProvider()` instead of literal `"onedrive"`. Display-name map at line 313 is removed in favour of `ProviderRegistry.getMetadata(id)?.displayName`.
+
+**B) Keep "onedrive" but document why** in an ADR. If OneDrive is genuinely the canonical default for the project's target audience, that's a defensible position — but it should be a deliberate choice with `// allow: per ADR-XXXX` markers on each site.
+
+Recommend **A**. The architecture has moved on; the literal hasn't. A registry-driven choice is also testable (parametric tests can swap the default per-test).
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented (ideally in a short ADR, e.g. ADR-0015 "default provider resolution").
+- [ ] If A: `SyncConfig.kt` has zero `"onedrive"` literals; all 8 sites consult `ProviderRegistry.defaultProvider()` or `ProviderRegistry.getMetadata`.
+- [ ] If B: each surviving literal has `// allow: per ADR-XXXX` marker (CI guard's allow-list mechanism).
+- [ ] Either way, `bash scripts/ci/check-no-provider-string-dispatch.sh` passes.
+- [ ] No regression in `resolveDefaultProfile` waterfall semantics; existing tests still green.
+
+## Why architecture-range
+
+It's a structural decision (what is the project's default provider?) with cross-module implications. UD-004 / UD-008 / UD-011 are all architecture-range; this fits.
+
+## Out of scope
+
+XDG-config-honouring resolution, multi-default support (different default per environment), profile-cycling. Those are independent later work.
+
+## Status of the CI guard
+
+`scripts/ci/check-no-provider-string-dispatch.sh` (added in
+refactor/provider-spi-contract) currently flags these 8 sites. Until
+this ticket is resolved, **the lines are tagged with `// allow:
+UD-012` markers** so CI doesn't fail on pre-existing technical debt.
+Removing those markers is part of this ticket's done-criterion.
+---
+id: UD-013
+title: Delete ProviderRegistry.isKnownType + defaultTypes dead code; fail loud on empty SPI discovery instead of silent fallback
+category: architecture
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:41
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:74-76
+  - core/app/core/src/test/kotlin/org/krost/unidrive/ProviderMetadataTest.kt
+  - core/app/core/src/test/kotlin/org/krost/unidrive/SpiDiscoveryTest.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt`
+defines two near-identically-named methods with different semantics
+on `ProviderRegistry`:
+
+```kotlin
+private val defaultTypes = setOf("localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
+
+val knownTypes: Set<String> by lazy {
+    val discovered = loader.toList().map { it.id }.toSet()
+    if (discovered.isEmpty()) defaultTypes else discovered
+}
+
+fun isKnown(type: String): Boolean = type in knownTypes      // line 74
+fun isKnownType(type: String): Boolean = type in defaultTypes // line 76
+```
+
+Two distinct issues:
+
+1. **`isKnownType` has zero non-test callers.** Verified
+   2026-05-02 against the post-refactor/provider-spi-contract tree:
+
+   ```
+   $ grep -rn "isKnownType" core/ --include="*.kt" | grep -v build/ | grep -v /test/
+   core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:76:    fun isKnownType(type: String): Boolean = type in defaultTypes
+   ```
+
+   Only the definition. The two test classes that exercise it
+   (`ProviderMetadataTest`, `SpiDiscoveryTest`) test the method
+   against the same `defaultTypes` set the method itself consults
+   — so the tests are tautological: they confirm the hardcoded
+   list contains its own members.
+
+2. **`defaultTypes` is a stale fallback.** It includes `onedrive`
+   but is missing `internxt` (added later). It existed because
+   "discovered.isEmpty()" can happen at unit-test time when the
+   `META-INF/services/...` file is absent from the test classpath.
+   But the right fix for that scenario is to register a
+   `META-INF/services/...` file in test resources, not to keep a
+   stale fallback that silently masks SPI registration failures.
+
+## Risk
+
+- **Footgun semantics.** A reader who sees `isKnown` and
+  `isKnownType` next to each other reasonably assumes they are
+  synonyms. They are not — one consults the live SPI, the other
+  consults the hardcoded fallback. A future caller that picks the
+  wrong one will silently get inconsistent behaviour for newly
+  added providers.
+- **Stale fallback masks SPI registration failures.** If the
+  `META-INF/services/org.krost.unidrive.ProviderFactory` file goes
+  missing from the runtime classpath (e.g. shadow-jar
+  misconfiguration), `knownTypes` silently falls back to the 6
+  members of `defaultTypes` — which currently does NOT include
+  `internxt`. A user with an Internxt profile would see
+  "unknown provider type internxt" with no helpful error pointing
+  at the SPI loading problem.
+
+## Proposed action
+
+1. **Delete `defaultTypes` and `isKnownType` outright.** Both are
+   dead in production code; the tautological tests
+   (`ProviderMetadataTest`'s `isKnownType validates built-in
+   providers`, `SpiDiscoveryTest`'s `isKnownType validates
+   built-in providers`) get deleted with them.
+2. **Replace the silent fallback** in `knownTypes` with a fail-loud
+   error:
+
+   ```kotlin
+   val knownTypes: Set<String> by lazy {
+       val discovered = loader.toList().map { it.id }.toSet()
+       if (discovered.isEmpty()) {
+           error(
+               "ProviderRegistry: no providers discovered via ServiceLoader. " +
+                   "Either no provider modules are on the classpath, or their " +
+                   "META-INF/services/org.krost.unidrive.ProviderFactory files " +
+                   "are missing from the runtime classpath."
+           )
+       }
+       discovered
+   }
+   ```
+
+   This converts the silent-empty-discovery footgun into a loud
+   failure at first call.
+3. **Test impact:** the empty-classpath scenario in tests must now
+   either provide the SPI registration file in test resources (the
+   right fix), or test against a fake-registered set. Most existing
+   tests already work because they're in `:app:cli/src/test` (which
+   has all 7 providers on the classpath) or use mocks.
+
+## Acceptance criteria
+
+- [ ] `defaultTypes`, `isKnownType` deleted from `ProviderMetadata.kt`.
+- [ ] `knownTypes` falls loud on empty discovery instead of falling
+      back silently.
+- [ ] `grep -rn "isKnownType\|defaultTypes" core/` returns zero hits.
+- [ ] `:app:core:test` and the global `./gradlew test` still pass;
+      no test deleted that asserted a real invariant.
+- [ ] Per `challenge-test-assertion`: the deleted tests
+      (`isKnownType validates built-in providers` ×2) are documented
+      in the resolution as "tautological — asserted the hardcoded
+      list contains its own members; deleted with the hardcoded
+      list itself".
+
+## Why architecture-range
+
+It's a contract-surface decision (does `ProviderRegistry` keep a
+fallback or fail loud?) and an API change (deleting a public
+method). Architecture range fits.
+
+## Out of scope
+
+Lifting the SPI registration concern into a build-time check (e.g.
+a Gradle task that asserts every `:providers:*` module ships its
+`META-INF/services/...` file). Worth its own ticket if the
+fail-loud approach surfaces real CI noise.
+
+## Why this wasn't done in refactor/provider-spi-contract
+
+The SPI-contract PR (UD-???-equivalent, the spec
+`docs/specs/2026-05-02-provider-spi-contract-extension-design.md`)
+explicitly listed this in its §6 "out-of-scope follow-ups" along
+with three other small cleanups, but did not file a ticket for it
+at the time. This ticket closes that gap.
+---
+id: UD-014
+title: Make MCP auth_begin/complete provider-agnostic via ProviderFactory.beginInteractiveAuth(); drop OneDrive-narrowing guard in AuthTool
+category: architecture
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt:80-101
+  - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
+opened: 2026-05-02
+---
+## Problem
+
+`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt`'s `handleAuthBegin` (and `handleAuthComplete`) currently has a two-step gate:
+
+1. **Capability check** (post-refactor/provider-spi-contract): `if (factory == null || !factory.supportsInteractiveAuth()) return error`. Long-term contract; correct semantically.
+2. **OneDrive-specific narrowing** (added 2026-05-02 by Codex review on PR #9): `if (ctx.profileInfo.type != "onedrive") return "handler is currently OneDrive-specific"`. **Temporary** — the body below the gate hardcodes `OneDriveConfig`, `OAuthService`, `DeviceCodeResponse` etc.
+
+Without step 2, any future provider whose factory returns `true` from `supportsInteractiveAuth()` (e.g. Internxt, hypothetical OAuth providers) would enter the handler and **execute OneDrive's OAuth flow against a non-OneDrive profile**. The Codex reviewer caught this on PR #9; step 2 was added as a stopgap with a `// allow: UD-014` marker.
+
+The proper fix: make the auth flow itself provider-agnostic in the SPI, then drop step 2.
+
+## Proposed action
+
+Extend `ProviderFactory` (or `CloudProvider`) with two new SPI methods:
+
+```kotlin
+interface ProviderFactory {
+    // … existing capabilities including supportsInteractiveAuth()
+
+    /**
+     * Begin an interactive auth flow. Returns a [BeginAuthResult]
+     * describing what the user must do next (visit URL, enter code,
+     * etc.) and a [continuationHandle] that the corresponding
+     * completeAuth() call will use to resume.
+     *
+     * Only invoked when supportsInteractiveAuth() returns true.
+     * Default throws UnsupportedOperationException — the gate
+     * should prevent that path being reached.
+     */
+    suspend fun beginInteractiveAuth(profileDir: Path): BeginAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+
+    /**
+     * Resume an interactive auth flow with the user-provided handle.
+     * Returns success/error; on success the credentials should now
+     * be persisted under profileDir.
+     */
+    suspend fun completeInteractiveAuth(profileDir: Path, continuationHandle: String): CompleteAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+}
+
+data class BeginAuthResult(
+    val userMessage: String,           // "Go to https://… and enter code XYZ"
+    val continuationHandle: String,    // opaque token the user passes to completeAuth
+    val pollableEndpoint: String? = null, // optional: for device-flow polling
+    val expiresAt: Instant? = null,
+)
+
+sealed class CompleteAuthResult {
+    object Success : CompleteAuthResult()
+    data class Pending(val message: String) : CompleteAuthResult()  // user hasn't completed in browser yet
+    data class Error(val message: String) : CompleteAuthResult()
+}
+```
+
+Then:
+
+1. **OneDrive** implements both methods, lifting the existing `OneDriveConfig` + `OAuthService` + `DeviceCodeResponse` plumbing inside the override. Existing `OneDriveProvider` keeps the OAuth-flow code where it belongs (with the provider).
+2. **`AuthTool.handleAuthBegin`** becomes provider-agnostic:
+   ```kotlin
+   if (factory == null || !factory.supportsInteractiveAuth()) return error("…")
+   val result = runBlocking { factory.beginInteractiveAuth(ctx.profileDir) }
+   storeContinuation(result.continuationHandle, ctx.profileInfo.name)
+   return buildToolResult(result.userMessage)
+   ```
+3. **Drop the UD-014 narrowing guard** in `AuthTool.kt`.
+4. **Internxt** can then implement `beginInteractiveAuth` (it does have OAuth) without touching `AuthTool.kt`.
+
+## Acceptance criteria
+
+- [ ] `BeginAuthResult` / `CompleteAuthResult` types added in `:app:core`.
+- [ ] `ProviderFactory.beginInteractiveAuth` + `completeInteractiveAuth` added with throwing defaults.
+- [ ] OneDrive overrides both, lifting current `AuthTool` body internals.
+- [ ] `AuthTool.handleAuthBegin`/`handleAuthComplete` no longer mention `OneDriveConfig` / `OAuthService` / `"onedrive"`.
+- [ ] `// allow: UD-014` marker + the narrowing `if (type != "onedrive")` block deleted from `AuthTool.kt`.
+- [ ] Existing `AdminToolsTest` cases still pass (the capability-rejection invariant is preserved).
+- [ ] Add a contract test asserting OneDrive's `beginInteractiveAuth()` returns a non-empty `userMessage` and a non-empty `continuationHandle` (without doing live network — fixture-driven).
+
+## Why architecture-range
+
+API change to the SPI (two new methods). Architecture range fits.
+
+## Out of scope
+
+Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is the lift target, not a rewrite). Internxt's `beginInteractiveAuth` impl (separate ticket if/when Internxt's interactive flow ships).
+
+## Why this wasn't done in PR #9
+
+Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
+---
+id: UD-774
+title: Temporarily disable ktlint plugin to speed up session iteration
+category: tooling
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/build.gradle.kts
+  - core/gradle/libs.versions.toml
+opened: 2026-05-02
+---
+**Disable the ktlint plugin's `apply` block in [core/build.gradle.kts](core/build.gradle.kts) across all subprojects, behind a single boolean toggle. ktlint adds ~20–30 s to every full `./gradlew build` and was the dominant cost in tight edit-test loops during multi-fix sessions (e.g. the UD-240g/UD-240i sequence on 2026-05-02). Re-enable is one line.**
+
+## Why temporary
+
+Long term, ktlint stays. The discipline of consistent formatting + the baseline mechanism for legacy violations is load-bearing for the project's "agents and humans share the codebase" model ([CODE-STYLE.md](docs/dev/CODE-STYLE.md), [docs/dev/lessons/ktlint-baseline-drift.md](docs/dev/lessons/ktlint-baseline-drift.md)).
+
+Short term, when iterating on a single module's `.kt` files (typical session shape: edit → run module test → repeat), ktlint runs on the full project's main + test source sets every time, even when only one file changed. On a 9-module composite that's the longest task in the build graph, by a wide margin.
+
+The toggle is intentionally crude — flip a `val ktlintEnabled = false` to `true` and the plugin lights up everywhere. This trades zero re-enable friction for zero per-invocation flexibility, which is the right tradeoff for a session-pace-of-work concern.
+
+## Acceptance
+
+- `core/build.gradle.kts` has a clearly-named compile-time toggle at the top of the `subprojects { ... }` block. When `false` (the new default after this ticket), no `ktlintCheck` / `ktlintFormat` / `ktlintMainSourceSetCheck` / `ktlintTestSourceSetCheck` tasks register on any subproject.
+- `./gradlew tasks --all` no longer lists ktlint tasks.
+- `./gradlew build` runs ~20–30 s faster on a warm daemon. Spot-check.
+- `./gradlew :app:sync:test` (single-module) runs end-to-end with no ktlint dependency.
+- The plugin declaration in [core/gradle/libs.versions.toml](core/gradle/libs.versions.toml) is left in place — only the *application* in `core/build.gradle.kts` is gated. Re-enable is one line of code.
+- Existing `<module>/config/ktlint/baseline.xml` files stay where they are. They become unused-but-harmless while the toggle is off; they snap back into use on re-enable.
+- [scripts/dev/ktlint-sync.sh](scripts/dev/ktlint-sync.sh) is left as-is. It will fail with "task not found" while the toggle is off — expected and acceptable for a temporary disable. A user re-enabling ktlint also re-enables the sync script in the same flip.
+- [scripts/dev/pre-commit/scope-check.sh](scripts/dev/pre-commit/scope-check.sh)'s `chore(ktlint)` rule (which restricts ktlint scope commits to `baseline.xml` only) is left as-is. The rule fires only on `chore(ktlint)`-scoped commits, which won't happen while the toggle is off.
+
+## Re-enable plan
+
+When session-pace work settles, flip the toggle back to `true` and:
+
+1. Run `scripts/dev/ktlint-sync.sh` to absorb any drift in baselines from the disable window.
+2. Verify `./gradlew build` is fully green (ktlint + tests).
+3. Close UD-774 with a `resolved_by: commit <sha>` referencing the re-enable commit.
+
+No data-loss path exists: nothing about disabling stores state outside the toggle line, so re-enable is reversible at any time.
+
+## Surfaced
+
+2026-05-02 session, after the UD-240g + UD-240i sequence (4 successive `./gradlew build` invocations totalling ~6 minutes of which ktlint was ~30 % of wall time). User explicitly asked to disable in-session.
+
+---
+id: UD-254a
+title: MDC clone storm under MDCContext — 80 percent of JFR allocation pressure
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+  - docs/dev/lessons/mdc-in-suspend.md
+opened: 2026-05-02
+---
+**Every coroutine context switch clones the SLF4J MDC map. Captured live via JFR (60-s recording, 17:27:37–17:28:37 UTC, 2026-05-02): `LogbackMDCAdapter.getPropertyMap()` accounts for **80.63 % of all allocation pressure** in the JVM. The cause is `kotlinx.coroutines.slf4j.MDCContext.updateThreadContext(...)` calling `MDC.getCopyOfContextMap()` on every dispatched task — a fresh `HashMap<String, String>` per coroutine resume.**
+
+## Captured live (jfr.exe view allocation-by-class on flight_recording_…15780.jfr)
+
+```
+                                     Allocation by Class
+Object Type                                                              Allocation Pressure
+------------------------------------------------------------------------ -------------------
+java.util.HashMap                                                                      80,63%
+byte[]                                                                                 10,72%
+kotlinx.coroutines.JobSupport$Finishing                                                 2,73%
+java.io.EOFException                                                                    2,15%
+kotlin.Result$Failure                                                                   1,14%
+java.nio.HeapByteBuffer                                                                 1,01%
+…
+```
+
+Stack-traced via `jfr.exe print --events ObjectAllocationSample --stack-depth 12`:
+
+```
+ch.qos.logback.classic.util.LogbackMDCAdapter.getPropertyMap()           ← 80% of allocation
+LogbackMDCAdapter.getCopyOfContextMap()
+org.slf4j.MDC.getCopyOfContextMap()
+kotlinx.coroutines.slf4j.MDCContext.updateThreadContext(...)
+kotlinx.coroutines.internal.ThreadContextKt.updateThreadContext(...)
+kotlinx.coroutines.DispatchedTask.run()
+kotlinx.coroutines.EventLoopImplBase.processNextEvent()
+kotlinx.coroutines.BlockingCoroutine.joinBlocking()
+kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(...)
+org.krost.unidrive.cli.SyncCommand.run() line: 357
+```
+
+The companion stack (`MDC.setContextMap`) shows the symmetric write side, fired from the `DefaultDispatcher-worker-*` runWorker loop on every task. The pattern is bidirectional — read on save, write on restore — so each coroutine resume costs **2 HashMap clones**, not 1.
+
+## Root cause
+
+`SyncEngine.syncOnce` in [core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:80-105](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt) pushes a `scan` MDC slot for the duration of one sync pass (UD-254). The CLI / providers add `commit` (build hash) + `profile` (config profile) + `thread` slots, populated at process start (logback.xml pattern `[%X{commit:--------}] [%X{profile:--------}] [%X{scan:--------}]`).
+
+While the sync is running, `kotlinx-coroutines-slf4j`'s `MDCContext` is in the coroutine context (added so log lines emitted inside `launch { }` / `async { }` blocks inherit the MDC). The integration's contract:
+
+> `updateThreadContext` → `MDC.getCopyOfContextMap()` (one HashMap allocation, snapshotting old MDC)
+> *coroutine body runs with the right MDC*
+> `restoreThreadContext` → `MDC.setContextMap(savedMap)` (one HashMap allocation, restoring old MDC)
+
+Every `DispatchedTask.run()` does both. With thousands of upload coroutines × per-PUT continuation suspensions × Ktor's HTTP/2 callback chains, the count goes into the millions.
+
+## Why this matters
+
+- **80 % of allocation pressure** means GC frequency tracks coroutine churn, not actual work. The post-fix daemon (UD-240g + UD-240i deployed) sustains many concurrent uploads precisely because the algorithmic fixes work — but each of those uploads is paying a 2-HashMap-per-suspend tax.
+- The recording showed only **0.53 % avg JVM CPU** — the daemon is mostly waiting on network. So the user isn't feeling this *as throughput*, only as memory churn. The cost is real but masked by I/O dominance.
+- **At larger scale** (e.g. UD-247's cross-provider benchmark workload) or with a faster network this allocation rate becomes a throughput cliff — see UD-742 / UD-757 ETA renderer that fires per scan tick; same pattern.
+- The project's existing [`docs/dev/lessons/mdc-in-suspend.md`](docs/dev/lessons/mdc-in-suspend.md) lesson already names this hazard ("MDC inside a suspend function doesn't survive MDCContext re-apply on resume — for cross-coroutine correlation prefer id-in-message"). The lesson is correct; we just kept using `MDCContext` on the hot path anyway.
+
+## Proposal — two slices
+
+### Slice A — clear `scan` from MDC at coroutine boundaries (S effort, low risk)
+
+The `scan` slot is the most expensive: it's set at `syncOnce` entry and held for the lifetime of one sync pass (the longest live MDC entry by far). Inside the long-lived coroutines launched from `syncOnce` (Pass 2 transfer slots, the IPC accept loop, etc.) the `scan` slot is rarely *needed* in log output — the per-action lines already carry path info. Drop it from the MDC scope, keep it as a banner-only field on the `Scan started`/`Scan ended` log lines.
+
+This alone should cut HashMap allocation by ~half — every map clone after entering the sync pass currently carries 4 entries; cutting `scan` makes it 3 (and the dominant size driver is the values, not the count, but the alloc count drops uniformly).
+
+### Slice B — drop `MDCContext` from coroutine context on hot paths (M effort, behavioural change)
+
+Stop installing `MDCContext()` in the coroutine context for `Pass 2: Apply` (the per-action upload/download workers) and the IPC server's accept loop. Replace with id-in-message logging:
+
+- `log.info("Upload {} ({} bytes) action={}", path, size, scanId)` instead of relying on MDC `[scan]` interpolation
+- Provider code already does this for `req=ID` (via UD-255's Ktor plugin) — extend the pattern
+
+Per the lessons file:
+> *MDC inside a suspend function doesn't survive MDCContext() re-apply on resume. For cross-coroutine correlation prefer id-in-message over MDC.*
+
+This is the canonical implementation of that guidance.
+
+## Acceptance
+
+- New JFR recording over the same workload shape shows `LogbackMDCAdapter.getPropertyMap` < 10 % of allocation pressure (down from 80.63 %).
+- `byte[]` (Internxt encrypt + S3 PUT) becomes the dominant allocation source, as JMC's rule originally suggested — confirms we've drained the MDC noise and what's left is intrinsic.
+- Log lines on the upload hot path still carry scan-id correlation (via inline format, not MDC) so a single `grep "scan=<id>"` still slices a sync pass.
+- No regression in `IpcProgressReporter` events — IPC clients already get `profile` in the JSON body (not via MDC).
+- `logback.xml`'s `%X{scan:--------}` pattern is left in place for the synchronous main-thread paths that still benefit (the `Scan started`/`Scan ended` banners).
+
+## Related
+
+- **UD-254** (closed) — introduced the `scan` MDC slot. This ticket undoes the scope of that change for hot-path coroutines while keeping the diagnostic value at the start/end banners.
+- **UD-255** (closed) — HTTP `req=ID` correlation. Set the precedent for id-in-message over MDC.
+- **lessons/mdc-in-suspend.md** — the project already named this hazard. UD-254a is the perf-evidence-driven fix.
+- **UD-247** (open) — cross-provider benchmark harness; doing this fix first means the harness measures the post-fix shape and gives a stable baseline.
+
+## Surfaced
+
+2026-05-02 19:27 — JFR recording on the running daemon (post-UD-240g/i deploy at 18:41) examined with `jfr.exe view allocation-by-class` and `jfr.exe print --events ObjectAllocationSample`. The signal was only visible because JMC's overview report (rule-based, summary-level) collapsed it under "Allocated Classes" without crediting the call site; the application-level views show it unambiguously.
+---
+id: UD-352a
+title: gather-phase 3:40 on narrow --sync-path: sequential pagination + no scoped delta + no streaming
+category: providers
+priority: medium
+effort: M
+status: open
+opened: 2026-05-03
+---
+**`unidrive sync --download-only --sync-path=/_INBOX` against a 22,700-item Internxt drive sat in `Scanning remote changes... 22,700 items · 3:40` before the first download started. The 3:40 is dominated by **sequential pagination of `/files` and `/folders`** in [`InternxtProvider.delta()` lines 313-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313). 22,700 items / 50 per page ≈ 454 round-trips × ~485ms ≈ 220s, entirely API-bound. Two compounding issues: (a) no parallelism on the offset-paginate; (b) `--sync-path` is filtered in-engine *after* the full delta returns ([SyncEngine.kt:163-168](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163)), so the engine pulls every item in the entire drive even when the user wants 1 % of it.**
+
+## Dig findings (2026-05-03)
+
+Triaged the 3:40 cost on `unidrive -p inxt_gernot_krost_posteo sync --download-only --sync-path=/_INBOX`:
+
+1. **`gatherRemoteChanges` does NOT honor `syncPath`.** [SyncEngine.kt:578-690](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:578) fetches the entire remote delta, full-set; filtering happens later at [SyncEngine.kt:163-168](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:163). For a narrow `--sync-path` against a wide drive the wasted work is the dominant cost.
+
+2. **`InternxtProvider.delta` paginates sequentially.** [InternxtProvider.kt:313-340](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313):
+   ```kotlin
+   var offset = 0
+   while (true) {
+       val batch = api.listFiles(adjustedCursor, limit, offset)   // limit=50
+       allFiles.addAll(batch)
+       …
+       if (batch.size < limit) break
+       offset += limit
+   }
+   // identical loop for /folders
+   ```
+   No concurrency. 22,700 items × 50/page = 454 sequential requests. Observed 220s ÷ 454 ≈ 485 ms/request — entirely network/server time.
+
+3. **`resolveItemPath` is cheap.** [SyncEngine.kt:703-709](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:703) only does DB lookup for deleted items at root; non-deleted items return directly. Not the bottleneck.
+
+4. **Fast-bootstrap (UD-223) is bypassed** because the operator has a populated DB (`storedCursor != null`), so `isFullSync = false`. Even if it weren't, this is `--download-only` — fast-bootstrap adopts the cursor and emits zero actions, which is the wrong answer when the user wants files pulled.
+
+5. **No streaming.** Engine's gather → reconcile → apply phases are strict. First download cannot start until gather + reconcile complete.
+
+## Three layers of fix, smallest to largest
+
+### (a) Parallelize Internxt offset-paginate — easy win, biggest absolute saving
+
+Replace the sequential offset loop with a parallel fetcher. Pseudo:
+
+```kotlin
+val pages = generateSequence(0) { it + limit }.takeWhile { it < probedTotal }
+val sem = Semaphore(8)
+val batches = pages.map { offset ->
+    async { sem.withPermit { api.listFiles(adjustedCursor, limit, offset) } }
+}.awaitAll()
+```
+
+Risks: the offset-paginate API contract assumes "stop when batch < limit" — without a count probe the parallel fan-out can't know how many pages exist. Either (i) request via `Range`-like total-count header (if Internxt supports it), (ii) over-fetch with `limit*N` slots and ignore empty pages, or (iii) spawn N requests, fan out more if any returned full pages. Concurrency 8 should cut 220 s to ~30 s.
+
+Same pattern applies to `listFolders`. Could be done in parallel with `listFiles`.
+
+### (b) Folder-scoped delta when `--sync-path` is set — eliminates wasted work
+
+For Internxt, the engine could pass `syncPath` (or its resolved folder UUID via `FolderUuidCache`) to the provider's `delta()` and have the provider only enumerate the subtree. Current `listFiles`/`listFolders` API doesn't take a folder filter — needs API research (does Internxt's REST API support `?folder=<uuid>` on `/files`?). If yes, narrow paths drop from 22,700 → ~hundreds.
+
+If the API doesn't support it, the engine could call `listFiles(folder=<uuid>)`-style folder-by-folder traversal as a `Capability.ScopedDelta` opt-in, falling back to full delta when absent. Adds capability bookkeeping but is the right answer for narrow `--sync-path` use cases.
+
+### (c) Streaming gather → apply for `--download-only` — biggest UX win, biggest refactor
+
+User's original ask. Pipeline pages of remote items into Pass-2 download workers as they arrive, before reconcile completes. Constraints relax in `--download-only` mode:
+- Move detection ([Reconciler.detectMoves](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt) — UD-240i/j/k) needs the full remote+local set; in `--download-only` move-as-download-new + delete-old is acceptable (slightly more bytes, correct outcome).
+- Conflict detection in `--download-only` defaults to remote-wins-content; per-item resolution is fine.
+- Cursor-promotion guard (UD-222) still works — just promote at end of gather only if every transfer succeeded.
+
+Implementation shape: a new `SyncMode.STREAM_DOWNLOAD` that bypasses `gatherRemoteChanges`/`reconcile`, enumerates remote pages, and per-page emits `DownloadContent` actions into a channel that Pass-2 workers consume. Initial impl could be Internxt-only behind a flag.
+
+## Why this fits as UD-352a
+
+[UD-352](docs/backlog/CLOSED.md) closed the gather-phase visibility problem (heartbeat per page so users see progress). UD-352a is the next layer: the gather phase is now visible *and* observably slow. The fixes here either preserve UD-352's heartbeat contract (parallelize, scoped delta) or relax it (streaming = no fixed total to count toward).
+
+## Acceptance
+
+- (a) is a self-contained provider-side change. Acceptance: sync wall-clock for the operator's `--sync-path=/_INBOX` against 22,700-item drive drops below 60 s with parallelism = 8. New `InternxtProviderTest` case asserts concurrent in-flight requests (mock with delay assertion).
+- (b) requires API research first. Acceptance: a `Capability.ScopedDelta` opt-in path; when set, narrow-path syncs enumerate < 1 s independent of total drive size.
+- (c) needs an ADR (streaming changes engine invariants). Acceptance: `--download-only --sync-path=/_INBOX` starts the first download within 10 s, regardless of drive size.
+
+Pick (a) first as the unblocking fix; (b) and (c) can be filed as siblings once the easy win is in.
+
+## Related
+
+- **UD-352** (closed) — gather-phase heartbeat. Sets the visibility contract this ticket builds on.
+- **UD-742** (closed) — heartbeat per page. Same gather-phase family.
+- **UD-223** (open) — fast-bootstrap. Adjacent: skips full enumeration on first sync via `Capability.FastBootstrap`. The `Capability.ScopedDelta` of (b) is the symmetric capability for non-first syncs.
+- **UD-405** (closed) — `--sync-path` Windows backslash normalisation. Same `--sync-path` UX axis.
+- **UD-901a** (closed) — recovery loops respect `syncPath`. Same scope-honoring concern at a different code site.
+
+## Surfaced
+
+2026-05-03, in operator's iteration after the UD-901 fix-stack landed. The 3:40 wait for a narrow `--download-only` is acceptable for a one-off but kills the "quick fetch this folder" use case — the dominant `--download-only` mental model.
+
+## 2026-05-04 update — concrete throughput target from a 165k-item baseline
+
+A fresh-profile sync against a 165,509-item Internxt account took 2012s end-to-end (Reconcile started: 165509 remote, 0 local; scan duration 2012178ms in `unidrive.log`). That is **~82 items/sec sequential**, broadly consistent with this ticket's 22,700-item ÷ 220s = ~103 items/sec earlier observation.
+
+**Acceptance addition** for the parallel-pagination fix: at parallelism = 8, observed throughput should be **≥500 items/sec** on a 165k-item account, i.e. the same 165,509-item scan completes in ≤350s. Verified by re-running the same `unidrive -p <profile> sync --download-only --sync-path /` and asserting the `Scan ended ... duration=Xms` log line shows `X ≤ 350000`.
+
+Also: pair the parallel pagination with **UD-303 (tie-break by `(updatedAt, lastUuid)`)** so concurrent paginators don't race each other into duplicate or dropped items at page boundaries. UD-303 must land first or alongside.
+
+---
+id: UD-362
+title: Narrow Internxt delta() request to --sync-path scope when set
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:578
+opened: 2026-05-03
+---
+**`unidrive sync --sync-path=/_INBOX` still pulls the entire drive's `/files` + `/folders` listing** — the scope filter is engine-side only, applied after the full delta returns. The Internxt Drive API exposes per-folder content endpoints (`/folders/content/{uuid}`, `/folders/{uuid}/tree` per the spec); the provider could narrow the wire-level call set when `syncPath` is plumbed through. Two costs today: (a) wasted bandwidth/time pulling 22,700 items to filter down to ~50 (cf. UD-352a 3:40 gather phase), and (b) a wider blast radius for the partial-gather problems in UD-360/UD-361 — the more surface area we walk, the more chances for a transient error to silently truncate.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§5 sync-path scope handling).
+
+Related: UD-352a (which already raised the parallelism + scoped-delta angle from the perf side). This ticket is the API-correctness framing of the same gap; coordinate or merge.
+
+## What to change
+
+Plumb `syncPath` from the engine to the provider via the existing `delta()` signature or a new overload. When set, the provider:
+- Resolves `syncPath` to a folder UUID once (cached per-cursor).
+- Walks `/folders/content/{uuid}` recursively scoped to that subtree, instead of `/files` + `/folders` flat listings.
+- Or, post-UD-363, uses `/folders/{uuid}/tree` for atomic scoped retrieval.
+
+## Acceptance
+
+- When `syncPath` is non-null and the provider supports scoped delta, the wire-level call set is restricted to the subtree.
+- An integration test asserts that `--sync-path=/_INBOX` against a 22 700-item drive issues O(items-in-subtree) requests, not O(items-in-drive).
+
+## Related
+
+- UD-352a (parallelism + scoped delta — perf framing).
+- UD-360, UD-361 (partial-gather signalling — narrower scope reduces exposure).
+- UD-363 (`/folders/{uuid}/tree` — atomic alternative).
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §5.
+---
+id: UD-363
+title: Replace flat-listing reconstruction with /folders/{uuid}/tree
+category: providers
+priority: medium
+effort: L
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293
+opened: 2026-05-03
+---
+**The Internxt Drive OpenAPI spec exposes `/folders/{uuid}/tree`, an atomic single-call subtree fetch — the provider doesn't use it.** Today's [`InternxtProvider.delta()`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:293) reconstructs the inventory from two independently paginated flat listings (`/files`, `/folders`); any insert, update, or delete on the server during the walk shifts page boundaries and can drop or duplicate rows. A single `/tree` call is atomic from the server's POV and eliminates the entire reorder/insert race class.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§3c, §3f, §6 mechanism 4).
+
+## What to change
+
+Behind a feature flag (so we can compare result sets on live drives), implement an alternative gather path that calls `/folders/{uuid}/tree` rooted at the drive root (or at `syncPath` per UD-362). Convert the tree response into the same `DeltaPage` shape the existing flat-listing path emits. Keep the legacy path until live-fixture parity is demonstrated.
+
+## Acceptance
+
+- Feature-flagged gather path uses `/folders/{uuid}/tree`.
+- Live-fixture test asserts the tree-based result set matches the legacy flat-listing result set across at least one full sync cycle on a stable test drive.
+- Performance comparison (request count, wall time) recorded in the lessons doc.
+
+## Related
+
+- UD-358 (stable sort) — sibling fix for the legacy path; this ticket bypasses the problem instead.
+- UD-362 (scoped delta) — `/tree` is the natural primitive for that.
+- UD-352a (parallelism perf) — `/tree` is one round-trip vs 454; collapses both perf and correctness wins into one change.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §3c.
+---
+id: UD-364
+title: Use /files/limits to populate maxFileSizeBytes()
+category: providers
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-03
+---
+**`InternxtProvider.maxFileSizeBytes()` returns null** — the SPI default — so the engine has no early reject for oversized uploads. A wasted `PUT` against the OVH shard backend can run to its full timeout (10 KB/s floor × file size, see UD-353) before failing. The Internxt Drive API exposes `/files/limits` (per the OpenAPI spec) which returns the server-reported per-file size cap; the provider should consume it and override the SPI method.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§capability matrix, available-unused).
+
+## What to change
+
+In [`InternxtApiService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt) add a `getFileLimits()` call. In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt) override `maxFileSizeBytes()` to return the cached server value, refreshed lazily on auth.
+
+## Acceptance
+
+- `maxFileSizeBytes()` returns a non-null Long matching the value reported by `/files/limits`.
+- Engine pre-flight check rejects oversized files before the upload pipeline starts (verify existing engine consumes `maxFileSizeBytes` — if not, this ticket also covers wiring it in).
+
+## Related
+
+- UD-353 (OVH shard upload throughput floor) — context for why oversized uploads hurt today.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §capability matrix.
+---
+id: UD-365
+title: Declare and implement Capability.Share family for Internxt
+category: providers
+priority: low
+effort: L
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+opened: 2026-05-03
+---
+**Internxt's Drive API exposes a fully-featured sharing model (~30 endpoints under `/sharings/*` per the OpenAPI spec); the provider returns `Unsupported` for the entire `Capability.Share` family.** That covers `share()`, `listShares()`, `revokeShare()` on [`CloudProvider`](core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt). The functionality is server-side ready and free; this is pure provider implementation work.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§capability matrix, available-unused).
+
+## What to change
+
+In [`InternxtProvider.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt):
+- Add `Capability.Share` (or whatever the SPI granularity is — verify against `Capability` enum) to the `capabilities()` set.
+- Override `share(path, expiryHours, password)` → POST `/sharings/...` with the spec-defined request body, return the share URL.
+- Override `listShares(path)` → GET `/sharings?...`.
+- Override `revokeShare(path, shareId)` → DELETE `/sharings/{id}`.
+- Add corresponding DTOs to `model/`.
+
+## Acceptance
+
+- All three SPI methods round-trip through `/sharings/*` and return live data.
+- `capabilities()` declares the share family.
+- Integration test creates a share, lists it, revokes it, and asserts the share is gone.
+
+## Related
+
+- UD-364 (`/files/limits`) — sibling capability-gap ticket for unused but advertised API surface.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §capability matrix.
+---
+id: UD-015
+title: Document /auth/login* and Bridge endpoints as undocumented vendor-flux surfaces
+category: architecture
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:100
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:290
+  - docs/ARCHITECTURE.md
+opened: 2026-05-03
+---
+**Three vendor-flux Internxt API surfaces are absent from `docs/ARCHITECTURE.md`** — `/auth/login`, `/auth/login/access`, and the entire Bridge family (`/buckets/*`, `/v2/buckets/*`). They're called by [`AuthService.kt`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt) and [`InternxtApiService.kt:290,326-368`](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:290) but **not in the public Drive OpenAPI spec at `https://api.internxt.com/drive/`**. They're stable per Internxt's open-source desktop client, but documenting their reverse-derived nature protects future agents from assuming the spec is canonical.
+
+Filed from the [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) (§API discovery, "Used-but-undocumented" classification).
+
+## What to change
+
+Either add a section to [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) under the Internxt provider summary, or create a new `docs/dev/lessons/internxt-undocumented-surfaces.md` listing:
+
+- `/auth/login` and `/auth/login/access` — auth challenge + token mint, called from `AuthService.kt:100,134`. Source of truth: Internxt's open-source desktop client (`internxt/drive-desktop` on GitHub).
+- `/buckets/{bucket}/files/{fileId}/info` — Bridge file metadata for download, called from `InternxtApiService.kt:290`. Source of truth: `internxt/inxt-js` (legacy Storj fork).
+- `/v2/buckets/{bucket}/files/start` and `/v2/buckets/{bucket}/files/finish` — Bridge upload protocol, called from `InternxtApiService.kt:326-368`. Source of truth: same as above.
+
+For each, note the open-source repo path used to derive the wire shape and date of derivation. This is a vendor-flux risk register, not an SLA — Internxt could change these without notice.
+
+## Acceptance
+
+- Section exists in `ARCHITECTURE.md` (or a dedicated lessons doc) listing all three undocumented surfaces.
+- Each entry has the call site, the source-of-truth open-source link, and a "verified on" date.
+- Cross-link from [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) §API discovery.
+
+## Related
+
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md).
+---
+id: UD-371
+title: Wire SyncEngine Pass 1 to dispatch grouped CreateRemoteFolder via provider.createFolders (UD-368 follow-on)
+category: sync
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:355
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt:65
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-03
+---
+**Wire `SyncEngine` Pass 1 to dispatch grouped `CreateRemoteFolder` actions through `provider.createFolders(paths)` so the bulk-folder optimisation landed in [UD-368](docs/backlog/CLOSED.md) actually runs in production.**
+
+UD-368 added `CloudProvider.createFolders(paths)` SPI (default loops `createFolder`) and `InternxtProvider.createFolders` (bulk-aware override calling `POST /folders` with the 5-item-capped `folders` array). But [SyncEngine.kt:375](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:375) still dispatches `CreateRemoteFolder` actions one at a time via `applyCreateRemoteFolder`. So in production every folder-create is still a single `createFolder` round-trip — the bulk path is dormant.
+
+## Realistic value
+
+Modest. The orphan-recovery cascade ([Reconciler.kt:225-275](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:225)) emits `CreateRemoteFolder` for ancestors **depth-first**, not breadth-first — a 10-deep new path is 10 sequential POSTs even with bulk (each level needs its parent's UUID first). Bulk only saves round-trips for **siblings under the same parent**, capped at 5x → 1x reduction.
+
+Cases where it actually helps:
+- A user dumps a directory with many flat-list new subfolders (e.g. importing an `archive/` with 20 immediate children).
+- Sibling-spawning recovery loops where multiple files under the same not-yet-existing parent each emit ancestor synthesis for the parent.
+
+The savings are real but bounded. Time-box this against the dispatch-loop refactor risk before committing to the work.
+
+## What to change
+
+### `SyncEngine` Pass 1 dispatch ([core/app/sync/src/main/kotlin/.../SyncEngine.kt:355-410](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:355))
+
+1. Pre-process `sequentialActions` before the per-action loop: scan for **consecutive runs** of `CreateRemoteFolder` actions sharing a parent path. Consecutive matters because `sortActions()` already orders them — if two `CreateRemoteFolder`s are interleaved with a `Conflict` or `MoveRemote`, don't try to coalesce across the boundary (preserves dispatch ordering invariants).
+2. For each run of size > 1, call `provider.createFolders(paths)` once; iterate the returned `List<CloudItem>` to do the per-folder DB upserts that today's `applyCreateRemoteFolder` does inline.
+3. For runs of size 1 or providers without bulk semantics, fall through to today's per-action `applyCreateRemoteFolder` path.
+4. Error handling: a bulk failure must not consume the whole consecutive-failure budget at once — count it as one failure (the operator's mental model is "the batch failed", not "5 folders failed"). Conversely on success, increment any counters once per folder, not once per batch.
+
+### Tests
+
+5. Extend [SyncEngineTest](core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt) FakeProvider with a `lastCreateFoldersBatch: List<String>?` spy. Test: enqueue 3 sibling `CreateRemoteFolder` actions sharing `/dir/`, run sync, assert spy captured all 3 paths in one `createFolders` call (not 3 separate `createFolder` calls).
+6. Test the size-1 fallthrough: single `CreateRemoteFolder` still hits `createFolder` (verifies the pre-pass doesn't introduce a regression for the common case).
+7. Test the boundary case: `CreateRemoteFolder("/a/b") → Conflict("/a/c") → CreateRemoteFolder("/a/d")` produces two separate `createFolder` calls (no cross-boundary coalescing).
+
+## Acceptance
+
+- A sibling fan-out of 3 `CreateRemoteFolder` actions under the same parent issues exactly **1** HTTP POST to Internxt (not 3).
+- The 10-deep depth-first cascade still issues 10 sequential POSTs (no regression — depth-first is structural).
+- Pass 1 consecutive-failure budget treats a batch failure as one failure, not N.
+- All existing SyncEngine tests pass unchanged.
+- A new SyncEngine test asserts the consecutive-`CreateRemoteFolder`-coalescing behaviour for siblings.
+
+## Out of scope
+
+- Reordering Pass 1 actions to maximise batching opportunities (the current `sortActions()` ordering is sacred for correctness reasons elsewhere in the engine).
+- Cross-parent batching (the bulk endpoint requires a single `parentFolderUuid`).
+- Async / parallel dispatch of separate batches (Pass 1 is intentionally sequential per UD-901 etc.).
+
+## Related
+
+- UD-368 (closed) — the API + SPI work that this ticket plugs into.
+- UD-901b (closed) — the orphan-recovery cascade emitter that's the main beneficiary on the breadth-first edge.
+- UD-317 (closed) — the per-item 409 recovery dance that the bulk path falls back to on conflict.
+- [Internxt API ↔ provider audit](docs/audits/internxt-api-vs-spi.md) — `POST /folders` row already notes the deferral.
+---
+id: UD-200
+title: First-time CLI UX: profile/account terminology, default-account handling, inline auth prompts
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-05-04
+---
+First-time CLI experience surfaces several friction points (drive-by feedback from a fresh `~/.config/unidrive/` walkthrough, 2026-05-04). Issues cluster into four orthogonal threads — fix individually, share the same UX-language refresh.
+
+## 1. Profile vs provider terminology is muddled
+
+`profile add` is named "Add a new provider profile (interactive wizard)" but the underlying entity is closer to an **account** (an authenticated identity at a provider). `profile list` shows columns `PROFILE / TYPE / SYNC ROOT / AUTH` — `TYPE` is the provider, `PROFILE` is the user-facing account label. Help text and column headings should agree.
+
+Proposed naming pass:
+- `profile` → keep as the CLI verb (it's accurate: a saved configuration), but reframe the help as "Manage cloud accounts (a profile binds one account at one provider to one local sync root)".
+- Column rename: `PROFILE → ACCOUNT`, `TYPE → PROVIDER`. Matches the `STORAGE PROVIDER / ACCOUNT` column already used in `unidrive status`.
+- `--provider` flag is doubly-overloaded — it accepts either a profile name *or* a provider type ("Provider profile name or type"). Split into `--account <name>` (preferred) with `--provider` kept as a deprecated alias for one minor version. Disambiguates the most common confusion: "is `internxt` the provider or my account?".
+
+## 2. `unidrive profile add <type> <name>` positional form silently rejected
+
+The error message advertises `Run 'unidrive profile add <type> <name>' to create your first profile`, but invoking it that way prints `Unmatched arguments from index 2`. The wizard-only form is the only working path. Either:
+- (a) implement the positional form (`profile add <provider-type> <account-name> [--sync-root PATH]`), so the bootstrap message is honest and scriptable, or
+- (b) fix the bootstrap message to say `Run 'unidrive profile add' to launch the interactive wizard.`
+
+(a) is the right fix — Picocli supports it trivially and it unblocks scripted onboarding. The wizard stays as the default when args are absent.
+
+## 3. Default-account handling is half-implemented and confusing
+
+After `profile add internxt_gernot_…`, `unidrive status` showed:
+
+```
+⚠︎ Microsoft OneDrive  [– –]  …  never
+```
+
+i.e. the "default" provider fell through to a hard-coded OneDrive shape rather than the only configured account. Two clean options:
+
+- **Option A (preferred): drop "default account" entirely.** Promote `--all` to be the default of `status`, `quota`, `log`, etc. Then `--all` becomes a no-op flag (deprecated alias) and bare `unidrive status` shows every configured account. Disambiguate via `-p <name>` for single-account view. Eliminates an entire class of "why is it showing OneDrive when I added Internxt?" surprises and matches user mental model (the CLI manages a *fleet* of accounts).
+- Option B: track default-account explicitly. Add `profile set-default <name>` and pick the most recently added account if no default is set. Fine but more state to maintain — A is simpler.
+
+## 4. Auth flow is disconnected from `profile add` and from "needs auth" errors
+
+`profile add` finishes without ever offering to authenticate. Then `status --all` (or any operation) tries to query the unauthorized account and surfaces only error noise. Two integration points:
+
+- **(a)** After a successful `profile add`, prompt: `Authenticate now? [Y/n]` — if yes, run the same auth flow as `unidrive auth -p <name>`. Skippable for non-interactive contexts (`--no-auth` flag or `UNIDRIVE_NONINTERACTIVE=1`).
+- **(b)** Any command that hits `AccountNotAuthenticated` should offer to start the auth flow inline: `Account 'foo' is not authenticated. Run 'unidrive auth -p foo' now? [Y/n]` and, on confirmation, exec it. Same gate via `--no-prompt`/non-interactive env.
+
+If a user has 23 accounts and none is authed, they should expect to be walked through 23 auth flows — that's the truth of "I have 23 unauthed accounts," not a UX bug. The bug is silently failing at the operation layer.
+
+## Acceptance criteria
+
+- Help text and column headings consistently use **account** for the user-facing identity and **provider** for the storage system. (#1)
+- `profile add <provider> <name>` works as a positional form, in addition to the wizard. (#2)
+- `unidrive status` (no flags) shows every configured account; `--all` becomes a deprecated no-op alias. Same for `quota`, `log`, and any other inventory-style command. Single-account view via `-p <name>`. (#3)
+- The hard-coded OneDrive fallback in `unidrive status` is removed. (#3)
+- `profile add` prompts for auth-now after success in interactive mode; suppressible. (#4a)
+- `AccountNotAuthenticated`-class errors offer to start the auth flow; suppressible. (#4b)
+- Smoke test: empty `~/.config/unidrive/` → `profile add internxt name --sync-root …` → auth prompt → `unidrive status` shows the new account, `[– –]` until first sync.
+
+## Notes
+
+- Threads 1 and 3 share a documentation refresh (README, `--help` text, every `man-page-style` doc). Worth doing in one pass to keep terminology consistent.
+- Thread 2 is the smallest and a good first commit.
+- Thread 4b touches every command's error handler — could be implemented as a single `runRequiringAuth` wrapper so the prompt logic lives in exactly one place.
+---
+id: UD-201
+title: CLI sync summary misleading: 'Reconciled: 0 actions' when --upload-only/--download-only filters everything out
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+CLI sync summary line is misleading when reconciler actions are filtered out by `--upload-only` / `--download-only`.
+
+## Repro (2026-05-04 session)
+
+Empty local sync root, fresh Internxt profile with ~165k remote items. Ran:
+
+```
+unidrive -p internxt_gernot_krost_posteo sync --upload-only
+```
+
+CLI output:
+
+```
+Scanning remote changes... 10,700 items · 1:58
+Reconciling... 165,509 / 165,509 items · 0:00
+Reconciled: 0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+`~/Internxt` stayed empty. User concluded "I'm doing something wrong" — the CLI gave no signal that 165k actions were reconciled and then thrown away by the upload-only filter.
+
+## What the log actually says
+
+```
+2026-05-04 17:04:24.835 INFO  Reconciler - Reconcile started: 165509 remote, 0 local
+2026-05-04 17:04:25.549 INFO  Reconciler - Reconcile complete: 165509 actions in 714ms
+```
+
+So the reconciler decided on 165,509 actions (all download-side, given local is empty). The executor then dropped all of them because `--upload-only` filters out download actions, and the CLI summary reported the post-filter count as if it were the reconciler verdict.
+
+## Bug shape
+
+`Reconciled: N actions` should reflect what the reconciler decided, not what the executor accepted after directional filtering. The current behaviour conflates two distinct numbers: "what the reconciler *wanted* to do" vs "what the executor *did* after `--upload-only` / `--download-only` filtering". They can differ by 165k.
+
+## Proposed fix
+
+Differentiate the counters in the CLI summary:
+
+```
+Reconciled: 165,509 actions
+  └─ 165,509 skipped (--upload-only filtered out download actions)
+Executed:   0 actions
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+Or, more compact:
+
+```
+Reconciled: 165,509 actions (165,509 skipped by --upload-only); 0 executed
+Sync complete: 0 downloaded, 0 uploaded, 0 conflicts (2012.2s)
+```
+
+Either form makes it impossible to misread "0 actions" as "nothing to do" when in reality the user told us to ignore everything.
+
+## Acceptance
+
+- Test scenario: empty local + N>0 remote + `--upload-only` → CLI reports a non-zero "reconciled" count and a non-zero "skipped" count whose reason mentions `--upload-only`.
+- Inverse: full local + empty remote + `--download-only` → reconciled count > 0, skipped count > 0 referencing `--download-only`.
+- Bidirectional sync (no flag) → skipped count is 0 (or absent).
+- Bonus: when `skipped > 0` print a one-line hint: `Hint: re-run without --upload-only to actually download these items.` Hint suppressible via `--no-hints` for scripted callers.
+
+## Notes
+
+- The log line `Reconcile complete: 165509 actions in 714ms` is correct and stays — only the CLI presentation layer needs the differentiation.
+- This pairs nicely with UD-200's "first-time UX" theme but is mechanically separate (reconciler/executor accounting, not terminology). Keep the tickets independent.
+- `--dry-run` already prints "would do X" semantics correctly; the same accounting shape is the precedent to follow.
+---
+id: UD-202
+title: Provider-specific CLI flags should be registered via the provider SPI, not hardcoded in core CLI commands
+category: core
+priority: medium
+effort: M
+status: open
+opened: 2026-05-04
+---
+Provider-specific CLI flags should not be hard-coded in the core CLI. Providers should register their own flags via the capability/SPI surface, and the CLI should surface them in `--help` only for the active provider.
+
+## Symptom (2026-05-04)
+
+`unidrive sync --help` always shows:
+
+```
+--fast-bootstrap   UD-223: skip first-sync enumeration by adopting the
+                   remote's current state as the cursor. Items already
+                   present on the remote before this moment stay invisible
+                   until they next mutate. OneDrive only; other providers
+                   warn + ignore.
+```
+
+The flag is **hard-coded in `SyncCommand.kt`** but is declared OneDrive-only in its own help text. On every other provider (Internxt, S3, SFTP, WebDAV, …) it's a footgun: the user reads the option, tries it, and gets a runtime warning ("provider 'X' does not declare the capability"). It pollutes help, confuses first-time users, and locks an extension point into the wrong layer.
+
+## What the architecture already supports
+
+The capability machinery is there:
+- `core/app/core/src/main/kotlin/org/krost/unidrive/Capability.kt:11` — `sealed class Capability` with `FastBootstrap`, `DeltaShared`, etc.
+- `core/providers/onedrive/.../OneDriveProvider.kt:43` — declares `Capability.FastBootstrap`.
+- `core/app/sync/.../SyncEngine.kt:641-678` — checks `Capability.FastBootstrap in provider.capabilities()` at runtime.
+
+What's missing is the **CLI binding side**: providers can't register CLI options/flags scoped to a particular command (`sync`, `quota`, …), so `SyncCommand` ends up with a hard-coded list that includes every provider's special-case flag.
+
+## Code refs
+
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:104-111` — hardcoded `--fast-bootstrap` declaration
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:365` — flag plumbed into `SyncEngine`
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:226` — config-side wiring, also generic
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:635-678` — capability gate (correct layer for the runtime check)
+- `core/providers/onedrive/.../OneDriveProvider.kt:43` — `Capability.FastBootstrap`
+
+## Proposed shape
+
+Two layers:
+
+1. **Provider SPI for command-scoped CLI options.** Each provider can declare options it supports per command:
+   ```kotlin
+   interface CloudProvider {
+       fun cliOptions(command: CliCommand): List<CliOption> = emptyList()
+   }
+
+   data class CliOption(
+       val names: List<String>,                  // ["--fast-bootstrap"]
+       val description: String,                  // "skip first-sync enumeration..."
+       val arity: Arity = Arity.FLAG,            // FLAG | SINGLE | REPEATABLE
+       val capability: Capability? = null,       // for capability-gated runtime check
+       val configKey: String? = null,            // optional config-file mirror, e.g. "fast_bootstrap"
+   )
+   ```
+2. **CLI command resolves provider at parse time** (the active profile is known via `-p`/`--account` or default), then composes the provider's `cliOptions(SYNC)` into the picocli command's option list before parsing.
+
+When `-p` selects a non-OneDrive profile, `unidrive sync --help` shows no `--fast-bootstrap`. When `-p` selects OneDrive, it does. Multi-provider invocations (no `-p`, fleet mode after UD-200 lands) show only options that are common to *all* configured providers, with a hint that provider-specific flags exist via `unidrive -p <name> sync --help`.
+
+## Acceptance
+
+- `unidrive -p <internxt-profile> sync --help` does **not** list `--fast-bootstrap`.
+- `unidrive -p <onedrive-profile> sync --help` **does** list `--fast-bootstrap`, sourced from `OneDriveProvider.cliOptions(SYNC)`.
+- Adding a new provider-specific flag requires zero edits to `SyncCommand.kt` — only a `cliOptions()` override on the provider.
+- `SyncCommand.kt` no longer references `FastBootstrap` or any other provider-specific feature by name.
+- Runtime capability check at `SyncEngine.kt:641-678` stays — the SPI registers the option, the engine still gates execution.
+- Test: provider with no special options → vanilla `sync` help. Provider with one option → option appears. Two providers each with their own option → composing `sync --help` for one shows only that provider's option.
+
+## Notes
+
+- Mirrors UD-200 thread #1 spirit (CLI surface should match the operator's mental model). Implementations are independent — file separately, can land in either order.
+- Picocli supports dynamic option registration via `CommandLine.addSubcommand` / `CommandLine.addOption` at runtime (or via `IFactory`). Picking the right hook so `--help` rendering works correctly is the implementation crux.
+- Same pattern should apply to *every* command that today includes provider-specific behaviour: `quota` (some providers don't have quotas), `share` (provider-specific link-type flags), `versions` (some providers have no version history). Don't add the SPI just for `sync` — design it command-agnostic.
+- Out of scope: profile-level config keys (e.g. `fast_bootstrap = true` in `config.toml`). Those should also be capability-gated but live on a different surface; flag this in implementation as a follow-up.
+
+## Cross-refs
+
+- UD-223 — original `--fast-bootstrap` ticket.
+- UD-200 — first-time UX (terminology, default-account, inline auth) — sibling but mechanically separate.
+---
+id: UD-204
+title: Per-call HTTP timeout matrix across providers (metadata vs upload vs download vs auth)
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's axios setup omits `timeout`, so a slow-loris server hangs everything indefinitely. unidrive's OkHttp clients across providers should have an explicit per-call timeout matrix, calibrated by call class (metadata vs upload-PUT vs download-GET).
+
+## Code refs
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/` — shared HTTP helpers
+- `core/providers/*/src/main/kotlin/.../*ApiService.kt` — per-provider OkHttpClient builders (verify each has timeouts set, document the matrix)
+
+## Proposed timeout matrix
+
+| Call class | Connect | Read | Write | Call (overall) | Notes |
+|------------|---------|------|-------|----------------|-------|
+| Metadata (list/get/move/delete) | 5 s | 15 s | 5 s | 30 s | Internxt API typical |
+| Upload PUT (single shard, multipart part) | 10 s | 5 min | 5 min | 10 min | 50 MB at modest throughput |
+| Download GET (shard) | 10 s | 5 min | n/a | 10 min | Same shape |
+| Auth (login, refresh) | 5 s | 10 s | 5 s | 30 s | Fast or fail |
+
+Overall `callTimeout` (OkHttp 3.12+) bounds the whole request including retries within one budget. Read timeout bounds inter-byte gaps. Connect timeout bounds initial socket establishment.
+
+## Acceptance
+
+- All provider OkHttp clients explicitly set `connectTimeout`, `readTimeout`, `writeTimeout`, `callTimeout`.
+- The four call classes (metadata / upload / download / auth) each have their own client or per-call override (OkHttp `newBuilder().callTimeout(...)`).
+- Unit test: slow-loris mock that drips 1 byte/sec on a metadata call gets aborted within `readTimeout` (15s); same on an upload PUT gets aborted within `callTimeout` (10min).
+- Documented in `docs/providers/<provider>-robustness.md` per provider.
+- Tunable via env or config for power users (`UNIDRIVE_HTTP_UPLOAD_CALL_TIMEOUT_S`, etc.) — not exposed in CLI.
+
+## Notes
+
+- This is mostly a doc-and-verify ticket if the timeouts are already set; an audit will tell.
+- Belt-and-braces against `ThrottleBudget` / `HttpRetryBudget` — those handle backpressure and retry, timeouts handle "the connection is just dead, give up."
+- **Circuit breaker is explicitly out of scope** — premature for current scale. Note in the ticket as a future ticket if the timeout-only model proves insufficient.
+
+## Cross-refs
+
+- internxt/sdk research — `Cons / footguns` per area, recurring "no timeout" theme.
+- UD-228 / UD-330 — retry budget rollout; timeouts are the floor under retry.
+---
+id: UD-205
+title: InFlightDedup<K,V>: share concurrent identical requests via ConcurrentHashMap<K, Deferred<V>>
+category: core
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-server-wip + swift-core + drive-desktop research (agent `a876235`, 2026-05-04). The single highest-leverage finding across all three repos. Drive-desktop's `get-in-flight-request.ts` keeps a `Map<key, Promise<T>>` so concurrent callers asking for the same logical request share one HTTP round-trip. Trivial to port to Kotlin coroutines as `ConcurrentHashMap<K, Deferred<V>>`.
+
+## Why
+
+Reconciler enumeration, status polling, UI fan-out, and the scheduler all hit the same provider methods (`listChildren`, `getMetadata`, `delta`) concurrently. Without dedup, N callers = N round-trips. With dedup, N callers = 1 round-trip + (N-1) cache hits on the in-flight `Deferred`.
+
+## Code refs
+
+- New file: `core/app/core/src/main/kotlin/org/krost/unidrive/http/InFlightDedup.kt`
+- Wire into provider call sites that are reasonably idempotent and frequently fan-out:
+  - `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `getFolderContents`, `getFileInfo`, `getFolderTree`
+  - `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveApiService.kt` — `getMetadata`, listings
+  - `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt` — `getValidCredentials` (token refresh under concurrent callers must dedup)
+
+## Proposed shape
+
+```kotlin
+class InFlightDedup<K : Any, V> {
+    private val inFlight = ConcurrentHashMap<K, Deferred<V>>()
+
+    suspend fun load(key: K, loader: suspend () -> V): V = coroutineScope {
+        // Hot path: existing in-flight Deferred.
+        inFlight[key]?.let { return@coroutineScope it.await() }
+        val deferred = async(start = CoroutineStart.LAZY) { loader() }
+        val winner = inFlight.putIfAbsent(key, deferred) ?: deferred
+        try {
+            winner.await()
+        } finally {
+            // Whoever started it is responsible for clearing it; losers no-op.
+            inFlight.remove(key, winner)
+        }
+    }
+}
+```
+
+Key choice: `(provider-id, method, args)` — e.g. `"internxt:listChildren:/Documents"`. Document the hashing requirement on `K`.
+
+## Acceptance
+
+- `InFlightDedupTest`: 100 concurrent `load("k", { delay(500); 42 })` calls — exactly one loader invocation, all 100 callers receive 42.
+- Failure propagation: loader throws → all callers receive the same exception, in-flight map is cleared.
+- Cancellation: caller cancels → if it's the only caller, loader is cancelled; if other callers are still awaiting, loader continues.
+- Wired into Internxt's `getFolderContents`: integration test with mock that delays 500ms — 100 parallel `listChildren("/Documents")` calls produce one mock invocation.
+- Token refresh: 100 concurrent calls observing a near-expired JWT → exactly one refresh call.
+
+## Notes
+
+- Cache scope is **in-flight only** — not a TTL cache. Once the request completes, the entry is removed. Successful results may be cached separately by callers; this ticket does not introduce a stale-data concern.
+- Pairs naturally with UD-352a (parallel pagination) — the dedup map prevents the parallel paginators from racing on the same offset under the offset-walled-pagination model.
+- Out of scope: distributed dedup across processes. In-process only.
+
+## Cross-refs
+
+- drive-desktop `src/infra/drive-server-wip/in/get-in-flight-request.ts` — direct shape source.
+- Cross-repo synthesis: "the single highest-leverage finding."
+---
+id: UD-207
+title: Codify HTTP retry-policy matrix (5xx/4xx/network/unknown) in HttpRetryBudget KDoc + tests
+category: core
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). Drive-desktop's `client-wrapper.service.ts` carries this comment as the cleanest retry-policy doc-comment in any of the three Internxt repos:
+
+> 2XX: success, 3XX/4XX: don't retry (except 408/429), 5XX: retry always, network errors: retry always, unknown exceptions: retry up to 3.
+
+unidrive's `HttpRetryBudget` (UD-228) should adopt this as its **canonical, documented matrix** — written into the budget's KDoc, locked in unit tests, and cross-linked from `docs/dev/lessons/`. Currently the policy lives in code and per-provider audits but isn't centralised.
+
+## Code refs
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc target
+- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetTest.kt` — extend with explicit matrix-row tests
+
+## Proposed matrix (verbatim)
+
+| Class | HTTP status / signal | Retry? | Cap | Backoff | Notes |
+|-------|----------------------|--------|-----|---------|-------|
+| Success | 2xx | n/a | n/a | n/a | |
+| Permanent client error | 4xx (except 408, 429) | **No** | n/a | n/a | Fail fast |
+| Timeout | 408 | Yes | budget.maxRetries | exp + jitter | |
+| Throttle | 429 | Yes | budget.maxRetries | honor `Retry-After` (cap = budget.maxRetryAfter) | UD-232 alignment |
+| Server error | 5xx | Yes | budget.maxRetries | exp + jitter | |
+| Network error (connect/read/SSL) | (no status) | Yes | budget.maxRetries | exp + jitter | |
+| Unknown exception | (caller-classified `Unknown`) | Yes | min(3, budget.maxRetries) | exp + jitter | The lower cap is deliberate |
+
+`exp + jitter` = exponential backoff with full jitter, base=1s, cap=`budget.maxRetryAfter`.
+
+## Acceptance
+
+- `HttpRetryBudget.kt` KDoc includes the table verbatim (markdown table fine).
+- `HttpRetryBudgetTest` has one test per row, asserting the budget's `decide(...)` returns the expected outcome.
+- A second test: removing any row (mocked) fails the suite — locks the matrix as a contract.
+- `docs/dev/lessons/http-retry-policy.md` (new) summarises the matrix with a link back to the budget code.
+- Per-provider audit docs (`docs/providers/*-robustness.md`) cross-link to the matrix instead of restating it.
+
+## Notes
+
+- This is documentation + test-locking, not a behaviour change (assuming the current `HttpRetryBudget` already implements the matrix). If implementation diverges from the matrix, file follow-up tickets per divergence — do not silently rewrite the budget here.
+- Pairs with UD-330 (cross-provider rollout) — when reviewers ask "what's the retry policy?" they should be able to point to this doc, not the code.
+- Out of scope: per-provider override hooks. The budget is intentionally one-policy-fits-all; provider-specific exceptions get their own ticket.
+
+## Cross-refs
+
+- drive-desktop `src/infra/drive-server-wip/in/client-wrapper.service.ts` — quotation source.
+- UD-228 / UD-330 — the budget itself and its rollout.
+- UD-232 — throttle / Retry-After.
+---
+id: UD-208
+title: Audit JWT-refresh model across providers; verify per-call check vs scheduler-based
+category: core
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop's `TokenScheduler.ts` uses `setTimeout(refresh, exp - now - 1d)` to schedule JWT refresh. This is **fragile under suspend/resume** — if the system was suspended for >24h, the `setTimeout` doesn't catch up.
+
+unidrive's `AuthService.kt` *appears* to use a per-call refresh model (`isJwtExpired()` checked at every operation, see `InternxtProvider.kt:54-58`), which is robust. But this hasn't been confirmed across the AuthService surface. **First step is verification, not implementation.**
+
+## Investigation
+
+1. Read `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt` end-to-end.
+2. Confirm: is JWT expiry checked at every API call site, or is there any background scheduler / `setInterval`-style refresh?
+3. Audit the same question for OneDrive (`core/providers/onedrive/.../auth/`) and any other provider with token refresh.
+4. Document findings in `docs/providers/auth-refresh-model.md` (new) — short doc, one paragraph per provider, citing code refs.
+
+## Decision tree
+
+- **All providers refresh per-call:** No code change. Land the `auth-refresh-model.md` audit doc, close ticket as informational.
+- **Any provider uses a wall-clock scheduler:** File a follow-up ticket per offending provider, scoped to "replace scheduler with per-call check OR add a wall-clock-aware re-arm on resume."
+
+## Acceptance
+
+- `docs/providers/auth-refresh-model.md` exists, lists each provider's auth refresh strategy with one code-ref per provider.
+- A clear verdict: "robust per-call" or "scheduler-based with risk".
+- If risk found: linked follow-up tickets.
+- If no risk found: a one-line note in this ticket's resolution explaining why the drive-desktop pattern is worse than what unidrive already does.
+
+## Notes
+
+- This is verify-then-decide. Don't pre-commit to an implementation strategy.
+- Out of scope: token storage encryption, refresh-token rotation policy, OAuth flow specifics. Just refresh-trigger model.
+- Cheap ticket — one read pass per provider's `AuthService`.
+
+## Cross-refs
+
+- drive-desktop `src/apps/main/token-scheduler/TokenScheduler.ts` — fragile pattern source.
+- drive-desktop research, "Cons / footguns" → token refresh.
+---
+id: UD-300
+title: Internxt: streaming AES-CTR decrypt during download (no buffer-then-decrypt)
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). The SDK's `decryptFile(...)` callback is invoked **after** the full encrypted file lands on disk — forcing any consumer to write ciphertext to a temp file then read+decrypt to the final file (2× I/O).
+
+unidrive's Internxt provider should not inherit this anti-pattern. AES-CTR is seekable, so streaming decrypt is mechanically simple: a single `Cipher.getInstance("AES/CTR/NoPadding")` instance updated chunk-by-chunk while the bytes flow into the final file.
+
+## Code refs (verify before editing)
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtCrypto.kt` — current decrypt path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` — `getContent` / download orchestration
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — HTTP body handling for shard GETs
+
+## Proposed shape
+
+```kotlin
+val cipher = Cipher.getInstance("AES/CTR/NoPadding").apply {
+    init(Cipher.DECRYPT_MODE, key, IvParameterSpec(iv))
+}
+response.body!!.byteStream().use { src ->
+    Files.newOutputStream(target, CREATE, TRUNCATE_EXISTING).use { dst ->
+        CipherOutputStream(dst, cipher).use { cos ->
+            src.copyTo(cos, bufferSize = 64 * 1024)
+        }
+    }
+}
+```
+
+Variant for multi-shard downloads: the same `Cipher` instance is updated across shards in shard-index order, since CTR is a stream cipher with state preserved across chunks.
+
+## Acceptance
+
+- `dd if=/dev/urandom of=/tmp/big bs=1M count=500` → upload → `unidrive free /big` → re-hydrate via `unidrive get`. Peak write byte count (`iotop -d 1` or `pidstat -d`) equals file size, not 2×.
+- Integration test: hydrate a 100 MB file, assert no temp files remain in `${java.io.tmpdir}` or `XDG_CACHE_HOME` matching `unidrive-*` after success.
+- Throughput regression test: hydrate of a 500 MB file completes ≥30 % faster than the buffer-then-decrypt baseline (one-shot benchmark, recorded in PR).
+- Existing `InternxtIntegrationTest` and `InternxtCryptoTest` pass unchanged.
+
+## Notes
+
+- Pairs with UD-301 (shard SHA-256 verification) — the streaming pipeline must interleave `MessageDigest.update` with `Cipher.update` so verification happens before plaintext reaches disk. Land them together.
+- Memory profile: O(buffer size = 64 KB), independent of file size.
+- Out of scope: parallel multi-shard download (single seekable stream is fine for v1).
+
+## Cross-refs
+
+- internxt/sdk research report — `Top 5 ideas to steal` #2.
+- swift-core's `Encrypt.swift` uses the same single-`StreamCryptor` pattern in reverse for upload — borrow the shape.
+---
+id: UD-301
+title: Internxt: client-side shard SHA-256 verification before fsync
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). AES-CTR provides confidentiality but **no integrity** — a bit-flip in cloud storage silently corrupts plaintext at the same offset. The SDK exposes `shards[].hash` (SHA-256 of encrypted bytes) but **never verifies it**. unidrive must, since the AES-CTR + RIPEMD-160(SHA-256) bridge contract puts the integrity burden on the client.
+
+## Code refs (verify before editing)
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` — `getContent`, shard iteration
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `getFileInfo` returns `shards: [{index, size, hash, url}]`
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/` — shard DTO
+
+## Proposed shape
+
+Per shard, during the streaming decrypt path (UD-300):
+
+```kotlin
+val sha = MessageDigest.getInstance("SHA-256")
+val cipher = Cipher.getInstance("AES/CTR/NoPadding")...
+
+while (src.read(buffer).also { n = it } > 0) {
+    sha.update(buffer, 0, n)            // hash the *encrypted* bytes
+    cipher.update(buffer, 0, n, plain)  // decrypt
+    dst.write(plain, 0, ...)
+}
+
+val computed = sha.digest()              // 32 bytes raw
+val expected = HexFormat.of().parseHex(shard.hash)
+if (!MessageDigest.isEqual(computed, expected)) {
+    throw ShardHashMismatchException(shard.index, expected, computed)
+}
+```
+
+Hash check happens **before** `dst.flush()` / fsync. If verification fails, delete the partial output and fail the hydrate cleanly so retry semantics work.
+
+The SDK derives the upload-side shard hash as `RIPEMD-160(SHA-256(encrypted_bytes))` (see swift-core `Encrypt.getFileContentHash`). Confirm the **download-side** `shard.hash` field is the same form (RIPEMD-160 of SHA-256) before wiring; if so, the comparison runs both digests in sequence over the same bytes.
+
+## Acceptance
+
+- New `ShardHashMismatchException(shardIndex: Int, expected: ByteArray, computed: ByteArray)` in `internxt.error`.
+- Unit test corrupts 1 byte mid-stream via mock `Source` wrapper → download throws `ShardHashMismatchException`, target file does not exist after the throw.
+- Multi-shard test: 5-shard file with shard 3 corrupted → download throws referencing `shardIndex=3`.
+- Happy path: 100 MB file integration test passes; manifest hash matches end-to-end.
+- Log line on mismatch contains `shardIndex`, expected/computed hex prefixes (8 bytes each), and the file's plain-name.
+
+## Notes
+
+- **Land together with UD-300.** Streaming verify on top of streaming decrypt is one PR; bolting verification onto a buffer-then-decrypt path doubles the I/O before the perf fix lands.
+- Hash algorithm verification: confirm `RIPEMD-160(SHA-256(...))` vs raw `SHA-256(...)` against a known-good fixture before committing the comparison code. The two SDK reports disagree slightly on framing.
+- This is a security-relevant change. Add to `docs/SECURITY.md` "client-side integrity verification" section.
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 things to avoid` #3 ("Don't trust AES-CTR ciphertext without out-of-band integrity").
+- swift-core `Encrypt.getFileContentHash` documents the hash construction.
+- UD-300 (streaming decrypt) — sibling, must land together.
+---
+id: UD-302
+title: Internxt: idempotency-key on mutations (header + dedup-by-natural-key fallback)
+category: providers
+priority: high
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** internxt/sdk research (agent `a4990ef`, 2026-05-04). Internxt's REST API exposes no idempotency-key contract. With UD-330 expanding retry coverage to non-GET verbs, a retried `POST /folders` after a network blip can create a duplicate folder with a different UUID. Same for `POST /files/start`, `POST /files/finish`, `POST /folders/{uuid}/move`, etc.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — every `POST/PATCH/DELETE/PUT` call site
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` (UD-228 budget that gates retry behaviour)
+
+## Two-layer fix
+
+**Layer 1 — opportunistic header.** Generate a v4 UUID per *logical* mutation (not per HTTP attempt). Pass it through the retry budget so all attempts share the same key. Header name candidates: `X-Idempotency-Key`, `Idempotency-Key`. **Server support unverified** — if the server ignores the header, this is a no-op; if accepted later, it just starts working. Free upside, near-zero cost.
+
+**Layer 2 — client-side dedup-by-natural-key fallback.** Required because we cannot trust the server. For mutations that *should* be unique, dedup by:
+- `createFolder(parentUuid, plainName)` — pre-flight `POST /folders/content/{parentUuid}/folders/existence` (batch existence, see drive-server-wip §1) before retry. If exists, treat retry as success and return the existing UUID.
+- `createFile(parentUuid, plainName, ...)` — same shape, different endpoint (`/files/existence`).
+- `moveFile`, `renameFile`, `deleteFile` — naturally idempotent if the target state matches; can be retried safely without dedup.
+
+For the upload finish endpoint specifically: a retried `POST /files/finish` with the same `(uuid, index, shards[].hash)` payload should be treated by the server as the same file (uuid is server-assigned by `/start`). Verify server behavior; document.
+
+## Acceptance
+
+- `InternxtApiService` carries an opaque `idempotencyKey: String?` parameter into every mutation method; the retry budget reuses the same key for all attempts of one logical call.
+- Unit test: mock returns 503 once then 200; `createFolder` is invoked once at the SyncEngine level, results in exactly one folder remotely (`listChildren` count == 1), HTTP is observed twice with identical `X-Idempotency-Key` header.
+- Existence-check fallback: forced retry where the first attempt actually succeeded server-side (mock returns 503 to client but persisted) — second attempt detects the existing folder via existence-check and returns its UUID instead of creating a duplicate.
+- Documented in `docs/providers/internxt-robustness.md` — header sent unconditionally, dedup-fallback active for create-class mutations.
+
+## Notes
+
+- This ticket has a research dependency: confirm by testing whether the server respects `X-Idempotency-Key` (or any sibling header). If yes, Layer 2 is a belt-and-braces safety net; if no, Layer 2 is the only defence.
+- Pairs with UD-330 — adding retry to non-GETs without idempotency safety = duplicate-storm risk. **Block UD-330 rollout to non-GETs on this ticket landing.**
+- Out of scope: cross-provider idempotency model. Each provider has its own contract (S3 has request-id, OneDrive uses ETag preconditions).
+
+## Cross-refs
+
+- internxt/sdk research — `Top 5 things to avoid` #1 ("No idempotency-key on POSTs").
+- UD-330 — HttpRetryBudget cross-provider rollout (must coordinate).
+- drive-server-wip research — `/files/existence` and `/folders/existence` batch endpoints (200-item arrays).
+---
+id: UD-303
+title: Internxt: tie-break delta walk by (updatedAt, lastUuid) to defeat offset-pagination boundary drift
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-server-wip + drive-desktop research (agent `a876235`, 2026-05-04). The Internxt API's only delta-ish surface is `(updatedAt ASC, status=ALL, limit=N, offset=M)` walked from a saved high-water-mark. The server has no secondary sort key. Items sharing an `updatedAt` value that fall on a page boundary can be **dropped or duplicated** between pages. Drive-desktop's checkpoint store has the same vulnerability — confirmed in `sync-remote-files.ts`.
+
+## Why this is silent
+
+If items A, B, C all have `updatedAt = T`, and the page break falls between B and C:
+- Page N ends with [..., A, B] @ `updatedAt = T`.
+- Cursor saved as `T`. Next sync queries `updatedAt > T` — **C is missed**.
+- Or: cursor saved as `T` inclusive, page N+1 returns [B, C, ...] — **B is duplicated** and treated as a new mutation.
+
+165k-item account → at any non-trivial timestamp granularity, the boundary collision is statistically inevitable on first cold sync.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:313-340` — `delta()` paginates flat
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `listFiles(cursor, limit, offset)`
+- Sync state DB schema — wherever the cursor is persisted (likely `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/state/`)
+
+## Proposed shape
+
+Extend the cursor from `Instant` to `(Instant, lastUuid: String)`:
+
+```kotlin
+data class InternxtCursor(val updatedAt: Instant, val lastUuid: String?)
+```
+
+Walk:
+1. Query `updatedAt >= cursor.updatedAt` (inclusive) — ASC by `(updatedAt, uuid)` if the server supports it; otherwise sort client-side post-fetch.
+2. Drop items where `updatedAt == cursor.updatedAt && uuid <= cursor.lastUuid` (already seen).
+3. After processing batch, set new cursor to `(lastItem.updatedAt, lastItem.uuid)`.
+4. If the entire batch shares one `updatedAt`, *do not advance the timestamp* — only advance `lastUuid` until a different `updatedAt` is seen.
+
+If the API doesn't return `uuid` in the listing payload, fall back to `(updatedAt, lastPlainNameLexicographic)` as a weaker tiebreak. Document the choice.
+
+## Acceptance
+
+- Synthetic fixture: 5 items all with `updatedAt = T`, paginated with `limit=2`, straddling a 2-page boundary at item index 2 → all 5 items observed exactly once across the walk.
+- Regression test: removing the tiebreak causes the test to fail (drops 1 or duplicates 1).
+- Persisted cursor schema gains `lastUuid` column with backwards-compatibility migration.
+- Resumed sync from saved `(T, "uuid-X")` cursor against a remote that has gained new items at `updatedAt = T` after `uuid-X` lexicographically picks them up; items at `updatedAt = T` before `uuid-X` are not re-seen.
+
+## Notes
+
+- **Verify server sort behavior first.** If `/files?sort=updatedAt&order=ASC` actually does secondary sort on `uuid` server-side, the client-side dedup is enough; otherwise we need post-fetch resort. Drive-server-wip controllers don't show secondary sort in the audit — assume client-side resort is needed.
+- Pairs with UD-352a (parallel pagination) — parallelizing the walk across non-overlapping `(updatedAt, lastUuid)` ranges is harder than sequential; ordering matters. Sequence: B2 first, then UD-352a builds on the cursor shape.
+- Out of scope: stable cursor across server-side cluster failover (Internxt's server may have its own consistency story; not our problem until proven otherwise).
+
+## Cross-refs
+
+- drive-server-wip `src/lib/http/limits.ts` (offset cap = 1M).
+- drive-server-wip `src/modules/file/dto/get-files.dto.ts` (the DTO shape).
+- drive-desktop `src/apps/main/remote-sync/files/sync-remote-files.ts` (the mirror-image bug in their checkpoint code).
+- Cross-repo synthesis: "the single highest-leverage takeaway."
+---
+id: UD-304
+title: Internxt: adopt swift-core multipart constants (100 MB threshold, 50 MB chunk, 6 parallel)
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** swift-core research (agent `a876235`, 2026-05-04). The bridge contract is empirically tuned to:
+
+```
+MULTIPART_MIN_SIZE   = 100 * 1024 * 1024   // 100 MB threshold
+MULTIPART_CHUNK_SIZE =  50 * 1024 * 1024   //  50 MB per part
+maxConcurrent        = 6                   // (or 1 in low-bandwidth mode)
+```
+
+Confirmed in `Sources/InternxtSwiftCore/Services/Network/NetworkFacade.swift`. The JS SDK delegates to `inxt-js` which mirrors the same numbers. **Diverging from these constants risks finish-API edge cases** (unverified server expectations on part size, count, alignment).
+
+unidrive's Internxt provider should adopt the same constants as defaults.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtConfig.kt` — add three named constants
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` (or wherever `upload()` lives) — branch on size, dispatch to multipart path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `startMultipart`, `finishMultipart` endpoints (verify present; if not, build them on the bridge contract)
+
+## Proposed shape
+
+```kotlin
+data class InternxtConfig(
+    ...
+    val multipartMinSize: Long = 100L * 1024 * 1024,
+    val multipartChunkSize: Long = 50L * 1024 * 1024,
+    val maxParallelParts: Int = 6,
+)
+```
+
+Configurable per profile (`config.toml`) for power users; defaults match swift-core exactly. Document in `docs/providers/internxt.md` that diverging from the defaults is unsupported.
+
+## Acceptance
+
+- `InternxtConfig` exposes the three knobs with the swift-core defaults.
+- Upload of a 200 MB synthetic file uses the multipart path with: 4 parts of 50 MB, ≤6 in-flight at peak, finish-API payload `parts: [{ETag, PartNumber}]` of length 4.
+- Upload of a 50 MB file uses the **single-PUT** path (below threshold).
+- Upload of a 99 MB file uses single-PUT; 101 MB uses multipart.
+- Integration test asserts the size threshold is exclusive at 100 MB and the chunking math (`ceil(size / 50MB) = partCount`).
+- `--reduce-bandwidth` (or equivalent config flag) caps concurrency to 1.
+
+## Notes
+
+- **Memory profile warning**: 6 × 50 MB = 300 MB peak RSS if parts are held in `ByteArray`/`Buffer` like swift-core does. UD-307 (stream parts via temp file) is the mitigation; **land UD-304 and UD-307 together** so we never ship the in-memory variant.
+- Out of scope: dynamic chunk sizing based on observed throughput. Static defaults match the upstream contract.
+- Out of scope: parallel multipart-finish (the bridge accepts one finish call per upload).
+
+## Cross-refs
+
+- swift-core `Sources/InternxtSwiftCore/Services/Network/NetworkFacade.swift`.
+- swift-core `Sources/InternxtSwiftCore/Services/Network/Encrypt.swift` — chunking + encryption interleave.
+- UD-307 (streaming parts via temp file) — required co-landing.
+---
+id: UD-306
+title: Internxt: investigate WebSocket NOTIFICATIONS_URL — change-feed or marketing-only?
+category: providers
+priority: low
+effort: XS
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop opens a `socket.io-client` connection to `process.env.NOTIFICATIONS_URL` and uses received events as **wake signals** (not source-of-truth) to trigger a checkpointed re-sync. UD-370 (CLOSED, 2026-05-03) disproved that Internxt's `/notifications` REST endpoint is a change feed — it's marketing-only.
+
+Open question: **does the WebSocket endpoint expose a different surface than the REST `/notifications`?** drive-desktop subscribes via socket.io and forwards to `RemoteNotificationsModule.processWebSocketEvent`, but the message schema lives in a closed-source `@internxt/drive-desktop-core/build/backend` package — not visible from the public repo.
+
+This ticket is **research-only**. If the answer is "yes, real change-feed exists," design follow-up. If "no, it's the same marketing surface," close as duplicate-of-UD-370.
+
+## Investigation steps
+
+1. Run drive-desktop locally with a test account, capture the WebSocket frames (browser devtools or `wireshark` against the unencrypted socket if possible — likely TLS, so use mitmproxy or the Electron devtools).
+2. Inspect message types and payload shapes. Look specifically for `file.created`, `file.updated`, `file.deleted`, `folder.*` events.
+3. Note the `NOTIFICATIONS_URL` value (config-published or hardcoded in the binary).
+4. Document findings in `docs/audits/internxt-websocket-feasibility.md` (companion to the existing `internxt-notifications-feasibility.md`).
+
+## Acceptance
+
+- `docs/audits/internxt-websocket-feasibility.md` exists and contains:
+  - The endpoint URL.
+  - Sample message frames (with sensitive fields elided).
+  - A one-sentence verdict: "real change feed" / "marketing only" / "ambiguous".
+  - If real: a sketch of how it would slot into unidrive's sync engine (wake signal triggering checkpointed re-sync, NOT source-of-truth).
+- If real → file a follow-up implementation ticket.
+- If not → close this ticket as resolved-with-no-action and update `internxt-notifications-feasibility.md` with the cross-reference.
+
+## Notes
+
+- Investigation only. No code changes.
+- Even if the WebSocket is a real change feed, the implementation is **DEFER post-MVP** — the offset-walked checkpoint walk works (UD-352a improvements + UD-303 tiebreak make it more robust) and adding a real-time push surface is an optimization, not a correctness gap.
+- This ticket's value is binary: either it kills speculation about a phantom optimization, or it surfaces a real one. Either way, the audit is cheap.
+
+## Cross-refs
+
+- UD-370 (closed) — `/notifications` REST is marketing-only.
+- drive-desktop `src/apps/main/realtime.ts` — socket.io subscription site.
+- drive-desktop `src/apps/main/remote-notifications-module/` — handler layer (private package, not directly inspectable).
+---
+id: UD-210
+title: Re-stat-during-upload abort guard: detect local file mutation mid-upload
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). drive-desktop's `upload-file.ts` calls `fs.stat(path)` inside the upload progress callback and aborts the upload if `stats.size !== sizeAtStart`. This catches the "user edited the file mid-upload" case which would otherwise corrupt the remote with a truncated tail or mixed-version content.
+
+unidrive should apply this provider-agnostic guard across **every** provider's upload path.
+
+## Code refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Executor.kt` (or wherever `upload` is dispatched per-action)
+- `core/providers/internxt/.../InternxtProvider.kt` — `upload` / `putContent`
+- `core/providers/onedrive/.../OneDriveProvider.kt` — `upload`
+- `core/providers/s3/...`, `core/providers/sftp/...`, `core/providers/webdav/...` — same surface
+
+## Proposed shape
+
+Two compatible places for the check:
+
+**Option A (per-provider, in the upload coroutine):** progress callback re-stats and cancels the parent `Job`.
+
+**Option B (orchestrator-level, in Executor):** wrap the upload call in a coroutine that periodically (or in the progress callback) re-stats and cancels. Provider doesn't need to know.
+
+Option B is preferable because it covers all providers uniformly without per-provider patches. Sketch:
+
+```kotlin
+suspend fun uploadWithMutationGuard(
+    file: Path,
+    upload: suspend (progress: (Long) -> Unit) -> Unit,
+) {
+    val sizeAtStart = Files.size(file)
+    val mtimeAtStart = Files.getLastModifiedTime(file)
+    upload { _ ->
+        val current = Files.size(file)
+        val mtime = Files.getLastModifiedTime(file)
+        if (current != sizeAtStart || mtime != mtimeAtStart) {
+            throw LocalFileMutatedDuringUploadException(file, sizeAtStart, current)
+        }
+    }
+}
+```
+
+Both `size` and `mtime` checked: an editor that overwrites in place with the same size still bumps mtime. A `truncate -s 1k` followed by an append back to original size *might* preserve size; mtime catches it.
+
+## Acceptance
+
+- New `LocalFileMutatedDuringUploadException(path, sizeBefore, sizeAfter)` with the path and sizes for the operator log.
+- Integration test: upload a 100 MB file, mid-flight `truncate -s 1k` it. Upload aborts. Remote contains no half-uploaded file (or contains an aborted multipart that gets cleaned up by the provider's existing abort path).
+- Test variant: append data instead of truncate — same outcome.
+- Test variant: rewrite in place same size, but mtime moves forward — same outcome.
+- Test variant: file size and mtime stable for the whole upload — happy path passes.
+- Sync resumes the file in the next pass since the file change was detected.
+
+## Notes
+
+- Out of scope: editor atomic-rename pattern (vim, jetbrains "atomic save" via `tmpfile + rename`). That's a separate watcher concern (UD-211). The mutation guard fires when the underlying inode has changed during upload — `Files.size(originalPath)` follows the path to the *new* inode and detects the size mismatch naturally.
+- Memory cost: zero (just two stat calls per progress event).
+- This is a UX safety net more than a correctness fix; the alternative ("upload corrupted, sync re-detects mismatch on next pass and re-uploads") works but is expensive in bytes and confusing if the user notices a "wrong" file in cloud storage temporarily.
+
+## Cross-refs
+
+- drive-desktop `src/infra/inxt-js/file-uploader/upload-file.ts` — direct shape source.
+- Top 3 ideas to steal from drive-desktop research, item #3.
+---
+id: UD-307
+title: Internxt: stream multipart parts via temp file (not in-memory ByteArray) for bounded heap
+category: providers
+priority: high
+effort: M
+status: open
+opened: 2026-05-04
+---
+**Source:** swift-core research (agent `a876235`, 2026-05-04). swift-core holds each 50 MB encrypted chunk as a `Data` blob in memory until the S3 PUT succeeds. With `maxConcurrent = 6`, peak RSS is ~300 MB per active upload. **Acceptable on a macOS desktop, hostile on a Linux JVM with bounded heap** — a `-Xmx512m` daemon will OOM uploading a single large file.
+
+Solution: stage each encrypted chunk to a temp file, upload via `RequestBody.create(file)`, delete on success. Peak heap usage drops to O(1).
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtCrypto.kt` — encrypt path
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt` (upload orchestration)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — multipart PUT
+
+## Proposed shape
+
+```kotlin
+val tempDir = Files.createTempDirectory("unidrive-mp-")
+try {
+    val chunkFiles = (0 until partCount).map { i ->
+        val chunk = tempDir.resolve("part-$i.enc")
+        encryptChunkToFile(source, offset = i * chunkSize, len = chunkSize, out = chunk, cipher)
+        chunk
+    }
+    coroutineScope {
+        chunkFiles.mapIndexed { i, chunk ->
+            async(uploadDispatcher) {
+                val body = chunk.toRequestBody("application/octet-stream".toMediaType())
+                val response = httpClient.newCall(...).execute()
+                Part(partNumber = i + 1, etag = response.header("ETag")!!)
+            }
+        }.awaitAll()
+    }
+} finally {
+    tempDir.toFile().deleteRecursively()
+}
+```
+
+Temp dir under `${java.io.tmpdir}/unidrive-mp-<random>/` — co-located on the same filesystem as the daemon's cache when possible (avoid cross-fs `rename` on cleanup). Honor `XDG_CACHE_HOME` if set.
+
+## Acceptance
+
+- Under JVM `-Xmx512m`, uploading a 2 GB file with `maxParallelParts=6` succeeds without OOM.
+- `lsof` (or equivalent) shows ≤6 open temp files at peak during a multipart upload.
+- After successful upload: `find ${java.io.tmpdir} -name 'unidrive-mp-*'` returns nothing.
+- After failed upload (e.g. mock returns 500 mid-multipart): same — temp dir is cleaned up by the `finally` block.
+- After daemon crash mid-upload: a separate cleanup pass at daemon startup removes `unidrive-mp-*` directories older than 1 hour. (Lightweight, no state-file needed.)
+- Integration test injects a 1 GB synthetic file; assertions: peak RSS reported by the test < 200 MB (well under the in-memory variant's ~300 MB), success.
+
+## Notes
+
+- **Land together with UD-304** (multipart constants). The two together make the upload path correct *and* memory-safe.
+- Disk-pressure caveat: multi-GB uploads transiently use ~6 × 50 MB = 300 MB on disk. Document in `docs/providers/internxt.md`.
+- Out of scope: streaming-encrypt-during-upload (encrypt and PUT byte-by-byte without ever materialising the chunk). Possible but more complex; not needed at MVP scale.
+- Out of scope: tmpfs detection / preference. Use `${java.io.tmpdir}` as-is.
+
+## Cross-refs
+
+- swift-core `NetworkFacade.swift` and `UploadMultipart.swift` — the in-memory variant we're explicitly *not* copying.
+- UD-304 (multipart constants) — sibling, must land together.
+- Cross-repo synthesis: "Memory profile of upload parts: ... swift-core holds whole encrypted chunk in `Data`; ... the streaming model is preferable on a Linux JVM with bounded heap."
+---
+id: UD-212
+title: HttpRetryBudget.decide(status, exception, retryAfter): make the canonical retry matrix actually enforceable
+category: core
+priority: medium
+effort: L
+status: open
+opened: 2026-05-04
+---
+**Source:** UD-207 implementation report (agent `ab7efd3`, 2026-05-04). The canonical retry-policy matrix is now documented in `HttpRetryBudget.kt` KDoc and locked-where-possible by `HttpRetryBudgetMatrixTest`, but **the matrix is aspirational, not enforced** — per-provider `withRetry` / `authenticatedRequest` loops each carry their own status-code matrix, retry caps, and backoff scheme. Four of six matrix tests are `@Ignore`d with TODO references to this ticket because the budget has no surface to test against.
+
+To make the matrix actually enforceable, refactor `HttpRetryBudget` from "coordination layer (token bucket + circuit breaker + IOException classifier)" into "coordination layer **plus** status-code policy engine."
+
+## Code refs (today's reality, post-UD-207)
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc has the matrix; runtime has no `decide(...)` entry point, no `maxRetries` field, no `maxRetryAfter` field, no backoff helper.
+- `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:162-228` — `maxAttempts: Int = 5`, `backoffMs: (attempt: Int) -> Long = { 1000L * (1L shl it) }` (no jitter), `isRetriableStatus(status) = status.value in setOf(408, 425, 429, 500, 502, 503, 504)`.
+- `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt` — constants `MAX_THROTTLE_ATTEMPTS = 5`, `MAX_FLAKE_ATTEMPTS = 3`, `MAX_SINGLE_BACKOFF_MS = 300_000`. Inline `if (status == 429) … if (status in 400..499) throw … else fall-through to retry`.
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt` — `authenticatedGet` retries 500/503/EOF only; non-GET verbs are one-shot (UD-330 is the rollout ticket).
+- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetMatrixTest.kt` — 4 cases skipped: `4xx (404) does not retry`, `408 retries`, `5xx (503) retries`, `unknown caps at 3`.
+
+## Proposed shape
+
+Five sub-tasks. Land in this order; each can be its own PR.
+
+### Sub-task A — fields + decide() entry point
+Add to `HttpRetryBudget`:
+```kotlin
+val maxRetries: Int = 5,                // default; provider can override
+val maxRetryAfter: Duration = 5.minutes, // cap on Retry-After honoring
+
+sealed class RetryDecision {
+    data class Retry(val delay: Duration) : RetryDecision()
+    object Fail : RetryDecision()
+}
+
+fun decide(
+    attempt: Int,
+    status: Int? = null,           // null when no HTTP response (network error)
+    exception: Throwable? = null,  // null on plain HTTP non-2xx
+    retryAfter: Duration? = null,  // from response header, if any
+): RetryDecision
+```
+
+The `decide(...)` body implements the matrix verbatim:
+- `attempt >= maxRetries` (or for Unknown: `>= min(3, maxRetries)`) → `Fail`.
+- `status == 200..299` → caller shouldn't be calling decide; document as precondition violation.
+- `status == 408 || 429 || in 500..599` → `Retry(backoff)`. For 429, `Retry(retryAfter.coerceAtMost(maxRetryAfter))` if `retryAfter != null`, else `Retry(backoff)`.
+- `status in 400..499 && status !in setOf(408, 429)` → `Fail`.
+- `exception != null && status == null` (network error: IOException, SocketTimeout) → `Retry(backoff)`.
+- `exception` not classified above (Unknown class) → `Retry(backoff)` capped at `min(3, maxRetries)` attempts.
+
+### Sub-task B — backoff helper with full jitter
+Add to `HttpRetryBudget`:
+```kotlin
+fun nextBackoff(attempt: Int, base: Duration = 1.seconds): Duration {
+    val expCap = base * (1L shl attempt.coerceAtMost(10))
+    val capped = expCap.coerceAtMost(maxRetryAfter)
+    val jitterMs = Random.nextLong(capped.inWholeMilliseconds + 1)
+    return jitterMs.milliseconds
+}
+```
+Full-jitter pattern (AWS Architecture Blog, 2015) — equally distributed across `[0, capped]`, smooths thundering-herd retry storms without sacrificing throughput. Existing per-provider exponential-without-jitter is the regression target.
+
+### Sub-task C — `RetryClass` for caller-classified Unknown
+Add an enum the caller can pass to `decide`:
+```kotlin
+enum class RetryClass { Http, Network, Unknown }
+```
+`Unknown` is for "exception didn't match any known retriable predicate but the caller wants to give it a few tries." Caps at `min(3, maxRetries)`.
+
+### Sub-task D — wire each provider into `decide()`
+- Internxt `InternxtApiService.authenticatedGet` and the rest of UD-330's rollout list.
+- OneDrive `GraphApiService.authenticatedRequest` + chunk uploader.
+- WebDAV `WebDavApiService.withRetry`.
+- HiDrive (separate module if it lands).
+- S3 `S3ApiService` (UD-330 scope).
+- Document any **legitimate** divergence as a constructor-arg override (e.g. WebDAV's 425 Too Early — pass `additionalRetriableStatuses = setOf(425)`).
+
+### Sub-task E — un-skip the matrix tests
+Remove the four `@Ignore` annotations on `HttpRetryBudgetMatrixTest` once `decide(...)` is in place; rewrite each to call `decide` directly with a synthetic status/exception/retry-after. The test class becomes the canonical contract.
+
+## Acceptance
+
+- `HttpRetryBudget` exposes `decide(...)` with the matrix-prescribed semantics.
+- `HttpRetryBudgetMatrixTest` runs 6/6 PASS, no skips.
+- Each provider's `withRetry`/`authenticatedRequest` calls into `budget.decide(...)` rather than carrying its own matrix.
+- Provider-specific divergences (WebDAV 425, S3 SlowDown, MinIO 507) appear as constructor overrides, not parallel matrices.
+- Adding a new provider requires zero changes to `HttpRetryBudget` and zero new retry matrices.
+- Documentation updated: lesson note moves from "aspirational matrix" to "enforced matrix"; KDoc gains a "How to use `decide`" example.
+
+## Notes
+
+- **Sub-tasks can be filed separately** if this turns out to be a multi-PR effort. The natural cut is A+B+C in one PR (engine), D+E in a second PR (rollout).
+- Pairs with UD-330 (cross-provider retry rollout). Likely UD-330 should be re-scoped to "rollout via `budget.decide`" once this lands; otherwise UD-330 ships per-provider matrices that this ticket then has to undo.
+- Out of scope: per-provider divergence beyond status-set additions. If a provider needs entirely different backoff semantics (e.g. honour `x-amz-retry-after-millis`), that's a follow-up.
+- Out of scope: distributed retry budget (cross-process). In-process token bucket only.
+
+## Cross-refs
+
+- UD-207 — surfaced this finding; closed once-per-row tests with @Ignore TODOs.
+- UD-228 — original HTTP-robustness audit that produced the matrix.
+- UD-330 — cross-provider rollout, must coordinate.
+- UD-232 — Retry-After / throttle handling, lives at the same surface.
+- drive-desktop `client-wrapper.service.ts` — the matrix's source.
+---
+id: UD-308
+title: Internxt: getValidCredentials should refresh proactively, not wait for a 401
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-04
+---
+**Source:** UD-208 audit finding (agent `a876235`, 2026-05-04). `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:175` — `getValidCredentials()` returns the stored `InternxtCredentials` or throws if absent. It does **not** itself check `isJwtExpired()` or call `refreshToken()`. Refresh only happens via:
+1. `authenticate()` (one-shot, at session start)
+2. Implicitly when the API call sees a 401 and re-asks `authenticate()` (via the existing recovery path)
+
+Result: a long-running daemon's first call after 24h of idle time hits a guaranteed-expired token before it ever gets refreshed, paying a full retry round-trip plus a `refreshToken` call in the critical path of an otherwise-fine API request.
+
+## Why this matters
+
+- **Cold-start latency**: every cold start of any operation pays the 401 + refresh round-trip if the token expired during idle.
+- **Concurrent calls thunder**: if N coroutines each notice the 401 simultaneously, they each fire their own `refreshToken()` unless the mutex inside `refreshToken` serialises them. Worth verifying.
+- **Compares unfavorably with the rest of the auth surface**: `InternxtProvider.authenticate()` (`InternxtProvider.kt:53-58`) does check `isJwtExpired()` proactively. The inconsistency between the entry point (proactive) and the call-site path (reactive-on-401) is the smell.
+
+## Code refs
+
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:41-62` — `isJwtExpired()` (pure, no network)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:175-...` — `getValidCredentials()` — **the call this ticket targets**
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:201-224` — `refreshToken()` (mutex-serialised, `NonCancellable`)
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:622-653` — `authenticatedGet()` consumer of `getValidCredentials()`
+
+## Proposed shape
+
+Make `getValidCredentials` *actually* return valid credentials:
+
+```kotlin
+suspend fun getValidCredentials(): InternxtCredentials {
+    val current = storedCredentials ?: throw NotAuthenticatedException(...)
+    return if (isJwtExpired(current.token)) {
+        refreshToken().also { /* persisted by refreshToken */ }
+    } else {
+        current
+    }
+}
+```
+
+Refresh-token mutex (`refreshToken`'s existing serialisation + double-check) ensures concurrent callers fire one network refresh, not N. Add a unit test to lock the dedup behaviour explicitly.
+
+If the JWT is "near-expiry" but not yet expired, we *could* still pre-emptively refresh — but that's optional polish; the main win is removing the guaranteed-expired-on-call class.
+
+Pairs naturally with UD-205 (in-flight dedup): `getValidCredentials` itself becomes a candidate dedup target so that even the `isJwtExpired() == true` branch doesn't fan out N refresh attempts.
+
+## Acceptance
+
+- `AuthService.getValidCredentials()` returns valid (non-expired) credentials by construction; throws if no token is available **or** refresh fails.
+- Unit test: 100 concurrent `getValidCredentials()` calls observing a near-expired token → exactly one refresh network call (verify via mock).
+- Unit test: `getValidCredentials()` with an expired token whose refresh fails → throws a refresh-specific exception, does not return stale credentials.
+- Unit test: `getValidCredentials()` with a valid token → returns immediately, no refresh attempt.
+- `InternxtApiService.authenticatedGet` receives credentials that are ≤30s from expiry **or fresher** at the moment of the API call.
+- The reactive-401 fallback path stays as a belt-and-braces safety net — do not remove it.
+- Documentation update in `docs/providers/auth-refresh-model.md` flips the "sharp edge" callout to "resolved (UD-308)".
+
+## Notes
+
+- Out of scope: refresh-token rotation policy, cross-session token sharing, encrypted-at-rest token storage. Just the call-time refresh trigger.
+- Out of scope: applying the same fix to OneDrive — the audit found OneDrive already does it correctly. Verify in the test, but don't refactor.
+- Pairs with UD-205. Could even use the InFlightDedup primitive directly:
+  ```kotlin
+  private val refreshDedup = InFlightDedup<Unit, InternxtCredentials>()
+  suspend fun refreshToken(): InternxtCredentials =
+      refreshDedup.load(Unit) { /* existing refresh logic */ }
+  ```
+  …if the existing mutex inside `refreshToken` doesn't already serve this purpose. Audit before duplicating.
+
+## Cross-refs
+
+- UD-208 — surfaced this finding (audit doc).
+- UD-205 — InFlightDedup primitive, potential reuse.
+- UD-310 / UD-331 — token-refresh mutex / NonCancellable carry-over (the existing serialisation surface).
+---
+id: UD-701
+title: Cloud provider speed ranking publication
+category: tooling
+priority: high
+effort: XL
+status: open
+code_refs:
+  - core/app/benchmark/src/main/kotlin/org/krost/unidrive/sync/BenchmarkRunner.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/BenchmarkCommand.kt
+  - docs/CLOUD_PROVIDERS_DATABASE.md
+opened: 2026-05-13
+---
+Sign up for free tiers of viable cloud storage providers, run
+standardized speed tests from Kubuntu (Germany ISP), rank by
+upload/download throughput and latency, publish via static site
+generator. EU-first ordering. Revenue model: affiliate signups.
+
+Phase 1 (static benchmark page generator) shipped in unidrive-closed
+commit 45b9407. This ticket tracks Phase 2: expand provider coverage,
+periodic re-tests, dynamic site updates.
+
+Reference: `docs/CLOUD_PROVIDERS_DATABASE.md` v1.0 (100+ providers).
+
+Was `#63` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-401
+title: Enhanced provider table Phase 2 (remote API, dynamic grades)
+category: cli
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt
+opened: 2026-05-13
+---
+Remote-API-backed dynamic provider table in CLI output. Phase 1
+(static table baked at compile time) already shipped.
+
+Phase 2: read live grades from the benchmark site (UD-701) with a
+sensible offline fallback to the baked-in table. The exact CLI
+surface depends on whether the public repo still has a `provider list`
+subcommand (it was removed in commit b07d864 on 2026-05-04) — if a
+replacement listing surface is added, it would be the natural host
+for the dynamic table; otherwise this work might expand the `benchmark`
+subcommand itself.
+
+Was `#107` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-800
+title: CloudForge E2E scenario incomplete (Playwright not wired)
+category: tests
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/Main360.kt:71
+  - core/app/e2e-360/src/main/kotlin/org/krost/unidrive/e2e/scenarios/CloudForgeRunner.kt
+opened: 2026-05-13
+---
+`CloudForgeCommand` in `Main360.kt:71` prints a TODO. Playwright
+browser integration not wired. The `--headed` flag is accepted but
+unused. Only `GroundTruthRunner` is fully implemented.
+
+Acceptance: CloudForge (cloud→local) scenario callable from CLI;
+Playwright wired for headed mode; one passing end-to-end test in
+CI or marked `@Tag("manual")`.
+
+Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
+dissolution.
+---
+id: UD-810
+title: Test cleanup: :app:core misleading + data-class delete-candidates (UD-813 batch A)
+category: tests
+priority: low
+effort: S
+status: open
+opened: 2026-05-13
+---
+## Source
+
+UD-813 audit of `:app:core` tests (2026-05-13). See
+[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
+
+This is the lower-risk batch — misleading test names and data-class
+delete-candidates. Rewrites are mechanical: rename to match the body, or
+delete with a one-line CHANGELOG note. No behaviour changes in production
+code.
+
+## Scope
+
+`core/app/core/src/test/`:
+
+- **`ProviderMetadataTest.allByTier returns sorted metadata`** — name promises
+  sort verification; body iterates without checking sort order. Either
+  rewrite to assert the canonical tier order
+  (`["Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global"]`) or rename
+  to "every entry has non-blank tier" if sort is intentionally not pinned.
+- **`ProviderMetadataTest.allMetadata returns list`** — body's `for (meta in all)`
+  runs 0 iterations on empty list, comment "may be empty" excuses the
+  vacuous pass. Either move the structural assertion to the `:app:cli`
+  classpath-rich variant (see new `ProviderRegistryDiscoveryTest`) and
+  delete here, or keep as a "per-entry structural invariant when present"
+  test with the explicit name.
+- **`ProviderMetadataTest.ProviderMetadata stores all required fields` /
+  `optional fields` / `data class equality and copy`** — assert Kotlin
+  data-class generation. Tests the compiler. Delete with a CHANGELOG note.
+- **`CloudItemTest.equal items have equal hashCodes` /
+  `items differing in any field are not equal` / `hashCode is stable across calls` /
+  `works correctly as HashMap key`** — same delete-candidate class.
+
+## Acceptance
+
+- Rewritten or deleted per the table above.
+- CHANGELOG `[Unreleased] / Removed` entry for each deleted test, naming
+  the file and the reason ("delete-candidate per UD-813 audit").
+- `TEST-AUDIT.md` table updated: each row's "Action" cell flips to the
+  commit that resolved it.
+---
+id: UD-811
+title: Test cleanup: :app:core retry-budget + dedup + request-id (UD-813 batch B)
+category: tests
+priority: medium
+effort: M
+status: open
+opened: 2026-05-13
+---
+## Source
+
+UD-813 audit of `:app:core` tests (2026-05-13). See
+[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
+
+This is the higher-touch batch — misleading retry-budget assertions and
+the dedup tests that share UD-807's `Dispatchers.Default + delay(10)
+spin-wait` flake class.
+
+## Scope
+
+`core/app/core/src/test/`:
+
+- **`HttpRetryBudgetMatrixTest.429 honors Retry-After capped by maxRetryAfter`** —
+  rename to reflect what the body actually checks: the storm-trigger plus
+  max-Retry-After honored in `resumeAfterEpochMs`. The "capped by
+  `maxRetryAfter`" feature does not exist in `HttpRetryBudget` (only in the
+  KDoc matrix comment). Either remove the cap claim from the docstring
+  matrix or implement the cap and add a test asserting it (separate
+  decision; the current test is just misnamed).
+- **`HttpRetryBudgetMatrixTest.network IOException retries with exponential backoff`** —
+  rename to `isRetriableIoException distinguishes transient vs misconfig IO failures`.
+  Body is a classifier-only contract; no backoff assertion is present.
+- **`InFlightDedupTest.concurrent callers for same key share exactly one loader invocation`**
+  and the sibling **`loader failure is rethrown ...`** test — rewrite to
+  use `runTest` + `testScheduler.advanceUntilIdle()` per the UD-807 pattern
+  (see `core/providers/internxt/src/test/kotlin/.../InternxtApiServiceTest.kt`
+  for the template). The 100-coroutine `Dispatchers.Default` flavour is
+  the same flake class as the now-fixed Internxt test; on slow Windows CI
+  the spin-wait budget is too tight for all callers to install themselves
+  before the gate releases.
+- **`RequestIdPluginTest.every request carries X-Unidrive-Request-Id header`** —
+  the `assertEquals(8, id.length)` pin reflects the current id format. If
+  the format changes (e.g. to 12 chars or UUID), the test breaks without
+  the invariant being violated. Replace with "non-blank + unique across N
+  requests" only, leaving the length as an implementation detail.
+- **`RequestIdPluginTest.request attribute exposes the id for caller introspection`** —
+  drop the `if (capturedFromBuilder != null)` guard around the
+  `assertEquals`. Today a regression that returns null silently passes;
+  the test should fail loud.
+
+## Acceptance
+
+- Each test rewritten per the table above.
+- `InFlightDedupTest` runs under `runTest` and finishes in < 50 ms instead
+  of relying on wall-clock spin-wait budgets.
+- `TEST-AUDIT.md` table updated with the resolving commit per row.
+
+## Risk
+
+Higher than UD-810 because the dedup rewrite touches multi-coroutine
+ordering. Reference: UD-807's Internxt fix (commit 5d9f49c) — the same
+pattern translates 1:1.

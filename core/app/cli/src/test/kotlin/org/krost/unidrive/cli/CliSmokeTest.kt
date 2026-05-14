@@ -60,34 +60,6 @@ class CliSmokeTest {
     }
 
     @Test
-    fun `provider info sftp succeeds`() {
-        assumeTrue("requires :app:cli:shadowJar — run ./gradlew :app:cli:shadowJar first", jarPath.exists())
-        val pb = runJar("provider", "info", "sftp")
-        val output =
-            pb
-                .start()
-                .inputStream
-                .bufferedReader()
-                .readText()
-        assertTrue(output.isNotEmpty(), "provider info should return output")
-        assertTrue(output.contains("SFTP"), "Output should mention SFTP")
-    }
-
-    @Test
-    fun `provider list shows providers`() {
-        assumeTrue("requires :app:cli:shadowJar — run ./gradlew :app:cli:shadowJar first", jarPath.exists())
-        val pb = runJar("provider", "list")
-        val output =
-            pb
-                .start()
-                .inputStream
-                .bufferedReader()
-                .readText()
-        assertTrue(output.contains("SFTP"), "Provider list should show SFTP")
-        assertTrue(output.contains("OneDrive"), "Provider list should show OneDrive")
-    }
-
-    @Test
     fun `help shows UniDrive`() {
         assumeTrue("requires :app:cli:shadowJar — run ./gradlew :app:cli:shadowJar first", jarPath.exists())
         val pb = runJar("--help")

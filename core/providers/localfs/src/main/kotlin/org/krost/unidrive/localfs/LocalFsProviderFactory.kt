@@ -20,11 +20,7 @@ class LocalFsProviderFactory : ProviderFactory {
             cloudActExposure = false,
             signupUrl = null,
             tier = "Local",
-            // UD-263: filesystem-bound — disk + page-cache are the only
-            // bottlenecks. 8 keeps the kernel I/O queue full without
-            // thrashing on a typical NVMe; lower values barely help on
-            // modern storage.
-            maxConcurrentTransfers = 8,
+            maxConcurrentTransfers = 8, // TODO GK auto default value
         )
 
     override fun create(

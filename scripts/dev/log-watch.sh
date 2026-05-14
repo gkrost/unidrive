@@ -19,7 +19,29 @@
 
 set -euo pipefail
 
-LOG="${UNIDRIVE_LOG:-$HOME/AppData/Local/unidrive/unidrive.log}"
+# UD-700: platform-aware default log path. The daemon's logback config
+# (core/app/cli/src/main/resources/logback.xml line 3) resolves
+# `${LOCALAPPDATA:-${user.home}/.local/share}/unidrive`, so on Linux the
+# log lives under `${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/`, on
+# Windows under `%LOCALAPPDATA%\unidrive\`, on macOS conventionally under
+# `~/Library/Logs/unidrive/` (verify against the bundled logback config
+# when the macOS distribution lands). UNIDRIVE_LOG always overrides.
+default_log_path() {
+  case "$(uname -s)" in
+    Darwin)
+      echo "$HOME/Library/Logs/unidrive/unidrive.log"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # LOCALAPPDATA is set by Windows shells; fall back to the
+      # conventional path if it's missing (rare, but msys without env).
+      echo "${LOCALAPPDATA:-$HOME/AppData/Local}/unidrive/unidrive.log"
+      ;;
+    Linux|*)
+      echo "${XDG_DATA_HOME:-$HOME/.local/share}/unidrive/unidrive.log"
+      ;;
+  esac
+}
+LOG="${UNIDRIVE_LOG:-$(default_log_path)}"
 # UD-282-style log analysis (proposal 2026-04-29): glob today's rolled
 # set so summary/anomalies don't miss WARNs that already rolled out of
 # the live tail. The glob deliberately matches `unidrive.log` plus any
@@ -29,6 +51,12 @@ LOG_GLOB="${UNIDRIVE_LOG_GLOB:-$(dirname "$LOG")/unidrive*.log}"
 
 if [[ ! -f "$LOG" ]]; then
   echo "log not found: $LOG" >&2
+  if [[ -z "${UNIDRIVE_LOG:-}" ]]; then
+    # UD-700: point the user at the expected daemon write location for
+    # this OS before bailing, so they don't have to grep the script to
+    # discover where the daemon would write.
+    echo "(expected daemon write path on $(uname -s); set UNIDRIVE_LOG to override)" >&2
+  fi
   exit 1
 fi
 

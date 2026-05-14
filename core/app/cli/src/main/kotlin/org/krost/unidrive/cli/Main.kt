@@ -27,8 +27,14 @@ import java.nio.file.Paths
     versionProvider = Main.VersionProvider::class,
     subcommands = [
         AuthCommand::class,
+        BackupCommand::class,
+        BenchmarkCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
+        // UD-236: git-style three-verb split — refresh = sync without byte
+        // transfers; apply = drain pending transfers without re-fetching deltas.
+        RefreshCommand::class,
+        ApplyCommand::class,
         SweepCommand::class,
         StatusCommand::class,
         GetCommand::class,
@@ -41,12 +47,10 @@ import java.nio.file.Paths
         ProfileCommand::class,
         VaultCommand::class,
         ConflictsCommand::class,
-        ProviderCommand::class,
         RelocateCommand::class,
         ShareCommand::class,
         TrashCommand::class,
         VersionsCommand::class,
-        BackupCommand::class,
     ],
 )
 class Main : Runnable {
@@ -57,7 +61,7 @@ class Main : Runnable {
     // the default via [SyncConfig.resolveDefaultProfile] in [resolveCurrentProfile]
     // so the CLI honours [general] default_profile from config.toml. The MCP jar
     // uses the same resolver, keeping the two invocation surfaces in lock-step.
-    @Option(names = ["-p", "--provider"], description = ["Provider profile name or type (see 'provider list')"])
+    @Option(names = ["-p", "--provider"], description = ["Provider profile name or type"])
     var provider: String? = null
 
     // UD-271: scope = INHERIT propagates -v / --verbose down to every subcommand
@@ -78,21 +82,13 @@ class Main : Runnable {
     lateinit var spec: CommandSpec
 
     private val baseConfigDir: Path
-        get() {
-            if (configDir != null) return Paths.get(configDir!!)
-            val appData = System.getenv("APPDATA")
-            return if (appData != null) {
-                Paths.get(appData, "unidrive")
-            } else {
-                Paths.get(System.getenv("HOME") ?: System.getProperty("user.home"), ".config", "unidrive")
-            }
-        }
+        get() = SyncConfig.defaultConfigDir(explicitOverride = configDir?.let { Paths.get(it) })
 
     private var _profile: ProfileInfo? = null
     private var _vaultData: Map<String, Map<String, String>>? = null
 
     /**
-     * UD-211: clear the memoised profile + vault caches so the next call to
+     * UD-213: clear the memoised profile + vault caches so the next call to
      * [resolveCurrentProfile] / [loadVaultData] re-parses against the current
      * [provider]. [org.krost.unidrive.cli.ext.internal.CliServicesImpl.withProfile]
      * is the primary caller; any future multi-profile-per-JVM code path must
@@ -352,18 +348,10 @@ class Main : Runnable {
     ): List<String> {
         val warnings = mutableListOf<String>()
         val envMappings =
-            when (type) {
-                "s3" ->
-                    mapOf(
-                        "S3_BUCKET" to "bucket",
-                        "AWS_ACCESS_KEY_ID" to "access_key_id",
-                        "AWS_SECRET_ACCESS_KEY" to "secret_access_key",
-                    )
-                "sftp" -> mapOf("SFTP_HOST" to "host", "SFTP_USER" to "user", "SFTP_PASSWORD" to "password")
-                "webdav" -> mapOf("WEBDAV_URL" to "url", "WEBDAV_USER" to "user", "WEBDAV_PASSWORD" to "password")
-                "rclone" -> mapOf("RCLONE_REMOTE" to "rclone_remote")
-                else -> emptyMap()
-            }
+            org.krost.unidrive.ProviderRegistry
+                .get(type)
+                ?.envVarMappings()
+                ?: emptyMap()
         for ((envVar, key) in envMappings) {
             if (System.getenv(envVar) != null && properties[key] != null) {
                 warnings.add("Warning: Profile has credentials in config.toml. Ignoring $envVar environment variable.")
@@ -597,7 +585,7 @@ class Main : Runnable {
     override fun run() {
         val profile = resolveCurrentProfile()
         val authenticated = isProviderAuthenticated()
-        val alwaysAvailable = setOf("log", "profile", "vault", "provider")
+        val alwaysAvailable = setOf("log", "profile", "vault")
         val cmd = spec.commandLine()
 
         // Print standard PicoCLI help header (synopsis + options)
@@ -795,8 +783,10 @@ internal fun renderConfigMissingMessage(
             appendLine("wcifs virtualization may be redirecting %APPDATA% reads to a sandbox-private")
             appendLine("copy, so the file a sibling native shell sees at this path may differ from")
             appendLine("what we see here. Workaround:")
-            appendLine("  1. Pass `-c <non-virtualized-path>`, e.g. `-c C:\\Users\\<you>\\unidrive-config`.")
+            appendLine("  1. Pass `-c <non-virtualized-path>`, e.g. `-c C:\\Users\\<you>\\.unidrive`.")
             appendLine("  2. Or set the UNIDRIVE_CONFIG_DIR env var to a path outside %APPDATA%.")
+            appendLine("  3. Or move your config to %USERPROFILE%\\.config\\unidrive\\config.toml — it")
+            appendLine("     wins over %APPDATA% when present (UD-407) and is outside the MSIX overlay.")
             appendLine("  Parent process: $parentProcessCommand")
             appendLine("  NTFS FileID at this path (compare against your native shell's view): $fileId")
         }

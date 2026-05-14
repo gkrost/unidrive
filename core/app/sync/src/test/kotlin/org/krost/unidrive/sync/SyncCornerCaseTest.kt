@@ -380,7 +380,11 @@ class SyncCornerCaseTest {
     @Test
     fun `DB entry without matching local file detected as deleted`() =
         runTest {
-            // Simulate: DB has entry but file was manually deleted (daemon was stopped)
+            // Simulate: DB has entry but file was manually deleted (daemon was stopped).
+            // UD-225a: isHydrated=true here matters — the test posits a user-deleted
+            // file, which means the file was once hydrated locally. An unhydrated
+            // row would now correctly trigger UD-225a's rehydrate path because the
+            // local-missing state IS the original state, not a delete event.
             db.upsertEntry(
                 SyncEntry(
                     path = "/ghost.txt",
@@ -392,7 +396,7 @@ class SyncCornerCaseTest {
                     localSize = 100,
                     isFolder = false,
                     isPinned = false,
-                    isHydrated = false,
+                    isHydrated = true,
                     lastSynced = Instant.now(),
                 ),
             )
@@ -471,7 +475,10 @@ class SyncCornerCaseTest {
     @Test
     fun `remote rename when old local file missing creates placeholder at new path`() =
         runTest {
-            // DB has entry at old path, but local file was deleted (daemon crash cleanup)
+            // DB has entry at old path, but local file was deleted (daemon crash cleanup).
+            // UD-225a: must be isHydrated=true to model "user-once-had-file-then-deleted-it";
+            // an unhydrated row now triggers rehydrate semantics rather than "user-deleted",
+            // which is the correct behaviour but not what this test exercises.
             db.upsertEntry(
                 SyncEntry(
                     path = "/old-name.txt",
@@ -483,7 +490,7 @@ class SyncCornerCaseTest {
                     localSize = 100,
                     isFolder = false,
                     isPinned = false,
-                    isHydrated = false,
+                    isHydrated = true,
                     lastSynced = Instant.now(),
                 ),
             )

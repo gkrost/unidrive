@@ -12,20 +12,40 @@ import java.util.Base64
 object HashVerifier {
     /**
      * Verify that the downloaded file matches the remote hash.
-     * Returns true if hash matches or if provider doesn't support hashes.
+     *
+     * Returns true if hash matches, OR if the algorithm is null
+     * (provider has no verifiable hash), OR if the remoteHash is
+     * null/empty. Returns false only on actual mismatch.
      */
     fun verify(
-        localPath: Path,
+        localPath: java.nio.file.Path,
         remoteHash: String?,
-        providerId: String,
+        algorithm: org.krost.unidrive.HashAlgorithm?,
     ): Boolean {
-        if (remoteHash == null || remoteHash.isEmpty()) return true
+        if (remoteHash.isNullOrEmpty()) return true
+        if (algorithm == null) return true
 
-        return when (providerId) {
-            "onedrive" -> verifyQuickXorHash(localPath, remoteHash)
-            "s3" -> verifyS3ETag(localPath, remoteHash)
-            else -> true // SFTP, WebDAV, rclone, etc. — no hash available
+        return when (algorithm) {
+            org.krost.unidrive.HashAlgorithm.QuickXor -> verifyQuickXorHash(localPath, remoteHash)
+            org.krost.unidrive.HashAlgorithm.Md5Hex -> verifyS3ETag(localPath, remoteHash)
+            org.krost.unidrive.HashAlgorithm.Sha256Hex -> verifySha256Hex(localPath, remoteHash)
         }
+    }
+
+    private fun verifySha256Hex(
+        localPath: java.nio.file.Path,
+        expectedHex: String,
+    ): Boolean {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        java.nio.file.Files.newInputStream(localPath).use { input ->
+            val buffer = ByteArray(8192)
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                md.update(buffer, 0, read)
+            }
+        }
+        val computed = md.digest().joinToString("") { "%02x".format(it) }
+        return computed.equals(expectedHex, ignoreCase = true)
     }
 
     private fun verifyQuickXorHash(

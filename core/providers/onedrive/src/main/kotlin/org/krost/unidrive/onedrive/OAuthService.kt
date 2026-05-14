@@ -32,11 +32,7 @@ class OAuthService(
         private const val TOKEN_FILE = "token.json"
     }
 
-    // UD-344: load / save / delete go through the shared `CredentialStore<Token>`.
-    // The `validate` hook wires OneDrive's UD-312 `hasPlausibleAccessTokenShape`
-    // shape guard so a half-written / Graph-emitted-empty access_token never
-    // round-trips through `loadToken()`.
-    private val credentialStore: CredentialStore<Token> =
+       private val credentialStore: CredentialStore<Token> =
         CredentialStore(
             dir = config.tokenPath,
             fileName = TOKEN_FILE,
@@ -68,7 +64,6 @@ class OAuthService(
         return Pair(url, verifier)
     }
 
-    // UD-351: PKCE helpers lifted to org.krost.unidrive.auth.Pkce.
     private fun generateCodeVerifier(): String = Pkce.generateVerifier()
 
     private fun generateCodeChallenge(verifier: String): String = Pkce.generateChallenge(verifier)
@@ -98,8 +93,6 @@ class OAuthService(
 
         val tokenResponse = json.decodeFromString<TokenResponse>(response.bodyAsText())
         val token = tokenResponse.toToken()
-        // UD-312: same shape guard as refreshToken() — catch empty / truncated
-        // access_token at the issue site so the caller doesn't persist it.
         if (!token.hasPlausibleAccessTokenShape()) {
             throw AuthenticationException(
                 "Code-exchange endpoint returned 2xx with a suspiciously short access_token " +
@@ -147,17 +140,6 @@ class OAuthService(
         )
     }
 
-    /**
-     * UD-216: non-blocking device-code poll. Performs exactly one round-trip
-     * against the token endpoint and classifies the result. Unlike
-     * [pollForToken], this never loops — the caller decides whether to retry
-     * (used by the MCP auth tools, which cannot block the server on a single
-     * tool call).
-     *
-     * Callers should respect the provider's `retry_after_seconds` hint on a
-     * [DevicePollOutcome.Pending] result; Azure explicitly slows us down with
-     * `slow_down` if we ignore it.
-     */
     sealed class DevicePollOutcome {
         data class Success(
             val token: Token,
@@ -195,7 +177,7 @@ class OAuthService(
             if (!token.hasPlausibleAccessTokenShape()) {
                 return DevicePollOutcome.Failed(
                     "Device-code poll returned 2xx with a suspiciously short access_token " +
-                        "(length=${token.accessToken.length}). UD-312 guard — retry.",
+                        "(length=${token.accessToken.length}). TODO retry.",
                 )
             }
             return DevicePollOutcome.Success(token)
@@ -224,9 +206,6 @@ class OAuthService(
         interval: Long,
     ): Token {
         while (true) {
-            // UD-311: same flake retry inside the poll loop. A TLS blip should
-            // not collapse the device-code flow — one more retry + small delay
-            // is cheaper than sending the user back to the verification URL.
             val response =
                 postWithFlakeRetry("pollForToken") {
                     Parameters
@@ -242,7 +221,6 @@ class OAuthService(
             if (response.status.isSuccess()) {
                 val tokenResponse = json.decodeFromString<TokenResponse>(body)
                 val token = tokenResponse.toToken()
-                // UD-312: same shape guard as the other two grant endpoints.
                 if (!token.hasPlausibleAccessTokenShape()) {
                     throw AuthenticationException(
                         "Device-code poll returned 2xx with a suspiciously short access_token " +
@@ -265,14 +243,6 @@ class OAuthService(
     }
 
     suspend fun refreshToken(refreshToken: String): Token {
-        // UD-311: the token-refresh path was SSL-failing with zero retry during
-        // long syncs. Observed 2026-04-19 13:05 after a 76-min 429 wait: token
-        // had expired, refresh hit login.microsoftonline.com, TLS handshake was
-        // terminated mid-stream, AuthenticationException propagated to
-        // SyncEngine which logged "Download failed: Remote host terminated the
-        // handshake" and gave up on the file. A single-shot handshake flake on
-        // a transient network blip should not cost a file. Use the same
-        // 3-attempt/2s-4s retry policy as downloadFile's flake loop.
         val response =
             postWithFlakeRetry("refreshToken") {
                 Parameters
@@ -289,13 +259,6 @@ class OAuthService(
 
         val tokenResponse = json.decodeFromString<TokenResponse>(response.bodyAsText())
         val token = tokenResponse.toToken()
-        // UD-312: Azure occasionally emits a 2xx refresh response with an empty
-        // or truncated access_token under load. Without this guard the caller
-        // would persist and replay the empty token, Graph would reject with
-        // IDX14100 (observed 2026-04-19 07:57). We surface the diagnostic here
-        // instead of propagating the bad token. Matches the guard in
-        // scripts/dev/oauth-mcp/graph_client.py so the CLI and the MCP agree
-        // on what "valid enough to return" means.
         if (!token.hasPlausibleAccessTokenShape()) {
             throw AuthenticationException(
                 "Refresh endpoint returned 2xx with a suspiciously short access_token " +
@@ -318,15 +281,6 @@ class OAuthService(
         httpClient.close()
     }
 
-    /**
-     * UD-311: wrap a form-url-encoded POST to the auth endpoint in the same
-     * 3-attempt / 2s / 4s flake retry as `GraphApiService.downloadFile`. SSL
-     * handshake failures and `IOException` family (connection reset, timeout,
-     * `Remote host terminated the handshake`) retry. HTTP-status failures
-     * return the response so the caller's existing error-classification path
-     * still runs — we don't want to retry a 400 invalid_grant for a minute.
-     * [label] is used only in log messages for correlation.
-     */
     private suspend fun postWithFlakeRetry(
         label: String,
         bodyProvider: () -> String,
@@ -362,7 +316,3 @@ class OAuthService(
 }
 
 private const val MAX_AUTH_FLAKE_ATTEMPTS = 3
-
-// UD-344: token-file load / save / delete now route through the shared
-// `org.krost.unidrive.auth.CredentialStore<Token>` — atomic move,
-// shape-guard validate hook, and POSIX chmod (UD-347 helper) all live there.

@@ -73,6 +73,13 @@ def fmt_rate(bps):
 
 
 def main(paths):
+    # UD-772: print() emits the literal '→' / '←' arrows (line ~173, mirroring the log
+    # convention) and crashes on Windows under default cp1252. Reconfigure stdout/stderr to
+    # UTF-8 so the script Just Works on PowerShell without requiring PYTHONIOENCODING=utf-8.
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     uploads_by_thread = defaultdict(list)   # thread -> [(ts, bytes, path)]
     upload_size_total = 0
     upload_count = 0

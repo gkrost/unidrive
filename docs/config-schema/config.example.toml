@@ -161,7 +161,7 @@ webhook_url = "https://example.com/unidrive/webhook"
 # int | default: null.
 # TODO: declared in RawProvider but not currently consumed anywhere (see
 # UD-203 notes). Keep absent until a caller is wired; remove key if still
-# dead at v0.1.0.
+# dead at v0.0.1.
 # webhook_port = 8443
 
 # Pin rules — globs that force eager hydration (download) of matches,

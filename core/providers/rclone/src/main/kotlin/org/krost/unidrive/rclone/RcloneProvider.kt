@@ -56,6 +56,7 @@ class RcloneProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem = cli.upload(localPath, remotePath)
 

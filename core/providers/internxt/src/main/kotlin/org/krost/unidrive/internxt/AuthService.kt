@@ -17,6 +17,9 @@ import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.internxt.model.*
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 open class AuthService(
     private val config: InternxtConfig,
@@ -24,7 +27,9 @@ open class AuthService(
 ) : AutoCloseable {
     private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
     private val json = Json { ignoreUnknownKeys = true }
-    private val httpClient = HttpClient()
+    private val httpClient = HttpClient {
+        expectSuccess = false
+    }
     private var credentials: InternxtCredentials? = null
     private val refreshMutex = Mutex()
 
@@ -87,6 +92,127 @@ open class AuthService(
         return readLine(prompt).toCharArray()
     }
 
+    /**
+     * Non-interactive Internxt login. See spec
+     * docs/superpowers/specs/2026-05-13-internxt-android-auth-flow-design.md
+     * for the full contract.
+     *
+     * 2FA semantics:
+     *   - If the challenge returns `tfa: false`, [tfaCode] is ignored.
+     *   - If `tfa: true` and [tfaCode] is null, throws [TfaRequiredException]
+     *     without making the access POST. Caller prompts and retries.
+     *   - If `tfa: true` and [tfaCode] is non-null but rejected, throws
+     *     [TfaInvalidException].
+     *
+     * Wrong email / password throws [BadCredentialsException] (from either
+     * step 1 or step 4). Server-side rejections that aren't bad-creds or
+     * TFA throw the generic [AuthenticationException]. [java.io.IOException]
+     * subtypes (timeouts, DNS failures) propagate unwrapped so callers can
+     * distinguish network failure from authentication failure.
+     *
+     * Request shape: when [tfaCode] is null, the `tfa` field is omitted from
+     * the `/auth/login/access` POST body entirely (not sent as null / empty).
+     */
+    suspend fun authenticate(
+        email: String,
+        password: String,
+        tfaCode: String? = null,
+    ): InternxtCredentials {
+        // Step 1: challenge.
+        val challengeText = postLoginChallenge(email)
+        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeText)
+
+        // Step 2: TFA gate.
+        if (challenge.tfa && tfaCode == null) {
+            throw TfaRequiredException()
+        }
+
+        // Step 3: password hash.
+        val sKey = challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
+        val hashedPassword = crypto.hashPassword(password, sKey, InternxtConfig.CRYPTO_KEY)
+
+        // Step 4: access POST (omit `tfa` field when not provided).
+        val accessBody = buildJsonObject {
+            put("email", JsonPrimitive(email))
+            put("password", JsonPrimitive(hashedPassword))
+            if (tfaCode != null) put("tfa", JsonPrimitive(tfaCode))
+        }
+        val accessText = postLoginAccess(accessBody)
+        val loginResult = json.decodeFromString<LoginAccessResponse>(accessText)
+
+        val rootFolderId = loginResult.user.rootFolderId
+            ?: loginResult.user.rootFolderIdNum?.toString()
+            ?: throw AuthenticationException("No root folder ID in login response")
+
+        // Step 5: decrypt mnemonic with the plaintext password.
+        val mnemonic = crypto.decryptMnemonic(loginResult.user.mnemonic, password)
+
+        val creds = InternxtCredentials(
+            jwt = loginResult.newToken,
+            mnemonic = mnemonic,
+            rootFolderId = rootFolderId,
+            email = email,
+            bridgeUser = loginResult.user.bridgeUser ?: email,
+            bridgeUserId = loginResult.user.userId ?: "",
+            bucket = loginResult.user.bucket ?: "",
+        )
+        saveCredentials(creds)
+        credentials = creds
+        return creds
+    }
+
+    /**
+     * HTTP seam: POST `/auth/login` with the given email; return the response body.
+     * Throws [BadCredentialsException] on 4xx that indicates wrong credentials.
+     * Test-overridable.
+     */
+    protected open suspend fun postLoginChallenge(email: String): String {
+        val body = buildJsonObject {
+            put("email", JsonPrimitive(email))
+        }
+        val response = httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login") {
+            contentType(ContentType.Application.Json)
+            applyInternxtHeaders()
+            setBody(json.encodeToString(JsonObject.serializer(), body))
+        }
+        if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+            throw BadCredentialsException("Login challenge rejected: ${response.bodyAsText()}")
+        }
+        if (!response.status.isSuccess()) {
+            throw AuthenticationException("Login challenge failed: ${response.bodyAsText()}")
+        }
+        return response.bodyAsText()
+    }
+
+    /**
+     * HTTP seam: POST `/auth/login/access` with the given pre-built body; return the
+     * response body. Throws [BadCredentialsException] for wrong-password 401, or
+     * [TfaInvalidException] when the response body indicates 2FA rejection. The
+     * caller is responsible for constructing the body with the right shape
+     * (email + hashed password + optional `tfa`). Test-overridable.
+     */
+    protected open suspend fun postLoginAccess(
+        body: JsonObject,
+    ): String {
+        val response = httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login/access") {
+            contentType(ContentType.Application.Json)
+            applyInternxtHeaders()
+            setBody(json.encodeToString(JsonObject.serializer(), body))
+        }
+        if (!response.status.isSuccess()) {
+            val bodyText = response.bodyAsText()
+            // Internxt's API returns 401 for both wrong-password and wrong-TFA.
+            // Distinguish by whether the request carried a tfa field.
+            val carriedTfa = body.containsKey("tfa")
+            if (response.status == HttpStatusCode.Unauthorized) {
+                if (carriedTfa) throw TfaInvalidException("Invalid 2FA code: $bodyText")
+                throw BadCredentialsException("Wrong password: $bodyText")
+            }
+            throw AuthenticationException("Access failed: $bodyText")
+        }
+        return response.bodyAsText()
+    }
+
     suspend fun authenticateInteractive(): InternxtCredentials {
         val email = readLine("Internxt email: ")
         if (email.isBlank()) throw AuthenticationException("No email provided")
@@ -95,81 +221,35 @@ open class AuthService(
         if (passwordChars.isEmpty()) throw AuthenticationException("No password provided")
         val password = String(passwordChars)
 
-        // Step 1: Login challenge
-        val challengeResponse =
-            httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login") {
-                contentType(ContentType.Application.Json)
-                applyInternxtHeaders()
-                setBody(
-                    json.encodeToString(
-                        kotlinx.serialization.json.JsonObject
-                            .serializer(),
-                        kotlinx.serialization.json.buildJsonObject { put("email", kotlinx.serialization.json.JsonPrimitive(email)) },
-                    ),
-                )
-            }
-        if (!challengeResponse.status.isSuccess()) {
-            throw AuthenticationException("Login failed: ${challengeResponse.bodyAsText()}")
-        }
-        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeResponse.bodyAsText())
-
-        // Step 2: Check for 2FA
-        var tfa: String? = null
-        if (challenge.tfa) {
-            tfa = readLine("2FA code: ")
+        try {
+            return authenticate(email, password, tfaCode = null)
+                .also { passwordChars.fill('\u0000') }
+        } catch (_: TfaRequiredException) {
+            // First attempt told us 2FA is required; prompt and retry up to 3 times.
         }
 
-        // Step 3: Hash password with sKey
-        val sKey = challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
-        val hashedPassword = crypto.hashPassword(password, sKey, InternxtConfig.CRYPTO_KEY)
-
-        // Step 4: Access token
-        val accessBody =
-            kotlinx.serialization.json.buildJsonObject {
-                put("email", kotlinx.serialization.json.JsonPrimitive(email))
-                put("password", kotlinx.serialization.json.JsonPrimitive(hashedPassword))
-                if (tfa != null) put("tfa", kotlinx.serialization.json.JsonPrimitive(tfa))
+        // Note: passwordChars stays populated during the readLine prompts
+        // between retries. Best-effort zeroing on exit; `password` (the
+        // immutable String built on line 530) is GC's problem regardless.
+        // The CLI tool is short-lived enough that this is acceptable; a
+        // longer-running daemon would route through SecureCredentialStore.
+        var attempts = 0
+        while (attempts < 3) {
+            val tfaCode = readLine("2FA code: ")
+            try {
+                return authenticate(email, password, tfaCode = tfaCode)
+                    .also { passwordChars.fill('\u0000') }
+            } catch (_: TfaInvalidException) {
+                attempts++
+                if (attempts >= 3) {
+                    passwordChars.fill('\u0000')
+                    throw AuthenticationException("Too many invalid 2FA attempts")
+                }
+                System.err.println("Invalid 2FA code, please try again.")
             }
-        val accessResponse =
-            httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login/access") {
-                contentType(ContentType.Application.Json)
-                applyInternxtHeaders()
-                setBody(
-                    json.encodeToString(
-                        kotlinx.serialization.json.JsonObject
-                            .serializer(),
-                        accessBody,
-                    ),
-                )
-            }
-        if (!accessResponse.status.isSuccess()) {
-            throw AuthenticationException("Authentication failed: ${accessResponse.bodyAsText()}")
         }
-        val loginResult = json.decodeFromString<LoginAccessResponse>(accessResponse.bodyAsText())
-
-        val rootFolderId =
-            loginResult.user.rootFolderId
-                ?: loginResult.user.rootFolderIdNum?.toString()
-                ?: throw AuthenticationException("No root folder ID in login response")
-
-        // Step 5: Decrypt mnemonic (API returns it encrypted with the plaintext password)
-        val mnemonic = crypto.decryptMnemonic(loginResult.user.mnemonic, password)
-
-        // Zero the password from memory
         passwordChars.fill('\u0000')
-
-        credentials =
-            InternxtCredentials(
-                jwt = loginResult.newToken,
-                mnemonic = mnemonic,
-                rootFolderId = rootFolderId,
-                email = email,
-                bridgeUser = loginResult.user.bridgeUser ?: email,
-                bridgeUserId = loginResult.user.userId ?: "",
-                bucket = loginResult.user.bucket ?: "",
-            )
-        saveCredentials(credentials!!)
-        return credentials!!
+        throw AuthenticationException("Too many invalid 2FA attempts")
     }
 
     suspend fun getValidCredentials(): InternxtCredentials = credentials ?: throw AuthenticationException("Not authenticated")

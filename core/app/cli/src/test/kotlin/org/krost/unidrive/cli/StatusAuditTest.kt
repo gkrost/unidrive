@@ -31,7 +31,7 @@ class StatusAuditTest {
                 nonHydrated = 1224,
                 pendingCursor = "cursor-token-xyz",
                 lastFullScan = null,
-                includeShared = false,
+                extraFields = listOf(org.krost.unidrive.StatusField("Include shared", "false")),
             )
 
         val output = StatusAudit.formatAuditReport(report)
@@ -59,7 +59,7 @@ class StatusAuditTest {
                 nonHydrated = 1224,
                 pendingCursor = "cursor",
                 lastFullScan = null,
-                includeShared = false,
+                extraFields = listOf(org.krost.unidrive.StatusField("Include shared", "false")),
             )
         assertEquals(AuditSeverity.RED, StatusAudit.severityFor(report))
     }
@@ -76,7 +76,6 @@ class StatusAuditTest {
                 nonHydrated = 0,
                 pendingCursor = null,
                 lastFullScan = null,
-                includeShared = null,
             )
         assertEquals(AuditSeverity.GREEN, StatusAudit.severityFor(report))
     }
@@ -93,7 +92,6 @@ class StatusAuditTest {
                 nonHydrated = 0,
                 pendingCursor = null,
                 lastFullScan = null,
-                includeShared = null,
             )
         assertEquals(AuditSeverity.YELLOW, StatusAudit.severityFor(report))
     }
@@ -110,7 +108,6 @@ class StatusAuditTest {
                 nonHydrated = 0,
                 pendingCursor = null,
                 lastFullScan = null,
-                includeShared = null,
             )
         val output = StatusAudit.formatAuditReport(report)
         assertTrue(output.contains("Remote quota:     unavailable"), "unavailable line present: $output")

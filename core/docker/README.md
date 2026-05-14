@@ -11,11 +11,11 @@ Three harnesses share the same `Dockerfile.test` image:
 All three run from the Gradle root (`core/`):
 
 ```bash
-# Localfs harness (8 tests).
+# Localfs harness.
 docker compose -f docker/docker-compose.test.yml build
 docker compose -f docker/docker-compose.test.yml run --rm unidrive-test
 
-# Provider contract harness (20 tests).
+# Provider contract harness.
 docker compose -f docker/docker-compose.providers.yml build unidrive-providers-test
 docker compose -f docker/docker-compose.providers.yml run --rm unidrive-providers-test
 
@@ -24,20 +24,18 @@ docker compose -f docker/docker-compose.mcp.yml build
 docker compose -f docker/docker-compose.mcp.yml run --rm unidrive-mcp-test
 ```
 
-Exit code 0 = all tests passed. Expected on HEAD: `8 passed, 0 failed` + `20 passed, 0 failed` + `9 passed, 0 failed`.
+Exit code 0 = all tests passed.
 
 ## What the localfs harness tests
 
 [`test-matrix.sh`](test-matrix.sh) drives the shadow-jar CLI through:
 
 1. `sync --dry-run` against a golden file structure
-2. `provider list` includes "Local Filesystem"
-3. `status --all` shows the configured localfs profiles
-4. `quota` returns non-zero storage info
-5. `provider info localfs` resolves
-6. `sync` (real, no `--dry-run`) runs without exception
-7. A second `sync` after touching a new file runs without exception
-8. A second profile on the same config is surfaced by `status --all`
+2. `status --all` shows the configured localfs profiles
+3. `quota` returns non-zero storage info
+4. `sync` (real, no `--dry-run`) runs without exception
+5. A second `sync` after touching a new file runs without exception
+6. A second profile on the same config is surfaced by `status --all`
 
 ## What the provider harness tests
 
@@ -49,19 +47,17 @@ providers compose file:
 1. Each service's listening port is reachable (bash `/dev/tcp` probe).
 2. `ssh-keyscan` seeds `known_hosts` for SFTP (the adapter fails closed
    without it).
-3. `provider info <type>` returns the descriptor (Tier: row check) —
-   four adapters.
-4. `status --all` enumerates each configured profile — four profiles.
-5. `quota` succeeds for each profile — first call that hits the live
+3. `status --all` enumerates each configured profile — four profiles.
+4. `quota` succeeds for each profile — first call that hits the live
    server, so it validates adapter construction + auth + read-only API
    round-trip.
-6. **Full upload round-trip** — write a unique marker file in
+5. **Full upload round-trip** — write a unique marker file in
    `sync_root`, run `sync --upload-only`, then fetch the file via a
    second independent client (sftp / curl / mc / rclone) and byte-compare.
    Proves upload semantics + server-side persistence, not just adapter
    construction.
 
-20 assertions total. The rclone adapter re-uses the MinIO service via
+The rclone adapter re-uses the MinIO service via
 `rclone`'s native `s3` backend (bucket `unidrive-test-rclone`) — no extra
 container for that one.
 

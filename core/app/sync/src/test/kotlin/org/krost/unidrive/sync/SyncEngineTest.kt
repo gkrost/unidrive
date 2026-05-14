@@ -77,6 +77,77 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-236 refresh skips Pass 2 — local file gets pending row but is not uploaded`() =
+        runTest {
+            // First sync establishes baseline (no items, no actions).
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            // Add a local file. A normal sync would upload it; refresh just records the intent.
+            Files.writeString(syncRoot.resolve("pending-up.txt"), "draft")
+            engine.syncOnce(skipTransfers = true)
+
+            // Pending-upload row exists (UD-901 pre-write) but provider was never called.
+            val entry = db.getEntry("/pending-up.txt")
+            assertNotNull(entry, "refresh must persist a pending-upload row for the new local file")
+            assertNull(entry.remoteId, "remoteId stays null until apply uploads")
+            assertTrue(provider.uploadedPaths.isEmpty(), "refresh must NOT call provider.upload")
+        }
+
+    @Test
+    fun `UD-236 apply drains pending uploads from a prior refresh`() =
+        runTest {
+            // Refresh records a pending upload.
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            Files.writeString(syncRoot.resolve("apply-me.txt"), "go")
+            engine.syncOnce(skipTransfers = true)
+            assertTrue(provider.uploadedPaths.isEmpty())
+
+            // Apply: skip remote gather, let recovery loops surface the pending UD-901 row.
+            engine.syncOnce(skipRemoteGather = true)
+
+            // The upload must have happened.
+            assertTrue(provider.uploadedPaths.contains("/apply-me.txt"))
+            val finalEntry = db.getEntry("/apply-me.txt")
+            assertNotNull(finalEntry?.remoteId, "apply must promote the pending row to a fully-synced state")
+        }
+
+    @Test
+    fun `UD-236 apply is no-op when nothing pending`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            // Apply with no pending entries — must complete without contacting provider for transfers.
+            val uploadedBefore = provider.uploadedPaths.size
+            engine.syncOnce(skipRemoteGather = true)
+            assertEquals(uploadedBefore, provider.uploadedPaths.size, "apply with no pending entries must not upload anything")
+        }
+
+    @Test
+    fun `UD-366 modify-upload forwards existing remoteId to provider for replace-in-place`() =
+        runTest {
+            // First upload registers the file with a remoteId in the DB.
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            Files.writeString(syncRoot.resolve("mod.txt"), "v1")
+            engine.syncOnce()
+            val firstRemoteId = db.getEntry("/mod.txt")?.remoteId
+            assertNotNull(firstRemoteId)
+            // NEW upload: existingRemoteId must be null.
+            assertNull(provider.lastUploadExistingRemoteId)
+
+            // Modify locally and re-sync. The reconciler emits MODIFIED+UNCHANGED →
+            // SyncAction.Upload(remoteId = entry.remoteId). The dispatcher must forward
+            // it as upload(existingRemoteId = firstRemoteId).
+            Thread.sleep(20) // ensure mtime advances on filesystems with second-level resolution
+            Files.writeString(syncRoot.resolve("mod.txt"), "v2-longer-content-to-bump-size")
+            engine.syncOnce()
+
+            assertEquals(firstRemoteId, provider.lastUploadExistingRemoteId)
+        }
+
+    @Test
     fun `sync deletes local file when remote deleted`() =
         runTest {
             provider.deltaItems = listOf(cloudItem("/will-delete.txt", size = 100))
@@ -146,6 +217,170 @@ class SyncEngineTest {
 
             assertNull(db.getEntry("/tracked.txt"))
             assertFalse(Files.exists(syncRoot.resolve("tracked.txt")))
+        }
+
+    @Test
+    fun `UD-225b applyDownload routes through downloadById when remoteItem has id`() =
+        runTest {
+            // The fast/robust path: when the action carries a non-empty remoteId,
+            // applyDownload (and the other DownloadContent dispatch sites) must
+            // call provider.downloadById, not provider.download. Path-based
+            // dispatch on Internxt triggers per-segment folder traversal and
+            // fails ~44 % of files when an intermediate folder name can't be
+            // resolved (live 2026-05-03 incident on the UD-225a recovery sync).
+            provider.files["/folder/file.txt"] = ByteArray(50)
+            provider.deltaItems = listOf(cloudItem("/folder/file.txt", size = 50))
+
+            engine.syncOnce()
+
+            assertTrue(
+                provider.downloadByIdCalls.any { (id, path) -> id == "id-/folder/file.txt" && path == "/folder/file.txt" },
+                "expected downloadById dispatch, got byId=${provider.downloadByIdCalls} byPath=${provider.downloadByPathCalls}",
+            )
+            assertTrue(
+                provider.downloadByPathCalls.isEmpty(),
+                "path-based download must NOT fire when remoteItem.id is set; got: ${provider.downloadByPathCalls}",
+            )
+        }
+
+    @Test
+    fun `UD-225b applyDownload falls back to path-based when remoteItem id is empty`() =
+        runTest {
+            // Defensive: synthesised CloudItems with no remoteId (an entry whose
+            // remote_id was null in the DB) fall through to path-based download.
+            // Should be unreachable in practice post-UD-225a (which routes
+            // pending-upload rows to RemoveEntry instead), but pin the safety
+            // valve so a future refactor doesn't accidentally NPE on empty id.
+            provider.files["/orphan.txt"] = ByteArray(20)
+            provider.deltaItems = listOf(cloudItem("/orphan.txt", size = 20).copy(id = ""))
+
+            engine.syncOnce()
+
+            assertTrue(
+                provider.downloadByPathCalls.contains("/orphan.txt"),
+                "expected path-based fallback, got byId=${provider.downloadByIdCalls} byPath=${provider.downloadByPathCalls}",
+            )
+            assertTrue(provider.downloadByIdCalls.isEmpty(), "downloadById must NOT fire when id is empty")
+        }
+
+    @Test
+    fun `UD-360 partial delta gather suppresses detectMissingAfterFullSync`() =
+        runTest {
+            // First sync: item appears in delta and is hydrated locally.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/tracked.txt"))
+            assertTrue(Files.exists(syncRoot.resolve("tracked.txt")))
+
+            // Reset cursor to force a full resync. The item is absent from the
+            // delta — but the provider signals complete=false (e.g. an Internxt
+            // subtree returned 503 and got skipped). Without UD-360, the engine
+            // would interpret the absence as a remote-deletion and emit del-local.
+            // With UD-360, the deletion sweep is suppressed and the local file
+            // survives until a complete delta succeeds on a later run.
+            db.setSyncState("delta_cursor", "")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deltaComplete = false
+
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce()
+
+            // File survives — this is the regression UD-360 prevents.
+            assertNotNull(db.getEntry("/tracked.txt"), "DB entry must NOT be removed on partial delta")
+            assertTrue(
+                Files.exists(syncRoot.resolve("tracked.txt")),
+                "local file must NOT be deleted on partial delta",
+            )
+            assertTrue(
+                reporter.warnings.any { it.contains("UD-360") && it.contains("complete=false") },
+                "expected UD-360 partial-gather warning, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-360 complete=true preserves the absence-implies-deletion sweep`() =
+        runTest {
+            // Inverse of the test above: complete=true (the default) MUST keep
+            // detectMissingAfterFullSync's behaviour. Pin this so a future
+            // refactor can't accidentally always-suppress the deletion sweep.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/tracked.txt"))
+
+            db.setSyncState("delta_cursor", "")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deltaComplete = true
+
+            engine.syncOnce()
+
+            assertNull(db.getEntry("/tracked.txt"))
+            assertFalse(Files.exists(syncRoot.resolve("tracked.txt")))
+        }
+
+    @Test
+    fun `UD-901e incomplete delta gather does NOT promote pending_cursor`() =
+        runTest {
+            // Codex review (PR #13) caught that the 3 cursor-promotion sites
+            // (empty-action / dry-run / success) unconditionally promoted
+            // pending_cursor → delta_cursor regardless of whether the gather
+            // pass was complete. Internxt's UD-360 subtree-skip path returns
+            // DeltaPage(complete=false) on 500/503, with the new latest
+            // updatedAt as the cursor. Promoting that cursor silently advances
+            // delta_cursor past items in the skipped subtree, so they're never
+            // re-enumerated.
+            //
+            // Invariant under test: after a delta pass where any page returned
+            // complete=false, delta_cursor MUST remain at its previous value,
+            // not advance to the partial gather's new cursor.
+            //
+            // First, establish a baseline cursor so we can detect movement.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-baseline"
+            provider.deltaComplete = true
+            engine.syncOnce()
+            assertEquals(
+                "cursor-baseline",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must advance on a complete gather",
+            )
+
+            // Second pass: provider returns complete=false with a new cursor
+            // (mimicking Internxt's "I skipped a folder on 503; here's the
+            // new latest-updatedAt I saw before the skip"). delta_cursor
+            // must NOT advance to this new value.
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-partial"
+            provider.deltaComplete = false
+
+            engine.syncOnce()
+
+            assertEquals(
+                "cursor-baseline",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must NOT advance when the gather was incomplete — " +
+                    "promoting cursor-partial would skip items in the failed subtree on next run",
+            )
+            // Sanity: the pending cursor is still written (so a follow-up
+            // complete gather can promote it), and the completeness flag
+            // reflects the partial state.
+            assertEquals("cursor-partial", db.getSyncState("pending_cursor"))
+            assertEquals("false", db.getSyncState("pending_cursor_complete"))
+
+            // Third pass: provider recovers, complete=true. The freshly
+            // complete cursor IS promoted.
+            provider.deltaCursor = "cursor-recovered"
+            provider.deltaComplete = true
+            engine.syncOnce()
+            assertEquals(
+                "cursor-recovered",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must advance once a complete gather lands",
+            )
+            assertEquals("true", db.getSyncState("pending_cursor_complete"))
         }
 
     @Test
@@ -330,6 +565,60 @@ class SyncEngineTest {
                 provider.deletedPaths.contains("/a/docs"),
                 "DeleteRemote should not be issued when move is detected",
             )
+        }
+
+    @Test
+    fun `UD-901d folder MoveRemote preserves destination folder row with canonical remoteId`() =
+        runTest {
+            // Codex review (PR #13) caught that applyMoveRemote's call order — deleteEntry
+            // → upsertEntry(destination) → renamePrefix — let renamePrefix's UD-901c
+            // cleanup-DELETE wipe the just-upserted destination root row. The moved
+            // folder ended up with no remoteId/metadata in the DB on every folder
+            // rename/move, and the next scan treated it as untracked.
+            //
+            // Invariant under test: after a folder move-remote, the destination folder
+            // row carries the canonical remoteId from provider.move() AND the descendant
+            // rows survive at the new prefix.
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/a", isFolder = true),
+                    cloudItem("/a/docs", isFolder = true),
+                    cloudItem("/a/docs/file.txt", size = 42),
+                )
+            engine.syncOnce()
+
+            // Sanity: pre-move state.
+            val preMoveDocs = db.getEntry("/a/docs")
+            assertNotNull(preMoveDocs)
+            assertTrue(preMoveDocs.isFolder)
+
+            // Local cross-parent move triggers a remote-side move.
+            val aDir = syncRoot.resolve("a")
+            val bDir = syncRoot.resolve("b")
+            Files.createDirectories(bDir)
+            Files.move(aDir.resolve("docs"), bDir.resolve("docs"))
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            // Source path is gone.
+            assertNull(db.getEntry("/a/docs"), "source row must be deleted after move")
+
+            // Destination folder row exists AND carries the canonical remoteId
+            // from FakeCloudProvider.move() (which returns CloudItem(id = "id-$path")).
+            val movedDocs = db.getEntry("/b/docs")
+            assertNotNull(movedDocs, "destination folder row must survive the rename — was being wiped by renamePrefix")
+            assertTrue(movedDocs.isFolder)
+            assertEquals(
+                "id-/b/docs",
+                movedDocs.remoteId,
+                "destination folder row must carry the remoteId returned by provider.move(), not be reset to null",
+            )
+
+            // Descendant rows survive at the new prefix (the renamePrefix UPDATE
+            // moves them; this was already working pre-fix, regression-guard it).
+            val movedFile = db.getEntry("/b/docs/file.txt")
+            assertNotNull(movedFile, "descendant rows must survive the rename")
+            assertEquals(42, movedFile.remoteSize)
         }
 
     // UD-297 — empty-local + populated-DB sanity check
@@ -918,17 +1207,47 @@ class SyncEngineTest {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
             }
+            downloadByPathCalls.add(remotePath)
             val content = files[remotePath] ?: ByteArray(0)
             Files.createDirectories(destination.parent)
             Files.write(destination, content)
             return content.size.toLong()
         }
 
+        // UD-225b: track id-vs-path dispatch separately so tests can verify the
+        // engine takes the fast/robust path when the action carries a remoteId.
+        // Default base impl in CloudProvider delegates to download(); this
+        // override lets us count both call paths distinctly.
+        val downloadByIdCalls = mutableListOf<Pair<String, String>>() // (remoteId, remotePath)
+        val downloadByPathCalls = mutableListOf<String>()
+
+        override suspend fun downloadById(
+            remoteId: String,
+            remotePath: String,
+            destination: Path,
+        ): Long {
+            if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (downloadFailCount > 0) {
+                downloadFailCount--
+                throw ProviderException("Network timeout on download")
+            }
+            downloadByIdCalls.add(remoteId to remotePath)
+            val content = files[remotePath] ?: ByteArray(0)
+            Files.createDirectories(destination.parent)
+            Files.write(destination, content)
+            return content.size.toLong()
+        }
+
+        var lastUploadExistingRemoteId: String? = null
+            private set
+
         override suspend fun upload(
             localPath: Path,
             remotePath: String,
+            existingRemoteId: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
+            lastUploadExistingRemoteId = existingRemoteId
             if (uploadFailCount > 0) {
                 uploadFailCount--
                 throw ProviderException("Network timeout on upload")
@@ -980,6 +1299,10 @@ class SyncEngineTest {
             return createFolder(toPath)
         }
 
+        // UD-360: when set, delta() returns DeltaPage(complete=false) so that
+        // tests can exercise the engine's partial-gather suppression path.
+        var deltaComplete = true
+
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -989,7 +1312,12 @@ class SyncEngineTest {
                 deltaFailCount--
                 throw ProviderException("Network timeout on delta")
             }
-            return DeltaPage(items = deltaItems, cursor = deltaCursor, hasMore = false)
+            return DeltaPage(
+                items = deltaItems,
+                cursor = deltaCursor,
+                hasMore = false,
+                complete = deltaComplete,
+            )
         }
 
         override suspend fun quota() = QuotaInfo(total = 1000, used = 100, remaining = 900)

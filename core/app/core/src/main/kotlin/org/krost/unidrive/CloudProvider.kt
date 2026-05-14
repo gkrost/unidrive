@@ -39,15 +39,42 @@ interface CloudProvider {
         destination: Path,
     ): Long = download(remotePath, destination)
 
+    /**
+     * Upload a local file to [remotePath].
+     *
+     * UD-366: providers that support replace-in-place (e.g. Internxt's `PUT /files/{uuid}`)
+     * use [existingRemoteId] when non-null to overwrite an existing remote entry instead of
+     * creating a new one. The reconciler passes [SyncEntry.remoteId] for MODIFIED actions;
+     * NEW uploads pass null. Providers without explicit replace semantics (path-based PUT
+     * like OneDrive, or filesystem overwrite) ignore the parameter.
+     *
+     * `existingRemoteId` precedes `onProgress` in the signature so trailing-lambda call sites
+     * `provider.upload(localPath, remotePath) { transferred, total -> … }` keep binding the
+     * lambda to `onProgress` (Kotlin trailing-lambda convention — see memory
+     * `feedback_kotlin_default_param_ordering`).
+     */
     suspend fun upload(
         localPath: Path,
         remotePath: String,
+        existingRemoteId: String? = null,
         onProgress: ((Long, Long) -> Unit)? = null,
     ): CloudItem
 
     suspend fun delete(remotePath: String)
 
     suspend fun createFolder(path: String): CloudItem
+
+    /**
+     * UD-368: create multiple folders in a single round-trip when the underlying API
+     * supports it (e.g. Internxt's polymorphic `POST /folders` bulk form, capped at 5
+     * per call). Default implementation loops [createFolder] one at a time so providers
+     * without bulk semantics keep working unchanged.
+     *
+     * Returns one [CloudItem] per requested path, in the same order. Implementations
+     * that issue bulk calls are responsible for chunking against the server's per-call
+     * cap and for handling partial-success / 409-conflict semantics per their backend.
+     */
+    suspend fun createFolders(paths: List<String>): List<CloudItem> = paths.map { createFolder(it) }
 
     suspend fun move(
         fromPath: String,
@@ -148,6 +175,30 @@ interface CloudProvider {
         CapabilityResult.Unsupported(Capability.Webhook, "Provider does not support webhook callbacks")
 
     fun close() {}
+
+    /**
+     * Algorithm this provider uses for `remoteHash` strings. Returning
+     * null means the provider has no verifiable hash; callers MUST
+     * treat that as "skip verification" rather than "verification
+     * passed". Default null.
+     */
+    fun hashAlgorithm(): HashAlgorithm? = null
+
+    /**
+     * Provider-specific status fields to render in `unidrive status`
+     * after the shared fields (quota, tracked files, etc.). Empty
+     * list (the default) means this provider contributes no extras.
+     */
+    fun statusFields(): List<StatusField> = emptyList()
+
+    /**
+     * Optional warning surfaced when relocating large data INTO this
+     * provider. `planSize` is the total byte count being moved.
+     * Returning null (the default) means "no provider-specific
+     * warning". Used by `relocate` to flag known transport ceilings
+     * (e.g. WebDAV's nginx-mod_dav throughput cliff).
+     */
+    fun transportWarning(planSize: Long): String? = null
 }
 
 data class ShareInfo(

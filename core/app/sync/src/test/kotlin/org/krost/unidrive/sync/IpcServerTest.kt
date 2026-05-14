@@ -304,4 +304,49 @@ class IpcServerTest {
             server = null
             assertFalse(Files.exists(socketPath), "Socket file should be deleted after close")
         }
+
+    // ── UD-406: runBlocking returns after IpcServer.close() ──────────────────
+    // SyncCommand's non-watch sync path was hanging after `Sync complete:`
+    // because `ipcServer.start(this)` launched an accept-loop coroutine into
+    // the runBlocking scope, and runBlocking blocks until ALL children
+    // complete. The fix is to call `ipcServer.close()` at the end of the
+    // non-watch branch so the accept-loop coroutine is cancelled.
+    //
+    // This test exercises the synthetic equivalent: spawn IpcServer.start
+    // inside a runBlocking, do the sync work (here a noop suspend), then
+    // close() — assert that the runBlocking block returns within a
+    // reasonable bound. Without the close, the test hangs and the JUnit
+    // timeout fires.
+
+    @Test(timeout = 5_000)
+    fun `UD-406 runBlocking returns after explicit ipcServer close`() {
+        val syncSocket = socketDir.resolve("ud406.sock")
+        val testServer = IpcServer(syncSocket)
+        try {
+            // Synthetic equivalent of SyncCommand.run():
+            //   runBlocking {
+            //     ipcServer.start(this)
+            //     <do sync work>
+            //     ipcServer.close()   ← UD-406 fix
+            //   }
+            // Without the close(), runBlocking would block forever waiting on
+            // the accept-loop child coroutine.
+            runBlocking {
+                testServer.start(this)
+                // Stand-in for engine.syncOnce — completes quickly.
+                kotlinx.coroutines.delay(50)
+                testServer.close()
+            }
+            // If we reach here, runBlocking returned cleanly. Without
+            // ipcServer.close() inside the lambda, the @Test timeout would
+            // have fired before this line.
+            assertFalse(
+                Files.exists(syncSocket),
+                "Socket file should be cleaned up after close() inside runBlocking",
+            )
+        } finally {
+            testServer.close()
+            Files.deleteIfExists(syncSocket)
+        }
+    }
 }

@@ -110,35 +110,28 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
 
-        // Step 4: Credential prompts per type
+        // Step 4: Credential prompts per type — driven by SPI capability
         val creds = mutableMapOf<String, String>()
-        when (type) {
-            "s3" -> {
-                creds["bucket"] = promptRequired(console, "S3 bucket")
-                creds["region"] = promptOptional(console, "S3 region", "auto")
-                creds["endpoint"] = promptOptional(console, "S3 endpoint", "https://s3.amazonaws.com")
-                creds["access_key_id"] = promptRequired(console, "Access key ID")
-                creds["secret_access_key"] = String(console.readPassword("Secret access key: ") ?: charArrayOf())
-                if (creds["secret_access_key"]!!.isBlank()) {
-                    System.err.println("Error: Secret access key is required.")
-                    System.exit(1)
+        val factory =
+            org.krost.unidrive.ProviderRegistry
+                .get(type)
+                ?: error("ProviderRegistry returned null for type=$type after resolveId; impossible state.")
+        for (prompt in factory.credentialPrompts()) {
+            val default = prompt.default
+            val value =
+                when {
+                    prompt.isMasked -> String(console.readPassword("${prompt.label}: ") ?: charArrayOf())
+                    default != null -> promptOptional(console, prompt.label, default)
+                    prompt.required -> promptRequired(console, prompt.label)
+                    else -> promptOptional(console, prompt.label, "")
                 }
+            if (prompt.required && value.isBlank()) {
+                System.err.println("Error: ${prompt.label} is required.")
+                System.exit(1)
             }
-            "sftp" -> {
-                creds["host"] = promptRequired(console, "SFTP host")
-                creds["port"] = promptOptional(console, "Port", "22")
-                creds["user"] = promptOptional(console, "Username", System.getProperty("user.name") ?: "root")
-                creds["remote_path"] = promptOptional(console, "Remote path", "")
-                creds["identity"] = promptOptional(console, "Identity file", "~/.ssh/id_ed25519")
-            }
-            "webdav" -> {
-                creds["url"] = promptRequired(console, "WebDAV URL")
-                creds["user"] = promptRequired(console, "Username")
-                creds["password"] = String(console.readPassword("Password: ") ?: charArrayOf())
-                if (creds["password"]!!.isBlank()) {
-                    System.err.println("Error: Password is required.")
-                    System.exit(1)
-                }
+            // Don't write empty optional values into config
+            if (value.isNotBlank()) {
+                creds[prompt.key] = value
             }
         }
 
@@ -154,7 +147,7 @@ class ProfileAddCommand : Runnable {
         println()
         println("Profile '${AnsiHelper.bold(name)}' added.")
         println("  Config: $configPath")
-        if (type in setOf("onedrive")) {
+        if (factory.supportsInteractiveAuth()) {
             println("  Next: run ${AnsiHelper.bold("unidrive -p $name auth")}")
         }
     }

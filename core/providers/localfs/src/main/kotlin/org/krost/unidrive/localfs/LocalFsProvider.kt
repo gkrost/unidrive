@@ -92,8 +92,11 @@ class LocalFsProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        // UD-366: existingRemoteId unused — Files.copy(REPLACE_EXISTING) is naturally
+        // replace-in-place.
         val target = safePath(remotePath)
         Files.createDirectories(target.parent)
         Files.copy(localPath, target, StandardCopyOption.REPLACE_EXISTING)

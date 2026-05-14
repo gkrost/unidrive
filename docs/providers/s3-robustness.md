@@ -99,16 +99,17 @@ because we don't use the SDK. This is the most consequential audit finding:
 every robustness behaviour an AWS user would assume is happening is silently
 absent.
 
-Recommended retry matrix for a future loop:
+Recommended retry matrix for a future loop follows the
+[canonical matrix](../dev/lessons/http-retry-policy.md). The rows below
+document **S3-specific divergences** that the canonical table does not
+cover; the shared 408 / 429 / 5xx / network-I/O / unknown-exception rows
+are NOT restated here.
 
-| Status / error | Retry? | Cap | Backoff base |
-|---|---|---|---|
-| 503 SlowDown | yes | 5 | `x-amz-retry-after-millis` if present, else 2 s × 2ⁿ + jitter |
-| 500 InternalError | yes | 3 | 1 s × 2ⁿ + jitter |
-| 502 / 504 | yes | 3 | 1 s × 2ⁿ + jitter |
-| 429 (S3-compat only — AWS proper does not send 429) | yes | 5 | `Retry-After` |
-| Network I/O (Connect / Socket / SSL) | yes | 3 | 500 ms × 2ⁿ + jitter |
-| 507 Insufficient Storage (MinIO disk full) | no | — | fatal |
+| Status / error | Retry? | Cap | Backoff base | Why S3-specific |
+|---|---|---|---|---|
+| 503 SlowDown | yes | 5 | `x-amz-retry-after-millis` if present, else 2 s × 2ⁿ + jitter | S3 emits `x-amz-retry-after-millis` (millisecond precision) instead of `Retry-After`; honour it preferentially |
+| 429 (S3-compat only — AWS proper does not send 429) | yes | 5 | `Retry-After` | AWS proper signals overload via 503 SlowDown; only third-party S3-compat backends emit 429 |
+| 507 Insufficient Storage (MinIO disk full) | no | — | fatal | Already covered by canonical "4xx fail-fast", but called out for the explicit user-facing message on MinIO out-of-space |
 
 ## 3. Retry-After
 
@@ -281,3 +282,22 @@ Medium confidence.
   per-prefix-aware variant could halve concurrency on sustained 503 the way
   OneDrive halves on 429 storms
   ([onedrive-robustness §5](onedrive-robustness.md#5-concurrency-recommendations)).
+
+## UD-203: server request-id correlation
+
+AWS S3 (and S3-compatible backends like MinIO) emit two correlation
+headers on every response:
+
+| Header | Source | Use |
+|--------|--------|-----|
+| `x-amz-request-id` | AWS edge | Surfaced to AWS support tickets; the primary reference id. Carried on [`ProviderException.requestId`](../../core/app/core/src/main/kotlin/org/krost/unidrive/ProviderException.kt) (cross-provider field). |
+| `x-amz-id-2` | AWS edge | Extended datacenter trace, useful for AWS-internal escalations only. Carried separately on `S3Exception.extendedRequestId`. |
+
+`S3ApiService.extractRequestId` and `extractExtendedRequestId` read
+the two headers; `checkResponse` populates them on every typed
+exception thrown from a non-success S3 response. A cross-provider grep
+on `requestId=` in `unidrive.log` finds the primary id regardless of
+provider; S3-aware operators can also inspect `extendedRequestId` on
+caught `S3Exception` instances.
+
+Test: [`S3RequestIdPropagationTest`](../../core/providers/s3/src/test/kotlin/org/krost/unidrive/s3/S3RequestIdPropagationTest.kt).

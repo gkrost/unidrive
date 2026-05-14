@@ -8,10 +8,15 @@ import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
 
 class LocalWatcher(
     private val syncRoot: Path,
+    private val debounceMs: Long = readDebounceFromEnv(),
 ) {
     private val log = LoggerFactory.getLogger(LocalWatcher::class.java)
     private val suppressedPaths = ConcurrentHashMap.newKeySet<String>()
@@ -22,6 +27,16 @@ class LocalWatcher(
     @Volatile private var running = false
     private val watchKeys = ConcurrentHashMap<WatchKey, Path>()
     private val changeSignal = Channel<Unit>(Channel.CONFLATED)
+
+    // UD-211 hold-and-emit state. Key = relative path (already normalised with leading "/").
+    // Every observed event for a path arms (or re-arms) a single scheduled emit; the
+    // last event in a burst wins on the schedule clock, and one emit is enqueued per
+    // path per quiet window.
+    private val pendingEmits = ConcurrentHashMap<String, ScheduledFuture<*>>()
+    private val coalescer: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "unidrive-watcher-coalescer").apply { isDaemon = true }
+        }
 
     fun start() {
         if (running) return
@@ -39,7 +54,7 @@ class LocalWatcher(
             Thread({
                 while (running) {
                     try {
-                        val key = ws.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
+                        val key = ws.poll(500, TimeUnit.MILLISECONDS) ?: continue
                         val dir = watchKeys[key] ?: continue
 
                         for (event in key.pollEvents()) {
@@ -53,10 +68,8 @@ class LocalWatcher(
 
                             if (relativePath in suppressedPaths) continue
 
-                            changedPaths.add(relativePath)
-                            changeSignal.trySend(Unit)
+                            handleEvent(kind, relativePath)
 
-                            // Register new directories
                             if (kind == StandardWatchEventKinds.ENTRY_CREATE && Files.isDirectory(child)) {
                                 try {
                                     registerRecursive(child, ws)
@@ -84,6 +97,10 @@ class LocalWatcher(
         running = false
         watchService?.close()
         watchThread?.join(2000)
+        // UD-211: cancel any in-flight emit schedules and shut down the coalescer.
+        pendingEmits.values.forEach { it.cancel(false) }
+        pendingEmits.clear()
+        coalescer.shutdownNow()
     }
 
     fun suppress(remotePath: String) {
@@ -108,6 +125,48 @@ class LocalWatcher(
             changeSignal.receive()
             true
         } ?: false
+
+    /**
+     * UD-211 hold-and-emit coalescer (v2: uniform debounce on every event kind).
+     *
+     * Every CREATE / MODIFY / DELETE for path P arms (or re-arms) a single scheduled
+     * emit at `+debounceMs`. The schedule's clock resets on each new event, so an
+     * editor's atomic-save burst (vim's `write .swp + ATOMIC_MOVE over orig`, which on
+     * different filesystems surfaces as DELETE+CREATE, MODIFY-of-existing, or
+     * RENAME_FROM+RENAME_TO) always coalesces to exactly one emit per quiet window.
+     * The engine re-stats on dequeue and sees whatever final state the burst left
+     * behind — there is no per-event side-effect to misorder.
+     *
+     * Trade-off: changes propagate at trailing-edge instead of leading-edge (~debounce
+     * latency before the engine reacts). For a sync engine this is correct: it
+     * eliminates the destructive "delete-then-recreate" cloud propagation that
+     * leading-edge emit caused on editor saves. Mid-upload mutations are caught
+     * separately by UD-210.
+     */
+    private fun handleEvent(
+        @Suppress("UNUSED_PARAMETER") kind: WatchEvent.Kind<*>,
+        relativePath: String,
+    ) {
+        // Cancel any in-flight schedule for this path and arm a fresh one. The last
+        // observed event in a burst wins on the schedule clock.
+        pendingEmits.remove(relativePath)?.cancel(false)
+        val task =
+            coalescer.schedule(
+                {
+                    if (pendingEmits.remove(relativePath) != null) {
+                        enqueue(relativePath)
+                    }
+                },
+                debounceMs,
+                TimeUnit.MILLISECONDS,
+            )
+        pendingEmits[relativePath] = task
+    }
+
+    private fun enqueue(relativePath: String) {
+        changedPaths.add(relativePath)
+        changeSignal.trySend(Unit)
+    }
 
     private fun registerRecursive(
         root: Path,
@@ -150,5 +209,10 @@ class LocalWatcher(
                 log.warn("Failed to register watches under {}: {}", root, e.message)
             }
         }
+    }
+
+    companion object {
+        private fun readDebounceFromEnv(): Long =
+            System.getenv("UNIDRIVE_WATCHER_DEBOUNCE_MS")?.toLongOrNull()?.takeIf { it >= 0 } ?: 2000L
     }
 }

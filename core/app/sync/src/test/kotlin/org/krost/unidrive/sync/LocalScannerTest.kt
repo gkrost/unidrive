@@ -54,6 +54,48 @@ class LocalScannerTest {
     }
 
     @Test
+    fun `UD-240h scan batches all UD-901 pre-writes into a single transaction`() {
+        // Functional regression: 100 NEW files all get UD-901 pending-upload rows committed
+        // and the connection is left in autoCommit=true (so the engine's later beginBatch
+        // works as expected). The perf claim ('1 transaction not 100') is a consequence;
+        // the test doesn't poke at SQLite internals.
+        repeat(100) { i -> Files.writeString(syncRoot.resolve("f-$i.txt"), "content-$i") }
+        val changes = scanner.scan()
+        assertEquals(100, changes.size)
+        // All 100 pending-upload rows must be readable (proves commit happened).
+        val rows = db.getAllEntries().filter { it.path.startsWith("/f-") }
+        assertEquals(100, rows.size)
+        // Every row carries the UD-901 pending shape: remoteId=null, isHydrated=true, lastSynced=EPOCH.
+        rows.forEach { r ->
+            assertNull(r.remoteId, "row ${r.path}")
+            assertTrue(r.isHydrated, "row ${r.path}")
+            assertEquals(Instant.EPOCH, r.lastSynced, "row ${r.path}")
+        }
+        // The autoCommit-restored invariant: a follow-up upsert must succeed without
+        // hanging behind an unclosed transaction.
+        db.upsertEntry(entry("/post-scan.txt", mtime = 999, size = 1))
+        assertNotNull(db.getEntry("/post-scan.txt"))
+    }
+
+    @Test
+    fun `UD-240h consecutive scan calls work — autoCommit invariant holds across runs`() {
+        // Two scan() calls in a row, with a NEW file added between them. Proves the
+        // first scan's batch commits cleanly and leaves autoCommit=true so the second
+        // scan can open its own batch. Without the rollback-on-failure guarantee in
+        // the finally{}, a partial-walk crash mid-batch would silently piggyback the
+        // engine's later beginBatch onto an unresolved transaction; this test pins
+        // the well-behaved happy path.
+        Files.writeString(syncRoot.resolve("a.txt"), "first")
+        scanner.scan()
+        Files.writeString(syncRoot.resolve("b.txt"), "second")
+        val changes = scanner.scan()
+        assertEquals(ChangeState.NEW, changes["/b.txt"])
+        // Both files must have rows.
+        assertNotNull(db.getEntry("/a.txt"))
+        assertNotNull(db.getEntry("/b.txt"))
+    }
+
+    @Test
     fun `detects modified local file`() {
         val file = syncRoot.resolve("mod.txt")
         Files.writeString(file, "original")

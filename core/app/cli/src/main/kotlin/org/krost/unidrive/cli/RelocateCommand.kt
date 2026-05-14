@@ -139,18 +139,20 @@ class RelocateCommand : Runnable {
 
         val sourceQuota: QuotaInfo = runBlocking(MDCContext()) { fromProviderObj.quota() }
 
-        print("Scanning source".padEnd(72))
-        System.out.flush()
+        // UD-408: tail -f-style scrollback. Was: in-place rewrite via `\r...padEnd(72)`
+        // mirroring CliProgressReporter's UD-735 behaviour. Now one heartbeat line per
+        // 1 s of pre-flight scanning; the path is shown in full (no 45-char truncate).
+        var lastEmit = 0L
         val (sourceSize, sourceCount) =
             runBlocking(MDCContext()) {
                 relocator.preFlightCheck(sourcePath) { count, path ->
-                    val short = if (path.length > 45) "…${path.takeLast(44)}" else path
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmit < 1000) return@preFlightCheck
+                    lastEmit = now
                     val countFmt = String.format(Locale.ROOT, "%,d", count).replace(',', ' ')
-                    print("\r${"Scanning source  $countFmt files  $short".padEnd(72)}")
-                    System.out.flush()
+                    println("Scanning source  $countFmt files  $path")
                 }
             }
-        println()
 
         val targetQuota: QuotaInfo = runBlocking(MDCContext()) { toProviderObj.quota() }
 
@@ -188,17 +190,9 @@ class RelocateCommand : Runnable {
         // worth flagging at plan time. The user can pick a better-fit
         // sibling profile on the same NAS (sftp / rclone) before burning
         // the upload time. --confirm-transport suppresses for scripts / CI.
-        if (!confirmTransport && toProviderObj.id == "webdav") {
-            val fiftyGiB = 50L * 1024 * 1024 * 1024
+        if (!confirmTransport) {
             val warnings = mutableListOf<String>()
-            if (sourceSize > fiftyGiB) {
-                warnings.add(
-                    "Plan size ${formatSize(sourceSize)} exceeds 50 GiB on a WebDAV target. " +
-                        "Throughput ceiling on nginx-mod_dav is typically < 30 MiB/s LAN; " +
-                        "expect this to take many hours. Consider sftp / rclone-native if the " +
-                        "same NAS exposes them.",
-                )
-            }
+            toProviderObj.transportWarning(sourceSize)?.let { warnings.add(it) }
             if (warnings.isNotEmpty()) {
                 System.err.println()
                 System.err.println("Transport-fitness warning (UD-279):")

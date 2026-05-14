@@ -247,7 +247,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535,
-          "$comment": "TODO: declared in RawProvider but not currently read by any caller (verified 2026-04-18). Kept in schema for parity with the data class; remove if still dead at v0.1.0."
+          "$comment": "TODO: declared in RawProvider but not currently read by any caller (verified 2026-04-18). Kept in schema for parity with the data class; remove if still dead at v0.0.1."
         },
 
         "xtra_encryption": {

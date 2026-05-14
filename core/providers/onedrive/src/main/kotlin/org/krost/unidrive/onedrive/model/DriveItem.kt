@@ -24,20 +24,6 @@ data class DriveItem(
     val isFolder: Boolean get() = folder != null
     val isFile: Boolean get() = file != null
 
-    /**
-     * UD-315: OneDrive's Personal Vault surfaces as a top-level item with **no facet at all** —
-     * no `folder`, `file`, `specialFolder`, `package`, or `root` set. Graph deliberately hides its
-     * children because the Vault is a BitLocker-encrypted area requiring separate authentication.
-     *
-     * Detection rule (belt-and-braces):
-     *   1. Primary: all known facets null AND size is 0 — the zero-facets signature observed
-     *      via `GET /me/drive/root/children?$select=name,size,folder,file,...` on 2026-04-19.
-     *   2. Name match against the locale-specific Vault strings — covers the case where MS adds
-     *      a facet in the future but the display name is still the Vault.
-     *
-     * Either predicate alone is sufficient; both together maximise recall without over-matching
-     * ordinary empty folders (which carry `folder != null`).
-     */
     val isPersonalVault: Boolean
         get() {
             val noFacets = folder == null && file == null
@@ -143,12 +129,6 @@ data class Quota(
     @SerialName("deleted") val deleted: Long = 0,
 )
 
-/**
- * UD-216: shape of Graph `/me` response that the `unidrive_identity` MCP tool
- * surfaces. Only the fields we expose are declared here; the full /me body
- * has ~30 properties. `ignoreUnknownKeys=true` in GraphApiService's JSON
- * config keeps the rest harmless.
- */
 @Serializable
 data class GraphMe(
     @SerialName("id") val id: String? = null,

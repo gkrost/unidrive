@@ -62,7 +62,7 @@ class CliServicesImplTest {
     }
 
     @Test
-    fun `withProfile invalidates caches across back-to-back calls (UD-211)`() {
+    fun `withProfile invalidates caches across back-to-back calls (UD-213)`() {
         val dir = tmp.newFolder("cfg").toPath()
         Files.writeString(
             dir.resolve("config.toml"),
@@ -78,7 +78,7 @@ class CliServicesImplTest {
         )
         val services = CliServicesImpl(freshMain(dir))
 
-        // Before UD-211, the second resolveProfile call observed Main._profile
+        // Before UD-213, the second resolveProfile call observed Main._profile
         // memoised from the first call and returned "alpha" for both lookups.
         val first = services.resolveProfile("alpha")
         val second = services.resolveProfile("beta")

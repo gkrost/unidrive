@@ -1,6 +1,5 @@
 package org.krost.unidrive.sftp
 
-import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
 import java.nio.file.Files
 import java.nio.file.Path
@@ -25,26 +24,10 @@ class SftpProviderFactoryTest {
         assertTrue(provider is SftpProvider)
     }
 
-    @Test
-    fun `create with missing host throws ConfigurationException`() {
-        assertFailsWith<ConfigurationException> {
-            factory.create(emptyMap(), tempDir)
-        }
-    }
-
-    @Test
-    fun `create with blank host throws ConfigurationException`() {
-        assertFailsWith<ConfigurationException> {
-            factory.create(mapOf("host" to "  "), tempDir)
-        }
-    }
-
-    @Test
-    fun `create with null host throws ConfigurationException`() {
-        assertFailsWith<ConfigurationException> {
-            factory.create(mapOf("host" to null), tempDir)
-        }
-    }
+    // Required-field "missing/blank/null host" cases moved to UD-818:
+    // org.krost.unidrive.cli.ProviderFactoryRequiredFieldsTest. That parametric
+    // test drives the invariant for every provider that declares its required
+    // prompts via the credentialPrompts() SPI.
 
     // --- create: port parsing ---
 

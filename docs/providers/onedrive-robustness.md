@@ -54,6 +54,8 @@ The download path additionally guards against **HTML-content responses** that pa
 
 ## 2. Retry placement
 
+Retry policy follows the [canonical matrix](../dev/lessons/http-retry-policy.md). The provider-specific notes below cover where the loops live and the constants OneDrive picks for its caps; the per-status decision (4xx fail-fast except 408/429, 5xx retry, network retry, unknown capped at 3) is unchanged from the matrix.
+
 Every HTTP entry point has its retry loop **inline at the HTTP layer**:
 
 - [`authenticatedRequest(url, method)`](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt:721) — bodyless GET / DELETE
@@ -151,3 +153,22 @@ OneDrive is a single product family (Microsoft Graph 1.0 + Beta), but the runtim
 - **`If-Match` on mutating POST** — sibling concern with WebDAV audit §4. Thread `@odata.etag` through `SyncAction` and into `moveItem` / `updateItem`. No ticket yet — file under UD-228 follow-ups when a concurrent-editor incident surfaces it.
 - **Personal-vs-Business concurrency tuning** — `HttpRetryBudget(maxConcurrency = 8)` is a single value across tenants. UD-263 (per-provider concurrency hints) extends `HttpRetryBudget` to read a per-profile `max_concurrency` knob; once that lands, the Business / GCC defaults should be calibrated separately.
 - **`HttpRetryBudget` config surface** — UD-262 will extract the constants in [GraphApiService.kt:898](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt:898) (`MAX_THROTTLE_ATTEMPTS`, `MAX_SINGLE_BACKOFF_MS`, `MAX_TOTAL_THROTTLE_WAIT_MS`) into the budget so per-provider overrides become possible.
+
+## UD-203: server request-id correlation
+
+Microsoft Graph emits two response headers on every call:
+
+| Header | Source | Use |
+|--------|--------|-----|
+| `request-id` | Graph's edge | Surfaced to Microsoft support tickets; references the server-side trace. **Preferred.** |
+| `client-request-id` | Echoed from the request if the caller supplied one | Useful when the server header is missing; correlates with the client's own log. |
+
+`GraphApiService.extractRequestId(HttpResponse)` reads `request-id` first
+and falls back to `client-request-id`. The value is carried on
+[`ProviderException.requestId`](../../core/app/core/src/main/kotlin/org/krost/unidrive/ProviderException.kt)
+(the base field), so a cross-provider grep on `requestId=` in
+`unidrive.log` finds the value regardless of which provider raised the
+exception. `requestIdSuffix(throwable)` in `:app:core` formats it into
+log lines used by `SyncEngine`.
+
+Test: [`GraphRequestIdPropagationTest`](../../core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/GraphRequestIdPropagationTest.kt).

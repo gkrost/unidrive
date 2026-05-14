@@ -1,6 +1,5 @@
 package org.krost.unidrive.s3
 
-import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
 import java.nio.file.Files
 import kotlin.test.*
@@ -72,53 +71,11 @@ class S3ProviderFactoryTest {
         }
     }
 
-    @Test
-    fun `create throws when bucket is missing`() {
-        val tokenDir = Files.createTempDirectory("s3-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("bucket" to null)), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when bucket is blank`() {
-        val tokenDir = Files.createTempDirectory("s3-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("bucket" to "  ")), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when access_key_id is missing`() {
-        val tokenDir = Files.createTempDirectory("s3-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("access_key_id" to null)), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
-
-    @Test
-    fun `create throws when secret_access_key is missing`() {
-        val tokenDir = Files.createTempDirectory("s3-factory-test")
-        try {
-            assertFailsWith<ConfigurationException> {
-                factory.create(fullProps(mapOf("secret_access_key" to null)), tokenDir)
-            }
-        } finally {
-            Files.deleteIfExists(tokenDir)
-        }
-    }
+    // Required-field "missing/blank" cases for bucket / access_key_id /
+    // secret_access_key moved to UD-818:
+    // org.krost.unidrive.cli.ProviderFactoryRequiredFieldsTest. That
+    // parametric test drives the contract for every provider whose
+    // credentialPrompts() lists required prompts.
 
     @Test
     fun `create treats blank region as default auto`() {

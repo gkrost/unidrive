@@ -127,7 +127,8 @@ tasks.register("deploy") {
         val jarFile = shadowJarFile.get().asFile
         val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
 
-        println("[deploy:mcp] starting — version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
+        // ASCII-only — gradle daemon stdout encoding is platform default, see :app:cli equivalent.
+        println("[deploy:mcp] starting -- version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
 
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion)
@@ -174,7 +175,7 @@ fun deployWindows(
             println("[deploy:mcp] could not kill pid=${ph.pid()}: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
-    if (killed.isEmpty()) println("[deploy:mcp] no running MCP process to kill — proceeding to copy")
+    if (killed.isEmpty()) println("[deploy:mcp] no running MCP process to kill -- proceeding to copy")
 
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy:mcp] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")

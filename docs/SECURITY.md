@@ -1,6 +1,6 @@
 # Security
 
-> Threat model + current posture + v0.1.0 baseline. Tracked against [ADR-0004](adr/0004-security-baseline.md). STRIDE formalized in [UD-112](backlog/BACKLOG.md#ud-112).
+> Threat model + current posture + v0.0.1 baseline. Tracked against [ADR-0004](adr/0004-security-baseline.md). STRIDE formalized in [UD-112](backlog/BACKLOG.md#ud-112).
 
 ## Asset inventory
 
@@ -83,6 +83,7 @@ Trust boundaries:
 - **Never log frame contents** (`IpcProgressReporter.kt`) — attacker-supplied payloads are not echoed into logs.
 - **UDS event server** (`IpcServer.kt`) bound at `$XDG_RUNTIME_DIR/unidrive-<profile>.sock` with mode `0600`.
 - **No first-party GUI surface for credentials** — auth lives in the daemon.
+- **Per-call token-refresh model** — every provider with token semantics (Internxt, OneDrive) checks expiry at each API call site rather than scheduling refresh on a wall clock. Robust under suspend/resume, unlike drive-desktop's `setTimeout`-based `TokenScheduler`. Audit: [`docs/providers/auth-refresh-model.md`](providers/auth-refresh-model.md) (UD-208).
 
 ## STRIDE
 
@@ -103,9 +104,9 @@ Columns: **Threat** — the concrete attack. **Asset/Component** — which row o
 | **E1** | UDS reachable cross-user via permissive `$XDG_RUNTIME_DIR` (e.g. `/tmp` fallback) → cross-user IPC | A7 UDS + daemon | Daemon runs un-privileged by default; UDS file mode `0600`; standard `$XDG_RUNTIME_DIR` is `/run/user/$UID` (mode `0700`) | If `$XDG_RUNTIME_DIR` is unset and the fallback path lands somewhere world-readable, the file mode still denies cross-user access | follow-up: refuse to start if `$XDG_RUNTIME_DIR` resolves to a world-traversable directory |
 | **E2** | Path traversal via an attacker-controlled virtual path writes outside the sync root | LocalFs provider | `safePath()` normalizes and asserts containment (`LocalFsProvider.kt:65`) with `startsWith(rootPath)` guard at `LocalFsProvider.kt:68` | Symlinks inside the root that point outside are *not* rejected (normalize is purely lexical) | — (symlink policy open; file under localfs hardening when opened) |
 
-## v0.1.0 baseline (MVP gates)
+## v0.0.1 baseline (MVP gates)
 
-Must ship with or before v0.1.0:
+Must ship with or before v0.0.1:
 
 1. **JSON-Schema validation** ([UD-105](backlog/CLOSED.md#ud-105), landed) on every NDJSON frame on both tiers; reject non-conforming frames without parsing further.
 2. **Message size cap + rate limit** ([UD-106](backlog/CLOSED.md#ud-106), landed) on the IPC channel.

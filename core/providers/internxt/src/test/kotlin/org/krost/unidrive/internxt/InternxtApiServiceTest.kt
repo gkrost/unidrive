@@ -1,9 +1,14 @@
 package org.krost.unidrive.internxt
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.serialization.json.Json
+import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.Mirror
 import org.krost.unidrive.internxt.model.StartUploadResponse
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -57,6 +62,22 @@ class InternxtApiServiceTest {
         val cursor = "2026-03-29T03:00:00.000Z"
         val rewound = InternxtProvider.rewindCursor(cursor)
         assertEquals("2026-03-28T21:00:00Z", rewound)
+    }
+
+    @Test
+    fun `UD-369 stripExtension removes the last dot-separated segment`() {
+        assertEquals("report", InternxtProvider.stripExtension("report.docx"))
+        assertEquals("archive.tar", InternxtProvider.stripExtension("archive.tar.gz"))
+        assertEquals("noext", InternxtProvider.stripExtension("noext"))
+        assertEquals("", InternxtProvider.stripExtension(".dotfile"))
+    }
+
+    @Test
+    fun `UD-369 newFileType returns the bare extension or null`() {
+        assertEquals("docx", InternxtProvider.newFileType("report.docx"))
+        assertEquals("gz", InternxtProvider.newFileType("archive.tar.gz"))
+        assertEquals(null, InternxtProvider.newFileType("noext"))
+        assertEquals("dotfile", InternxtProvider.newFileType(".dotfile"))
     }
 
     @Test
@@ -142,6 +163,105 @@ class InternxtApiServiceTest {
         }
 
     @Test
+    fun `UD-372 InternxtFile eagerly parses creation+modification timestamps via JSON deserialise`() {
+        val raw =
+            """{"uuid":"u1","creationTime":"2026-05-03T17:39:55.123Z","modificationTime":"2026-05-03T18:00:00Z"}"""
+        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        assertEquals(java.time.Instant.parse("2026-05-03T17:39:55.123Z"), file.creationInstant)
+        assertEquals(java.time.Instant.parse("2026-05-03T18:00:00Z"), file.modificationInstant)
+        // Wire fields preserved.
+        assertEquals("2026-05-03T17:39:55.123Z", file.creationTime)
+        assertEquals("2026-05-03T18:00:00Z", file.modificationTime)
+    }
+
+    @Test
+    fun `UD-372 InternxtFile timestamps null when wire field absent`() {
+        val raw = """{"uuid":"u1"}"""
+        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        assertEquals(null, file.creationInstant)
+        assertEquals(null, file.modificationInstant)
+    }
+
+    @Test
+    fun `UD-372 InternxtFile timestamps null when wire field is malformed (lenient parse)`() {
+        val raw = """{"uuid":"u1","creationTime":"not-a-date","modificationTime":""}"""
+        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        assertEquals(null, file.creationInstant)
+        assertEquals(null, file.modificationInstant)
+    }
+
+    @Test
+    fun `UD-372 InternxtFolder eagerly parses timestamps via JSON deserialise`() {
+        val raw =
+            """{"uuid":"f1","creationTime":"2026-05-03T17:39:55Z","modificationTime":"2026-05-03T18:00:00Z"}"""
+        val folder = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFolder>(raw)
+        assertEquals(java.time.Instant.parse("2026-05-03T17:39:55Z"), folder.creationInstant)
+        assertEquals(java.time.Instant.parse("2026-05-03T18:00:00Z"), folder.modificationInstant)
+    }
+
+    @Test
+    fun `UD-368 createFoldersBatch rejects empty list`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.createFoldersBatch("parent-uuid", emptyList())
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("at least one item"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-368 createFoldersBatch rejects more than 5 items (server cap)`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            val tooMany = (1..6).map { "name-$it" to "enc-$it" }
+            try {
+                service.createFoldersBatch("parent-uuid", tooMany)
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("server-capped at 5"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-367 trashItems rejects empty list`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.trashItems(emptyList())
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("at least one item"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-367 trashItems rejects more than 50 items (server cap)`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            val tooMany = (1..51).map { "uuid-$it" to "file" }
+            try {
+                service.trashItems(tooMany)
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("server-capped at 50"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
+    fun `UD-367 trashItems rejects invalid type values`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            try {
+                service.trashItems(listOf("uuid-1" to "directory"))
+                kotlin.test.fail("expected IllegalArgumentException")
+            } catch (e: IllegalArgumentException) {
+                kotlin.test.assertTrue(e.message!!.contains("must be 'file' or 'folder'"), "actual: ${e.message}")
+            }
+        }
+
+    @Test
     fun `UD-335 retryOnTransient surfaces original exception after budget exhausted`() =
         kotlinx.coroutines.test.runTest {
             val service = mkService()
@@ -196,6 +316,99 @@ class InternxtApiServiceTest {
             )
         assertEquals(1024_000L, timeoutMs)
     }
+
+    @Test
+    fun `UD-358 listing query params include sort=uuid and order=ASC`() {
+        // Without sort/order, paginated /files and /folders walks can drop or
+        // duplicate rows on concurrent mutation. uuid is the only stable sort
+        // key (immutable per row); order=ASC is conventional.
+        val params = InternxtApiService.listingQueryParams(updatedAt = null, limit = 50, offset = 0)
+        assertEquals("uuid", params["sort"])
+        assertEquals("ASC", params["order"])
+        assertEquals("ALL", params["status"], "tombstones must remain visible")
+        assertEquals("50", params["limit"])
+        assertEquals("0", params["offset"])
+        kotlin.test.assertNull(params["updatedAt"], "no updatedAt when null")
+    }
+
+    @Test
+    fun `UD-358 listing query params pass through updatedAt cursor`() {
+        val cursor = "2026-03-29T12:00:00Z"
+        val params = InternxtApiService.listingQueryParams(updatedAt = cursor, limit = 100, offset = 50)
+        assertEquals(cursor, params["updatedAt"])
+        assertEquals("uuid", params["sort"])
+        assertEquals("ASC", params["order"])
+        assertEquals("100", params["limit"])
+        assertEquals("50", params["offset"])
+    }
+
+    // UD-807: rewritten to use kotlinx-coroutines-test `runTest` + virtual time.
+    // The previous wall-clock variant spawned 20 `Dispatchers.Default` coroutines
+    // and spin-waited with `delay(10)` for 500 ms; that budget was too tight on
+    // slow Windows CI runners, where the 20 callers occasionally hadn't all
+    // installed themselves before the gate was released. The dedup invariant
+    // (one loader invocation across N concurrent load() calls for the same key)
+    // is timing-independent — InFlightDedup is pure concurrency coordination
+    // (ConcurrentHashMap + async + Deferred). Running on the test scheduler
+    // lets us use `yield()` to deterministically suspend all callers on the
+    // gate before any of them is released, removing the race window without
+    // changing the production code path.
+    @Test
+    fun `UD-205 folderContents dedup collapses concurrent loads for the same uuid into one`() =
+        kotlinx.coroutines.test.runTest {
+            val service = mkService()
+            val loaderInvocations = AtomicInteger(0)
+            val gate = CompletableDeferred<Unit>()
+            val payload = FolderContentResponse()
+
+            // Launch 20 concurrent callers on the test scheduler. They all
+            // suspend inside the loader on `gate.await()` (after the winner
+            // increments `loaderInvocations`) or inside `winner.await()` (for
+            // losers awaiting the shared deferred). `yield()` runs all
+            // currently-queued continuations until every caller is parked.
+            val deferreds =
+                (1..20).map {
+                    async {
+                        service.folderContentsDedup.load("folder-uuid-A") {
+                            loaderInvocations.incrementAndGet()
+                            gate.await()
+                            payload
+                        }
+                    }
+                }
+
+            // Drain the scheduler until all 20 callers are suspended:
+            //  - the winner is parked on `gate.await()` after bumping the
+            //    counter once;
+            //  - the 19 losers are parked on `winner.await()` in InFlightDedup.
+            // testScheduler.advanceUntilIdle() runs every queued continuation
+            // that has no outstanding wall-clock dependency.
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                1,
+                loaderInvocations.get(),
+                "exactly one caller should have entered the loader before the gate opens",
+            )
+
+            // Release the loader. All 20 callers now resolve to the same payload.
+            gate.complete(Unit)
+            val results = deferreds.awaitAll()
+
+            assertEquals(20, results.size)
+            kotlin.test.assertTrue(results.all { it === payload })
+            assertEquals(
+                1,
+                loaderInvocations.get(),
+                "concurrent getFolderContents calls for same UUID must share one underlying load",
+            )
+
+            // Different UUID → fresh loader invocation (no cross-key interference).
+            service.folderContentsDedup.load("folder-uuid-B") {
+                loaderInvocations.incrementAndGet()
+                payload
+            }
+            assertEquals(2, loaderInvocations.get())
+        }
 
     @Test
     fun `UD-353 sub-floor files still get the 600s floor under the OVH override`() {

@@ -43,6 +43,11 @@ The Internxt-specific risk on the third row is heavier than OneDrive's: the down
 
 ## 2. Retry placement
 
+The target policy is the [canonical matrix](../dev/lessons/http-retry-policy.md);
+the table below is a **gap audit** showing which call sites diverge from it
+today. Internxt currently has zero retry on most verbs — the divergence is
+"absence", not "different policy".
+
 [`authenticatedGet`](../../core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:383) hosts an inline ladder for GETs only with delays `[2 s, 4 s, 8 s]` and a `500/503 + EOFException` predicate.
 
 | Verb / endpoint | 429 retry? | 5xx retry? | I/O retry? | Cite |
@@ -156,3 +161,18 @@ Vendor docs do not cover the Bridge / CDN ceiling; the sensible enforcement poin
 - **Document the encryption-vs-retry boundary.** Whichever ticket adds upload retries must specify: retry only stages 4–5 (PUT + finish), never stages 1–3 (re-IV). Unit test should freeze the IV between attempts within a single upload run.
 - **`finishUpload` idempotency.** Send a client-side request id (or reuse `descriptor.uuid` from `startUpload`); have `finishUpload` accept "already-finished, return cached fileId". Vendor support unverified — file research ticket against the SDK first.
 - **Hard-coded `internxt-version`.** Make a config override so we can bump without a release. Tracks the client-allowlist tightening risk.
+
+## UD-203: server request-id correlation
+
+Internxt's drive-server emits `x-request-id` on every response — the
+upstream SDK extracts it at error-normalization time as
+`AxiosResponseError.xRequestId`.
+
+`InternxtApiService.extractRequestId(HttpResponse)` reads it; the value
+is carried on [`ProviderException.requestId`](../../core/app/core/src/main/kotlin/org/krost/unidrive/ProviderException.kt)
+(the base field), so a cross-provider grep on `requestId=` in
+`unidrive.log` finds the value regardless of which provider raised the
+exception. `requestIdSuffix(throwable)` in `:app:core` formats it into
+log lines used by `SyncEngine`.
+
+Test: [`InternxtRequestIdPropagationTest`](../../core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtRequestIdPropagationTest.kt).

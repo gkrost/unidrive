@@ -15,6 +15,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.http.InFlightDedup
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
@@ -31,25 +32,29 @@ class InternxtApiService(
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
-        // UD-335: retry-eligible HTTP statuses for transient-failure write
-        // endpoints. 429 is rate-limit; 5xx are server-side. The Cloudflare
-        // 502 origin_bad_gateway pattern that drove this ticket lives here.
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
 
-        // UD-353: throughput floor for OVH temporal-uploads-bucket PUTs.
-        // Internxt's shard-upload backend is `s3.gra.io.cloud.ovh.net`,
-        // a third-party S3-compatible endpoint with no Internxt-side SLA.
-        // Observed at 30–50 KB/s during congestion (2026-04-30 incident:
-        // 5 ~30 MiB videos torn down at the 600 s floor while OVH was
-        // still receiving). Override the UploadTimeoutPolicy default
-        // (50 KiB/s) with a more pessimistic 10 KiB/s for OVH PUTs only;
-        // Internxt's own API calls keep the default. The 60 s
-        // socketTimeoutMillis still fires on stalled connections, so
-        // slow-loris exposure is unchanged.
+        internal fun listingQueryParams(
+            updatedAt: String?,
+            limit: Int,
+            offset: Int,
+        ): Map<String, String> {
+            val params =
+                mutableMapOf(
+                    "status" to "ALL",
+                    "limit" to limit.toString(),
+                    "offset" to offset.toString(),
+                    "sort" to "uuid",
+                    "order" to "ASC",
+                )
+            if (updatedAt != null) params["updatedAt"] = updatedAt
+            return params
+        }
+
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
     }
 
@@ -64,28 +69,29 @@ class InternxtApiService(
             install(org.krost.unidrive.http.RequestId)
         }
 
-    // UD-343: shared :app:core UnidriveJson singleton.
     private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
-    suspend fun getFolderContents(folderUuid: String): FolderContentResponse {
-        val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
-        return json.decodeFromString<FolderContentResponse>(body)
-    }
+    // UD-205: read-heavy folder-listing calls are a known dedup target.
+    // Concurrent sync-engine coroutines descending overlapping subtrees can
+    // legitimately ask for the same folder UUID at the same time; the dedup
+    // collapses those into one HTTP round-trip without changing call-site
+    // semantics. Other read-heavy call sites (getFileMeta, getValidCredentials)
+    // are tracked under follow-up tickets — this is the proof-of-concept wiring.
+    internal val folderContentsDedup = InFlightDedup<String, FolderContentResponse>()
+
+    suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
+        folderContentsDedup.load(folderUuid) {
+            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
+            json.decodeFromString<FolderContentResponse>(body)
+        }
 
     suspend fun listFiles(
         updatedAt: String? = null,
         limit: Int = 50,
         offset: Int = 0,
     ): List<InternxtFile> {
-        val params =
-            mutableMapOf(
-                "status" to "ALL",
-                "limit" to limit.toString(),
-                "offset" to offset.toString(),
-            )
-        if (updatedAt != null) params["updatedAt"] = updatedAt
-        val body = authenticatedGet("$baseUrl/files", params)
+        val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset))
         return json.decodeFromString<List<InternxtFile>>(body)
     }
 
@@ -94,14 +100,7 @@ class InternxtApiService(
         limit: Int = 50,
         offset: Int = 0,
     ): List<InternxtFolder> {
-        val params =
-            mutableMapOf(
-                "status" to "ALL",
-                "limit" to limit.toString(),
-                "offset" to offset.toString(),
-            )
-        if (updatedAt != null) params["updatedAt"] = updatedAt
-        val body = authenticatedGet("$baseUrl/folders", params)
+        val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset))
         return json.decodeFromString<List<InternxtFolder>>(body)
     }
 
@@ -142,6 +141,115 @@ class InternxtApiService(
             json.decodeFromString<InternxtFile>(response.bodyAsText())
         }
 
+    /**
+     * UD-366: replace an existing file's content in place via `PUT /files/{uuid}`.
+     *
+     * Spec: `ReplaceFileDto` accepts only `fileId` (new bridge bucket-entry id), `size`
+     * (required), and optional `modificationTime`. The endpoint preserves the existing
+     * file's bucket, encrypted name, parent folder, and encryptVersion — there is nothing
+     * to re-derive on the client side. Returns the updated `FileDto` (same `uuid`,
+     * swapped `fileId`).
+     */
+    suspend fun replaceFile(
+        uuid: String,
+        size: Long,
+        fileId: String,
+        modificationTime: java.time.Instant? = null,
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
+                    put("size", kotlinx.serialization.json.JsonPrimitive(size))
+                    if (modificationTime != null) {
+                        put("modificationTime", kotlinx.serialization.json.JsonPrimitive(modificationTime.toString()))
+                    }
+                }
+            val response =
+                httpClient.put("$baseUrl/files/$uuid") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
+
+    /**
+     * UD-368: bulk folder creation under a single parent via the polymorphic `POST /folders`.
+     *
+     * Spec: `CreateFolderDto` accepts either `{plainName}` (single) OR
+     * `{folders: [{plainName}], parentFolderUuid}` (bulk, 1–5 items per call). The bulk
+     * response is undocumented in the swagger 200 schema (which lists only single-folder
+     * `FolderDto`) — we parse as `ResultFoldersDto = {result: [FolderDto]}` based on the
+     * sibling endpoint convention; if Internxt ships an integration test or the live API
+     * returns a different shape, this will fail loudly at deserialise time.
+     *
+     * The 409 conflict response is bulk-specific: `CreateBulkFoldersConflictResponseDto` =
+     * `{message, existentFolders: [string]}` (names, not UUIDs). Caller is responsible for
+     * the 409-recovery dance — there is no per-item partial-success path on the wire.
+     *
+     * Note: the bulk DTO documents `plainName` only per item; the existing single-folder
+     * `createFolder` also sends `name` (encrypted) as an undocumented field that the server
+     * accepts. We mirror that here for parity, even though the spec is silent.
+     */
+    suspend fun createFoldersBatch(
+        parentUuid: String,
+        items: List<Pair<String, String>>,
+    ): List<InternxtFolder> {
+        require(items.isNotEmpty()) { "createFoldersBatch requires at least one item" }
+        require(items.size <= 5) { "POST /folders bulk form is server-capped at 5; got ${items.size}" }
+        return retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("parentFolderUuid", kotlinx.serialization.json.JsonPrimitive(parentUuid))
+                    put(
+                        "folders",
+                        kotlinx.serialization.json.buildJsonArray {
+                            items.forEach { (plainName, encryptedName) ->
+                                add(
+                                    kotlinx.serialization.json.buildJsonObject {
+                                        put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                                        put("name", kotlinx.serialization.json.JsonPrimitive(encryptedName))
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+            val response =
+                httpClient.post("$baseUrl/folders") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            // Try ResultFoldersDto shape `{result: [FolderDto]}`; fall back to bare array.
+            val text = response.bodyAsText()
+            val rootElement = json.parseToJsonElement(text)
+            val arr =
+                when {
+                    rootElement is kotlinx.serialization.json.JsonObject && "result" in rootElement ->
+                        rootElement["result"]!!
+                    rootElement is kotlinx.serialization.json.JsonObject && "folders" in rootElement ->
+                        rootElement["folders"]!!
+                    rootElement is kotlinx.serialization.json.JsonArray ->
+                        rootElement
+                    else ->
+                        throw InternxtApiException(
+                            "createFoldersBatch: unexpected response shape (no result/folders array): ${text.take(200)}",
+                            statusCode = 0,
+                        )
+                }
+            json.decodeFromJsonElement(
+                kotlinx.serialization.builtins.ListSerializer(InternxtFolder.serializer()),
+                arr,
+            )
+        }
+    }
+
     suspend fun createFolder(
         parentUuid: String,
         plainName: String,
@@ -157,6 +265,65 @@ class InternxtApiService(
                 }
             val response =
                 httpClient.post("$baseUrl/folders") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFolder>(response.bodyAsText())
+        }
+
+    /**
+     * UD-369: rename a file in place via `PUT /files/{uuid}/meta`.
+     *
+     * Spec: `UpdateFileMetaDto` requires `{plainName, type}`. Notably, the endpoint does NOT
+     * accept the `name` (encrypted) field — only the plaintext name + type are updated. The
+     * encrypted-name field stays stale after a rename. Unidrive uses `plainName` for path
+     * resolution everywhere ([InternxtProvider.kt] `fileToCloudItem`, `buildFolderPath`,
+     * `resolveFolder`), so the staleness is invisible to the sync engine — but document it
+     * because it's a sharp edge for any future code that relies on the encrypted name.
+     */
+    suspend fun renameFile(
+        uuid: String,
+        plainName: String,
+        type: String?,
+    ): InternxtFile =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                    // Spec says type is required; empty string is valid for extensionless files.
+                    put("type", kotlinx.serialization.json.JsonPrimitive(type ?: ""))
+                }
+            val response =
+                httpClient.put("$baseUrl/files/$uuid/meta") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            checkResponse(response)
+            json.decodeFromString<InternxtFile>(response.bodyAsText())
+        }
+
+    /**
+     * UD-369: rename a folder in place via `PUT /folders/{uuid}/meta`.
+     *
+     * Spec: `UpdateFolderMetaDto` requires `{plainName}` only — same encrypted-name caveat
+     * as [renameFile].
+     */
+    suspend fun renameFolder(
+        uuid: String,
+        plainName: String,
+    ): InternxtFolder =
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put("plainName", kotlinx.serialization.json.JsonPrimitive(plainName))
+                }
+            val response =
+                httpClient.put("$baseUrl/folders/$uuid/meta") {
                     applyAuth(creds)
                     contentType(ContentType.Application.Json)
                     setBody(requestBody.toString())
@@ -214,6 +381,55 @@ class InternxtApiService(
         if (response.status != HttpStatusCode.NotFound) checkResponse(response)
     }
 
+    /**
+     * UD-367: move items to Internxt's recycle bin via `POST /storage/trash/add`.
+     *
+     * Spec: `MoveItemsToTrashDto` accepts `items: [{uuid, type: "file"|"folder"}]` with
+     * a server-side cap of 50 items per call. Replaces the permanent `DELETE /files/{uuid}`
+     * + `DELETE /folders` collection-form path for routine sync-driven deletes — the user
+     * recovers via Internxt's web UI within the configured retention window.
+     *
+     * The permanent `deleteFile` / `deleteFolder` primitives remain available for explicit
+     * purge actions (e.g. a future `unidrive trash purge --remote`).
+     *
+     * @param items list of (uuid, type) pairs where type is "file" or "folder". Caller is
+     *   responsible for chunking >50 items into multiple calls — this method does not split.
+     */
+    suspend fun trashItems(items: List<Pair<String, String>>) {
+        require(items.isNotEmpty()) { "trashItems requires at least one item" }
+        require(items.size <= 50) { "trashItems is server-capped at 50; got ${items.size}" }
+        require(items.all { it.second == "file" || it.second == "folder" }) {
+            "type must be 'file' or 'folder'; got ${items.map { it.second }.distinct()}"
+        }
+        retryOnTransient {
+            val creds = credentialsProvider()
+            val requestBody =
+                kotlinx.serialization.json.buildJsonObject {
+                    put(
+                        "items",
+                        kotlinx.serialization.json.buildJsonArray {
+                            items.forEach { (uuid, type) ->
+                                add(
+                                    kotlinx.serialization.json.buildJsonObject {
+                                        put("uuid", kotlinx.serialization.json.JsonPrimitive(uuid))
+                                        put("type", kotlinx.serialization.json.JsonPrimitive(type))
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+            val response =
+                httpClient.post("$baseUrl/storage/trash/add") {
+                    applyAuth(creds)
+                    contentType(ContentType.Application.Json)
+                    setBody(requestBody.toString())
+                }
+            // 200 OK — items moved. 400 means at least one uuid was invalid; let it surface.
+            checkResponse(response)
+        }
+    }
+
     suspend fun deleteFolder(uuid: String) {
         val creds = credentialsProvider()
         val requestBody =
@@ -249,16 +465,7 @@ class InternxtApiService(
             if (!response.status.isSuccess()) {
                 throw InternxtApiException("Download failed: ${response.status}", response.status.value)
             }
-            // UD-340: shared assertNotHtml at :app:core/http (UD-333/UD-231/
-            // UD-293 lineage). On Internxt this is HIGHER severity than on
-            // the OneDrive baseline because the body is fed through
-            // cipher.update() (AES-CTR) before write — HTML XOR'd through a
-            // strong keystream produces high-entropy bytes indistinguishable
-            // from a real decrypted file. UD-226's NUL-stub sweep does not
-            // catch it. Permanent silent corruption is the failure mode if
-            // the guard isn't here. Must execute BEFORE the first
-            // cipher.update() call so the AES-CTR keystream / IV state stays
-            // untouched and the URL can be retried cleanly.
+
             assertNotHtml(response, contextMsg = "Download (encrypted) -> ${destination.fileName}")
             val channel: ByteReadChannel = response.body()
             var written = 0L
@@ -396,14 +603,9 @@ class InternxtApiService(
         file: java.nio.file.Path,
         size: Long,
     ) {
-        // UD-342: shared streamingFileBody adds UD-287 finally-flushAndClose
-        // (Internxt's previous inline body lacked it — silent connection-
-        // pool corruption on cancellation).
+
         val response =
             httpClient.put(url) {
-                // UD-337 + UD-353: streaming variant that actually triggered
-                // the 2026-04-30 incident. Same pessimistic OVH floor — see
-                // OVH_PUT_MIN_THROUGHPUT_BPS.
                 timeout {
                     requestTimeoutMillis =
                         UploadTimeoutPolicy.computeRequestTimeoutMs(
@@ -465,35 +667,32 @@ class InternxtApiService(
         applyInternxtHeaders()
     }
 
+    /**
+     * UD-203: pull the Internxt server-side request id off a response.
+     * Header name confirmed from the upstream SDK
+     * (`AxiosResponseError.xRequestId` — extracted at error-normalization
+     * time). Returns null if the header isn't present (e.g. synthetic
+     * MockEngine responses, pre-flight failures).
+     */
+    private fun extractRequestId(response: HttpResponse): String? = response.headers["x-request-id"]
+
     private suspend fun checkResponse(response: HttpResponse) {
         if (response.status == HttpStatusCode.Unauthorized) {
-            throw AuthenticationException("Authentication failed (401): ${response.bodyAsText()}")
+            throw AuthenticationException(
+                "Authentication failed (401): ${response.bodyAsText()}",
+                requestId = extractRequestId(response),
+            )
         }
         if (!response.status.isSuccess()) {
-            throw InternxtApiException("API error: ${response.status} - ${response.bodyAsText()}", response.status.value)
+            throw InternxtApiException(
+                "API error: ${response.status} - ${response.bodyAsText()}",
+                statusCode = response.status.value,
+                requestId = extractRequestId(response),
+            )
         }
     }
 
-    // UD-335: tactical retry on transient 5xx + 429 for write endpoints
-    // (createFolder / createFile / moveFile / moveFolder). Cloudflare 502
-    // origin_bad_gateway during a 1230-folder mkdir burst on 2026-04-30
-    // surfaced as ~30 hard failures in a single sync — Internxt's API has
-    // no retry layer, so the action propagates straight to SyncEngine
-    // which logs WARN and moves on. With this wrapper the action retries
-    // in-band against the captured retry_after hint (or exponential
-    // fallback) before bubbling up.
-    //
-    // UD-330 is the structural cross-provider HttpRetryBudget lift. This is
-    // narrower: only the write endpoints, only Internxt, no shared budget
-    // across concurrent calls (each caller backs off independently).
-    //
-    // Idempotency caveat: POST `/folders` / `/files` MAY create a duplicate
-    // if the server completed the write but Cloudflare 502'd the response
-    // edge. Internxt's documented behaviour for duplicate-name creates is
-    // a 4xx (which we don't retry), so the typical case is "request never
-    // landed → safe to retry". A tiny tail of double-creates is the
-    // accepted cost vs the much-larger pain of dropping every transient
-    // failure.
+   
     internal suspend fun <T> retryOnTransient(
         maxAttempts: Int = 3,
         op: suspend () -> T,
@@ -522,19 +721,14 @@ class InternxtApiService(
         }
     }
 
-    // UD-335: parse `"retry_after": <int seconds>` from the Cloudflare /
-    // Internxt error JSON body (which our InternxtApiException carries
-    // verbatim in its message). Returns ms, or null if absent/unparseable.
+   
     internal fun parseRetryAfter(message: String?): Long? {
         if (message == null) return null
         val match = RETRY_AFTER_REGEX.find(message) ?: return null
         return match.groupValues[1].toLongOrNull()?.times(1000)
     }
 
-    // UD-336 (UD-334 Part A): readBoundedErrorBody lifted to
-    // org.krost.unidrive.http.ErrorBody so HiDrive / Internxt / OneDrive
-    // share a single implementation. UD-333 / UD-293 origin notes are
-    // preserved on the lifted helper.
+
 
     override fun close() {
         httpClient.close()
@@ -554,4 +748,5 @@ data class LimitResponse(
 class InternxtApiException(
     message: String,
     val statusCode: Int = 0,
-) : ProviderException(message)
+    requestId: String? = null,
+) : ProviderException(message, requestId = requestId)

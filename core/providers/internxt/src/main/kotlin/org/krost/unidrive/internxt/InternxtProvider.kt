@@ -3,6 +3,7 @@ package org.krost.unidrive.internxt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
+import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
 import org.krost.unidrive.sync.ScanHeartbeat
@@ -21,6 +22,24 @@ class InternxtProvider(
     private val crypto = InternxtCrypto()
     private val authService = AuthService(config)
     private val api = InternxtApiService(config) { authService.getValidCredentials() }
+
+    // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
+    // folder lookups. Populated on createFolder success (the API returns the
+    // new folder's UUID — without this the next resolveFolder call races
+    // Internxt's read-after-write inconsistency window: POST /drive/folders
+    // returns 200, but GET /drive/folders/{parentUuid} doesn't yet show the
+    // child for ~1-3 seconds). Consulted at the top of each resolveFolder
+    // segment-walk so multi-level mkdir cascades survive that window.
+    //
+    // Also populated on read (after a successful list) so subsequent
+    // resolveFolder calls hitting the same parent don't re-list — a free
+    // latency win on top of the bug fix.
+    //
+    // Eviction: none. Process-lifetime cache. A folder created via this
+    // cache then deleted out-of-band (web UI, another sync session) leaves
+    // a stale entry whose UUID will 404 on the next operation; acceptable
+    // trade for the in-process scope.
+    private val folderCache = FolderUuidCache()
 
     override val isAuthenticated: Boolean get() = authService.isAuthenticated
     override val canAuthenticate: Boolean get() = Files.exists(config.tokenPath.resolve("credentials.json"))
@@ -125,6 +144,7 @@ class InternxtProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
+        existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val segments = pathSegments(remotePath)
@@ -135,8 +155,9 @@ class InternxtProvider(
         val plainName = if (ext != null) fileName.substringBeforeLast('.') else fileName
         val parentPath = "/" + segments.dropLast(1).joinToString("/")
 
-        // 1. Get file size without loading into memory
+        // 1. Get file size + mtime without loading into memory
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
+        val localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
         onProgress?.invoke(0L, fileSize)
 
         // 2. Generate random 32-byte index; derive key + iv
@@ -201,28 +222,64 @@ class InternxtProvider(
         // 8. Finish upload → get bridge fileId
         val bucketEntry = api.finishUpload(bucket, indexHex, hashHex, descriptor.uuid)
 
-        // 9. Register file in drive metadata
+        // 9. Register file in drive metadata.
+        // UD-366: MODIFIED uploads route through PUT /files/{uuid} (replace-in-place);
+        // NEW uploads POST /files (create). Defensive fallback below catches the 409 that
+        // appears when the reconciler thought a path was new but the remote already has it.
+        if (existingRemoteId != null) {
+            val replaced =
+                api.replaceFile(
+                    uuid = existingRemoteId,
+                    size = fileSize,
+                    fileId = bucketEntry.id,
+                    modificationTime = localMtime,
+                )
+            return replaced.toCloudItem(parentPath)
+        }
+
         val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
         val created =
-            api.createFile(
-                bucket = bucket,
-                folderUuid = parentUuid,
-                plainName = plainName,
-                encryptedName = encryptedName,
-                size = fileSize,
-                type = ext,
-                fileId = bucketEntry.id,
-            )
+            try {
+                api.createFile(
+                    bucket = bucket,
+                    folderUuid = parentUuid,
+                    plainName = plainName,
+                    encryptedName = encryptedName,
+                    size = fileSize,
+                    type = ext,
+                    fileId = bucketEntry.id,
+                )
+            } catch (e: InternxtApiException) {
+                // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
+                // path that already exists on remote. Re-resolve the UUID and retry as PUT
+                // rather than stranding the local edit.
+                if (e.statusCode != 409) throw e
+                log.warn(
+                    "UD-366: 409 on POST /files for {} despite existingRemoteId=null — " +
+                        "reconciler/DB drift; re-resolving UUID and retrying as PUT /files/{{uuid}}",
+                    remotePath,
+                )
+                val existing = getMetadata(remotePath)
+                if (existing.isFolder) throw e
+                api.replaceFile(
+                    uuid = existing.id,
+                    size = fileSize,
+                    fileId = bucketEntry.id,
+                    modificationTime = localMtime,
+                )
+            }
         return created.toCloudItem(parentPath)
     }
 
     override suspend fun delete(remotePath: String) {
+        // UD-367: route routine sync-driven deletes through Internxt's recycle bin
+        // (POST /storage/trash/add) so any spurious del-local from a partial delta()
+        // gather is recoverable rather than permanently destructive. The permanent
+        // deleteFile/deleteFolder primitives in InternxtApiService remain available
+        // for an explicit `unidrive trash purge --remote` operator action (not yet wired).
         val metadata = getMetadata(remotePath)
-        if (metadata.isFolder) {
-            api.deleteFolder(metadata.id)
-        } else {
-            api.deleteFile(metadata.id)
-        }
+        val type = if (metadata.isFolder) "folder" else "file"
+        api.trashItems(listOf(metadata.id to type))
     }
 
     override suspend fun createFolder(path: String): CloudItem {
@@ -247,31 +304,144 @@ class InternxtProvider(
                         ?: throw e // 409 but folder not found: re-throw original error
                 existing
             }
+        // UD-357: cache the new folder's UUID so the next resolveFolder call
+        // doesn't race Internxt's read-after-write inconsistency on listing.
+        // Use sanitizeName(name) so the lookup key matches what resolveFolder
+        // compares against.
+        folderCache.put(parentUuid, sanitizeName(name), folder.uuid)
         return folder.toCloudItem(parentPath)
+    }
+
+    /**
+     * UD-368: bulk-aware override. Groups paths by their parent folder, resolves each parent
+     * UUID once, and calls [InternxtApiService.createFoldersBatch] in chunks of 5 (the
+     * Internxt server cap). Falls back to the per-path [createFolder] (which carries the
+     * UD-317 409-recovery dance and UD-357 cache population) for cross-parent groups,
+     * preserving today's correctness guarantees.
+     *
+     * **Caveat — partial-success on bulk 409.** The server returns
+     * `CreateBulkFoldersConflictResponseDto` for any conflict in the batch, listing only the
+     * conflicting plain names. Recovering UUIDs for the non-conflicting ones from a bulk
+     * response is awkward; on 409 we fall back to serial [createFolder] for the entire
+     * group, which trades round-trips for correctness.
+     */
+    override suspend fun createFolders(paths: List<String>): List<CloudItem> {
+        if (paths.isEmpty()) return emptyList()
+        if (paths.size == 1) return listOf(createFolder(paths.single()))
+
+        // Preserve input order in the result.
+        data class Indexed(val originalIndex: Int, val path: String, val name: String, val parentPath: String)
+        val indexed =
+            paths.mapIndexed { i, p ->
+                val segs = pathSegments(p)
+                require(segs.isNotEmpty()) { "Cannot create root: $p" }
+                Indexed(i, p, segs.last(), "/" + segs.dropLast(1).joinToString("/"))
+            }
+        val byParent = indexed.groupBy { it.parentPath }
+        val results = arrayOfNulls<CloudItem>(paths.size)
+
+        for ((parentPath, group) in byParent) {
+            val parentUuid = resolveFolder(parentPath)
+            val creds = authService.getValidCredentials()
+            // Chunk against the server's 5-item cap.
+            for (chunk in group.chunked(5)) {
+                val items =
+                    chunk.map { idx ->
+                        val encryptedName = crypto.encryptName(idx.name, "${creds.mnemonic}-$parentUuid")
+                        idx.name to encryptedName
+                    }
+                try {
+                    val created = api.createFoldersBatch(parentUuid, items)
+                    require(created.size == chunk.size) {
+                        "createFoldersBatch returned ${created.size} folders for ${chunk.size} requested"
+                    }
+                    chunk.zip(created).forEach { (idx, folder) ->
+                        // UD-357: populate cache so later resolveFolder calls don't race.
+                        folderCache.put(parentUuid, sanitizeName(idx.name), folder.uuid)
+                        results[idx.originalIndex] = folder.toCloudItem(parentPath)
+                    }
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode != 409) throw e
+                    // UD-368 caveat: bulk 409 doesn't tell us per-item success/failure.
+                    // Fall back to serial createFolder which handles 409 per-item via UD-317.
+                    log.warn(
+                        "UD-368: bulk POST /folders returned 409 for parent {}; falling back to " +
+                            "serial createFolder for {} item(s)",
+                        parentPath,
+                        chunk.size,
+                    )
+                    chunk.forEach { idx ->
+                        results[idx.originalIndex] = createFolder(idx.path)
+                    }
+                }
+            }
+        }
+        @Suppress("UNCHECKED_CAST")
+        return (results as Array<CloudItem>).toList()
     }
 
     override suspend fun move(
         fromPath: String,
         toPath: String,
     ): CloudItem {
-        val metadata = getMetadata(fromPath)
+        val fromSegments = pathSegments(fromPath)
         val toSegments = pathSegments(toPath)
-        val toParentPath = "/" + toSegments.dropLast(1).joinToString("/")
+        if (fromSegments.isEmpty() || toSegments.isEmpty()) {
+            throw ProviderException("Cannot move from/to root: $fromPath -> $toPath")
+        }
+        val fromParent = fromSegments.dropLast(1)
+        val toParent = toSegments.dropLast(1)
+        val fromName = fromSegments.last()
+        val toName = toSegments.last()
+        val toParentPath = "/" + toParent.joinToString("/")
+
+        val metadata = getMetadata(fromPath)
+        val sameParent = fromParent == toParent
+        val sameName = fromName == toName
+
+        if (sameParent && sameName) return metadata // no-op
+
+        // UD-369: route the rename leg through PUT /…/meta when the parent doesn't change,
+        // avoiding the engine's worst-case download → re-encrypt → re-upload → delete-old
+        // cycle for what is metadata-only on the wire. Cross-parent moves keep PATCH; mixed
+        // (different parent AND different name) does both in sequence.
+        if (sameParent) {
+            return if (metadata.isFolder) {
+                api.renameFolder(metadata.id, toName).toCloudItem(toParentPath)
+            } else {
+                val newType = newFileType(toName)
+                api.renameFile(metadata.id, plainName = stripExtension(toName), type = newType)
+                    .toCloudItem(toParentPath)
+            }
+        }
+
         val destFolderUuid = resolveFolder(toParentPath)
-        return if (metadata.isFolder) {
-            val result = api.moveFolder(metadata.id, destFolderUuid)
-            result.toCloudItem(toParentPath)
+        if (metadata.isFolder) {
+            val moved = api.moveFolder(metadata.id, destFolderUuid)
+            return if (sameName) {
+                moved.toCloudItem(toParentPath)
+            } else {
+                api.renameFolder(moved.uuid, toName).toCloudItem(toParentPath)
+            }
         } else {
-            val result = api.moveFile(metadata.id, destFolderUuid)
-            result.toCloudItem(toParentPath)
+            val moved = api.moveFile(metadata.id, destFolderUuid)
+            return if (sameName) {
+                moved.toCloudItem(toParentPath)
+            } else {
+                val newType = newFileType(toName)
+                api.renameFile(moved.uuid, plainName = stripExtension(toName), type = newType)
+                    .toCloudItem(toParentPath)
+            }
         }
     }
+
 
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
     ): DeltaPage {
         foldersScanned.set(0)
+        foldersSkipped.set(0)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
@@ -327,7 +497,27 @@ class InternxtProvider(
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull() ?: cursor ?: Instant.now().toString()
 
-        return DeltaPage(items = items, cursor = latestUpdatedAt, hasMore = false)
+        // UD-360: signal partial gather to the engine instead of throwing.
+        // Replaces the UD-361 fail-loud ProviderException — the engine now
+        // honours `complete=false` by skipping detectMissingAfterFullSync,
+        // so we no longer need to abort the run to prevent spurious
+        // del-local. Sync continues with whatever was successfully gathered;
+        // the missing subtree is picked up on the next run.
+        val skipped = foldersSkipped.get()
+        if (skipped > 0) {
+            log.warn(
+                "Internxt delta gather skipped {} folder(s) due to 500/503; " +
+                    "returning DeltaPage(complete=false). detectMissingAfterFullSync will be suppressed.",
+                skipped,
+            )
+        }
+
+        return DeltaPage(
+            items = items,
+            cursor = latestUpdatedAt,
+            hasMore = false,
+            complete = skipped == 0,
+        )
     }
 
     private fun buildFolderPath(
@@ -349,29 +539,26 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicInteger(0)
 
+    // UD-361: count of subtrees we skipped due to 500/503 during the recursive
+    // /files fallback. Inspected at the end of delta() to refuse partial gathers.
+    private val foldersSkipped =
+        java.util.concurrent.atomic
+            .AtomicInteger(0)
+
     private suspend fun collectFilesFromFolders(
         folderUuid: String,
         accumulator: MutableList<InternxtFile>,
         depth: Int,
     ) {
-        val content =
-            try {
-                api.getFolderContents(folderUuid)
-            } catch (e: InternxtApiException) {
-                if (e.statusCode in listOf(500, 503)) {
-                    log.warn("Skipping folder {} ({}): {}", folderUuid, e.statusCode, e.message)
-                    return
-                }
-                throw e
-            }
-        accumulator.addAll(content.files)
-        val scanned = foldersScanned.incrementAndGet()
-        log.debug("Scanning: {} files, {} folders scanned", accumulator.size, scanned)
-        for (child in content.children) {
-            if (child.status == "EXISTS" && !child.removed && !child.deleted) {
-                collectFilesFromFolders(child.uuid, accumulator, depth + 1)
-            }
-        }
+        collectFilesFromFoldersImpl(
+            getContents = api::getFolderContents,
+            folderUuid = folderUuid,
+            accumulator = accumulator,
+            depth = depth,
+            scanned = foldersScanned,
+            skipped = foldersSkipped,
+            log = log,
+        )
     }
 
     private suspend fun resolveFolder(path: String): String {
@@ -380,11 +567,23 @@ class InternxtProvider(
         var currentUuid = creds.rootFolderId
 
         for (segment in segments) {
+            // UD-357: cache hit short-circuits Internxt's eventual-consistency
+            // window. On the first resolveFolder right after createFolder of
+            // a new subfolder, the API listing still doesn't show it; the
+            // cache (populated by createFolder) does.
+            val cached = folderCache.get(currentUuid, segment)
+            if (cached != null) {
+                currentUuid = cached
+                continue
+            }
             val content = api.getFolderContents(currentUuid)
             val child =
                 // UD-317: sanitise child name before matching path segment.
                 content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == segment }
                     ?: throw ProviderException("Folder not found: $segment in $path")
+            // UD-357: cache the discovered UUID too — subsequent resolveFolder
+            // calls on the same parent skip the round-trip.
+            folderCache.put(currentUuid, segment, child.uuid)
             currentUuid = child.uuid
         }
         return currentUuid
@@ -414,12 +613,66 @@ class InternxtProvider(
     }
 
     companion object {
+        /**
+         * UD-361: testable recursion driver. Walks the folder tree rooted at
+         * [folderUuid], accumulating files into [accumulator]. On 500/503
+         * from [getContents], increments [skipped] and returns (the subtree
+         * is silently dropped from the accumulator — caller is responsible
+         * for inspecting [skipped] and rejecting partial gathers). Other
+         * exceptions propagate. Increments [scanned] for every successfully
+         * walked folder.
+         */
+        internal suspend fun collectFilesFromFoldersImpl(
+            getContents: suspend (String) -> FolderContentResponse,
+            folderUuid: String,
+            accumulator: MutableList<InternxtFile>,
+            depth: Int,
+            scanned: java.util.concurrent.atomic.AtomicInteger,
+            skipped: java.util.concurrent.atomic.AtomicInteger,
+            log: org.slf4j.Logger,
+        ) {
+            val content =
+                try {
+                    getContents(folderUuid)
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode in listOf(500, 503)) {
+                        log.warn("Skipping folder {} ({}): {}", folderUuid, e.statusCode, e.message)
+                        skipped.incrementAndGet()
+                        return
+                    }
+                    throw e
+                }
+            accumulator.addAll(content.files)
+            val total = scanned.incrementAndGet()
+            log.debug("Scanning: {} files, {} folders scanned", accumulator.size, total)
+            for (child in content.children) {
+                if (child.status == "EXISTS" && !child.removed && !child.deleted) {
+                    collectFilesFromFoldersImpl(
+                        getContents,
+                        child.uuid,
+                        accumulator,
+                        depth + 1,
+                        scanned,
+                        skipped,
+                        log,
+                    )
+                }
+            }
+        }
+
         fun rewindCursor(cursor: String): String {
             val instant = Instant.parse(cursor)
             return instant.minus(6, ChronoUnit.HOURS).toString()
         }
 
         fun pathSegments(path: String): List<String> = path.removePrefix("/").split("/").filter { it.isNotEmpty() }
+
+        /** UD-369: split a leaf filename into (plainName, type). Returned type is the bare extension or null. */
+        fun stripExtension(filename: String): String =
+            if (filename.contains('.')) filename.substringBeforeLast('.') else filename
+
+        fun newFileType(filename: String): String? =
+            if (filename.contains('.')) filename.substringAfterLast('.') else null
 
         /**
          * UD-317: strip leading/trailing whitespace (incl. `\n`, `\r`, `\t`)
@@ -452,11 +705,24 @@ class InternxtProvider(
                 path = fullPath,
                 size = file.size.toLongOrNull() ?: 0,
                 isFolder = false,
-                modified = file.modificationTime?.let { parseTime(it) },
-                created = file.creationTime?.let { parseTime(it) },
+                modified = file.modificationInstant,
+                created = file.creationInstant,
                 hash = null,
-                mimeType = cleanType,
-                deleted = file.status == "TRASHED" || file.status == "DELETED",
+                // UD-352c: Internxt's API returns `file.type` as a file
+                // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
+                // (e.g. "image/heic"). Setting mimeType = cleanType here
+                // produced Android intent-resolver mismatches (no app
+                // declares an intent-filter for MIME literally "heic").
+                // Set mimeType = null so consumers (Android LocalFileSource,
+                // MediaStoreBridge, etc.) derive the real MIME from the
+                // filename extension via their platform-native lookup.
+                // The extension itself is preserved in the `name` field
+                // a few lines above (the `name = "$baseName.$cleanType"`
+                // construction).
+                mimeType = null,
+                // UD-359: surface `removed`/`deleted` boolean flags alongside
+                // the `status` enum. Mirrors the folder helper at line ~562.
+                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
             )
         }
 
@@ -473,8 +739,8 @@ class InternxtProvider(
                 path = fullPath,
                 size = 0,
                 isFolder = true,
-                modified = folder.modificationTime?.let { parseTime(it) },
-                created = folder.creationTime?.let { parseTime(it) },
+                modified = folder.modificationInstant,
+                created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
                 deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
@@ -500,11 +766,24 @@ class InternxtProvider(
                 path = "$parentPath/$name",
                 size = file.size.toLongOrNull() ?: 0,
                 isFolder = false,
-                modified = file.modificationTime?.let { parseTime(it) },
-                created = file.creationTime?.let { parseTime(it) },
+                modified = file.modificationInstant,
+                created = file.creationInstant,
                 hash = null,
-                mimeType = cleanType,
-                deleted = file.status == "TRASHED" || file.status == "DELETED",
+                // UD-352c: Internxt's API returns `file.type` as a file
+                // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
+                // (e.g. "image/heic"). Setting mimeType = cleanType here
+                // produced Android intent-resolver mismatches (no app
+                // declares an intent-filter for MIME literally "heic").
+                // Set mimeType = null so consumers (Android LocalFileSource,
+                // MediaStoreBridge, etc.) derive the real MIME from the
+                // filename extension via their platform-native lookup.
+                // The extension itself is preserved in the `name` field
+                // a few lines above (the `name = "$baseName.$cleanType"`
+                // construction).
+                mimeType = null,
+                // UD-359: surface `removed`/`deleted` boolean flags alongside
+                // the `status` enum. Mirrors the folder helper at line ~562.
+                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
             )
         }
 
@@ -520,19 +799,13 @@ class InternxtProvider(
                 path = "$parentPath/$name",
                 size = 0,
                 isFolder = true,
-                modified = folder.modificationTime?.let { parseTime(it) },
-                created = folder.creationTime?.let { parseTime(it) },
+                modified = folder.modificationInstant,
+                created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
                 deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
             )
         }
 
-        private fun parseTime(iso: String): Instant? =
-            try {
-                Instant.parse(iso)
-            } catch (_: Exception) {
-                null
-            }
     }
 }
