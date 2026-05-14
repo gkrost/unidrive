@@ -413,19 +413,33 @@ class SyncEngine(
                     consecutiveFailures = 0
                 } catch (e: AuthenticationException) {
                     // UD-253: include exception class + full stack for auth failures.
-                    log.error("Authentication failed, stopping sync: {}: {}", e.javaClass.simpleName, e.message, e)
+                    // UD-203: append `requestId=<id>` when the provider's exception
+                    // carries one, so the ERROR log line points at a Graph / S3 /
+                    // Internxt support trace.
+                    log.error(
+                        "Authentication failed, stopping sync: {}: {}{}",
+                        e.javaClass.simpleName,
+                        e.message,
+                        org.krost.unidrive.requestIdSuffix(e),
+                        e,
+                    )
                     throw e
                 } catch (e: Exception) {
                     consecutiveFailures++
                     passOneFailures.incrementAndGet()
                     // UD-253: class name + throwable (SLF4J renders stack trace when the
                     // last arg is a Throwable) so WARNs are self-diagnosing in the log.
+                    // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
+                    // caught exception is a ProviderException with a non-null id,
+                    // empty string otherwise — same line shape as before for non-
+                    // provider failures.
                     log.warn(
-                        "Action failed for {} ({} consecutive): {}: {}",
+                        "Action failed for {} ({} consecutive): {}: {}{}",
                         action.path,
                         consecutiveFailures,
                         e.javaClass.simpleName,
                         e.message,
+                        org.krost.unidrive.requestIdSuffix(e),
                         e,
                     )
                     reporter.onWarning("Failed: ${action.path} - ${e.message}")

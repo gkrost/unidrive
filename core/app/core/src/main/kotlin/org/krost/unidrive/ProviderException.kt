@@ -36,3 +36,23 @@ open class AuthenticationException(
     cause: Throwable? = null,
     requestId: String? = null,
 ) : ProviderException(message, cause, requestId)
+
+/**
+ * UD-203: helper for logging call sites. Returns ` requestId=<id>` (with
+ * leading space) if the throwable is a [ProviderException] subclass that
+ * carries a non-null id, otherwise the empty string. The leading space
+ * makes the suffix safe to concatenate into an existing log message
+ * without separator gymnastics:
+ *
+ * ```
+ * log.warn("Action failed for {}: {}{}", path, e.message, requestIdSuffix(e))
+ * ```
+ *
+ * Designed for grep — operators see `requestId=<id>` on the error line
+ * and can plug the id directly into a support ticket regardless of
+ * which provider raised the exception.
+ */
+fun requestIdSuffix(t: Throwable?): String {
+    val id = (t as? ProviderException)?.requestId ?: return ""
+    return " requestId=$id"
+}
