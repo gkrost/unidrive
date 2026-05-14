@@ -22,6 +22,17 @@ import kotlin.test.assertTrue
 class GroundTruthBareProviderConfigTest {
     private val syncRoot = Paths.get("/tmp/ud802-test-root")
 
+    /**
+     * `buildBareProviderConfig` doubles every backslash in the syncRoot
+     * before embedding it in the TOML (because TOML basic strings escape
+     * `\`). On Linux, `Paths.get("/tmp/...").toString()` is
+     * `/tmp/...` — no backslashes — so the doubling is a no-op. On
+     * Windows, the same call returns `\tmp\...` and the production code
+     * emits `\\tmp\\...` in the TOML. Tests must apply the same escape
+     * before substring-matching, otherwise the assertion is OS-coupled.
+     */
+    private val expectedSyncRootInToml = syncRoot.toString().replace("\\", "\\\\")
+
     @Test
     fun `s3 config inlines bucket and credentials from env`() {
         val env =
@@ -36,7 +47,7 @@ class GroundTruthBareProviderConfigTest {
 
         assertTrue("[providers.s3]" in toml)
         assertTrue("type = \"s3\"" in toml)
-        assertTrue("sync_root = \"${syncRoot}\"" in toml)
+        assertTrue("sync_root = \"$expectedSyncRootInToml\"" in toml)
         assertTrue("bucket = \"my-bucket\"" in toml)
         assertTrue("region = \"eu-central-1\"" in toml)
         assertTrue("endpoint = \"https://s3.example.com\"" in toml)
