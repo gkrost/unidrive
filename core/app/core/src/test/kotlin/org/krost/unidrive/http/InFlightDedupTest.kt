@@ -1,19 +1,14 @@
 package org.krost.unidrive.http
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlin.test.fail
 
 /**
  * UD-205: pin the dedup primitive's contract.
@@ -26,42 +21,51 @@ import kotlin.test.fail
  *  4. Map is cleared after success — a second call re-invokes the loader.
  */
 class InFlightDedupTest {
+    // UD-811: rewritten to use kotlinx-coroutines-test `runTest` + virtual time.
+    // The previous `runBlocking + Dispatchers.Default + delay(10) spin-wait`
+    // shape (with a 500 ms budget) was flake-prone on slow CI runners and
+    // became a hard failure under kotlinx-coroutines 1.11.0 on Ubuntu CI.
+    // The dedup invariant (one loader invocation across N concurrent load()
+    // calls for the same key) is timing-independent — InFlightDedup is pure
+    // concurrency coordination (ConcurrentHashMap + async + Deferred).
+    // Running on the test scheduler lets us use advanceUntilIdle() to
+    // deterministically suspend all N callers on the gate before releasing
+    // any of them. Same pattern UD-807 applied to InternxtApiServiceTest's
+    // UD-205 dedup test.
     @Test
     fun `concurrent callers for same key share exactly one loader invocation`() =
-        runBlocking {
+        runTest {
             val dedup = InFlightDedup<String, Int>()
             val loaderInvocations = AtomicInteger(0)
             // Gate so all 100 callers reach the dedup before any loader can complete;
             // ensures we exercise the deduplication race rather than a serial sequence.
             val gate = CompletableDeferred<Unit>()
 
-            val results =
-                coroutineScope {
-                    val deferreds =
-                        (1..100).map {
-                            async(Dispatchers.Default) {
-                                dedup.load("k") {
-                                    loaderInvocations.incrementAndGet()
-                                    gate.await()
-                                    42
-                                }
-                            }
-                        }
-                    // Yield onto a separate dispatcher so the 100 launched coroutines
-                    // get a chance to install themselves on the dedup map before we
-                    // release the gate.
-                    withContext(Dispatchers.IO) {
-                        // Small spin until at least one caller has reached the dedup.
-                        repeat(50) {
-                            if (dedup.inFlightCount() >= 1 && loaderInvocations.get() >= 1) {
-                                return@repeat
-                            }
-                            delay(10)
+            val deferreds =
+                (1..100).map {
+                    async {
+                        dedup.load("k") {
+                            loaderInvocations.incrementAndGet()
+                            gate.await()
+                            42
                         }
                     }
-                    gate.complete(Unit)
-                    deferreds.awaitAll()
                 }
+
+            // Drain the scheduler until every caller is suspended:
+            //  - the winner is parked on `gate.await()` after bumping the
+            //    counter once;
+            //  - the 99 losers are parked on `winner.await()` inside
+            //    InFlightDedup.load.
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                1,
+                loaderInvocations.get(),
+                "exactly one caller should have entered the loader before the gate opens",
+            )
+
+            gate.complete(Unit)
+            val results = deferreds.awaitAll()
 
             assertEquals(100, results.size)
             assertTrue(results.all { it == 42 }, "every caller should receive the same value")
@@ -75,34 +79,30 @@ class InFlightDedupTest {
 
     @Test
     fun `loader failure is rethrown to all callers and the map is cleared for the next call`() =
-        runBlocking {
+        runTest {
             val dedup = InFlightDedup<String, Int>()
             val loaderInvocations = AtomicInteger(0)
             val gate = CompletableDeferred<Unit>()
 
-            val outcomes =
-                coroutineScope {
-                    val deferreds =
-                        (1..10).map {
-                            async(Dispatchers.Default) {
-                                runCatching {
-                                    dedup.load("k") {
-                                        loaderInvocations.incrementAndGet()
-                                        gate.await()
-                                        throw RuntimeException("boom")
-                                    }
-                                }
+            val deferreds =
+                (1..10).map {
+                    async {
+                        runCatching {
+                            dedup.load("k") {
+                                loaderInvocations.incrementAndGet()
+                                gate.await()
+                                throw RuntimeException("boom")
                             }
                         }
-                    withContext(Dispatchers.IO) {
-                        repeat(50) {
-                            if (loaderInvocations.get() >= 1) return@repeat
-                            delay(10)
-                        }
                     }
-                    gate.complete(Unit)
-                    deferreds.awaitAll()
                 }
+
+            // All 10 callers parked: 1 on gate.await(), 9 on winner.await().
+            testScheduler.advanceUntilIdle()
+            assertEquals(1, loaderInvocations.get(), "exactly one caller entered the loader pre-gate")
+
+            gate.complete(Unit)
+            val outcomes = deferreds.awaitAll()
 
             outcomes.forEachIndexed { i, outcome ->
                 val ex = outcome.exceptionOrNull()
