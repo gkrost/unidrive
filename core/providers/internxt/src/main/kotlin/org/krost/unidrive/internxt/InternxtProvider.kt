@@ -708,7 +708,18 @@ class InternxtProvider(
                 modified = file.modificationInstant,
                 created = file.creationInstant,
                 hash = null,
-                mimeType = cleanType,
+                // UD-352c: Internxt's API returns `file.type` as a file
+                // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
+                // (e.g. "image/heic"). Setting mimeType = cleanType here
+                // produced Android intent-resolver mismatches (no app
+                // declares an intent-filter for MIME literally "heic").
+                // Set mimeType = null so consumers (Android LocalFileSource,
+                // MediaStoreBridge, etc.) derive the real MIME from the
+                // filename extension via their platform-native lookup.
+                // The extension itself is preserved in the `name` field
+                // a few lines above (the `name = "$baseName.$cleanType"`
+                // construction).
+                mimeType = null,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
                 deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
@@ -758,7 +769,18 @@ class InternxtProvider(
                 modified = file.modificationInstant,
                 created = file.creationInstant,
                 hash = null,
-                mimeType = cleanType,
+                // UD-352c: Internxt's API returns `file.type` as a file
+                // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
+                // (e.g. "image/heic"). Setting mimeType = cleanType here
+                // produced Android intent-resolver mismatches (no app
+                // declares an intent-filter for MIME literally "heic").
+                // Set mimeType = null so consumers (Android LocalFileSource,
+                // MediaStoreBridge, etc.) derive the real MIME from the
+                // filename extension via their platform-native lookup.
+                // The extension itself is preserved in the `name` field
+                // a few lines above (the `name = "$baseName.$cleanType"`
+                // construction).
+                mimeType = null,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
                 deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,

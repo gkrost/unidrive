@@ -31,7 +31,7 @@ open class ProviderException(
     val requestId: String? = null,
 ) : Exception(message, cause)
 
-class AuthenticationException(
+open class AuthenticationException(
     message: String,
     cause: Throwable? = null,
     requestId: String? = null,

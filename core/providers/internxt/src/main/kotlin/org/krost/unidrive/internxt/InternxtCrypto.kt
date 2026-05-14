@@ -10,7 +10,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-class InternxtCrypto {
+open class InternxtCrypto {
     companion object {
         private const val PBKDF2_ITERATIONS = 2145
         private const val SALT_SIZE = 64
@@ -243,7 +243,7 @@ class InternxtCrypto {
      * 2. PBKDF2(password, salt, iterations=10000, keySize=256) -> hex hash
      * 3. Encrypt the hash with CRYPTO_KEY -> base64 -> hex
      */
-    fun hashPassword(
+    open fun hashPassword(
         password: String,
         sKey: String,
         cryptoKey: String,
@@ -269,7 +269,7 @@ class InternxtCrypto {
      * Decrypt the mnemonic returned by the Internxt login API.
      * The mnemonic is hex-encoded, CryptoJS-encrypted with the plaintext password.
      */
-    fun decryptMnemonic(
+    open fun decryptMnemonic(
         encryptedMnemonicHex: String,
         password: String,
     ): String {
