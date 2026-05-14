@@ -57,17 +57,21 @@ class HttpRetryBudgetMatrixTest {
         // See @Ignore reason.
     }
 
-    // -- Row: Throttle (429) — honors Retry-After ---------------------------
+    // -- Row: Throttle (429) — storm threshold + largest-Retry-After gating ---
 
+    // UD-811 audit: renamed from `429 honors Retry-After capped by maxRetryAfter`.
+    // The original name promised a `maxRetryAfter` cap that does not exist in
+    // HttpRetryBudget — only in the KDoc matrix's prescriptive cell. The body
+    // never asserted any cap. The actual invariants the body pins are
+    // (a) a single 429 below the storm threshold does not open the circuit,
+    // and (b) once the storm trips, the largest Retry-After in the window
+    // gates resumeAfterEpochMs. Renamed accordingly; if/when a maxRetryAfter
+    // cap is actually implemented in HttpRetryBudget, a new test should pin
+    // that contract separately.
     @Test
     @Suppress("ktlint:standard:function-naming")
-    fun `429 honors Retry-After capped by maxRetryAfter`() =
+    fun `429 storm opens circuit honoring largest Retry-After observed`() =
         runTest {
-            // The budget's contract for 429 is observable via recordThrottle: the largest
-            // Retry-After in the storm window is what gates resumeAfterEpochMs once the
-            // storm threshold trips. We assert that:
-            //   - a single 429 with retryAfter=R does NOT prematurely open the circuit;
-            //   - the recorded retryAfter is preserved for the storm hint.
             val clock = FakeClock(now = 1_000)
             val budget =
                 HttpRetryBudget(
@@ -104,11 +108,19 @@ class HttpRetryBudgetMatrixTest {
         // See @Ignore reason.
     }
 
-    // -- Row: Network error (no status) — retries with exp+jitter -----------
+    // -- Row: Network error (no status) — retriability classification --------
 
+    // UD-811 audit: renamed from `network IOException retries with exponential
+    // backoff`. The previous name promised backoff verification, but the body
+    // exercises only `HttpRetryBudget.isRetriableIoException`'s classifier —
+    // it asserts which IOException subclasses are transient (retry-worthy)
+    // versus misconfig (fail fast). The actual exponential-backoff behaviour
+    // is tested at the provider layer (WebDavApiServiceRetryTest,
+    // GraphApiService uploadChunkWithRetries), not here. Renamed to match
+    // the body's actual scope.
     @Test
     @Suppress("ktlint:standard:function-naming")
-    fun `network IOException retries with exponential backoff`() {
+    fun `isRetriableIoException distinguishes transient TCP failures from misconfig`() {
         // The budget classifies which IOExceptions are worth retrying via
         // isRetriableIoException on its companion. Transient TCP failures must be
         // retriable; misconfig classes (DNS, SSL) must NOT be.
