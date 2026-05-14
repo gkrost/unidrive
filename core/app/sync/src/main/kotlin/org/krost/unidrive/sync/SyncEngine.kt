@@ -291,12 +291,9 @@ class SyncEngine(
         reporter.onActionCount(actions.size)
 
         if (actions.isEmpty()) {
-            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
-            val pendingCursor = db.getSyncState("pending_cursor")
-            if (pendingCursor != null) {
-                db.setSyncState("delta_cursor", pendingCursor)
-                db.setSyncState("last_full_scan", Instant.now().toString())
-            }
+            // UD-260 / UD-901e: promote pending cursor only if the gather pass
+            // that wrote it was complete (see promotePendingCursorIfComplete).
+            promotePendingCursorIfComplete()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(0, 0, 0, duration)
             return
@@ -340,12 +337,9 @@ class SyncEngine(
                     else -> {}
                 }
             }
-            // Promote pending cursor to delta_cursor so subsequent scans reuse remote state (UD-260)
-            val pendingCursor = db.getSyncState("pending_cursor")
-            if (pendingCursor != null) {
-                db.setSyncState("delta_cursor", pendingCursor)
-                db.setSyncState("last_full_scan", Instant.now().toString())
-            }
+            // UD-260 / UD-901e: promote pending cursor only if the gather pass
+            // that wrote it was complete (see promotePendingCursorIfComplete).
+            promotePendingCursorIfComplete()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration, counts)
             return
@@ -624,10 +618,11 @@ class SyncEngine(
         // otherwise be lost forever: the server-side delta cursor advances past it and future
         // syncs would not re-see it as "new". Failed items keep pending_cursor → next sync redoes
         // the delta from the previous promoted cursor.
-        val cursor = db.getSyncState("pending_cursor")
-        if (cursor != null && transferFailures.get() == 0) {
-            db.setSyncState("delta_cursor", cursor)
-            db.setSyncState("last_full_scan", Instant.now().toString())
+        //
+        // UD-901e additionally gates promotion on the gather pass being complete
+        // (see promotePendingCursorIfComplete).
+        if (transferFailures.get() == 0) {
+            promotePendingCursorIfComplete()
         }
 
         val duration = System.currentTimeMillis() - startTime
@@ -742,12 +737,26 @@ class SyncEngine(
             return page
         }
 
+        // UD-901e: persist the running completeness flag alongside the cursor.
+        // The 3 cursor-promotion sites (apply / dry-run / empty-action) check
+        // `pending_cursor_complete` and refuse to promote when any page in the
+        // gather pass returned complete=false — otherwise a transient subtree
+        // 500/503 would bake the incomplete sweep's cursor into delta_cursor,
+        // and the next sync would resume from a point past items it never
+        // enumerated. Stored as the string "true"/"false"; absent is treated
+        // as "true" by the promotion guards for backwards-compat with state.db
+        // files that predate this flag.
+        fun persistPendingCursor(cursor: String) {
+            db.setSyncState("pending_cursor", cursor)
+            db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
+        }
+
         var page = nextPage(cursor)
         for (item in page.items) {
             val resolved = resolveItemPath(item) ?: continue
             changes[resolved.path] = resolved
         }
-        db.setSyncState("pending_cursor", page.cursor)
+        persistPendingCursor(page.cursor)
         // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
         // so a 113k-item drive emits ~2260 update events — cheap, and the
         // reporter is responsible for throttling display (CliProgressReporter
@@ -760,7 +769,7 @@ class SyncEngine(
                 val resolved = resolveItemPath(item) ?: continue
                 changes[resolved.path] = resolved
             }
-            db.setSyncState("pending_cursor", page.cursor)
+            persistPendingCursor(page.cursor)
             reporter.onScanProgress("remote", changes.size)
         }
 
@@ -775,6 +784,33 @@ class SyncEngine(
             reporter.onWarning(msg)
         }
         return changes
+    }
+
+    /**
+     * UD-901e: promote `pending_cursor` to `delta_cursor` only when the gather
+     * pass that produced it was complete. A `pending_cursor_complete` value
+     * of "false" means at least one delta page returned `complete=false`
+     * (currently: Internxt subtree 500/503 skip path), and promoting that
+     * cursor would silently skip items in the failed subtree on the next run.
+     * Absent flag is treated as complete=true so the gate is backwards-compat
+     * with state.db files written before this flag landed.
+     *
+     * Returns true if promotion happened; false if it was withheld. Callers
+     * use the return value only for `last_full_scan` bookkeeping.
+     */
+    private fun promotePendingCursorIfComplete(): Boolean {
+        val pendingCursor = db.getSyncState("pending_cursor") ?: return false
+        val complete = db.getSyncState("pending_cursor_complete") ?: "true"
+        if (complete != "true") {
+            log.warn(
+                "UD-901e: withholding pending_cursor promotion — gather pass was incomplete. " +
+                    "delta_cursor stays at its previous value so missed inventory is re-enumerated next run.",
+            )
+            return false
+        }
+        db.setSyncState("delta_cursor", pendingCursor)
+        db.setSyncState("last_full_scan", Instant.now().toString())
+        return true
     }
 
     /**
@@ -1038,6 +1074,20 @@ class SyncEngine(
                 oldEntry?.remoteSize ?: 0L
             }
         db.deleteEntry(action.fromPath)
+        // UD-901d: renamePrefix() must run BEFORE the destination upsert.
+        // renamePrefix's UD-901c cleanup phase deletes every row at the
+        // new prefix (including `newPrefix.removeSuffix("/")` — the folder
+        // root row itself) to clear out pre-existing LocalScanner UD-901
+        // placeholder rows that would otherwise collide with the UPDATE.
+        // If we upserted first and renamed second, the cleanup would wipe
+        // the canonical destination row we just wrote, leaving the moved
+        // folder with no remoteId/metadata in state.db — every subsequent
+        // scan would treat the folder as untracked and try to re-create
+        // it remotely. Upserting AFTER the rename keeps cleanup honest
+        // and the canonical row intact.
+        if (isFolder) {
+            db.renamePrefix(action.fromPath, action.path)
+        }
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
@@ -1053,9 +1103,6 @@ class SyncEngine(
                 lastSynced = Instant.now(),
             ),
         )
-        if (isFolder) {
-            db.renamePrefix(action.fromPath, action.path)
-        }
         // UD-113: success path for the remote-side rename/move.
         auditLog?.emit(
             action = "Move",
@@ -1088,10 +1135,14 @@ class SyncEngine(
         }
 
         db.deleteEntry(action.fromPath)
-        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
+        // UD-901d: renamePrefix() must run BEFORE the destination upsert —
+        // see applyMoveRemote for the full rationale. Same bug class:
+        // renamePrefix's UD-901c cleanup deletes the destination root row
+        // it doesn't know was meant to be canonical.
         if (isFolder) {
             db.renamePrefix(action.fromPath, action.path)
         }
+        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
     }
 
     private fun applyDeleteLocal(action: SyncAction.DeleteLocal) {

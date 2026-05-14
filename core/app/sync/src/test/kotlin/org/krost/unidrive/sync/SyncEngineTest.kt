@@ -322,6 +322,68 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-901e incomplete delta gather does NOT promote pending_cursor`() =
+        runTest {
+            // Codex review (PR #13) caught that the 3 cursor-promotion sites
+            // (empty-action / dry-run / success) unconditionally promoted
+            // pending_cursor → delta_cursor regardless of whether the gather
+            // pass was complete. Internxt's UD-360 subtree-skip path returns
+            // DeltaPage(complete=false) on 500/503, with the new latest
+            // updatedAt as the cursor. Promoting that cursor silently advances
+            // delta_cursor past items in the skipped subtree, so they're never
+            // re-enumerated.
+            //
+            // Invariant under test: after a delta pass where any page returned
+            // complete=false, delta_cursor MUST remain at its previous value,
+            // not advance to the partial gather's new cursor.
+            //
+            // First, establish a baseline cursor so we can detect movement.
+            provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
+            provider.deltaCursor = "cursor-baseline"
+            provider.deltaComplete = true
+            engine.syncOnce()
+            assertEquals(
+                "cursor-baseline",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must advance on a complete gather",
+            )
+
+            // Second pass: provider returns complete=false with a new cursor
+            // (mimicking Internxt's "I skipped a folder on 503; here's the
+            // new latest-updatedAt I saw before the skip"). delta_cursor
+            // must NOT advance to this new value.
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-partial"
+            provider.deltaComplete = false
+
+            engine.syncOnce()
+
+            assertEquals(
+                "cursor-baseline",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must NOT advance when the gather was incomplete — " +
+                    "promoting cursor-partial would skip items in the failed subtree on next run",
+            )
+            // Sanity: the pending cursor is still written (so a follow-up
+            // complete gather can promote it), and the completeness flag
+            // reflects the partial state.
+            assertEquals("cursor-partial", db.getSyncState("pending_cursor"))
+            assertEquals("false", db.getSyncState("pending_cursor_complete"))
+
+            // Third pass: provider recovers, complete=true. The freshly
+            // complete cursor IS promoted.
+            provider.deltaCursor = "cursor-recovered"
+            provider.deltaComplete = true
+            engine.syncOnce()
+            assertEquals(
+                "cursor-recovered",
+                db.getSyncState("delta_cursor"),
+                "delta_cursor must advance once a complete gather lands",
+            )
+            assertEquals("true", db.getSyncState("pending_cursor_complete"))
+        }
+
+    @Test
     fun `remote modification re-downloads local file`() =
         runTest {
             // UD-222: remote-modified re-hydrates (always true for non-folders under new semantics).
@@ -503,6 +565,60 @@ class SyncEngineTest {
                 provider.deletedPaths.contains("/a/docs"),
                 "DeleteRemote should not be issued when move is detected",
             )
+        }
+
+    @Test
+    fun `UD-901d folder MoveRemote preserves destination folder row with canonical remoteId`() =
+        runTest {
+            // Codex review (PR #13) caught that applyMoveRemote's call order — deleteEntry
+            // → upsertEntry(destination) → renamePrefix — let renamePrefix's UD-901c
+            // cleanup-DELETE wipe the just-upserted destination root row. The moved
+            // folder ended up with no remoteId/metadata in the DB on every folder
+            // rename/move, and the next scan treated it as untracked.
+            //
+            // Invariant under test: after a folder move-remote, the destination folder
+            // row carries the canonical remoteId from provider.move() AND the descendant
+            // rows survive at the new prefix.
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/a", isFolder = true),
+                    cloudItem("/a/docs", isFolder = true),
+                    cloudItem("/a/docs/file.txt", size = 42),
+                )
+            engine.syncOnce()
+
+            // Sanity: pre-move state.
+            val preMoveDocs = db.getEntry("/a/docs")
+            assertNotNull(preMoveDocs)
+            assertTrue(preMoveDocs.isFolder)
+
+            // Local cross-parent move triggers a remote-side move.
+            val aDir = syncRoot.resolve("a")
+            val bDir = syncRoot.resolve("b")
+            Files.createDirectories(bDir)
+            Files.move(aDir.resolve("docs"), bDir.resolve("docs"))
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            // Source path is gone.
+            assertNull(db.getEntry("/a/docs"), "source row must be deleted after move")
+
+            // Destination folder row exists AND carries the canonical remoteId
+            // from FakeCloudProvider.move() (which returns CloudItem(id = "id-$path")).
+            val movedDocs = db.getEntry("/b/docs")
+            assertNotNull(movedDocs, "destination folder row must survive the rename — was being wiped by renamePrefix")
+            assertTrue(movedDocs.isFolder)
+            assertEquals(
+                "id-/b/docs",
+                movedDocs.remoteId,
+                "destination folder row must carry the remoteId returned by provider.move(), not be reset to null",
+            )
+
+            // Descendant rows survive at the new prefix (the renamePrefix UPDATE
+            // moves them; this was already working pre-fix, regression-guard it).
+            val movedFile = db.getEntry("/b/docs/file.txt")
+            assertNotNull(movedFile, "descendant rows must survive the rename")
+            assertEquals(42, movedFile.remoteSize)
         }
 
     // UD-297 — empty-local + populated-DB sanity check
