@@ -22,6 +22,8 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
+    // UD-203: MockEngine for request-id propagation tests.
+    testImplementation(libs.ktor.client.mock)
 }
 
 tasks.test {

@@ -276,6 +276,18 @@ open class S3ApiService(
     /** Convert an S3 key (foo/bar.txt) to a virtual path (/foo/bar.txt). */
     fun keyToPath(key: String): String = "/$key"
 
+    /**
+     * UD-203: pull the AWS S3 correlation headers off a response. AWS
+     * (and S3-compatible backends like MinIO) emit `x-amz-request-id`
+     * (primary; surfaced to AWS support tickets) and `x-amz-id-2` (the
+     * extended datacenter trace). MinIO ships both even though only the
+     * first is meaningful in self-hosted deployments. Returns null when
+     * the header is absent.
+     */
+    private fun extractRequestId(response: HttpResponse): String? = response.headers["x-amz-request-id"]
+
+    private fun extractExtendedRequestId(response: HttpResponse): String? = response.headers["x-amz-id-2"]
+
     private suspend fun checkResponse(
         response: HttpResponse,
         url: String,
@@ -284,12 +296,22 @@ open class S3ApiService(
         val body = response.bodyAsText()
         val code = xmlValue(body, "Code") ?: response.status.value.toString()
         val message = xmlValue(body, "Message") ?: ""
+        val requestId = extractRequestId(response)
+        val extendedRequestId = extractExtendedRequestId(response)
         when {
             response.status == HttpStatusCode.Unauthorized ||
                 response.status == HttpStatusCode.Forbidden ->
-                throw AuthenticationException("S3 auth failed ($code): $message [$url]")
+                throw AuthenticationException(
+                    "S3 auth failed ($code): $message [$url]",
+                    requestId = requestId,
+                )
             else ->
-                throw S3Exception("S3 error ($code): $message [$url]", response.status.value)
+                throw S3Exception(
+                    "S3 error ($code): $message [$url]",
+                    statusCode = response.status.value,
+                    requestId = requestId,
+                    extendedRequestId = extendedRequestId,
+                )
         }
     }
 
