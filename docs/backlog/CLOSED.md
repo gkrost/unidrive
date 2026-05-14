@@ -771,3 +771,54 @@ opened: 2026-05-04
 
 - internxt/sdk research — `Top 5 ideas to steal` #3.
 - BACKLOG ticket near line 1095-1130 (existing error-parsing audit) — this is the captured-fields extension for the request-id specifically.
+
+---
+id: UD-810
+title: Test cleanup: :app:core misleading + data-class delete-candidates (UD-813 batch A)
+category: tests
+priority: low
+effort: S
+status: closed
+closed: 2026-05-14
+resolved_by: commit 246769d. Two misleading tests renamed to match their assertions (allByTier applies the canonical tier ordering; every discovered metadata has non-blank id and displayName); nine data-class-contract tests deleted (ProviderMetadataTest: 5; CloudItemTest: 4). CHANGELOG [Unreleased] / Removed records the deletions; TEST-AUDIT.md table flipped to 'Resolved by 246769d' for the four affected rows. Business-invariant defaults tests retained.
+opened: 2026-05-13
+---
+## Source
+
+UD-813 audit of `:app:core` tests (2026-05-13). See
+[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
+
+This is the lower-risk batch — misleading test names and data-class
+delete-candidates. Rewrites are mechanical: rename to match the body, or
+delete with a one-line CHANGELOG note. No behaviour changes in production
+code.
+
+## Scope
+
+`core/app/core/src/test/`:
+
+- **`ProviderMetadataTest.allByTier returns sorted metadata`** — name promises
+  sort verification; body iterates without checking sort order. Either
+  rewrite to assert the canonical tier order
+  (`["Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global"]`) or rename
+  to "every entry has non-blank tier" if sort is intentionally not pinned.
+- **`ProviderMetadataTest.allMetadata returns list`** — body's `for (meta in all)`
+  runs 0 iterations on empty list, comment "may be empty" excuses the
+  vacuous pass. Either move the structural assertion to the `:app:cli`
+  classpath-rich variant (see new `ProviderRegistryDiscoveryTest`) and
+  delete here, or keep as a "per-entry structural invariant when present"
+  test with the explicit name.
+- **`ProviderMetadataTest.ProviderMetadata stores all required fields` /
+  `optional fields` / `data class equality and copy`** — assert Kotlin
+  data-class generation. Tests the compiler. Delete with a CHANGELOG note.
+- **`CloudItemTest.equal items have equal hashCodes` /
+  `items differing in any field are not equal` / `hashCode is stable across calls` /
+  `works correctly as HashMap key`** — same delete-candidate class.
+
+## Acceptance
+
+- Rewritten or deleted per the table above.
+- CHANGELOG `[Unreleased] / Removed` entry for each deleted test, naming
+  the file and the reason ("delete-candidate per UD-813 audit").
+- `TEST-AUDIT.md` table updated: each row's "Action" cell flips to the
+  commit that resolved it.

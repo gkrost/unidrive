@@ -5805,54 +5805,6 @@ CI or marked `@Tag("manual")`.
 Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
 dissolution.
 ---
-id: UD-810
-title: Test cleanup: :app:core misleading + data-class delete-candidates (UD-813 batch A)
-category: tests
-priority: low
-effort: S
-status: open
-opened: 2026-05-13
----
-## Source
-
-UD-813 audit of `:app:core` tests (2026-05-13). See
-[`docs/dev/TEST-AUDIT.md`](../../dev/TEST-AUDIT.md) for the full table.
-
-This is the lower-risk batch — misleading test names and data-class
-delete-candidates. Rewrites are mechanical: rename to match the body, or
-delete with a one-line CHANGELOG note. No behaviour changes in production
-code.
-
-## Scope
-
-`core/app/core/src/test/`:
-
-- **`ProviderMetadataTest.allByTier returns sorted metadata`** — name promises
-  sort verification; body iterates without checking sort order. Either
-  rewrite to assert the canonical tier order
-  (`["Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global"]`) or rename
-  to "every entry has non-blank tier" if sort is intentionally not pinned.
-- **`ProviderMetadataTest.allMetadata returns list`** — body's `for (meta in all)`
-  runs 0 iterations on empty list, comment "may be empty" excuses the
-  vacuous pass. Either move the structural assertion to the `:app:cli`
-  classpath-rich variant (see new `ProviderRegistryDiscoveryTest`) and
-  delete here, or keep as a "per-entry structural invariant when present"
-  test with the explicit name.
-- **`ProviderMetadataTest.ProviderMetadata stores all required fields` /
-  `optional fields` / `data class equality and copy`** — assert Kotlin
-  data-class generation. Tests the compiler. Delete with a CHANGELOG note.
-- **`CloudItemTest.equal items have equal hashCodes` /
-  `items differing in any field are not equal` / `hashCode is stable across calls` /
-  `works correctly as HashMap key`** — same delete-candidate class.
-
-## Acceptance
-
-- Rewritten or deleted per the table above.
-- CHANGELOG `[Unreleased] / Removed` entry for each deleted test, naming
-  the file and the reason ("delete-candidate per UD-813 audit").
-- `TEST-AUDIT.md` table updated: each row's "Action" cell flips to the
-  commit that resolved it.
----
 id: UD-811
 title: Test cleanup: :app:core retry-budget + dedup + request-id (UD-813 batch B)
 category: tests
