@@ -26,7 +26,13 @@ class OneDriveProvider(
             tokenManager.getValidToken(forceRefresh).accessToken
         }
 
-    override val isAuthenticated: Boolean get() = tokenManager.isAuthenticated
+    // UD-007: tokenManager is the source of truth — the setter is a no-op so
+    // the default CloudProvider.logout()'s `isAuthenticated = false` becomes
+    // harmless; this provider's own `logout()` override flips state via
+    // `tokenManager.logout()` which the getter then reflects.
+    override var isAuthenticated: Boolean
+        get() = tokenManager.isAuthenticated
+        set(_) { /* delegated to tokenManager; setter is a no-op */ }
     override val canAuthenticate: Boolean get() = Files.exists(config.tokenPath.resolve("token.json"))
     val includeShared: Boolean get() = config.includeShared
 

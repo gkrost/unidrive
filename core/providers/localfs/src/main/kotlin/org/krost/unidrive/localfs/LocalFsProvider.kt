@@ -33,7 +33,6 @@ class LocalFsProvider(
     override val displayName = "Local Filesystem"
 
     override var isAuthenticated: Boolean = false
-        private set
     override val canAuthenticate: Boolean get() = true
 
     override fun capabilities(): Set<Capability> =
@@ -52,9 +51,7 @@ class LocalFsProvider(
         isAuthenticated = true
     }
 
-    override suspend fun logout() {
-        isAuthenticated = false
-    }
+    // UD-007: logout() default in CloudProvider flips isAuthenticated.
 
     override fun close() {}
 

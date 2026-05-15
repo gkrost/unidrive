@@ -116,7 +116,7 @@ private class InMemoryProvider(
 ) : CloudProvider {
     override val id = "test"
     override val displayName = "Test"
-    override val isAuthenticated = true
+    override var isAuthenticated = true
 
     override fun capabilities(): Set<org.krost.unidrive.Capability> = emptySet()
 

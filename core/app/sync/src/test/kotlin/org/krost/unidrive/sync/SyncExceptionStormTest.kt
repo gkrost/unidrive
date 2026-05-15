@@ -119,7 +119,7 @@ class SyncExceptionStormTest {
     private class CountingFailProvider : org.krost.unidrive.CloudProvider {
         override val id = "fake-counting"
         override val displayName = "FakeCounting"
-        override val isAuthenticated = true
+        override var isAuthenticated = true
 
         var deltaItems = listOf<CloudItem>()
         var deltaCursor = "cursor-1"

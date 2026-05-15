@@ -773,7 +773,7 @@ class CloudRelocatorTest {
         override val id: String,
     ) : CloudProvider {
         override val displayName = id
-        override val isAuthenticated = true
+        override var isAuthenticated = true
 
         override fun capabilities(): Set<org.krost.unidrive.Capability> = setOf(org.krost.unidrive.Capability.Delta)
 

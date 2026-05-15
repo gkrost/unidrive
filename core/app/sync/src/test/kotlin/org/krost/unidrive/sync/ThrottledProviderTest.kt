@@ -18,7 +18,7 @@ class ThrottledProviderTest {
     ) : CloudProvider {
         override val id = "stub"
         override val displayName = "Stub"
-        override val isAuthenticated = true
+        override var isAuthenticated = true
 
         override fun capabilities(): Set<org.krost.unidrive.Capability> = emptySet()
 

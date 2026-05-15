@@ -29,7 +29,6 @@ class SftpProvider(
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
 
     override var isAuthenticated: Boolean = false
-        private set
     override val canAuthenticate: Boolean get() =
         config.host.isNotBlank() && (config.identityFile != null || config.password != null)
 

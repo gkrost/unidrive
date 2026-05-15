@@ -39,7 +39,6 @@ class S3Provider(
         )
 
     override var isAuthenticated: Boolean = false
-        private set
     override val canAuthenticate: Boolean get() =
         config.bucket.isNotBlank() && config.accessKey.isNotBlank() && config.secretKey.isNotBlank()
 
@@ -56,9 +55,7 @@ class S3Provider(
         }
     }
 
-    override suspend fun logout() {
-        isAuthenticated = false
-    }
+    // UD-007: logout() default in CloudProvider flips isAuthenticated.
 
     override fun close() = api.close()
 

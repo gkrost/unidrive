@@ -38,7 +38,6 @@ class WebDavProvider internal constructor(
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
 
     override var isAuthenticated: Boolean = false
-        private set
     override val canAuthenticate: Boolean get() =
         config.baseUrl.isNotBlank() && config.username.isNotBlank() && config.password.isNotBlank()
 
@@ -49,9 +48,7 @@ class WebDavProvider internal constructor(
         log.debug("Auth: {}", config.baseUrl)
     }
 
-    override suspend fun logout() {
-        isAuthenticated = false
-    }
+    // UD-007: logout() default in CloudProvider flips isAuthenticated.
 
     override fun close() = api.close()
 

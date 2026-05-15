@@ -41,7 +41,7 @@ class OneDriveShareManageTest {
                 object : CloudProvider {
                     override val id = "stub"
                     override val displayName = "Stub"
-                    override val isAuthenticated = false
+                    override var isAuthenticated = false
 
                     override fun capabilities(): Set<Capability> = emptySet()
 
@@ -93,7 +93,7 @@ class OneDriveShareManageTest {
                 object : CloudProvider {
                     override val id = "stub"
                     override val displayName = "Stub"
-                    override val isAuthenticated = false
+                    override var isAuthenticated = false
 
                     override fun capabilities(): Set<Capability> = emptySet()
 

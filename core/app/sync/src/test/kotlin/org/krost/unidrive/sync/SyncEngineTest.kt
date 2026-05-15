@@ -1151,7 +1151,7 @@ class SyncEngineTest {
     class FakeCloudProvider : CloudProvider {
         override val id = "fake"
         override val displayName = "Fake"
-        override val isAuthenticated = true
+        override var isAuthenticated = true
 
         var supportsFastBootstrap = false
         var deltaFromLatestCalls = 0
