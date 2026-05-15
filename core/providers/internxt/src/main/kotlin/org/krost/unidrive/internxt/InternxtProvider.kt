@@ -1,6 +1,7 @@
 package org.krost.unidrive.internxt
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
 import org.krost.unidrive.internxt.model.FolderContentResponse
@@ -41,6 +42,20 @@ class InternxtProvider(
     // trade for the in-process scope.
     private val folderCache = FolderUuidCache()
 
+    // UD-364: process-lifetime cache of /files/limits.maxUploadFileSize.
+    // Lazy single-flight: first maxFileSizeBytes() call fetches + caches;
+    // subsequent calls return cached. Server returns null for "no cap",
+    // which we still cache (the negative answer is also stable per plan).
+    // Failures (network, 401) do NOT poison the cache — the next call retries.
+    // User plans change rarely; no eviction.
+    private val limitsLock = Any()
+
+    @Volatile
+    private var fileLimitsCached: Long? = null
+
+    @Volatile
+    private var fileLimitsResolved: Boolean = false
+
     // UD-007: authService is the source of truth — see OneDriveProvider for
     // the rationale. Setter is a no-op; the override of `logout()` below
     // flips state via `authService.logout()`.
@@ -54,6 +69,31 @@ class InternxtProvider(
             Capability.Delta,
             Capability.QuotaExact,
         )
+
+    /**
+     * UD-364: per-plan upload cap from `GET /files/limits` (`maxUploadFileSize`).
+     *
+     * Caches the first successful result for the lifetime of this provider
+     * instance. On fetch failure (network, 401, malformed body) returns null
+     * and leaves the cache unset so the next call retries — never caches
+     * the failure. The non-suspend SPI requires `runBlocking`; the call is
+     * O(one HTTP round-trip) and only runs once per provider lifetime.
+     */
+    override fun maxFileSizeBytes(): Long? {
+        if (fileLimitsResolved) return fileLimitsCached
+        return synchronized(limitsLock) {
+            if (fileLimitsResolved) return@synchronized fileLimitsCached
+            try {
+                val limits = runBlocking { api.getFileLimits() }
+                fileLimitsCached = limits.maxUploadFileSize
+                fileLimitsResolved = true
+                fileLimitsCached
+            } catch (e: Exception) {
+                log.warn("UD-364: GET /files/limits failed ({}); maxFileSizeBytes()=null, will retry next call", e.message)
+                null
+            }
+        }
+    }
 
     override suspend fun authenticate() {
         authService.initialize()
