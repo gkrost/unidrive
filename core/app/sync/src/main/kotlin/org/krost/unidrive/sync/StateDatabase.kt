@@ -200,6 +200,7 @@ class StateDatabase(
         }
     }
 
+    @Synchronized
     fun getAllEntries(): List<SyncEntry> {
         conn.createStatement().use { stmt ->
             val rs = stmt.executeQuery("SELECT * FROM sync_entries")
