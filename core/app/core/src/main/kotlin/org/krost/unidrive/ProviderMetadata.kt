@@ -95,4 +95,30 @@ object ProviderRegistry {
     fun isKnown(type: String): Boolean = type in knownTypes
 
     fun isKnownType(type: String): Boolean = type in defaultTypes
+
+    /**
+     * UD-012: the registry's opinion of "what should we default to when the
+     * user hasn't pinned a profile?"
+     *
+     * Returns `"localfs"` when it's discovered on the classpath — it has zero
+     * setup cost, never fails the auth step, and is always present in v0.1.0
+     * builds. Falls back to the first SPI-discovered provider (deterministic
+     * by classpath order) otherwise. Falls back to `"localfs"` (the literal
+     * string, even if no factory is discovered) when nothing is loaded — this
+     * is the test-classpath path, and downstream `resolveProfile()` will
+     * surface a readable error if the choice is unusable.
+     *
+     * Replaces the historical `"onedrive"` literal that
+     * `SyncConfig.kt` carried as a single-provider-era artefact. Production
+     * callers (`SyncConfig.load / defaults / parse / resolveDefaultProfile`)
+     * delegate here instead of hardcoding a provider id.
+     */
+    fun defaultProvider(): String {
+        val discovered = loader.toList().map { it.id }
+        return when {
+            "localfs" in discovered -> "localfs"
+            discovered.isNotEmpty() -> discovered.first()
+            else -> "localfs"
+        }
+    }
 }
