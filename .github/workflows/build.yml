@@ -62,6 +62,17 @@ jobs:
         shell: bash
         run: bash scripts/ci/check-no-provider-string-dispatch.sh
 
+      - name: Doc drift check (UD-762)
+        # Lightweight grep/regex checks for the most common doc-vs-code drifts
+        # (Kotlin/Logback versions, module count, CLI subcommand count, provider
+        # list, BACKLOG ID-range conformance). Sub-second; no Gradle.
+        # `continue-on-error: true` until pre-existing drift is resolved in
+        # follow-up tickets — see commit body for the inventory of findings
+        # on this script's first run against main HEAD.
+        shell: bash
+        continue-on-error: true
+        run: bash scripts/ci/check-docs.sh
+
       - name: Semgrep security scan
         run: pip install semgrep && semgrep scan --config .semgrep.yml --error
 
