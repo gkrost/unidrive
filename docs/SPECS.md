@@ -51,7 +51,7 @@ have to change to bring them back.
 | `app/sync` | Three-phase sync engine (gather→reconcile→apply), SQLite state DB, inotify watcher, placeholder management, conflict log, credential vault | [`core/app/sync/`](../core/app/sync) | ✅ |
 | `app/xtra` | AES-256-GCM client-side encryption with RSA-2048-OAEP key wrapping | [`core/app/xtra/`](../core/app/xtra) | ✅ |
 | `app/cli` | PicoCLI, 19 subcommands | [`core/app/cli/`](../core/app/cli) | ✅ |
-| `app/mcp` | MCP server with 15 tools | [`core/app/mcp/`](../core/app/mcp) | 💻 **15 tools verified** (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:20-24`) |
+| `app/mcp` | MCP server with 23 tools | [`core/app/mcp/`](../core/app/mcp) | 💻 **23 tools verified** (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62`) |
 | `providers/onedrive` | MS Graph, OAuth2, webhook subscriptions, shared-folder support | [`core/providers/onedrive/`](../core/providers/onedrive) | ✅ |
 | `providers/s3` | SigV4 HTTP, snapshot delta | [`core/providers/s3/`](../core/providers/s3) | ✅ |
 | `providers/sftp` | Apache MINA SSHD, snapshot delta | [`core/providers/sftp/`](../core/providers/sftp) | ✅ |
@@ -116,12 +116,22 @@ Two distinct IPC surfaces exist. Each has its own transport and format. (A third
 
 **Transport:** child process stdin/stdout. Framing: one JSON-RPC frame per line (no `Content-Length` prefixes).
 
-**Tool set (15, 💻 verified** at `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:20-24`):
+**Tool set (23, 💻 verified** at `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62`):
+
+Original 15 user-facing tools:
 
 ```
 unidrive_status, unidrive_sync, unidrive_get, unidrive_free, unidrive_pin,
 unidrive_conflicts, unidrive_ls, unidrive_config, unidrive_trash, unidrive_versions,
 unidrive_share, unidrive_relocate, unidrive_watch_events, unidrive_quota, unidrive_backup
+```
+
+Plus 8 admin verbs added under [UD-216](backlog/CLOSED.md#ud-216) for end-to-end LLM-driven management:
+
+```
+unidrive_auth_begin, unidrive_auth_complete, unidrive_logout,
+unidrive_profile_list, unidrive_profile_add, unidrive_profile_remove,
+unidrive_profile_set, unidrive_identity
 ```
 
 **Resources (3):** `unidrive://config`, `unidrive://conflicts`, `unidrive://profiles`.
