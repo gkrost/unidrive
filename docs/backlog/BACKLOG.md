@@ -2971,6 +2971,7 @@ category: architecture
 priority: low
 effort: XS
 status: open
+depends_on: UD-821
 code_refs:
   - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:41
   - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:74-76
@@ -2978,6 +2979,8 @@ code_refs:
   - core/app/core/src/test/kotlin/org/krost/unidrive/SpiDiscoveryTest.kt
 opened: 2026-05-02
 ---
+
+> **2026-05-15 update:** Tier-3 batch attempted this and surfaced that `:app:sync:test` fails 7 tests because its test classpath has no `META-INF/services/org.krost.unidrive.ProviderFactory` resource — the silent fallback was masking this. Implementation is correct; it just needs UD-821 (test-scope stub `ProviderFactory`) to land first. Agent's working branch `refactor/UD-013-remove-isKnownType-dead-code` (commit `d0389f1`) is preserved locally for re-merge once UD-821 closes.
 ## Problem
 
 `core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt`
@@ -3929,59 +3932,6 @@ Key choice: `(provider-id, method, args)` — e.g. `"internxt:listChildren:/Docu
 
 - drive-desktop `src/infra/drive-server-wip/in/get-in-flight-request.ts` — direct shape source.
 - Cross-repo synthesis: "the single highest-leverage finding."
----
-id: UD-207
-title: Codify HTTP retry-policy matrix (5xx/4xx/network/unknown) in HttpRetryBudget KDoc + tests
-category: core
-priority: low
-effort: XS
-status: open
-opened: 2026-05-04
----
-**Source:** drive-desktop research (agent `a876235`, 2026-05-04). Drive-desktop's `client-wrapper.service.ts` carries this comment as the cleanest retry-policy doc-comment in any of the three Internxt repos:
-
-> 2XX: success, 3XX/4XX: don't retry (except 408/429), 5XX: retry always, network errors: retry always, unknown exceptions: retry up to 3.
-
-unidrive's `HttpRetryBudget` (UD-228) should adopt this as its **canonical, documented matrix** — written into the budget's KDoc, locked in unit tests, and cross-linked from `docs/dev/lessons/`. Currently the policy lives in code and per-provider audits but isn't centralised.
-
-## Code refs
-
-- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc target
-- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetTest.kt` — extend with explicit matrix-row tests
-
-## Proposed matrix (verbatim)
-
-| Class | HTTP status / signal | Retry? | Cap | Backoff | Notes |
-|-------|----------------------|--------|-----|---------|-------|
-| Success | 2xx | n/a | n/a | n/a | |
-| Permanent client error | 4xx (except 408, 429) | **No** | n/a | n/a | Fail fast |
-| Timeout | 408 | Yes | budget.maxRetries | exp + jitter | |
-| Throttle | 429 | Yes | budget.maxRetries | honor `Retry-After` (cap = budget.maxRetryAfter) | UD-232 alignment |
-| Server error | 5xx | Yes | budget.maxRetries | exp + jitter | |
-| Network error (connect/read/SSL) | (no status) | Yes | budget.maxRetries | exp + jitter | |
-| Unknown exception | (caller-classified `Unknown`) | Yes | min(3, budget.maxRetries) | exp + jitter | The lower cap is deliberate |
-
-`exp + jitter` = exponential backoff with full jitter, base=1s, cap=`budget.maxRetryAfter`.
-
-## Acceptance
-
-- `HttpRetryBudget.kt` KDoc includes the table verbatim (markdown table fine).
-- `HttpRetryBudgetTest` has one test per row, asserting the budget's `decide(...)` returns the expected outcome.
-- A second test: removing any row (mocked) fails the suite — locks the matrix as a contract.
-- `docs/dev/lessons/http-retry-policy.md` (new) summarises the matrix with a link back to the budget code.
-- Per-provider audit docs (`docs/providers/*-robustness.md`) cross-link to the matrix instead of restating it.
-
-## Notes
-
-- This is documentation + test-locking, not a behaviour change (assuming the current `HttpRetryBudget` already implements the matrix). If implementation diverges from the matrix, file follow-up tickets per divergence — do not silently rewrite the budget here.
-- Pairs with UD-330 (cross-provider rollout) — when reviewers ask "what's the retry policy?" they should be able to point to this doc, not the code.
-- Out of scope: per-provider override hooks. The budget is intentionally one-policy-fits-all; provider-specific exceptions get their own ticket.
-
-## Cross-refs
-
-- drive-desktop `src/infra/drive-server-wip/in/client-wrapper.service.ts` — quotation source.
-- UD-228 / UD-330 — the budget itself and its rollout.
-- UD-232 — throttle / Retry-After.
 ---
 id: UD-208
 title: Audit JWT-refresh model across providers; verify per-call check vs scheduler-based
@@ -11543,3 +11493,90 @@ Recommended: Option 1 (sweep) as a one-time cleanup, then evaluate whether Optio
 - `scripts/dev/backlog.py` — the script that creates these anchors
 - `docs/backlog/BACKLOG.md` UD-216, UD-218, UD-219 — current orphan-anchor entries
 - 2026-05-15 tier-2 batch session — where this friction surfaced
+---
+id: UD-821
+title: Add test-scope ProviderFactory stub to :app:sync (unblocks UD-013)
+category: tests
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/test/kotlin/
+  - core/app/sync/src/test/resources/META-INF/services/
+opened: 2026-05-15
+---
+**Source:** 2026-05-15 tier-3 batch surfaced this blocker while implementing UD-013 (which proposed replacing the silent SPI-discovery fallback with `error(...)`). When the silent fallback is removed, `./gradlew :app:sync:test` fails 7 tests because `:app:sync`'s test classpath has no provider implementations registered via `ServiceLoader`.
+
+## Issue
+
+`ProviderRegistry` (in `:app:core`) uses `ServiceLoader.load(ProviderFactory::class.java)` to discover provider plugins at runtime. Each provider module ships `src/main/resources/META-INF/services/org.krost.unidrive.ProviderFactory` listing its factory class.
+
+`:app:sync` does NOT depend on any provider module — by design, it depends only on `:app:core` to keep the engine provider-agnostic. So when `:app:sync`'s tests run, the `ServiceLoader` lookup returns empty.
+
+Today this is masked by the `defaultTypes` silent fallback that UD-013 wants to delete. Without that fallback, 7 `:app:sync` tests fail because they construct a `ProviderRegistry` and expect a non-empty result.
+
+## Impact
+
+Severity: medium.
+
+Blocks UD-013 (fail-loud SPI discovery). UD-013 is the right thing to do — silent fallbacks hide misconfiguration in production — but cannot land until the test fixture is in place.
+
+Confirmed in the tier-3 batch's UD-013 worktree:
+
+```
+./gradlew :app:sync:test
+451 tests completed, 7 failed
+> Task :app:sync:test FAILED
+```
+
+The 7 failing tests will be the ones that construct a `ProviderRegistry` directly or indirectly.
+
+## Fix shape
+
+Add a test-scope stub `ProviderFactory` and a META-INF/services file pointing at it.
+
+1. Create `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/testfixtures/StubProviderFactory.kt`:
+   ```kotlin
+   package org.krost.unidrive.sync.testfixtures
+
+   import org.krost.unidrive.CloudProvider
+   import org.krost.unidrive.ProviderFactory
+   import org.krost.unidrive.ProviderMetadata
+
+   /**
+    * Test-only ProviderFactory so :app:sync tests don't trip on the
+    * fail-loud SPI discovery from UD-013. Returns a stub CloudProvider
+    * that throws if any operation is actually invoked — tests must
+    * either inject their own provider or not exercise the provider path.
+    */
+   class StubProviderFactory : ProviderFactory {
+       override val metadata = ProviderMetadata(
+           id = "stub-test",
+           displayName = "Stub (test fixture)",
+       )
+
+       override fun create(config: Map<String, Any?>): CloudProvider =
+           error("StubProviderFactory.create() called — tests must inject a real provider")
+
+       override fun isAuthenticated(): Boolean = false
+   }
+   ```
+
+   (Adapt the `ProviderFactory` signature to whatever the current interface is; the above sketches it.)
+
+2. Create `core/app/sync/src/test/resources/META-INF/services/org.krost.unidrive.ProviderFactory` containing one line:
+   ```
+   org.krost.unidrive.sync.testfixtures.StubProviderFactory
+   ```
+
+3. Verify: `./gradlew :app:sync:test` passes with the UD-013 fail-loud change applied. If any of the 7 originally-failing tests still fail, they were depending on specific provider IDs (`localfs`, etc.); update them to use `"stub-test"` or to inject a provider explicitly rather than relying on SPI discovery.
+
+## Cross-refs
+
+- UD-013 — the fail-loud SPI discovery change blocked on this
+- `core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt` — where the fail-loud `error(...)` would go (currently has the silent fallback)
+- 2026-05-15 tier-3 batch surfaced this — agent's report flagged it correctly
+
+## Ordering
+
+Land UD-821 first, then UD-013 can land cleanly. Don't reverse the order — UD-013 alone breaks main.

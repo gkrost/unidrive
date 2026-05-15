@@ -2190,3 +2190,59 @@ No data-loss path exists: nothing about disabling stores state outside the toggl
 ## Surfaced
 
 2026-05-02 session, after the UD-240g + UD-240i sequence (4 successive `./gradlew build` invocations totalling ~6 minutes of which ktlint was ~30 % of wall time). User explicitly asked to disable in-session.
+
+---
+id: UD-207
+title: Codify HTTP retry-policy matrix (5xx/4xx/network/unknown) in HttpRetryBudget KDoc + tests
+category: core
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-15
+resolved_by: commit e750cc4. Implemented in commit e750cc4 (2026-05-04, 'codify HTTP retry-policy matrix in HttpRetryBudget KDoc + tests + lesson') with refinements in commit 6556992 ('test(UD-811): :app:core retry-budget + request-id rewrites'). Closure missed in original cycle; tier-3 batch surfaced the gap.
+opened: 2026-05-04
+---
+**Source:** drive-desktop research (agent `a876235`, 2026-05-04). Drive-desktop's `client-wrapper.service.ts` carries this comment as the cleanest retry-policy doc-comment in any of the three Internxt repos:
+
+> 2XX: success, 3XX/4XX: don't retry (except 408/429), 5XX: retry always, network errors: retry always, unknown exceptions: retry up to 3.
+
+unidrive's `HttpRetryBudget` (UD-228) should adopt this as its **canonical, documented matrix** — written into the budget's KDoc, locked in unit tests, and cross-linked from `docs/dev/lessons/`. Currently the policy lives in code and per-provider audits but isn't centralised.
+
+## Code refs
+
+- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc target
+- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetTest.kt` — extend with explicit matrix-row tests
+
+## Proposed matrix (verbatim)
+
+| Class | HTTP status / signal | Retry? | Cap | Backoff | Notes |
+|-------|----------------------|--------|-----|---------|-------|
+| Success | 2xx | n/a | n/a | n/a | |
+| Permanent client error | 4xx (except 408, 429) | **No** | n/a | n/a | Fail fast |
+| Timeout | 408 | Yes | budget.maxRetries | exp + jitter | |
+| Throttle | 429 | Yes | budget.maxRetries | honor `Retry-After` (cap = budget.maxRetryAfter) | UD-232 alignment |
+| Server error | 5xx | Yes | budget.maxRetries | exp + jitter | |
+| Network error (connect/read/SSL) | (no status) | Yes | budget.maxRetries | exp + jitter | |
+| Unknown exception | (caller-classified `Unknown`) | Yes | min(3, budget.maxRetries) | exp + jitter | The lower cap is deliberate |
+
+`exp + jitter` = exponential backoff with full jitter, base=1s, cap=`budget.maxRetryAfter`.
+
+## Acceptance
+
+- `HttpRetryBudget.kt` KDoc includes the table verbatim (markdown table fine).
+- `HttpRetryBudgetTest` has one test per row, asserting the budget's `decide(...)` returns the expected outcome.
+- A second test: removing any row (mocked) fails the suite — locks the matrix as a contract.
+- `docs/dev/lessons/http-retry-policy.md` (new) summarises the matrix with a link back to the budget code.
+- Per-provider audit docs (`docs/providers/*-robustness.md`) cross-link to the matrix instead of restating it.
+
+## Notes
+
+- This is documentation + test-locking, not a behaviour change (assuming the current `HttpRetryBudget` already implements the matrix). If implementation diverges from the matrix, file follow-up tickets per divergence — do not silently rewrite the budget here.
+- Pairs with UD-330 (cross-provider rollout) — when reviewers ask "what's the retry policy?" they should be able to point to this doc, not the code.
+- Out of scope: per-provider override hooks. The budget is intentionally one-policy-fits-all; provider-specific exceptions get their own ticket.
+
+## Cross-refs
+
+- drive-desktop `src/infra/drive-server-wip/in/client-wrapper.service.ts` — quotation source.
+- UD-228 / UD-330 — the budget itself and its rollout.
+- UD-232 — throttle / Retry-After.
