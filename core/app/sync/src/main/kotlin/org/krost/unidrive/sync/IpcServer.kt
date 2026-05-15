@@ -76,6 +76,13 @@ class IpcServer(
 
         val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
         server.bind(UnixDomainSocketAddress.of(socketPath))
+        // UD-100: defense-in-depth — set 0600 on socket file for parity with parent dir 0700 (tempSocketDir() at line 316).
+        runCatching {
+            Files.setPosixFilePermissions(
+                socketPath,
+                PosixFilePermissions.fromString("rw-------"),
+            )
+        }
         serverChannel = server
 
         acceptJob =
