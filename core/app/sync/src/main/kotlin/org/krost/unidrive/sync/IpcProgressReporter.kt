@@ -73,11 +73,22 @@ class IpcProgressReporter(
         }
     }
 
-    override fun onActionCount(total: Int) {
+    override fun onActionCount(
+        total: Int,
+        preFilterTotal: Int,
+        filterReason: String?,
+    ) {
         val current = server.syncState ?: IpcServer.SyncState(profile = profileName)
         server.updateState(current.copy(actionTotal = total))
         emit("action_count") {
             put("total", total)
+            // UD-201: surface the pre-filter total and drop reason so IPC
+            // clients (tray, `unidrive status`) can render the divergence
+            // case symmetrically with the CLI summary.
+            if (preFilterTotal != total) {
+                put("pre_filter_total", preFilterTotal)
+                if (filterReason != null) put("filter_reason", filterReason)
+            }
         }
     }
 

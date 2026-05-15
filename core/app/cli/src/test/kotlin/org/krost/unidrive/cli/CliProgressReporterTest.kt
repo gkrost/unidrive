@@ -160,6 +160,82 @@ class CliProgressReporterTest {
         )
     }
 
+    // UD-201: distinguish "reconciler decided N actions" from "executor ran
+    // M actions" when --upload-only / --download-only drops actions. Failure
+    // mode pre-fix: a fresh upload-only sync against a populated remote
+    // printed "Reconciled: 0 actions" and the user concluded "I'm doing
+    // something wrong." Post-fix: two lines, with the drop reason named.
+
+    @Test
+    fun `UD-201 onActionCount with upload-only filter shows reconciled and executed lines`() {
+        val reporter = CliProgressReporter()
+        // 165,509 actions reconciled, all dropped by --upload-only because
+        // local was empty (every action was download-side).
+        reporter.onActionCount(total = 0, preFilterTotal = 165_509, filterReason = "--upload-only")
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Reconciled: 165,509 actions"),
+            "expected reconciled line with pre-filter count; got: $output",
+        )
+        assertTrue(
+            output.contains("Executed:") && output.contains("0 ") &&
+                output.contains("--upload-only filter dropped 165,509"),
+            "expected executed line naming the drop reason and count; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-201 onActionCount with download-only filter shows reconciled and executed lines`() {
+        val reporter = CliProgressReporter()
+        // Full local + empty remote: 800 actions reconciled, 750 dropped
+        // (uploads), 50 executed (Conflicts / RemoveEntry / etc).
+        reporter.onActionCount(total = 50, preFilterTotal = 800, filterReason = "--download-only")
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Reconciled: 800 actions"),
+            "expected reconciled line; got: $output",
+        )
+        assertTrue(
+            output.contains("Executed:") && output.contains("50 ") &&
+                output.contains("--download-only filter dropped 750"),
+            "expected executed line naming download-only drop reason; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-201 onActionCount with bidirectional sync no divergence shows single line`() {
+        val reporter = CliProgressReporter()
+        // No filter, no divergence — emit the single-line legacy summary.
+        reporter.onActionCount(total = 42, preFilterTotal = 42, filterReason = null)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Reconciled: 42 actions"),
+            "expected single-line summary; got: $output",
+        )
+        assertFalse(
+            output.contains("Executed:"),
+            "no Executed line when reconciled equals executed; got: $output",
+        )
+    }
+
+    @Test
+    fun `UD-201 onActionCount legacy single-argument call still works`() {
+        // Source-compatibility check: existing callers that pass only `total`
+        // rely on the default values for preFilterTotal and filterReason.
+        // Output must remain the single-line "Reconciled: N actions" form.
+        val reporter = CliProgressReporter()
+        reporter.onActionCount(12)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("Reconciled: 12 actions"),
+            "single-arg call must still produce the legacy line; got: $output",
+        )
+        assertFalse(
+            output.contains("Executed:"),
+            "single-arg call must NOT emit a divergence line; got: $output",
+        )
+    }
+
     // UD-745 — failed count surfaces in summary when non-zero.
 
     @Test

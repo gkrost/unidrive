@@ -630,6 +630,22 @@ class InternxtApiService(
         return QuotaInfo(total = maxBytes, used = usedBytes, remaining = maxBytes - usedBytes)
     }
 
+    /**
+     * UD-364: GET /files/limits — per-tier file size cap.
+     *
+     * Source of truth: drive-server-wip `src/modules/file/dto/get-file-limits.dto.ts`
+     * shape: `{ versioning: VersioningLimitsDto, maxUploadFileSize: number | null }`.
+     * Only `maxUploadFileSize` is consumed; versioning fields are ignored
+     * (kotlinx-serialization's `ignoreUnknownKeys` via [UnidriveJson] handles them).
+     * `null` from the server means unlimited / not configured — surfaces as
+     * `FileLimitsResponse.maxUploadFileSize = null`, which the provider maps to
+     * `maxFileSizeBytes() = null` (i.e. no cap).
+     */
+    suspend fun getFileLimits(): FileLimitsResponse {
+        val body = authenticatedGet("$baseUrl/files/limits")
+        return json.decodeFromString<FileLimitsResponse>(body)
+    }
+
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
@@ -749,6 +765,17 @@ data class UsageResponse(
 @Serializable
 data class LimitResponse(
     val maxSpaceBytes: Long = 0,
+)
+
+/**
+ * UD-364: response shape of `GET /files/limits` (drive-server-wip
+ * `GetFileLimitsDto`). `maxUploadFileSize` is a per-tier byte cap, or null
+ * when the server reports no cap. Other fields (`versioning`) are dropped
+ * via `ignoreUnknownKeys`.
+ */
+@Serializable
+data class FileLimitsResponse(
+    val maxUploadFileSize: Long? = null,
 )
 
 class InternxtApiException(

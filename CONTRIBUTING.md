@@ -4,6 +4,8 @@ Thanks for considering a contribution. UniDrive is in early-stage public
 preview — APIs, IPC, and on-disk layout are still moving. Expect
 breakage; expect strong opinions about provenance and trust.
 
+Coding agents: see [CLAUDE.md](CLAUDE.md) (canonical) or [AGENTS.md](AGENTS.md) (tool-agnostic pointer).
+
 ## Before you open a pull request
 
 1. **Discuss first for non-trivial work.** File an issue describing the
