@@ -11289,3 +11289,66 @@ Three sub-steps:
 - `core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:70-77` — `safePath()` candidate
 - `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:324` — `escapeLike()` candidate
 - `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:73` — JWT padding candidate (UD-308)
+---
+id: UD-702
+title: Add AGENTS.md pointer file for tool-agnostic onboarding
+category: tooling
+priority: low
+effort: XS
+status: open
+code_refs:
+  - CLAUDE.md
+  - CONTRIBUTING.md
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15. Tool-agnostic onboarding gap surfaced when comparing unidrive's repo conventions to the cross-tool `AGENTS.md` convention adopted by Codex, OpenCode, Aider, and other non-Claude coding agents.
+
+## Issue
+
+`CLAUDE.md` at the repo root provides detailed project-scoped agent onboarding: quick-start, "Before you X" sections for backlog mutation / log reading / ktlint, commit etiquette, infrastructure context. There is no equivalent file readable by other coding agents that ship with `AGENTS.md` conventions:
+
+- **Codex CLI** reads `AGENTS.md` (Anthropic-derived but tool-distinct).
+- **OpenCode** reads `AGENTS.md`.
+- **Aider** reads `AGENTS.md` and `.aider.conf.yml`.
+- **GitHub Copilot CLI** reads `AGENTS.md` (recent convention).
+
+A new contributor or external agent landing in the repo via one of those tools sees no project-level guidance, has no idea backlog mutation must go through `backlog.py`, may hand-edit `BACKLOG.md` (the exact failure mode `backlog.py` was built to prevent), or may not know about `ktlint-sync.sh` / `log-watch.sh`.
+
+## Impact
+
+Severity: low.
+
+Functionally invisible to the daily Claude Code workflow. Surfaces when:
+
+1. External contributor uses Codex/OpenCode/Aider against the repo — onboarding friction.
+2. The maintainer wants to A/B-test a different coding agent without porting the entire CLAUDE.md content.
+3. Future automation (CI checks, repo-policy linters) wants a stable "agent guidance" anchor file by convention.
+
+## Fix shape
+
+Option A — symlink (zero duplication): `ln -s CLAUDE.md AGENTS.md`. Both files point to the same content. Works on POSIX; Windows clones via WSL or with `core.symlinks=true` also work, but native Windows clones see the symlink as a regular text file containing the literal string `CLAUDE.md`.
+
+Option B — thin pointer file: create `AGENTS.md` with a 3-line body:
+```markdown
+# Agent guidance
+
+The canonical agent-onboarding doc for this repo is [CLAUDE.md](CLAUDE.md).
+Read that file first. All conventions there apply to any coding agent.
+```
+No duplication risk, no symlink concerns. Tool-agnostic agents follow the link.
+
+Option C — fork the content: duplicate `CLAUDE.md` content into `AGENTS.md` and keep both in sync. Highest maintenance burden — drift is guaranteed.
+
+Recommended: **Option B**. Cheap, robust, no platform footguns.
+
+## Verification
+
+- `cat AGENTS.md` from a fresh clone returns the pointer text.
+- Codex/OpenCode/Aider opened against the repo surface the project conventions.
+- Add a one-liner to `CONTRIBUTING.md` noting that both files exist and `CLAUDE.md` is canonical.
+
+## Cross-refs
+
+- `CLAUDE.md` — current canonical agent doc at repo root
+- `CONTRIBUTING.md` — should reference both files once `AGENTS.md` lands
+- Earlier verification pass at 2026-05-15 confirmed `AGENTS.md` is absent
