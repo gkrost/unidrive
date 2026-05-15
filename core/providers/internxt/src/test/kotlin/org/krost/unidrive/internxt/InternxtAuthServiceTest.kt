@@ -140,6 +140,124 @@ class InternxtAuthServiceTest {
             }
         }
 
+    /**
+     * UD-308 invariant: `getValidCredentials()` proactively refreshes when the
+     * stored JWT is expired, instead of returning a known-stale token and forcing
+     * the caller to discover staleness via a 401.
+     *
+     * If this test is removed or loosened, the cold-start latency regression
+     * silently returns: callers will pay an extra 401+refresh round-trip on every
+     * first request after the JWT lifetime expires.
+     */
+    @Test
+    fun `getValidCredentials proactively refreshes when stored jwt is expired`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-proactive-")
+            try {
+                // Seed with an expired JWT (exp = 1 second after epoch).
+                val expiredJwt = makeJwtWithExp(1L)
+                seedCredentials(tmp, jwt = expiredJwt)
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                // Sanity: the seam classifies this JWT as expired.
+                assertTrue(auth.isJwtExpired(), "Test setup: seeded JWT should be expired")
+
+                val creds = auth.getValidCredentials()
+
+                assertEquals(
+                    1,
+                    auth.callCount.get(),
+                    "Expected exactly one refresh roundtrip when stored JWT is expired, " +
+                        "got ${auth.callCount.get()}.",
+                )
+                assertTrue(
+                    creds.jwt.startsWith("refreshed-jwt-#"),
+                    "Expected refreshed jwt from getValidCredentials, got: ${creds.jwt}",
+                )
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `getValidCredentials does not refresh when stored jwt is still valid`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-valid-")
+            try {
+                // exp = now + 1 hour → not expired.
+                val futureExp = System.currentTimeMillis() / 1000 + 3600
+                val freshJwt = makeJwtWithExp(futureExp)
+                seedCredentials(tmp, jwt = freshJwt)
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                assertFalse(auth.isJwtExpired(), "Test setup: seeded JWT should not be expired")
+
+                val creds = auth.getValidCredentials()
+
+                assertEquals(
+                    0,
+                    auth.callCount.get(),
+                    "Expected zero refresh roundtrips when stored JWT is still valid, " +
+                        "got ${auth.callCount.get()}.",
+                )
+                assertEquals(freshJwt, creds.jwt)
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `getValidCredentials still throws when no credentials are stored`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-empty-")
+            try {
+                // No seedCredentials() call — store is empty.
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                assertFailsWith<org.krost.unidrive.AuthenticationException> {
+                    auth.getValidCredentials()
+                }
+                assertEquals(
+                    0,
+                    auth.callCount.get(),
+                    "No credentials → no refresh attempt (would fail anyway, but waste of a round-trip).",
+                )
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    /**
+     * Build a minimal JWT (header.payload.signature) whose payload's `exp` claim
+     * has the given unix-second value. Signature is irrelevant — `isJwtExpired()`
+     * never validates it, it only decodes the payload.
+     *
+     * Note: `isJwtExpired()` decodes via `Base64.getUrlDecoder().decode(payload + "==")`,
+     * which only accepts input where `length % 4 == 2` (i.e. the unpadded base64
+     * needed exactly two `=` of padding). We therefore pad the JSON payload with
+     * a dummy `pad` claim so the byte length is `3k + 1` and the base64 length
+     * is `4k + 2`. Without this the decoder throws and `isJwtExpired()` returns
+     * `true` regardless of the `exp` value — masking the very behaviour the test
+     * is meant to verify.
+     */
+    private fun makeJwtWithExp(expEpochSec: Long): String {
+        val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header = encoder.encodeToString("""{"alg":"HS256","typ":"JWT"}""".toByteArray())
+        // Find a `pad` value whose total payload byte-length is 3k+1.
+        var padLen = 0
+        var raw: String
+        while (true) {
+            raw = """{"exp":$expEpochSec,"pad":"${"x".repeat(padLen)}"}"""
+            if (raw.length % 3 == 1) break
+            padLen++
+        }
+        val payload = encoder.encodeToString(raw.toByteArray())
+        return "$header.$payload.fake-signature"
+    }
+
     @Test
     fun `authenticate succeeds without TFA when challenge tfa is false`() = runBlocking {
         val service = stubbedAuthService(

@@ -251,7 +251,26 @@ open class AuthService(
         throw AuthenticationException("Too many invalid 2FA attempts")
     }
 
-    suspend fun getValidCredentials(): InternxtCredentials = credentials ?: throw AuthenticationException("Not authenticated")
+    /**
+     * Returns the stored credentials, proactively refreshing the JWT if it has expired.
+     *
+     * UD-308: pre-UD-308 this just returned `credentials` or threw, leaving the
+     * refresh to happen reactively when a downstream request came back 401. That
+     * cost every cold-start-after-long-idle call an extra HTTP round-trip
+     * (request → 401 → refresh → retry). Checking [isJwtExpired] up front lets us
+     * refresh once and skip the doomed request entirely.
+     *
+     * Refresh goes through [refreshToken], which serialises concurrent callers via
+     * [RefreshableTokenLatch] (UD-338) — we deliberately do not duplicate any of
+     * that machinery here.
+     *
+     * Absent credentials (never authenticated) still throw [AuthenticationException]
+     * — the contract for that case is unchanged.
+     */
+    suspend fun getValidCredentials(): InternxtCredentials {
+        val current = credentials ?: throw AuthenticationException("Not authenticated")
+        return if (isJwtExpired()) refreshToken() else current
+    }
 
     /**
      * Network seam for the refresh roundtrip. Protected + open so tests can override
