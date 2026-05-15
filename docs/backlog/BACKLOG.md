@@ -11502,7 +11502,6 @@ effort: XS
 status: open
 code_refs:
   - core/app/sync/src/test/kotlin/
-  - core/app/sync/src/test/resources/META-INF/services/
 opened: 2026-05-15
 ---
 **Source:** 2026-05-15 tier-3 batch surfaced this blocker while implementing UD-013 (which proposed replacing the silent SPI-discovery fallback with `error(...)`). When the silent fallback is removed, `./gradlew :app:sync:test` fails 7 tests because `:app:sync`'s test classpath has no provider implementations registered via `ServiceLoader`.

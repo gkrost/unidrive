@@ -135,17 +135,21 @@ fi
 # 7. AGENT-SYNC.md ID-range table vs BACKLOG.md frontmatter.
 # Parse the ID-range table to derive {range -> allowed categories}. Then for
 # every open ticket in BACKLOG.md, verify its `category:` matches one of the
-# categories permitted by its ID's range. Reserved ranges (UD-500..599,
-# UD-600..699) are allowed to host *any* category per the rebinding precedent
-# in AGENT-SYNC.md ("Repurpose retired ranges").
+# categories permitted by its ID's range. The reserved 500-series and
+# 600-series buckets are allowed to host *any* category per the rebinding
+# precedent in AGENT-SYNC.md ("Repurpose retired ranges").
+#
+# (Inline range references intentionally avoid the "UD-NNN" form because
+# backlog-sync.kts scans this file for UD-XXX strings and would flag them as
+# orphan refs. We name the buckets by their leading digit instead.)
 declare -A RANGE_CATS=(
     [0]="architecture"
     [1]="security"
     [2]="core"
     [3]="providers"
     [4]="cli shell-win"
-    [5]=""        # UD-500..599 reserved (was ui) — accept any
-    [6]=""        # UD-600..699 reserved (was protocol) — accept any
+    [5]=""        # 500-bucket reserved (was ui) — accept any
+    [6]=""        # 600-bucket reserved (was protocol) — accept any
     [7]="tooling docs"
     [8]="tests"
     [9]="experimental"
@@ -184,7 +188,7 @@ while IFS=' ' read -r udid cat; do
     num="${udid#UD-}"
     num="${num%%[a-z]}"
     bucket="${num:0:1}"  # first digit -> 0..9 range bucket
-    # AGENT-SYNC.md range is UD-001..099 = bucket 0 (00x, 01x..09x), UD-100..199 = 1, etc.
+    # AGENT-SYNC.md range mapping: 001-099 -> bucket 0, 100-199 -> bucket 1, etc.
     allowed="${RANGE_CATS[$bucket]:-}"
     if [[ -z "$allowed" ]]; then
         # Reserved range, accept any category.
