@@ -6,6 +6,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.sync.computeSnapshotDelta
+import org.krost.unidrive.sync.defaultDeletedItem
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 
@@ -117,20 +118,8 @@ class RcloneProvider(
                 prevCursor = cursor,
                 entrySerializer = RcloneSnapshotEntry.serializer(),
                 hasChanged = ::rcloneHasChanged,
-                deletedItem = { path, entry ->
-                    CloudItem(
-                        id = path,
-                        name = path.substringAfterLast("/"),
-                        path = path,
-                        size = 0,
-                        isFolder = entry.isFolder,
-                        modified = null,
-                        created = null,
-                        hash = null,
-                        mimeType = null,
-                        deleted = true,
-                    )
-                },
+                // UD-008: shared helper from :app:sync; Rclone uses `id = path` default.
+                deletedItem = { path, entry -> defaultDeletedItem(path, entry) },
             )
         }
 

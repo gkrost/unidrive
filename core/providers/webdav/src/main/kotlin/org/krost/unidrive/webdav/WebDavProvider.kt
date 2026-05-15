@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
+import org.krost.unidrive.sync.defaultDeletedItem
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 import java.time.Instant
@@ -153,20 +154,8 @@ class WebDavProvider internal constructor(
                     (curr.etag != null && prev.etag != curr.etag) ||
                     (curr.etag == null && prev.lastModified != curr.lastModified)
             },
-            deletedItem = { path, entry ->
-                CloudItem(
-                    id = path,
-                    name = path.substringAfterLast("/"),
-                    path = path,
-                    size = 0,
-                    isFolder = entry.isFolder,
-                    modified = null,
-                    created = null,
-                    hash = null,
-                    mimeType = null,
-                    deleted = true,
-                )
-            },
+            // UD-008: shared helper from :app:sync; WebDAV uses `id = path` default.
+            deletedItem = { path, entry -> defaultDeletedItem(path, entry) },
         )
     }
 
