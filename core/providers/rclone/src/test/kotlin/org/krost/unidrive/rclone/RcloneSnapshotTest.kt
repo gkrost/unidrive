@@ -1,6 +1,7 @@
 package org.krost.unidrive.rclone
 
 import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.SnapshotTestSupport
 import kotlin.test.*
 
 class RcloneSnapshotTest {
@@ -36,14 +37,12 @@ class RcloneSnapshotTest {
 
     @Test
     fun `empty snapshot encodes and decodes`() {
-        val snapshot = RcloneSnapshot(entries = emptyMap(), timestamp = 0L)
-        val decoded = decode(snapshot.encode())
-        assertTrue(decoded.entries.isEmpty())
+        SnapshotTestSupport.verifyEmptySnapshotRoundTrip(RcloneSnapshotEntry.serializer())
     }
 
     @Test
     fun `decode rejects invalid base64`() {
-        assertFailsWith<Exception> { decode("not-valid-base64!!!") }
+        SnapshotTestSupport.verifyInvalidBase64Rejects(RcloneSnapshotEntry.serializer())
     }
 
     @Test
