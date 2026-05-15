@@ -1,0 +1,28 @@
+name: Cross-repo dependency drift
+
+on:
+  pull_request:
+    paths:
+      - 'core/gradle/libs.versions.toml'
+      - 'scripts/check-version-drift.sh'
+      - '.github/workflows/version-drift.yml'
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout core
+        uses: actions/checkout@v4
+        with:
+          path: unidrive
+
+      - name: Checkout unidrive-android sibling
+        uses: actions/checkout@v4
+        with:
+          repository: gkrost/unidrive-android
+          path: unidrive-android
+          # No token needed — public repo. Adjust if it becomes private.
+
+      - name: Run drift check
+        working-directory: unidrive
+        run: bash scripts/check-version-drift.sh
