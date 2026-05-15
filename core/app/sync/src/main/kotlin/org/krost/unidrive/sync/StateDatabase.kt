@@ -17,13 +17,13 @@ class StateDatabase(
     // connection URL.
     private val inMemory: Boolean = false,
 ) {
-    private lateinit var conn: Connection
+    private var _conn: Connection? = null
+    private val conn: Connection
+        get() = _conn ?: error("StateDatabase not initialized — call initialize() first")
 
     @Synchronized
     fun initialize() {
-        if (::conn.isInitialized && !conn.isClosed) {
-            conn.close()
-        }
+        _conn?.takeIf { !it.isClosed }?.close()
         val url =
             if (inMemory) {
                 "jdbc:sqlite::memory:"
@@ -31,14 +31,14 @@ class StateDatabase(
                 Files.createDirectories(dbPath.parent)
                 "jdbc:sqlite:$dbPath"
             }
-        conn = DriverManager.getConnection(url)
+        _conn = DriverManager.getConnection(url)
         conn.autoCommit = true
         createTables()
     }
 
     @Synchronized
     fun close() {
-        if (::conn.isInitialized && !conn.isClosed) conn.close()
+        _conn?.takeIf { !it.isClosed }?.close()
     }
 
     @Synchronized
