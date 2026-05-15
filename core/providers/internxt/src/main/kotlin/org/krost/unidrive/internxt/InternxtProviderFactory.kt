@@ -5,6 +5,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
+import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.nio.file.Files
 import java.nio.file.Path
@@ -60,32 +61,11 @@ class InternxtProviderFactory : ProviderFactory {
 
         return try {
             val creds = json.decodeFromString<InternxtCredentials>(Files.readString(credFile))
-            // Check JWT expiry directly - decode payload manually
-            val jwt = creds.jwt
-            val parts = jwt.split(".")
-            if (parts.size >= 2) {
-                val padded =
-                    when (parts[1].length % 4) {
-                        2 -> parts[1] + "=="
-                        3 -> parts[1] + "="
-                        else -> parts[1]
-                    }
-                val payloadJson =
-                    String(
-                        java.util.Base64
-                            .getUrlDecoder()
-                            .decode(padded),
-                    )
-                // Simple regex to extract "exp": value
-                val expRegex = """"exp"\s*:\s*(\d+)""".toRegex()
-                val match = expRegex.find(payloadJson)
-                if (match != null) {
-                    val exp = match.groupValues[1].toLong()
-                    val now = System.currentTimeMillis() / 1000
-                    if (now > exp) {
-                        return CredentialHealth.ExpiresIn(0, "JWT expired — run 'unidrive auth'")
-                    }
-                }
+            // UD-010: JWT body decode + exp extraction lifted to JwtExtractor.
+            // UD-308 padding fix is preserved in the shared impl.
+            val exp = JwtExtractor.extractExp(creds.jwt)
+            if (exp != null && System.currentTimeMillis() / 1000 > exp) {
+                return CredentialHealth.ExpiresIn(0, "JWT expired — run 'unidrive auth'")
             }
             CredentialHealth.Ok
         } catch (e: Exception) {
