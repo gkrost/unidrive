@@ -31,7 +31,7 @@ import java.nio.file.Paths
         BenchmarkCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
-        // UD-236: git-style three-verb split — refresh = sync without byte
+        // Git-style three-verb split — refresh = sync without byte
         // transfers; apply = drain pending transfers without re-fetching deltas.
         RefreshCommand::class,
         ApplyCommand::class,

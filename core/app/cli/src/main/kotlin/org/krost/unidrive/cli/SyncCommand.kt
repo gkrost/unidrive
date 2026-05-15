@@ -39,7 +39,7 @@ import kotlin.time.Duration.Companion.seconds
 
 @Command(name = "sync", description = ["Sync files with cloud provider"], mixinStandardHelpOptions = true)
 open class SyncCommand : Runnable {
-    // UD-236: refresh/apply override these via subclass to drive partial syncs.
+    // refresh/apply override these via subclass to drive partial syncs.
     // refresh = skipTransfers=true (Pass 1 only, defer byte transfers).
     // apply = skipRemoteGather=true (no provider.delta(), let recovery loops drive).
     // sync = both false (current behaviour).
@@ -499,7 +499,7 @@ open class SyncCommand : Runnable {
                         dryRun = dryRun,
                         forceDelete = forceDelete,
                         reason = org.krost.unidrive.sync.SyncReason.MANUAL,
-                        // UD-236: refresh / apply set these via subclass.
+                        // refresh / apply set these via subclass.
                         skipTransfers = skipTransfers,
                         skipRemoteGather = skipRemoteGather,
                     )
