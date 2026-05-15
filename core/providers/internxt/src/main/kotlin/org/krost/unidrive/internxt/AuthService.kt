@@ -61,11 +61,21 @@ open class AuthService(
         return try {
             val parts = jwt.split(".")
             if (parts.size < 2) return true
+            // UD-308 follow-up (PR #23 Codex P2): base64url payload segments
+            // need padding so the total length is a multiple of 4. The previous
+            // `+ "=="` only worked when `raw.length % 4 == 2`; for `% 4` in
+            // {0, 3} the decode threw and the catch returned `true` ("treat
+            // as expired"). Once UD-308 wired `isJwtExpired()` into
+            // `getValidCredentials()`, that quirk would force a refresh
+            // round-trip on every API call for JWTs with non-{4k+2} payload
+            // lengths. Pad based on `length % 4` instead.
+            val raw = parts[1]
+            val padding = (4 - raw.length % 4) % 4
             val payload =
                 String(
                     java.util.Base64
                         .getUrlDecoder()
-                        .decode(parts[1] + "=="),
+                        .decode(raw + "=".repeat(padding)),
                 )
             val exp =
                 json
