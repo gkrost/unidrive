@@ -11642,3 +11642,55 @@ First source ref: `core/docker/Dockerfile.test:1`. See `code_refs` for the full 
 Bulk-filed 2026-05-15 follow-up to PR #17's UD-766 CI gate — slipped past
 the initial scan because the script's `scanRoots` doesn't include
 `.github/`, but the `core/docker/Dockerfile.test` ref still surfaces it.
+
+---
+id: UD-254
+title: UD-254 (parent anchor — see sub-letter variants)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:376
+opened: 2026-05-15
+---
+
+**AUTO-FILED PARENT ANCHOR.** Source code cites `UD-254` (bare, no
+sub-letter) but only sub-letter variants (`UD-254a`) exist as real
+entries. This stub exists so the `scripts/backlog-sync.kts` CI gate
+under UD-766 doesn't see bare `UD-254` cites as orphans.
+
+## Sub-letter variants
+
+- [UD-254a](#ud-254a) — MDC clone storm under MDCContext.
+
+When the bare `UD-254` cites are touched, prefer pointing them at the
+specific sub-letter variant they relate to and close this anchor as
+`wontfix-historical, parent of sub-tickets`.
+
+---
+id: UD-352
+title: UD-352 (parent anchor — see sub-letter variants)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:160
+opened: 2026-05-15
+---
+
+**AUTO-FILED PARENT ANCHOR.** Source code cites `UD-352` (bare, no
+sub-letter) but only sub-letter variants (`UD-352a`) exist as real
+entries. This stub exists so the `scripts/backlog-sync.kts` CI gate
+under UD-766 doesn't see bare `UD-352` cites as orphans.
+
+## Sub-letter variants
+
+- [UD-352a](#ud-352a) — see entry above for full scope.
+
+When the bare `UD-352` cites are touched, prefer pointing them at the
+specific sub-letter variant they relate to and close this anchor as
+`wontfix-historical, parent of sub-tickets`.

@@ -29,7 +29,13 @@ require(File(root, "docs/backlog/BACKLOG.md").exists()) {
 // so we skip it to avoid flagging range-marker IDs as orphans.
 val scanRoots = listOf("core", "ui", "shell-win", "protocol", "scripts")
 val idPattern = Regex("""UD-(\d{3})""")
-val frontmatterBlock = Regex("""(?m)^---\s*\n(.*?)\n---""", RegexOption.DOT_MATCHES_ALL)
+// Frontmatter block must start with `id:` immediately after the opening ---,
+// otherwise the regex greedily eats section-divider `---\n## Heading\n---`
+// stretches and consumes the opening `---` of the next real entry. Symptom
+// was UD-206 / UD-209 reported as orphans on 2026-05-15 PR #17 because the
+// "## Core daemon (UD-200..299)" divider sat between two `---` markers and
+// matched as a "frontmatter block" with no id, swallowing UD-206's opener.
+val frontmatterBlock = Regex("""(?m)^---\s*\n(id:.*?)\n---""", RegexOption.DOT_MATCHES_ALL)
 
 data class BacklogItem(
     val id: String,
