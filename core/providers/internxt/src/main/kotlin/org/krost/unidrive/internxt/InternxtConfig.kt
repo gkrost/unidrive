@@ -1,10 +1,10 @@
 package org.krost.unidrive.internxt
 
+import org.krost.unidrive.io.defaultTokenPath
 import java.nio.file.Path
-import java.nio.file.Paths
 
 data class InternxtConfig(
-    val tokenPath: Path = defaultTokenPath(),
+    val tokenPath: Path = defaultTokenPath("internxt"),
 ) {
     companion object {
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
@@ -15,10 +15,5 @@ data class InternxtConfig(
         // Public encryption salt from Internxt's open-source desktop client (not a secret).
         // Used in password hashing during auth. Override via env var for custom deployments.
         val CRYPTO_KEY: String = System.getenv("INTERNXT_CRYPTO_KEY") ?: "6KYQBP847D4ATSFA"
-
-        fun defaultTokenPath(): Path {
-            val home = System.getenv("HOME") ?: System.getProperty("user.home")
-            return Paths.get(home, ".config", "unidrive", "internxt")
-        }
     }
 }

@@ -1,6 +1,7 @@
 package org.krost.unidrive.sftp
 
 import kotlinx.coroutines.sync.Semaphore
+import org.krost.unidrive.io.defaultTokenPath
 import kotlin.test.*
 
 /**
@@ -57,7 +58,7 @@ class SftpConcurrencyTest {
         val provider2 =
             factory.create(
                 mapOf("host" to "example.com", "max_concurrency" to "2", "password" to "test"),
-                SftpConfig.defaultTokenPath(),
+                defaultTokenPath("sftp"),
             ) as SftpProvider
         assertEquals(2, provider2.config.maxConcurrency)
 
@@ -65,7 +66,7 @@ class SftpConcurrencyTest {
         val providerDefault =
             factory.create(
                 mapOf("host" to "example.com", "password" to "test"),
-                SftpConfig.defaultTokenPath(),
+                defaultTokenPath("sftp"),
             ) as SftpProvider
         assertEquals(4, providerDefault.config.maxConcurrency)
 
@@ -73,7 +74,7 @@ class SftpConcurrencyTest {
         val providerBad =
             factory.create(
                 mapOf("host" to "example.com", "max_concurrency" to "notanumber", "password" to "test"),
-                SftpConfig.defaultTokenPath(),
+                defaultTokenPath("sftp"),
             ) as SftpProvider
         assertEquals(4, providerBad.config.maxConcurrency)
 
@@ -81,7 +82,7 @@ class SftpConcurrencyTest {
         val providerZero =
             factory.create(
                 mapOf("host" to "example.com", "max_concurrency" to "0", "password" to "test"),
-                SftpConfig.defaultTokenPath(),
+                defaultTokenPath("sftp"),
             ) as SftpProvider
         assertEquals(1, providerZero.config.maxConcurrency)
     }

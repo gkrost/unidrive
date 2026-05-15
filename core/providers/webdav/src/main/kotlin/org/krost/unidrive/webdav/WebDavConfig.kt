@@ -1,7 +1,7 @@
 package org.krost.unidrive.webdav
 
+import org.krost.unidrive.io.defaultTokenPath
 import java.nio.file.Path
-import java.nio.file.Paths
 
 /**
  * Configuration for a WebDAV provider.
@@ -17,18 +17,11 @@ data class WebDavConfig(
     val baseUrl: String,
     val username: String,
     val password: String,
-    val tokenPath: Path = defaultTokenPath(),
+    val tokenPath: Path = defaultTokenPath("webdav"),
     val trustAllCerts: Boolean = false,
     val uploadFloorTimeoutMs: Long = 600_000L,
     val uploadMinThroughputBytesPerSecond: Long = 50L * 1024,
     val downloadFloorTimeoutMs: Long = 600_000L,
     val downloadMinThroughputBytesPerSecond: Long = 50L * 1024,
     val maxFileSizeBytes: Long? = null,
-) {
-    companion object {
-        fun defaultTokenPath(): Path {
-            val home = System.getenv("HOME") ?: System.getProperty("user.home")
-            return Paths.get(home, ".config", "unidrive", "webdav")
-        }
-    }
-}
+)

@@ -1,5 +1,6 @@
 package org.krost.unidrive.sftp
 
+import org.krost.unidrive.io.defaultTokenPath
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -27,7 +28,7 @@ data class SftpConfig(
     val password: String? = null,
     val remotePath: String = "",
     val knownHostsFile: Path? = defaultKnownHostsFile(),
-    val tokenPath: Path = defaultTokenPath(),
+    val tokenPath: Path = defaultTokenPath("sftp"),
     /**
      * Maximum number of concurrent SFTP subsystem channels on the SSH session.
      * Synology NAS (and other embedded SSH servers) reject parallel channel opens
@@ -53,11 +54,6 @@ data class SftpConfig(
         fun defaultKnownHostsFile(): Path? {
             val home = System.getenv("HOME") ?: System.getProperty("user.home") ?: return null
             return Paths.get(home, ".ssh", "known_hosts")
-        }
-
-        fun defaultTokenPath(): Path {
-            val home = System.getenv("HOME") ?: System.getProperty("user.home")
-            return Paths.get(home, ".config", "unidrive", "sftp")
         }
     }
 }

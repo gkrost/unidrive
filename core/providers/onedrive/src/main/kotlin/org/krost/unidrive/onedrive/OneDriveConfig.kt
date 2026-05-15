@@ -1,11 +1,11 @@
 package org.krost.unidrive.onedrive
 
+import org.krost.unidrive.io.defaultTokenPath
 import java.nio.file.Path
-import java.nio.file.Paths
 
 data class OneDriveConfig(
     val applicationId: String = DEFAULT_APP_ID,
-    val tokenPath: Path = defaultTokenPath(),
+    val tokenPath: Path = defaultTokenPath("onedrive"),
     val userAgent: String = DEFAULT_USER_AGENT,
     val redirectUri: String = DEFAULT_REDIRECT_URI,
     val authEndpoint: String = DEFAULT_AUTH_ENDPOINT,
@@ -21,10 +21,5 @@ data class OneDriveConfig(
 
         const val GRAPH_BASE_URL = "https://graph.microsoft.com"
         const val GRAPH_VERSION = "v1.0"
-
-        fun defaultTokenPath(): Path {
-            val home = System.getenv("HOME") ?: System.getProperty("user.home")
-            return Paths.get(home, ".config", "unidrive", "onedrive")
-        }
     }
 }
