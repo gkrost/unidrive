@@ -1,6 +1,7 @@
 package org.krost.unidrive.internxt
 
 import io.ktor.client.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -9,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.internxt.model.*
@@ -24,8 +26,20 @@ open class AuthService(
 ) : AutoCloseable {
     private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
     private val json = Json { ignoreUnknownKeys = true }
+    // UD-204: install HttpTimeout so a slow-loris auth endpoint (the named
+    // vector from the source ticket — internxt/sdk axios setup omits the
+    // timeout) can't hang the whole sync indefinitely. Uses the same
+    // HttpDefaults values as the other Ktor clients in the tree; the
+    // four-class metadata/upload/download/auth matrix proposed in the
+    // ticket body is deferred to a follow-up that touches all providers
+    // together.
     private val httpClient = HttpClient {
         expectSuccess = false
+        install(HttpTimeout) {
+            connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
+            socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+            requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
+        }
     }
     private var credentials: InternxtCredentials? = null
 
@@ -47,11 +61,21 @@ open class AuthService(
         return try {
             val parts = jwt.split(".")
             if (parts.size < 2) return true
+            // UD-308 follow-up (PR #23 Codex P2): base64url payload segments
+            // need padding so the total length is a multiple of 4. The previous
+            // `+ "=="` only worked when `raw.length % 4 == 2`; for `% 4` in
+            // {0, 3} the decode threw and the catch returned `true` ("treat
+            // as expired"). Once UD-308 wired `isJwtExpired()` into
+            // `getValidCredentials()`, that quirk would force a refresh
+            // round-trip on every API call for JWTs with non-{4k+2} payload
+            // lengths. Pad based on `length % 4` instead.
+            val raw = parts[1]
+            val padding = (4 - raw.length % 4) % 4
             val payload =
                 String(
                     java.util.Base64
                         .getUrlDecoder()
-                        .decode(parts[1] + "=="),
+                        .decode(raw + "=".repeat(padding)),
                 )
             val exp =
                 json
@@ -251,7 +275,26 @@ open class AuthService(
         throw AuthenticationException("Too many invalid 2FA attempts")
     }
 
-    suspend fun getValidCredentials(): InternxtCredentials = credentials ?: throw AuthenticationException("Not authenticated")
+    /**
+     * Returns the stored credentials, proactively refreshing the JWT if it has expired.
+     *
+     * UD-308: pre-UD-308 this just returned `credentials` or threw, leaving the
+     * refresh to happen reactively when a downstream request came back 401. That
+     * cost every cold-start-after-long-idle call an extra HTTP round-trip
+     * (request → 401 → refresh → retry). Checking [isJwtExpired] up front lets us
+     * refresh once and skip the doomed request entirely.
+     *
+     * Refresh goes through [refreshToken], which serialises concurrent callers via
+     * [RefreshableTokenLatch] (UD-338) — we deliberately do not duplicate any of
+     * that machinery here.
+     *
+     * Absent credentials (never authenticated) still throw [AuthenticationException]
+     * — the contract for that case is unchanged.
+     */
+    suspend fun getValidCredentials(): InternxtCredentials {
+        val current = credentials ?: throw AuthenticationException("Not authenticated")
+        return if (isJwtExpired()) refreshToken() else current
+    }
 
     /**
      * Network seam for the refresh roundtrip. Protected + open so tests can override

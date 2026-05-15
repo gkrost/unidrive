@@ -19,6 +19,7 @@ import org.krost.unidrive.http.InFlightDedup
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.streamingFileBody
+import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -679,13 +680,18 @@ class InternxtApiService(
     private suspend fun checkResponse(response: HttpResponse) {
         if (response.status == HttpStatusCode.Unauthorized) {
             throw AuthenticationException(
-                "Authentication failed (401): ${response.bodyAsText()}",
+                // UD-334: wrap the raw body in truncateErrorBody so HTML 401 pages
+                // (e.g. a Cloudflare-fronted Internxt error) don't dump 60 lines
+                // of inline CSS + branding into the exception message. JSON-prefix
+                // bodies (`{...}`) pass through untouched, so the existing
+                // `parseRetryAfter(e.message)` path remains intact.
+                "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
                 requestId = extractRequestId(response),
             )
         }
         if (!response.status.isSuccess()) {
             throw InternxtApiException(
-                "API error: ${response.status} - ${response.bodyAsText()}",
+                "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
                 statusCode = response.status.value,
                 requestId = extractRequestId(response),
             )
