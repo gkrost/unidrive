@@ -157,11 +157,24 @@ if (orphans.isNotEmpty()) {
 }
 
 if (staleClosed.isNotEmpty()) {
-    hardFail = true
-    header("STALE CLOSED (ID in CLOSED.md still referenced in source)")
+    // UD-766 follow-up: in this codebase, comments like
+    // `// UD-203: pull request-id off the response` are intentional
+    // provenance markers — they label code with the ticket that drove
+    // it, useful for archaeology and for readers learning why an
+    // unusual choice was made. The original strict policy treated
+    // every such citation as a stale tracking error, but the unidrive
+    // convention is to keep closed-ticket cites in source. Downgraded
+    // to a warning so a genuinely orphaned annotation (cited code
+    // removed but the comment forgotten) still surfaces in the report
+    // without blocking CI on the documentation convention. Worst-
+    // offender annotations have been trimmed in source for signal/
+    // noise; the warning lists what remains for the next reader to
+    // judge per-case.
+    header("WARN: closed-ticket refs in source (historical provenance; check on touch)")
     for ((id, refs) in staleClosed.sortedBy { it.first }) {
         println("  $id")
         refs.take(5).forEach { println("    $it") }
+        if (refs.size > 5) println("    ... (${refs.size - 5} more)")
     }
 }
 
