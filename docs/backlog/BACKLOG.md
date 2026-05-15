@@ -10891,3 +10891,479 @@ gates but only gitleaks is wired today.
 Tier 3 / deferred from the Top-10 hygiene round.
 
 Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §6
+---
+id: UD-100
+title: UDS socket has no explicit POSIX 0600 chmod (defense-in-depth, parent dir already 0700)
+category: security
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:316-326
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15 cross-verified by codebase audit. PR #24 Codex bot review correctly pointed out that the original ticket framed the threat wrong; this rewrite is the corrected scope.
+
+## Issue
+
+`IpcServer.start()` opens a `ServerSocketChannel` of family `UNIX` and binds it to `socketPath` (`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78`). No `Files.setPosixFilePermissions(socketPath, ...)` call follows. The socket file inherits the umask default — typically `srwxr-xr-x`.
+
+The parent directory is created with `rwx------` (0700) by `tempSocketDir()` at `IpcServer.kt:316-326` — applied uniformly to both `$XDG_RUNTIME_DIR/unidrive-ipc-*/` and the `/tmp/unidrive-ipc-*/` fallback (`Files.createTempDirectory(prefix, asFileAttribute(rwx------))`). The parent dir 0700 is already the primary cross-user defense.
+
+## Impact
+
+Severity: low (defense-in-depth only).
+
+**What chmod 0600 on the socket does NOT solve:**
+- A malicious same-user process (browser extension, sandboxed app, npm postinstall) runs as the same UID and already passes the 0700 directory check and would pass a 0600 socket check too. UNIX socket permissions only segment by UID — they cannot distinguish two processes running as the same user.
+- The push-only stream of `SyncState` snapshots remains readable to any same-UID process regardless of what chmod we put on the socket file. If that stream needs sensitivity review, that is a separate concern (see Follow-up below).
+
+**What chmod 0600 on the socket DOES solve:**
+- Parity with the parent-dir hardening. If an operator misconfigures `$XDG_RUNTIME_DIR` to be world-traversable (rare but possible — e.g., custom systemd-user setups, container environments), the parent dir 0700 protection collapses and only the socket file's own permissions stand. Today that is umask-dependent.
+- Defense-in-depth: the convention used by Vault.kt (`Vault.kt:86`) and CredentialStore.kt is to set 0600 explicitly on the sensitive file, not rely on umask. The socket file is the only sensitive artifact unidrive creates that does not follow this convention.
+- Auditability: a `0600` socket file is self-documenting in `ls -l` output; an inherited-umask one requires the auditor to reason about the parent dir.
+
+## Fix shape
+
+After `server.bind(...)` on `IpcServer.kt:78`, add:
+
+```kotlin
+runCatching { Files.setPosixFilePermissions(socketPath, PosixFilePermissions.fromString("rw-------")) }
+```
+
+Wrap in `runCatching` because Windows lacks POSIX file permissions and the existing `PosixPermissions` helper at `core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:31-33` already follows this pattern (returns early on non-POSIX filesystems).
+
+## Verification
+
+- Add a test `IpcServerPermissionsTest` that starts the server, reads `Files.getPosixFilePermissions(socketPath)`, and asserts the set equals `{OWNER_READ, OWNER_WRITE}`.
+- `assumeTrue` skip on non-POSIX hosts.
+
+## Follow-up question (not part of this ticket)
+
+If the same-user threat (browser extension reading sync state) is genuinely in scope for unidrive's threat model, the only mechanisms that address it are:
+
+1. **Per-client authentication.** First-frame token exchange or mTLS over the UDS. Heavy.
+2. **Sanitise the broadcast payload.** Strip file paths and other PII from `SyncState` before emission; only push opaque progress counters. Cheap, but loses observability for the CLI's own `status` consumer.
+3. **Reduce the broadcast audience.** Make `IpcServer` only emit if a registered subscriber identifies itself (one-way handshake), instead of unconditionally broadcasting to all `accept()`ed clients.
+
+These should be a separate ticket (likely category=security, priority=medium, effort=M) if the threat model decision is "yes, defend against same-UID observers." File a new UD-1xx for that if needed; do not bundle with this one.
+
+## Cross-refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78` — bind site missing chmod
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:316-326` — `tempSocketDir()` already protects parent dir with 0700 for both XDG and /tmp paths
+- `core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:27-48` — existing 0600/0700 helper used by Vault and CredentialStore
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Vault.kt:86` — reference pattern for setting POSIX perms on a sensitive file
+- `docs/SECURITY.md` STRIDE row I3 (information disclosure) — should be updated once fixed
+- PR #24 review comment `r3249149257` (Codex bot) — flagged the original ticket's threat-model framing; this rewrite incorporates the correction
+---
+id: UD-215
+title: StateDatabase.getAllEntries() missing @Synchronized
+category: core
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:203
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15, cross-verified.
+
+## Issue
+
+`StateDatabase.getAllEntries()` at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:203` is missing `@Synchronized`. 21 of the 22 methods on `StateDatabase` use the monitor (e.g. `getEntryCount()` at line 195, `getEntriesByPrefix()` at line 213, `deleteEntry()` at line 224). `getAllEntries()` is the lone outlier, iterating a `ResultSet` without holding the lock.
+
+## Impact
+
+Severity: medium.
+
+The Kotlin-level monitor serializes JDBC access across the engine. Without it, `getAllEntries()` runs an `executeQuery` + `while(rs.next())` loop while another coroutine — most plausibly the reconciler's writer path or `pruneEntries` — can execute `DELETE FROM sync_entries` on the same `Connection`. Realistic failure modes:
+
+1. `SQLiteException: ResultSet closed` thrown mid-iteration if a concurrent statement on the same connection invalidates the cursor.
+2. Silent under-iteration: the `ResultSet` returns rows for entries that have already been deleted by the time the caller acts on them, yielding stale `SyncEntry` snapshots.
+
+SQLite's connection-level mutex prevents corruption, but the JDBC API does not guarantee cursor stability when sibling statements run on the same `Connection`.
+
+## Fix shape
+
+One line: add `@Synchronized` to the method declaration at line 203, matching the convention of every other reader on this class.
+
+## Verification
+
+- Compile + `./gradlew :app:sync:test` confirms no regression.
+- Optionally add a stress test that runs `getAllEntries()` in a tight loop while another coroutine mutates the table; the test should not throw.
+
+## Followup question
+
+Should `StateDatabase` migrate to a `ReentrantReadWriteLock` so concurrent readers don't serialize on the monitor? Worth a separate ticket if scan-phase parallelism becomes a bottleneck. For now `@Synchronized` is the consistent fix.
+
+## Cross-refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:203` — unsynchronized method
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:194,212,223` — peer methods showing the expected pattern
+---
+id: UD-217
+title: StateDatabase lateinit conn has no reconnect/init guard
+category: core
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:20
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15, cross-verified.
+
+## Issue
+
+`StateDatabase` holds `private lateinit var conn: Connection` at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:20`. The only assignment site is `initialize()` (lines 22-37). If the SQLite connection is closed externally — by an explicit `close()` call followed by a re-entry that misses calling `initialize()`, or by a JVM-level fault on the FileChannel backing the DB — every subsequent `@Synchronized` method throws either:
+- `kotlin.UninitializedPropertyAccessException: lateinit property conn has not been initialized`, or
+- `java.sql.SQLException: database connection is closed` (after `close()` was called explicitly).
+
+There is no auto-reconnect or `ensureConnection()` guard.
+
+## Impact
+
+Severity: low.
+
+SQLite is in-process and file-backed; connection drops are rare under normal operation. The realistic failure mode is operator error: a callsite forgets to call `initialize()` after constructing the `StateDatabase`, or a test fixture leaks a closed instance into a coroutine. Both surface as a hard exception rather than data corruption.
+
+The reason this is worth filing despite low severity: the failure mode is opaque (`UninitializedPropertyAccessException` does not name `StateDatabase` in its stack frame), and the fix is cheap.
+
+## Fix shape options
+
+Option A — minimal: replace `lateinit var conn` with a getter that throws an explicit `IllegalStateException("StateDatabase not initialized — call initialize() first")` with class name.
+
+Option B — defensive: add `private fun ensureConnected(): Connection { if (!::conn.isInitialized || conn.isClosed) initialize(); return conn }` and route all method bodies through it. Trades clarity for resilience.
+
+Option C — structural: make `StateDatabase` open the connection in `init {}` and remove `initialize()` entirely. Connection lifecycle becomes tied to the `StateDatabase` instance.
+
+Recommended: Option C. The current two-phase init (`constructor + initialize()`) exists for the `inMemory=true` path used by `--reset --dry-run`, but that flag is set in the constructor anyway. There is no reason `initialize()` cannot be called from `init {}`.
+
+## Verification
+
+- Existing tests for `StateDatabase` should pass without modification.
+- Add a regression test: construct `StateDatabase`, immediately call a method without `initialize()`, assert a clear error message (Option A) or that it works (Option C).
+
+## Cross-refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:20` — `lateinit var conn`
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:22-37` — only initialization site
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:40-42` — `close()` site, no reconnect guard
+---
+id: UD-220
+title: Reconciler.kt recovery synthesis has high cognitive load (3 phases + bookkeeping)
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:175-269
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15, cross-verified.
+
+## Issue
+
+`Reconciler.reconcile()` accumulates a three-phase recovery structure between `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:182-264` that is hard to reason about locally:
+
+1. **Phase A — UD-225 download recovery (lines 183-204).** Walks `allDbEntries` for placeholder rows (non-folder, non-hydrated, `remoteSize > 0`) not already covered by the action set. Synthesises `DownloadContent` actions. Guarded by exclude-glob and `pathInSyncScope` filters.
+2. **Phase B — UD-901 upload recovery (lines 213-224).** Walks `allDbEntries` for pending-upload rows (non-folder, `remoteId == null`, hydrated, local file exists). Synthesises `Upload` actions. Same scope/exclude guards.
+3. **Phase C — UD-901b ancestor synthesis (lines 245-264).** Post-pass over `recoveryEmitted = actions.subList(recoveryStartIdx, actions.size).toList()`. For each recovery-emitted action's path, walks the ancestor chain and synthesises `CreateRemoteFolder` for any ancestor not already in `coveredPaths`/`ancestorsToCreate` and not known on remote.
+
+The bookkeeping spans four mutable sets (`coveredPaths`, `actions`, `recoveryEmitted`, `ancestorsToCreate`) and one index (`recoveryStartIdx`). Each phase has 5-7 `continue` filters that must stay aligned across phases (folder check, hydrated check, covered-paths check, exclude-glob, scope guard).
+
+## Impact
+
+Severity: medium.
+
+Functionally correct — the inline UD-225/UD-901/UD-901a/UD-901b comments and `ReconcilerTest.kt` cover the known regressions. Cognitive load is the issue:
+
+- Adding a new recovery case requires understanding all three phases plus the `recoveryStartIdx`/`recoveryEmitted` convention.
+- A new filter requirement (e.g., a future "skip files under a paused profile") must be added in 3 places to stay consistent.
+- The phases are not unit-testable in isolation; only the composed `reconcile()` result is.
+
+## Fix shape
+
+Extract each phase into a named method on `Reconciler`:
+
+```kotlin
+private fun synthesisDownloadRecovery(allDbEntries, remoteChanges, coveredPaths, syncPath): List<SyncAction>
+private fun synthesisUploadRecovery(allDbEntries, syncRoot, coveredPaths, syncPath): List<SyncAction>
+private fun synthesisAncestorFolders(recoveryEmitted, entryByPath, coveredPaths): List<SyncAction>
+```
+
+Each method returns the actions to append; `reconcile()` becomes:
+
+```kotlin
+actions += synthesisDownloadRecovery(...)
+actions += synthesisUploadRecovery(...)
+val recoveryEmitted = actions.takeLast(...)  // or track index
+actions += synthesisAncestorFolders(recoveryEmitted, entryByPath, coveredPaths)
+```
+
+Lift the shared filter chain (folder, hydrated, covered, exclude, scope) into a private predicate `isRecoveryCandidate(entry)` to enforce alignment.
+
+## Followup question
+
+The current shape evolved across UD-225 → UD-901 → UD-901a → UD-901b incrementally. Before refactoring, audit `ReconcilerTest.kt` coverage to confirm each phase has a regression test pinning its behaviour. Add tests for any uncovered branch before the extraction so the refactor is a pure rename.
+
+## Verification
+
+- `./gradlew :app:sync:test` green pre- and post-refactor.
+- Diff coverage: no new uncovered branches.
+- Code-style sanity: line count of `reconcile()` should drop from ~90 lines (lines 175-269) to ~30.
+
+## Cross-refs
+
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:175-269` — current monolithic block
+- `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ReconcilerTest.kt` — regression coverage
+- UD-225 (download recovery), UD-901 (upload recovery), UD-901a (scope guard), UD-901b (ancestor synthesis) — historical context
+---
+id: UD-775
+title: Re-enable ktlint (close UD-774; CI-only or full)
+category: tooling
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/build.gradle.kts:26-51
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15. Continuation of UD-774's reactivation plan.
+
+## Issue
+
+`val ktlintEnabled = false` at `core/build.gradle.kts:31` disables the entire ktlint pipeline across all subprojects. The conditional at line 36 (`if (ktlintEnabled) { apply(plugin = "org.jlleitschuh.gradle.ktlint") ... }`) skips `ktlintCheck`, `ktlintFormat`, baseline drift detection, and the per-project baseline.xml convention from UD-706b.
+
+UD-774's comment block (lines 26-30) documents the disable as temporary: "Flip back to `true` to restore the UD-706 / UD-706b setup. Re-enable plan: run `scripts/dev/ktlint-sync.sh` after flip to absorb any baseline drift, then `./gradlew build` to confirm green, then close UD-774."
+
+Since the disable on 2026-05-02, ~50 commits have landed without ktlint enforcement (`git log --oneline --since="2026-05-02" | wc -l`). The longer ktlint stays off, the larger the eventual baseline absorption.
+
+## Impact
+
+Severity: medium.
+
+Drift accumulates silently. Currently no enforcement means:
+- New code lands without style consistency checks.
+- The 1541-line `SyncEngine.kt` and the 1072-line `WebDavApiService.kt` (the two largest files) have no automated guard against the kind of large-block-style drift that ktlint catches cheaply.
+- When ktlint is re-enabled, `ktlint-sync.sh` will absorb a large diff into baseline.xml entries, which silently downgrades enforcement quality (each absorbed violation is one we agreed to never re-check).
+
+## Fix shape
+
+Three sub-steps; each can be a separate commit:
+
+1. **Audit drift first.** Run `./gradlew :app:sync:ktlintMainSourceSetCheck` (or equivalent) on a temporary branch with `ktlintEnabled = true` and the existing baseline. Capture the new-violation count per subproject.
+2. **Decide absorb vs fix.** If the new-violation count is small (e.g., <50), fix them in code rather than baseline. If large, absorb via `scripts/dev/ktlint-sync.sh` but tag each absorption with a UD-775 reference in the baseline so the debt is trackable.
+3. **Flip the flag.** `val ktlintEnabled = true` at `core/build.gradle.kts:31`, delete the UD-774 comment block, close UD-774.
+
+## Cost analysis
+
+The original UD-774 disable rationale: "ktlint costs ~20-30s per `./gradlew build` and was the dominant per-iteration cost during the UD-240g/UD-240i sessions on 2026-05-02."
+
+Mitigations available:
+- Run ktlint only on changed files via `ktlintCheck --include` patterns.
+- Gate ktlint behind a build property: `if (project.hasProperty("noKtlint")) false else true` so iterative dev can opt out via `./gradlew build -PnoKtlint`.
+- Move ktlint to CI-only (skip locally) by checking `System.getenv("CI") != null`.
+
+Recommended: CI-only enforcement. Local dev gets fast iteration; PR gate catches drift before merge.
+
+## Verification
+
+- After flip: `./gradlew clean build` from `core/` green.
+- After flip: `scripts/dev/ktlint-sync.sh` reports no surprise baseline drift.
+- After flip: close UD-774 with `python3 scripts/dev/backlog.py close UD-774 --commit <sha>`.
+
+## Cross-refs
+
+- `core/build.gradle.kts:26-51` — current disable + conditional apply
+- `scripts/dev/ktlint-sync.sh` — baseline absorption helper
+- `docs/dev/lessons/ktlint-baseline-drift.md` — prior failure mode this guards against
+- UD-706 (initial ktlint setup), UD-706b (per-project baseline), UD-774 (current disable)
+---
+id: UD-318
+title: Migrate S3 provider from custom SigV4Signer to AWS SDK
+category: providers
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/SigV4Signer.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15, cross-verified.
+
+## Issue
+
+`core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/SigV4Signer.kt` is a 154-line hand-rolled implementation of AWS Signature Version 4. The S3 provider uses it to sign every request rather than going through the AWS SDK for Kotlin or the AWS SDK for Java v2.
+
+## Impact
+
+Severity: low.
+
+The current implementation works for the request shapes unidrive actually issues (PUT, GET, DELETE, HEAD on standard S3 endpoints). The maintenance burden is realised when:
+
+- AWS rotates the canonical-request hashing algorithm (rare but has happened — SigV4a regional/global signing was added 2022).
+- A new request shape needs signing: presigned URLs, S3 Express One Zone, chunked uploads with trailing checksums, IAM role assumption.
+- A new authentication mode is required: SSO, IAM Identity Center, container credential provider, EC2 instance metadata service v2.
+- A subtle bug is found (e.g., URI-encoding edge case for `+` vs `%20` in query strings) — the SDK has these regression-tested.
+
+The cost of staying on the hand-rolled signer compounds with every S3 feature unidrive wants to support.
+
+## Fix shape
+
+Two paths:
+
+**Path A — AWS SDK for Kotlin (preferred).** `aws.sdk.kotlin:s3:1.x`. Idiomatic Kotlin coroutines, native suspend functions, smaller dependency surface than the Java SDK. Cost: ~5 MB added to the fat jar, all transfers go through their HTTP engine (loses unidrive's `HttpRetryBudget` integration unless wired in via interceptor).
+
+**Path B — AWS SDK for Java v2.** `software.amazon.awssdk:s3:2.x`. Mature, well-documented, but pulls a larger dep graph (~15 MB) and requires `Future`-to-coroutine adapters.
+
+Path A recommended. The provider already isolates HTTP via `S3ApiService.kt`; switching the underlying client is a localised change.
+
+## Migration notes
+
+- `HttpRetryBudget` integration: AWS SDK has its own retry policies. Need to either disable SDK retry and wire `HttpRetryBudget` as a `RequestInterceptor`, or accept SDK retries and remove the budget for S3. Decision affects retry semantics consistency across providers.
+- Throttle handling: SDK surfaces `S3Exception` with retryable HTTP status; unidrive's `ThrottleBudget` (UD-232) is HTTP-layer; need to verify rate-limit signals propagate.
+- Test coverage: existing 8 tests in `core/providers/s3/src/test/kotlin/` should pass post-migration. Add a contract test that confirms PUT/GET/DELETE/HEAD round-trip against a live S3 (or LocalStack) bucket.
+- SigV4Signer.kt removal: keep file in git history; delete from main after green CI on the migration commit.
+
+## Followup question
+
+Worth coordinating with the WebDAV adapter's `trustAllCerts` story (UD-104 closure) before migrating: if the AWS SDK pins its own HTTP engine, the user's "trust all certs for self-hosted S3 (MinIO, Garage)" requirement may need a separate SDK-level escape hatch.
+
+## Verification
+
+- `./gradlew :providers:s3:test` green.
+- Integration smoke against a MinIO container: upload, download, delete, list.
+- Fat-jar size delta documented in commit message.
+
+## Cross-refs
+
+- `core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/SigV4Signer.kt` — 154 LoC to remove
+- `core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt` — main consumer
+- `core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Config.kt` — endpoint/region config
+- `core/providers/s3/src/test/kotlin/` — 8 existing tests as regression net
+---
+id: UD-819
+title: Adopt property-based testing for path/glob/escape invariants (rename misleading SftpProviderPropertyTest)
+category: tests
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderPropertyTest.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:70-77
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:324
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15, cross-verified.
+
+## Issue
+
+`core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderPropertyTest.kt` is misleadingly named: despite "Property" in the filename, the file contains standard example-based JUnit tests. Codebase-wide grep finds no property-based-testing framework imports (no `io.kotest.property`, no `kotlin-test-property`, no `junit-quickcheck`, no `Arbitrary`/`forAll`).
+
+## Impact
+
+Severity: low.
+
+Example-based tests cover the cases the author thought of. Property-based testing (PBT) shines for code shapes unidrive has plenty of:
+
+- **Path handling** — `LocalFsProvider.safePath()` at `core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:70-77`. The containment invariant is "for all relative paths `p`, `safePath(p).startsWith(rootPath)` OR throws". PBT generates adversarial paths (`../`, `./`, NUL bytes, mixed separators, percent-encoded) that no hand-written test will enumerate.
+- **Glob matching** — `matchesGlob()` used by exclude patterns in `Reconciler.kt:187,218`. PBT generates random glob/path pairs and asserts symmetry properties (escape round-trip, anchor-independence).
+- **SQL LIKE escaping** — `escapeLike()` at `StateDatabase.kt:324`. Property: `escapeLike(s) + "%"` matches `s` and nothing prefixed by `s` plus an additional `%` or `_`. PBT generates strings containing `%`, `_`, `\`.
+- **Sparse-file dehydrate/hydrate round-trip** — `PlaceholderManager.dehydrate()` at `PlaceholderManager.kt:110-121`. Property: dehydrate-then-hydrate is identity for any file of size N ≥ 0.
+- **JWT base64url padding** — `isJwtExpired()` at `AuthService.kt:73` (UD-308). Property: for any base64url string of length L, `padded.length % 4 == 0`.
+
+The filename suggests someone planned PBT for SFTP path-handling and didn't follow through. Renaming is half the fix; the other half is actually adding PBT.
+
+## Fix shape
+
+Three sub-steps:
+
+1. **Add kotest-property.** `testImplementation("io.kotest:kotest-property:5.9.x")`. Kotest's PBT module is the most idiomatic Kotlin option and integrates with JUnit5.
+2. **Rename `SftpProviderPropertyTest.kt` to `SftpProviderBasicsTest.kt`.** Decouples filename from the framework absence.
+3. **Add a PBT module per high-value invariant.** Priorities, in order: `safePath()` containment, `escapeLike()` correctness, `isJwtExpired()` padding. Each as a separate test file: `LocalFsPathPropertyTest.kt`, `EscapeLikePropertyTest.kt`, `JwtPaddingPropertyTest.kt`.
+
+## Cost
+
+- `kotest-property` adds ~2 MB to test classpath, no production impact.
+- Each invariant test: ~20-40 lines.
+- PBT runs are slower than example tests (default 1000 iterations) but parallelisable.
+
+## Verification
+
+- `./gradlew test` green with new tests.
+- Mutation-test a known bug in `safePath()` (e.g., temporarily remove the `startsWith` check); PBT should catch it within ≤100 iterations.
+- Document the PBT pattern in `docs/dev/CODE-STYLE.md` so future contributors know when to reach for it.
+
+## Cross-refs
+
+- `core/providers/sftp/src/test/kotlin/org/krost/unidrive/sftp/SftpProviderPropertyTest.kt` — misleadingly named file
+- `core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:70-77` — `safePath()` candidate
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:324` — `escapeLike()` candidate
+- `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:73` — JWT padding candidate (UD-308)
+---
+id: UD-702
+title: Add AGENTS.md pointer file for tool-agnostic onboarding
+category: tooling
+priority: low
+effort: XS
+status: open
+code_refs:
+  - CLAUDE.md
+  - CONTRIBUTING.md
+opened: 2026-05-15
+---
+**Source:** External review pass 2026-05-15. Tool-agnostic onboarding gap surfaced when comparing unidrive's repo conventions to the cross-tool `AGENTS.md` convention adopted by Codex, OpenCode, Aider, and other non-Claude coding agents.
+
+## Issue
+
+`CLAUDE.md` at the repo root provides detailed project-scoped agent onboarding: quick-start, "Before you X" sections for backlog mutation / log reading / ktlint, commit etiquette, infrastructure context. There is no equivalent file readable by other coding agents that ship with `AGENTS.md` conventions:
+
+- **Codex CLI** reads `AGENTS.md` (Anthropic-derived but tool-distinct).
+- **OpenCode** reads `AGENTS.md`.
+- **Aider** reads `AGENTS.md` and `.aider.conf.yml`.
+- **GitHub Copilot CLI** reads `AGENTS.md` (recent convention).
+
+A new contributor or external agent landing in the repo via one of those tools sees no project-level guidance, has no idea backlog mutation must go through `backlog.py`, may hand-edit `BACKLOG.md` (the exact failure mode `backlog.py` was built to prevent), or may not know about `ktlint-sync.sh` / `log-watch.sh`.
+
+## Impact
+
+Severity: low.
+
+Functionally invisible to the daily Claude Code workflow. Surfaces when:
+
+1. External contributor uses Codex/OpenCode/Aider against the repo — onboarding friction.
+2. The maintainer wants to A/B-test a different coding agent without porting the entire CLAUDE.md content.
+3. Future automation (CI checks, repo-policy linters) wants a stable "agent guidance" anchor file by convention.
+
+## Fix shape
+
+Option A — symlink (zero duplication): `ln -s CLAUDE.md AGENTS.md`. Both files point to the same content. Works on POSIX; Windows clones via WSL or with `core.symlinks=true` also work, but native Windows clones see the symlink as a regular text file containing the literal string `CLAUDE.md`.
+
+Option B — thin pointer file: create `AGENTS.md` with a 3-line body:
+```markdown
+# Agent guidance
+
+The canonical agent-onboarding doc for this repo is [CLAUDE.md](CLAUDE.md).
+Read that file first. All conventions there apply to any coding agent.
+```
+No duplication risk, no symlink concerns. Tool-agnostic agents follow the link.
+
+Option C — fork the content: duplicate `CLAUDE.md` content into `AGENTS.md` and keep both in sync. Highest maintenance burden — drift is guaranteed.
+
+Recommended: **Option B**. Cheap, robust, no platform footguns.
+
+## Verification
+
+- `cat AGENTS.md` from a fresh clone returns the pointer text.
+- Codex/OpenCode/Aider opened against the repo surface the project conventions.
+- Add a one-liner to `CONTRIBUTING.md` noting that both files exist and `CLAUDE.md` is canonical.
+
+## Cross-refs
+
+- `CLAUDE.md` — current canonical agent doc at repo root
+- `CONTRIBUTING.md` — should reference both files once `AGENTS.md` lands
+- Earlier verification pass at 2026-05-15 confirmed `AGENTS.md` is absent
