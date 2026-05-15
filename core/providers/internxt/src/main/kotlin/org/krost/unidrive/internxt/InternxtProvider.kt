@@ -41,7 +41,12 @@ class InternxtProvider(
     // trade for the in-process scope.
     private val folderCache = FolderUuidCache()
 
-    override val isAuthenticated: Boolean get() = authService.isAuthenticated
+    // UD-007: authService is the source of truth — see OneDriveProvider for
+    // the rationale. Setter is a no-op; the override of `logout()` below
+    // flips state via `authService.logout()`.
+    override var isAuthenticated: Boolean
+        get() = authService.isAuthenticated
+        set(_) { /* delegated to authService; setter is a no-op */ }
     override val canAuthenticate: Boolean get() = Files.exists(config.tokenPath.resolve("credentials.json"))
 
     override fun capabilities(): Set<Capability> =

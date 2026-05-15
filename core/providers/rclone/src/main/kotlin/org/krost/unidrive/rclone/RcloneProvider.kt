@@ -15,7 +15,6 @@ class RcloneProvider(
     override val id = "rclone"
     override val displayName = "Rclone"
     override var isAuthenticated: Boolean = false
-        private set
     override val canAuthenticate: Boolean get() = config.remote.isNotBlank()
 
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
@@ -30,9 +29,7 @@ class RcloneProvider(
         isAuthenticated = true
     }
 
-    override suspend fun logout() {
-        isAuthenticated = false
-    }
+    // UD-007: logout() default in CloudProvider flips isAuthenticated.
 
     // ── Listing ─────────────────────────────────────────────────────────────
 

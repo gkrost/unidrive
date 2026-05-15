@@ -5,7 +5,19 @@ import java.nio.file.Path
 interface CloudProvider {
     val id: String
     val displayName: String
-    val isAuthenticated: Boolean
+
+    /**
+     * UD-007: writable so the default [logout] implementation can flip it.
+     * Providers that own external resources (token files, network sessions,
+     * delegated auth services) override the getter to compute from their
+     * own state — see OneDrive's `tokenManager.isAuthenticated` delegation
+     * and Internxt's `authService.isAuthenticated`. The setter on those
+     * delegated implementations becomes a no-op via the override; the four
+     * boilerplate providers (WebDAV, S3, Rclone, LocalFs) keep a simple
+     * `override var isAuthenticated: Boolean = false` so the default
+     * [logout] body can reset it without per-provider override.
+     */
+    var isAuthenticated: Boolean
 
     /** Whether enough credentials/config exist to attempt [authenticate]. */
     val canAuthenticate: Boolean get() = false
@@ -21,7 +33,18 @@ interface CloudProvider {
 
     suspend fun authenticate()
 
-    suspend fun logout()
+    /**
+     * Forget any cached credentials / authenticated state.
+     *
+     * UD-007: default implementation flips the in-memory flag. Providers that
+     * own external resources (open API clients, token files, network
+     * sessions) override to release them — typically calling `super.logout()`
+     * is unnecessary because the override sets its own `isAuthenticated` via
+     * its delegated state.
+     */
+    suspend fun logout() {
+        isAuthenticated = false
+    }
 
     suspend fun listChildren(path: String): List<CloudItem>
 

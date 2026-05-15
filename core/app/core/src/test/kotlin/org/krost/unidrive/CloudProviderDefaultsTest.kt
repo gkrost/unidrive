@@ -40,7 +40,7 @@ class CloudProviderDefaultsTest {
         object : CloudProvider {
             override val id = "stub"
             override val displayName = "Stub Provider"
-            override val isAuthenticated = false
+            override var isAuthenticated = false
 
             // The stub intentionally declares NO capabilities — every optional
             // method should therefore hit the interface default and return

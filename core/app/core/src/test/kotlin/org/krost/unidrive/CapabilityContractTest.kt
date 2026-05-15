@@ -33,7 +33,7 @@ class CapabilityContractTest {
     private class CapableProvider : CloudProvider {
         override val id = "capable"
         override val displayName = "Capable"
-        override val isAuthenticated = true
+        override var isAuthenticated = true
 
         override fun capabilities(): Set<Capability> =
             setOf(

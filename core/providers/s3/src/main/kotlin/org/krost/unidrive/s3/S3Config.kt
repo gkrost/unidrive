@@ -1,7 +1,7 @@
 package org.krost.unidrive.s3
 
+import org.krost.unidrive.io.defaultTokenPath
 import java.nio.file.Path
-import java.nio.file.Paths
 
 /**
  * Configuration for an S3 or S3-compatible provider.
@@ -27,7 +27,7 @@ data class S3Config(
     val endpoint: String,
     val accessKey: String = System.getenv("AWS_ACCESS_KEY_ID") ?: "",
     val secretKey: String = System.getenv("AWS_SECRET_ACCESS_KEY") ?: "",
-    val tokenPath: Path = defaultTokenPath(),
+    val tokenPath: Path = defaultTokenPath("s3"),
 ) {
     companion object {
         /** Known preset endpoints keyed by short name. */
@@ -55,10 +55,5 @@ data class S3Config(
                 accessKey = accessKey,
                 secretKey = secretKey,
             )
-
-        fun defaultTokenPath(): Path {
-            val home = System.getenv("HOME") ?: System.getProperty("user.home")
-            return Paths.get(home, ".config", "unidrive", "s3")
-        }
     }
 }

@@ -23,7 +23,7 @@ Config is a single TOML at `~/.config/unidrive/config.toml` (Linux). Annotated e
 
 ## Status
 
-Early public preview. Linux is the MVP target; macOS and Windows may build on best-effort. Public API, IPC contract, and on-disk layout are still moving. No prebuilt binaries — build from source. Where the project is going: [docs/ROADMAP.md](docs/ROADMAP.md). What it deliberately is NOT trying to be: [docs/NON-GOALS.md](docs/NON-GOALS.md). Detailed gates: [docs/CHANGELOG.md](docs/CHANGELOG.md), [docs/backlog/BACKLOG.md](docs/backlog/BACKLOG.md).
+Early public preview. Linux is the MVP target; macOS and Windows are out of scope for v0.1.0 ([ADR-0012](docs/adr/0012-linux-mvp-protocol-removal.md), [docs/NON-GOALS.md](docs/NON-GOALS.md)) and not exercised in CI. Public API, IPC contract, and on-disk layout are still moving. No prebuilt binaries — build from source. Where the project is going: [docs/ROADMAP.md](docs/ROADMAP.md). What it deliberately is NOT trying to be: [docs/NON-GOALS.md](docs/NON-GOALS.md). Detailed gates: [docs/CHANGELOG.md](docs/CHANGELOG.md), [docs/backlog/BACKLOG.md](docs/backlog/BACKLOG.md).
 
 ## Trust
 
