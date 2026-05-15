@@ -186,6 +186,7 @@ class InternxtProvider(
         return api.downloadFileStreaming(downloadUrl, cipher, destination)
     }
 
+    // UD-304: multipart constants available in InternxtConfig.MULTIPART_*; not yet consumed (pending UD-307 multipart endpoint impl).
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
