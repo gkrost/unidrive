@@ -4,16 +4,13 @@ import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.auth.CredentialStore
+import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.internxt.model.*
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -31,7 +28,9 @@ open class AuthService(
         expectSuccess = false
     }
     private var credentials: InternxtCredentials? = null
-    private val refreshMutex = Mutex()
+
+    // UD-338: shared mutex + NonCancellable wrap lifted to :app:core/auth.
+    private val refreshLatch = RefreshableTokenLatch()
 
     companion object {
         private const val CREDENTIALS_FILE = "credentials.json"
@@ -280,27 +279,26 @@ open class AuthService(
      */
     suspend fun refreshToken(): InternxtCredentials {
         val stale = credentials ?: throw AuthenticationException("Not authenticated")
-        return refreshMutex.withLock {
-            val current = credentials ?: throw AuthenticationException("Not authenticated")
-            // Double-check: another coroutine may have already refreshed while we waited.
-            if (current.jwt != stale.jwt) {
-                return@withLock current
-            }
-            // UD-331: mirror the UD-310 OneDrive fix — wrap the network call AND
-            // the saveCredentials in NonCancellable so a Pass-2 scope cancel on
-            // a sibling's 401 can't abort the refresh between "got new JWT" and
-            // "wrote it to disk." Without this, in-memory `credentials` disagrees
-            // with what's persisted across crashes / process restart.
-            val rotated =
-                withContext(NonCancellable) {
-                    val newJwt = fetchRefreshedJwt(current.jwt)
-                    val updated = current.copy(jwt = newJwt)
-                    saveCredentials(updated)
-                    updated
-                }
-            credentials = rotated
-            rotated
-        }
+        // UD-338: serialisation + NonCancellable wrap delegated to
+        // RefreshableTokenLatch (replaces the inline `refreshMutex.withLock {
+        // ... withContext(NonCancellable) { ... } }` pattern that mirrored
+        // UD-310/UD-331 by hand). Double-check predicate (`jwt != stale.jwt`)
+        // stays here because it's the Internxt-specific "did someone else
+        // already refresh?" answer.
+        return refreshLatch.withRefresh(
+            isAlreadyFresh = {
+                val current = credentials ?: throw AuthenticationException("Not authenticated")
+                if (current.jwt != stale.jwt) current else null
+            },
+            body = {
+                val current = credentials ?: throw AuthenticationException("Not authenticated")
+                val newJwt = fetchRefreshedJwt(current.jwt)
+                val updated = current.copy(jwt = newJwt)
+                saveCredentials(updated)
+                credentials = updated
+                updated
+            },
+        )
     }
 
     suspend fun logout() {

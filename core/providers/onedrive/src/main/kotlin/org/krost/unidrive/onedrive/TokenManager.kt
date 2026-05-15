@@ -1,10 +1,7 @@
 package org.krost.unidrive.onedrive
 
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.auth.awaitOAuthCallback
 import org.krost.unidrive.io.openBrowser
 import org.krost.unidrive.onedrive.model.Token
@@ -17,7 +14,11 @@ class TokenManager(
 ) {
     private val log = org.slf4j.LoggerFactory.getLogger(TokenManager::class.java)
     private var token: Token? = null
-    private val refreshMutex = Mutex()
+
+    // UD-338: shared mutex + NonCancellable wrap lifted to :app:core/auth.
+    // Provider-specific force-refresh (UD-310) and RefreshFailure recording
+    // (UD-111) stay below in `getValidToken`.
+    private val refreshLatch = RefreshableTokenLatch()
 
     @Volatile
     var lastRefreshFailure: RefreshFailure? = null
@@ -84,48 +85,53 @@ class TokenManager(
             return currentToken
         }
 
-        return refreshMutex.withLock {
-            val freshToken = token ?: throw AuthenticationException("Not authenticated")
-            // Re-check under the lock — another coroutine may have refreshed while we waited.
-            if (!forceRefresh && !freshToken.isNearExpiry()) {
-                return freshToken
-            }
-            // If another caller already forced a refresh after we took our turn in the queue, its
-            // result is fresh enough for us too.
-            if (forceRefresh && !freshToken.isNearExpiry() && freshToken !== currentToken) {
-                return freshToken
-            }
-
-            val refreshToken = freshToken.refreshToken
-            if (refreshToken != null) {
-                try {
-                    val refreshed =
-                        withContext(NonCancellable) {
-                            oauthService.refreshToken(refreshToken)
-                        }
-                    token = refreshed
-                    oauthService.saveToken(refreshed)
-                    lastRefreshFailure = null
-                    return refreshed
-                } catch (e: Exception) {
-                    val failure =
-                        RefreshFailure(
-                            timestamp = java.time.Instant.now(),
-                            errorClass = e.javaClass.simpleName,
-                            message = e.message,
-                        )
-                    lastRefreshFailure = failure
-                    log.warn(
-                        "OAuth refresh failed: {}: {}. User will be prompted to re-authenticate.",
-                        failure.errorClass,
-                        failure.message,
-                        e,
-                    )
+        // UD-338: serialisation + NonCancellable wrap delegated to
+        // RefreshableTokenLatch. The skip-if-already-fresh predicate
+        // captures both OneDrive nuances:
+        //  - normal callers (no forceRefresh) accept any fresh token,
+        //  - forceRefresh callers accept a fresh token IFF it's a
+        //    different object than the one we observed pre-lock (i.e.
+        //    another coroutine already did the force-refresh).
+        // RefreshFailure recording (UD-111) and the throw still live
+        // here because they're provider-specific UX, not lock-mechanics.
+        return refreshLatch.withRefresh(
+            isAlreadyFresh = {
+                val freshToken = token ?: throw AuthenticationException("Not authenticated")
+                when {
+                    !forceRefresh && !freshToken.isNearExpiry() -> freshToken
+                    forceRefresh && !freshToken.isNearExpiry() && freshToken !== currentToken -> freshToken
+                    else -> null
                 }
-            }
-
-            throw AuthenticationException("Authentication expired. Please re-authenticate.")
-        }
+            },
+            body = {
+                val freshToken = token ?: throw AuthenticationException("Not authenticated")
+                val refreshToken = freshToken.refreshToken
+                if (refreshToken != null) {
+                    try {
+                        val refreshed = oauthService.refreshToken(refreshToken)
+                        token = refreshed
+                        oauthService.saveToken(refreshed)
+                        lastRefreshFailure = null
+                        return@withRefresh refreshed
+                    } catch (e: Exception) {
+                        val failure =
+                            RefreshFailure(
+                                timestamp = java.time.Instant.now(),
+                                errorClass = e.javaClass.simpleName,
+                                message = e.message,
+                            )
+                        lastRefreshFailure = failure
+                        log.warn(
+                            "OAuth refresh failed: {}: {}. User will be prompted to re-authenticate.",
+                            failure.errorClass,
+                            failure.message,
+                            e,
+                        )
+                    }
+                }
+                throw AuthenticationException("Authentication expired. Please re-authenticate.")
+            },
+        )
     }
 
     suspend fun logout() {
