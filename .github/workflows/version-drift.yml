@@ -10,19 +10,37 @@ on:
 jobs:
   drift-check:
     runs-on: ubuntu-latest
+    # `unidrive-android` is currently private; the default GITHUB_TOKEN
+    # cannot reach it, so without a PAT secret the sibling-checkout step
+    # 404s. The check is informational ("warn-only" per the script's
+    # own contract — drift never blocks a PR), so we route the sibling
+    # PAT through env (secrets aren't available at job-level `if:` per
+    # GitHub Actions docs) and skip the sibling steps when the PAT is
+    # absent. When the secret is added (a fine-grained PAT with
+    # `Contents: Read` on `gkrost/unidrive-android`), the steps run;
+    # until then they emit a `::warning::` and exit clean.
+    env:
+      ANDROID_PAT: ${{ secrets.UNIDRIVE_ANDROID_PAT }}
     steps:
       - name: Checkout core
         uses: actions/checkout@v4
         with:
           path: unidrive
 
+      - name: Warn when no PAT configured
+        if: ${{ env.ANDROID_PAT == '' }}
+        run: |
+          echo "::warning::UNIDRIVE_ANDROID_PAT secret not configured; skipping cross-repo drift check. Add a fine-grained PAT with Contents:Read on gkrost/unidrive-android to enable."
+
       - name: Checkout unidrive-android sibling
+        if: ${{ env.ANDROID_PAT != '' }}
         uses: actions/checkout@v4
         with:
           repository: gkrost/unidrive-android
           path: unidrive-android
-          # No token needed — public repo. Adjust if it becomes private.
+          token: ${{ env.ANDROID_PAT }}
 
       - name: Run drift check
+        if: ${{ env.ANDROID_PAT != '' }}
         working-directory: unidrive
         run: bash scripts/check-version-drift.sh
