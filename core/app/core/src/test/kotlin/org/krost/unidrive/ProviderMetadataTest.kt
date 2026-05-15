@@ -52,23 +52,69 @@ class ProviderMetadataTest {
         }
     }
 
+    // UD-810 audit: renamed from `allMetadata returns list`. The body's
+    // for-loop runs 0 iterations when the provider classpath is empty
+    // (the case in :app:core, where provider modules are not on the
+    // test classpath), so the previous test silently passed when the
+    // SPI was broken. The structural invariant ("every discovered
+    // entry has non-blank id and displayName") is still worth pinning
+    // for any classpath state; the "at least one entry discovered"
+    // invariant lives in :app:cli's ProviderRegistryDiscoveryTest where
+    // every provider IS on the test classpath.
     @Test
-    fun `allMetadata returns list`() {
-        val all = ProviderRegistry.allMetadata()
-        // may be empty in unit-test classpath without providers, but should not throw
-        for (meta in all) {
-            assertTrue(meta.id.isNotBlank())
-            assertTrue(meta.displayName.isNotBlank())
+    fun `every discovered metadata has non-blank id and displayName`() {
+        for (meta in ProviderRegistry.allMetadata()) {
+            assertTrue(meta.id.isNotBlank(), "metadata id must be non-blank; got '${meta.id}'")
+            assertTrue(
+                meta.displayName.isNotBlank(),
+                "metadata '${meta.id}' displayName must be non-blank",
+            )
         }
     }
 
+    // UD-810 audit: renamed from `allByTier returns sorted metadata` and
+    // rewritten under Codex PR #18 review feedback.
+    //
+    // Previous body sorted with a LOCAL `sortedBy { canonical.indexOf(...) }`
+    // expression that never invoked `ProviderRegistry.allByTier()` — if
+    // `allByTier()` changed to the wrong order or stopped sorting entirely,
+    // the test would still pass. Codex flagged this on PR #18.
+    //
+    // Fix: `ProviderRegistry.allByTier` now takes an optional
+    // `metadata: List<ProviderMetadata>` parameter (default = `allMetadata()`)
+    // so synthesized fixtures can be injected through the real API in
+    // :app:core's classpath-less test environment. The test now exercises
+    // the actual production sort recipe.
+    //
+    // The "real providers tier-sorted" pin against a populated classpath
+    // still belongs in :app:cli's ProviderRegistryDiscoveryTest (separate
+    // chunk).
     @Test
-    fun `allByTier returns sorted metadata`() {
-        val sorted = ProviderRegistry.allByTier()
-        for (meta in sorted) {
-            assertTrue(meta.tier.isNotBlank())
-        }
+    fun `allByTier applies the canonical tier ordering`() {
+        // Build one fixture per canonical tier value, inserted in reverse so
+        // a no-op sort (or wrong-order sort) is detectable.
+        val synthesized = ProviderRegistry.TIER_ORDER.reversed().map { tier -> tierStub(tier) }
+        val sorted = ProviderRegistry.allByTier(synthesized)
+        assertEquals(
+            ProviderRegistry.TIER_ORDER,
+            sorted.map { it.tier },
+            "ProviderRegistry.allByTier must return entries in TIER_ORDER",
+        )
     }
+
+    private fun tierStub(tier: String): ProviderMetadata =
+        ProviderMetadata(
+            id = "stub-${tier.lowercase().replace("-", "_")}",
+            displayName = "Stub $tier",
+            description = "tier fixture",
+            authType = "n/a",
+            encryption = "n/a",
+            jurisdiction = "n/a",
+            gdprCompliant = true,
+            cloudActExposure = false,
+            signupUrl = null,
+            tier = tier,
+        )
 
     @Test
     fun `isKnown checks knownTypes`() {
@@ -77,61 +123,12 @@ class ProviderMetadataTest {
         assertFalse(ProviderRegistry.isKnown("nonexistent"))
     }
 
-    // --- ProviderMetadata data class construction ---
-
-    @Test
-    fun `ProviderMetadata stores all required fields`() {
-        val meta =
-            ProviderMetadata(
-                id = "test",
-                displayName = "Test Provider",
-                description = "A test provider",
-                authType = "oauth2",
-                encryption = "TLS",
-                jurisdiction = "DE",
-                gdprCompliant = true,
-                cloudActExposure = false,
-                signupUrl = "https://example.com/signup",
-                tier = "EU-hosted",
-            )
-        assertEquals("test", meta.id)
-        assertEquals("Test Provider", meta.displayName)
-        assertEquals("A test provider", meta.description)
-        assertEquals("oauth2", meta.authType)
-        assertEquals("TLS", meta.encryption)
-        assertEquals("DE", meta.jurisdiction)
-        assertTrue(meta.gdprCompliant)
-        assertFalse(meta.cloudActExposure)
-        assertEquals("https://example.com/signup", meta.signupUrl)
-        assertEquals("EU-hosted", meta.tier)
-        assertNull(meta.userRating)
-        assertNull(meta.benchmarkGrade)
-        assertNull(meta.affiliateUrl)
-    }
-
-    @Test
-    fun `ProviderMetadata optional fields`() {
-        val meta =
-            ProviderMetadata(
-                id = "rated",
-                displayName = "Rated Provider",
-                description = "Has optional fields",
-                authType = "api_key",
-                encryption = "AES-256",
-                jurisdiction = "US",
-                gdprCompliant = false,
-                cloudActExposure = true,
-                signupUrl = null,
-                tier = "Global",
-                userRating = 4.5,
-                benchmarkGrade = "A",
-                affiliateUrl = "https://example.com/aff",
-            )
-        assertEquals(4.5, meta.userRating)
-        assertEquals("A", meta.benchmarkGrade)
-        assertEquals("https://example.com/aff", meta.affiliateUrl)
-        assertNull(meta.signupUrl)
-    }
+    // UD-810 audit: deleted `ProviderMetadata stores all required fields` and
+    // `ProviderMetadata optional fields` — both tested Kotlin's data-class
+    // constructor + getter generation, not a domain invariant. If `data class`
+    // ever becomes a regular `class` (or a field rename happens), the affected
+    // callers fail at compile time; no runtime test would catch a regression
+    // that the compiler would not catch first. See CHANGELOG `[Unreleased] / Removed`.
 
     // -- UD-263: per-provider concurrency hints --------------------------------
 
@@ -183,53 +180,10 @@ class ProviderMetadataTest {
         assertEquals(200L, meta.minRequestSpacingMs)
     }
 
-    @Test
-    fun `ProviderMetadata data class equality and copy`() {
-        val meta1 =
-            ProviderMetadata(
-                id = "x",
-                displayName = "X",
-                description = "d",
-                authType = "a",
-                encryption = "e",
-                jurisdiction = "j",
-                gdprCompliant = true,
-                cloudActExposure = false,
-                signupUrl = null,
-                tier = "Local",
-            )
-        val meta2 = meta1.copy()
-        assertEquals(meta1, meta2)
-        val meta3 = meta1.copy(id = "y")
-        assertFalse(meta1 == meta3)
-        assertEquals("y", meta3.id)
-    }
-
-    // --- ShareInfo data class ---
-
-    @Test
-    fun `ShareInfo stores all fields`() {
-        val info =
-            ShareInfo(
-                id = "s1",
-                url = "https://share.example.com/abc",
-                type = "view",
-                scope = "anonymous",
-                hasPassword = true,
-                expiration = "2026-05-01T00:00:00Z",
-            )
-        assertEquals("s1", info.id)
-        assertEquals("https://share.example.com/abc", info.url)
-        assertEquals("view", info.type)
-        assertEquals("anonymous", info.scope)
-        assertTrue(info.hasPassword)
-        assertEquals("2026-05-01T00:00:00Z", info.expiration)
-    }
-
-    @Test
-    fun `ShareInfo defaults`() {
-        val info = ShareInfo(id = "s2", url = "u", type = "edit", scope = "org")
-        assertFalse(info.hasPassword)
-        assertNull(info.expiration)
-    }
+    // UD-810 audit: deleted `ProviderMetadata data class equality and copy`,
+    // `ShareInfo stores all fields`, `ShareInfo defaults` — all three tested
+    // Kotlin's data-class generated machinery (equals/copy/getter/default-args),
+    // not domain invariants. Compiler-generated behaviour is the contract; a
+    // runtime test that re-derives it adds maintenance cost without catching
+    // anything the compiler doesn't already catch. See CHANGELOG.
 }

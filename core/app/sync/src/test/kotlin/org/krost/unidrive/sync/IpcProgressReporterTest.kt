@@ -2,11 +2,9 @@ package org.krost.unidrive.sync
 
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.Ignore
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -40,6 +38,45 @@ class IpcProgressReporterTest {
         return client
     }
 
+    /**
+     * UD-214: wait for the IpcServer's accept loop (on `Dispatchers.IO`) to
+     * have registered at least [atLeast] clients. Replaces the
+     * `delay(100)` "hope it's enough" pattern that flaked on slow CI
+     * runners — `delay` advances virtual time under `runTest` while the
+     * accept loop runs on a real thread. `Thread.sleep` here is the right
+     * primitive: we genuinely need real wall-clock to elapse for the
+     * accept thread to make progress.
+     */
+    private fun awaitClientCount(
+        server: IpcServer,
+        atLeast: Int = 1,
+        timeoutMs: Long = 2000,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (server.clientCount < atLeast && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5)
+        }
+        check(server.clientCount >= atLeast) {
+            "UD-214: server did not register $atLeast client(s) within ${timeoutMs}ms " +
+                "(saw ${server.clientCount})"
+        }
+    }
+
+    // UD-214 synchronization contract (kept here as a one-place reference):
+    //   1. server.start(scope) — accept + broadcast loops launched on Dispatchers.IO.
+    //   2. connectClient() — TCP connect blocks until server-side accept() returns.
+    //   3. awaitClientCount(server, 1) — wait for the accept loop to register the
+    //      newly-accepted client in the `clients` list. Without this gate, an emit
+    //      that races accept() finds an empty client list and drops the message.
+    //   4. emit*() — IpcProgressReporter puts the JSON line on the server's
+    //      `Channel<String>`. The broadcast loop drains it on its next iteration
+    //      and writes to every registered client.
+    //   5. readLines(client, timeoutMs = N) — blocks until the bytes show up or
+    //      the deadline expires. Owns its own wall-clock budget; never sees
+    //      virtual time.
+    // The previous `delay(100)` pattern was wrong because runTest's virtual
+    // time doesn't advance the Dispatchers.IO accept loop's real-thread clock.
+
     private suspend fun readLines(
         client: SocketChannel,
         timeoutMs: Long = 2000,
@@ -71,10 +108,9 @@ class IpcProgressReporterTest {
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(100)
 
             val client = connectClient()
-            delay(100)
+            awaitClientCount(server!!)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.onScanProgress("remote", 42)
@@ -94,10 +130,9 @@ class IpcProgressReporterTest {
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(100)
 
             val client = connectClient()
-            delay(100)
+            awaitClientCount(server!!)
 
             val reporter = IpcProgressReporter(server!!, "work")
             reporter.onActionProgress(3, 10, "DownloadFile", "/docs/report.pdf")
@@ -112,22 +147,20 @@ class IpcProgressReporterTest {
             client.close()
         }
 
-    @Ignore("Flaky IPC race; see #108. Temporarily disabled for release build.")
+    // UD-214: re-enabled. Was @Ignore'd ("Flaky IPC race; see #108") because
+    // the delay(200)/yield() pattern couldn't reliably wait for the
+    // Dispatchers.IO accept loop under runTest's virtual time.
     @Test
     fun `onSyncComplete emits sync_complete event`() =
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(200)
-            yield() // ensure broadcast job is scheduled
 
             val client = connectClient()
-            delay(200)
-            yield() // ensure client connected
+            awaitClientCount(server!!)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.onSyncComplete(downloaded = 5, uploaded = 3, conflicts = 1, durationMs = 12345)
-            yield() // allow broadcast job to process channel
 
             val lines = readLines(client, timeoutMs = 5000, minLines = 1)
             val syncCompleteLines =
@@ -148,16 +181,16 @@ class IpcProgressReporterTest {
             client.close()
         }
 
-    @Ignore("Flaky IPC race; see #108 / UD-214. Temporarily disabled for release build.")
+    // UD-214: re-enabled. Was @Ignore'd on the same race class as
+    // `onSyncComplete emits sync_complete event` above.
     @Test
     fun `emitSyncError sanitizes newlines`() =
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(100)
 
             val client = connectClient()
-            delay(100)
+            awaitClientCount(server!!)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.emitSyncError("line1\nline2\nline3")
@@ -178,10 +211,9 @@ class IpcProgressReporterTest {
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(100)
 
             val client = connectClient()
-            delay(100)
+            awaitClientCount(server!!)
 
             val reporter = IpcProgressReporter(server!!, "myprofile")
             reporter.emitSyncStarted()
@@ -198,7 +230,8 @@ class IpcProgressReporterTest {
         runTest {
             server = IpcServer(socketPath)
             server!!.start(backgroundScope)
-            delay(100)
+            // No client connected — this test exercises the in-process state
+            // mutation path, not the IPC broadcast, so no awaitClientCount needed.
 
             val reporter = IpcProgressReporter(server!!, "testprofile")
 

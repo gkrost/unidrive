@@ -41,6 +41,19 @@ class IpcServer(
     var syncState: SyncState? = null
         private set
 
+    /**
+     * UD-214: number of currently-connected clients. Exposed so callers can
+     * synchronize on "accept loop has registered a freshly-connected client"
+     * without polling private state. The value is eventually-consistent —
+     * `accept()` runs on `Dispatchers.IO` and there is a small window
+     * between the client's TCP connect completing and `clients.add(...)`
+     * running — but is monotonic for a given client until that client
+     * closes. Primary consumer: `IpcProgressReporterTest` and any tool
+     * that needs to gate emission on "at least one consumer is listening".
+     */
+    val clientCount: Int
+        get() = clients.size
+
     private val log = LoggerFactory.getLogger(IpcServer::class.java)
     private val clients = CopyOnWriteArrayList<SocketChannel>()
     private val channel = Channel<String>(capacity = 256)

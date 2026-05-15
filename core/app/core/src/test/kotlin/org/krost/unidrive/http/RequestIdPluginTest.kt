@@ -20,8 +20,14 @@ import kotlin.test.assertTrue
  * `X-Unidrive-Request-Id` header unique per call.
  */
 class RequestIdPluginTest {
+    // UD-811 audit: invariant is "every request carries a non-blank,
+    // unique `X-Unidrive-Request-Id`." The previous body additionally
+    // asserted `id.length == 8`, which pinned the current id format —
+    // if the format ever changes (e.g. to 12 chars or a full UUID),
+    // the test breaks without the contract being violated. Length
+    // dropped; non-blank + unique remain.
     @Test
-    fun `every request carries X-Unidrive-Request-Id header`() =
+    fun `every request carries a non-blank unique X-Unidrive-Request-Id header`() =
         runTest {
             val seenIds = mutableListOf<String>()
             val engine =
@@ -45,14 +51,28 @@ class RequestIdPluginTest {
             assertEquals(3, seenIds.size)
             seenIds.forEachIndexed { i, id ->
                 assertTrue(id.isNotBlank(), "request $i should carry X-Unidrive-Request-Id; saw '$id'")
-                assertEquals(8, id.length, "request $i id should be 8 chars; was '$id'")
             }
             // Three distinct ids.
             assertEquals(seenIds.toSet().size, seenIds.size, "each request should get a fresh id; saw $seenIds")
         }
 
+    // UD-811 audit: renamed from `request attribute exposes the id for
+    // caller introspection`. The previous body tried to capture
+    // `this.requestId()` inside the `client.request { ... }` lambda,
+    // but that lambda runs during HttpRequestBuilder construction —
+    // BEFORE the `RequestId` plugin's `onRequest` populates the
+    // attribute. So `capturedFromBuilder` was always null, the
+    // `if (capturedFromBuilder != null) { assertEquals(...) }` guard
+    // never ran, and the test silently degenerated to "engine saw a
+    // non-blank header." Renamed to match what the test actually
+    // verifies: that the plugin populates the header before the
+    // request reaches the engine. The "exposes via attribute for
+    // caller introspection" use-case is not reachable from outside
+    // the plugin's own `onResponse` hook and so cannot be black-box
+    // tested; covered indirectly by the log line that pulls the
+    // attribute in `onResponse`.
     @Test
-    fun `request attribute exposes the id for caller introspection`() =
+    fun `RequestId plugin populates X-Unidrive-Request-Id before the request reaches the engine`() =
         runTest {
             val engine =
                 MockEngine {
@@ -63,25 +83,18 @@ class RequestIdPluginTest {
                     install(RequestId)
                 }
 
-            var capturedFromBuilder: String? = null
-            val response =
-                client.request("https://example.invalid/probe") {
-                    // The plugin populates the attribute before send; the builder
-                    // hook runs after, so we can read it here.
-                    capturedFromBuilder = this.requestId()
-                }
+            val response = client.request("https://example.invalid/probe")
             assertEquals("ok", response.bodyAsText())
 
-            // The same id that the plugin put on the request must reach the server
-            // as the X-Unidrive-Request-Id header; assert that indirectly via the
-            // builder hook capturing the attribute.
-            val fromEngineHeader = (engine.requestHistory.first().headers["X-Unidrive-Request-Id"])
-            assertNotNull(fromEngineHeader)
-            // Builder-side value may be null if onRequest runs after our block;
-            // either way the header must be populated for the server to see it.
-            if (capturedFromBuilder != null) {
-                assertEquals(capturedFromBuilder, fromEngineHeader)
-            }
+            val fromEngineHeader = engine.requestHistory.first().headers["X-Unidrive-Request-Id"]
+            assertNotNull(
+                fromEngineHeader,
+                "engine must see the X-Unidrive-Request-Id header populated by the plugin",
+            )
+            assertTrue(
+                fromEngineHeader.isNotBlank(),
+                "X-Unidrive-Request-Id must be non-blank; got '$fromEngineHeader'",
+            )
         }
 
     @Test
