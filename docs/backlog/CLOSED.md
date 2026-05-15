@@ -1154,3 +1154,296 @@ A roadmap without non-goals reads as "all the things, eventually, just be patien
 ## Provenance
 
 Discussed 2026-05-01 with maintainer. Pairs with UD-003 (ADR-0014 surface consolidator) — together they make the project navigable for new contributors without reading 13 ADRs + 90 tickets.
+
+---
+id: UD-769
+title: Drop windows-latest from CI core matrix (or demote to allowed-to-fail) per ADR-0011/0012
+category: tooling
+priority: medium
+effort: XS
+status: closed
+closed: 2026-05-15
+resolved_by: commit b8c0447. Path A: dropped windows-latest from matrix; collapsed core (matrix.os) to core (ubuntu-latest); dropped 4 if-guards; tightened README §Status.
+code_refs:
+  - .github/workflows/build.yml:39
+opened: 2026-05-02
+---
+## Problem
+
+`.github/workflows/build.yml:39`:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    os: [ubuntu-latest, windows-latest]
+```
+
+[ADR-0011](adr/0011-shell-win-removal.md) +
+[ADR-0012](adr/0012-linux-mvp-protocol-removal.md) make Linux the
+MVP target. macOS and Windows are explicitly community-best-effort
+(README §"Status", in slim form: "Linux-first").
+
+Yet CI runs the full `core` job on `windows-latest` and `fail-fast:
+false` means a Windows-only failure produces a red overall build
+status even when Linux is green. This:
+
+- **Lies about the support matrix.** Anyone reading the build
+  badge and expanding the run sees "we test on Windows" — we
+  don't, in any meaningful sense; we just smoke that the JVM
+  modules compile.
+- **Burns CI time** (Windows runners are 5-10× slower than
+  ubuntu-latest for Gradle cold start; observed in
+  run 25247884883 — Windows job ran 5+ minutes when Linux took
+  3).
+- **Adds noise to PRs.** Every PR sits with a half-failed
+  status until the Windows run finishes, even though the
+  failure is rarely a real defect.
+
+## Proposed action
+
+Two acceptable paths:
+
+**A) Drop windows-latest from the matrix entirely.** Honest,
+fast, matches ADR-0012. Loses the "compiles on Windows"
+canary, which is real but cheap to restore later.
+
+**B) Keep it as a separate, allowed-to-fail job** with an
+`continue-on-error: true` or a `if: github.event_name ==
+'schedule'` guard so PR builds don't block on Windows. Restore
+the Windows runner only on the main branch / nightly schedule.
+
+Recommend **A** for v0.1.0. Re-add via **B** if a future ADR
+re-opens Windows as a tier (per ADR-0012 §"Re-opening criteria").
+
+## Acceptance criteria
+
+- [ ] `core` matrix does not include `windows-latest` for PR
+      builds.
+- [ ] If kept (Option B), windows-latest is `continue-on-error:
+      true` AND only runs on `push: branches: [main]` or a
+      `schedule:` trigger.
+- [ ] README badge stays accurate (linux-first claim is honest).
+- [ ] No regression on ubuntu-latest + gitleaks jobs.
+
+## Why this is its own ticket
+
+It's a one-line CI config change but with policy implications
+(does the project still claim "best-effort Windows builds"?).
+A discrete commit with a clear `git log` entry is worth more
+than folding it into a generic "CI hygiene" sweep.
+
+---
+id: UD-770
+title: SPECS.md §2.2 reports 15 MCP tools; code lists 23 (UD-216 admin verbs added; doc not updated)
+category: tooling
+priority: medium
+effort: XS
+status: closed
+closed: 2026-05-15
+resolved_by: commit 4d574e3. SPECS.md App-tier table row and §2.2 prose updated: 15 to 23 (15 user-facing + 8 UD-216 admin verbs). Pure doc reconciliation, no code change.
+code_refs:
+  - docs/SPECS.md:54
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SPECS.md:54` claims the MCP server exposes 15 tools,
+verified against `core/app/mcp/.../Main.kt:20-24`:
+
+> | `app/mcp` | MCP server with 15 tools |
+> [`core/app/mcp/`](../core/app/mcp) | 💻 **15 tools verified**
+> (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:20-24`) |
+
+The actual count in `Main.kt` (verified at filing time) is **23**:
+the original 15 user-facing tools (status, sync, get, free, pin,
+conflicts, ls, config, trash, versions, share, relocate,
+watchEvents, quota, backup) **plus 8 admin verbs** added under
+[UD-216](#ud-216): authBegin, authComplete, logout, profileList,
+profileAdd, profileRemove, profileSet, identity.
+
+`Main.kt:53` even has the comment `// UD-216: admin verbs for
+end-to-end LLM-driven management.` admitting the count moved.
+
+The SPECS.md row is also marked 💻 **15 tools verified**, which
+is now a false attestation — the verification was correct at the
+time it was made, but the doc didn't follow the code.
+
+## Risk
+
+- `SPECS.md` is the **normative intent catalog** per CLAUDE.md.
+  The whole point of SPECS.md is to flag doc-vs-code drift with
+  📄 / 💻 / ✅ / ⚠ labels. A wrong 💻 attestation is precisely
+  the failure mode SPECS.md exists to prevent.
+- LLM clients picking up unidrive's MCP server expecting "15
+  tools" per the docs will be surprised by the 8 admin verbs;
+  not breaking, but inelegant.
+
+## Proposed action
+
+1. Update `docs/SPECS.md:54` row:
+   - Tool count: `15` → `23` (or whatever `Main.kt` lists at
+     edit time — re-verify, do not trust this ticket).
+   - Line range: `Main.kt:20-24` → the actual `listOf(...)`
+     range. At filing time the `tools = listOf(...)` block
+     spans `Main.kt:36-62`.
+   - Verification label: stays 💻 (code-verified) once corrected.
+2. Cross-check: does any other doc (README, ARCHITECTURE.md,
+   docs/EXTENSIONS.md, docs/MCP* if such exists) cite "15
+   tools"? Sweep and update.
+3. Add a `// SPECS.md row N — keep tool count in sync` marker
+   comment near the `listOf(...)` block in `Main.kt` so future
+   adds prompt a SPECS.md edit. (Optional; only if the maintainer
+   thinks comment-pinning beats a CI check.)
+
+## Acceptance criteria
+
+- [ ] `docs/SPECS.md:54` (or its current line) reports the
+      actual tool count, with the actual line range.
+- [ ] `grep -rn "15 tools" docs/` returns no stale claims.
+- [ ] No code changes required (this is doc drift only).
+
+## Why this is its own ticket
+
+Tiny but high-trust: SPECS.md is the source of truth for
+intent-vs-code accuracy. Drift here erodes confidence in every
+other ✅ / ⚠ label across the catalog. Worth its own atomic
+commit so a future reader can `git log -- docs/SPECS.md` and
+see exactly when the count was reconciled.
+
+---
+id: UD-007
+title: Default logout() on CloudProvider; remove 4-provider boilerplate (WebDAV, S3, Rclone, LocalFs)
+category: architecture
+priority: medium
+effort: XS
+status: closed
+closed: 2026-05-15
+resolved_by: commit 041d304. CloudProvider.logout() now has a default body that flips isAuthenticated. 4 boilerplate overrides (WebDAV/S3/Rclone/LocalFs) removed; OneDrive/Internxt converted to var with no-op setter; SFTP keeps its api.close() override. 8 test stubs val to var. Out of scope: ADR-0005 capability split for logout().
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProvider.kt
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+4 of 7 in-tree providers (WebDAV, S3, Rclone, LocalFs) implement `logout()` as the same boilerplate:
+
+```kotlin
+override suspend fun logout() { isAuthenticated = false }
+```
+
+The `CloudProvider` interface should provide this as the default. SFTP, OneDrive, and Internxt would override to add `api.close()` / `tokenManager.logout()` etc.
+
+## Proposed action
+
+1. In `CloudProvider.kt`, change `logout()` from abstract to default-implemented:
+
+   ```kotlin
+   /**
+    * Forget any cached credentials / authenticated state. Default
+    * implementation flips the in-memory flag; providers that own
+    * external resources (token files, network connections) override
+    * to release them.
+    */
+   suspend fun logout() {
+       // Default no-op; subclasses override to release resources.
+       // Note: subclasses that track an in-memory `isAuthenticated`
+       // flag must reset it themselves in their override.
+   }
+   ```
+
+2. Decide: should `isAuthenticated` be lifted into `CloudProvider`? If yes, the default `logout()` can flip it. If not, keep the default a no-op and let each provider's override handle its own state.
+
+3. Delete the boilerplate `override suspend fun logout() { isAuthenticated = false }` in WebDAV, S3, Rclone, LocalFs.
+
+4. Verify SFTP, OneDrive, Internxt overrides still do the right thing (they'll need to set `isAuthenticated = false` themselves now if it was previously inherited from the boilerplate; depends on §2 decision).
+
+## Acceptance criteria
+
+- [ ] `logout()` has a default implementation in `CloudProvider`.
+- [ ] WebDAV, S3, Rclone, LocalFs no longer override `logout()`.
+- [ ] SFTP, OneDrive, Internxt overrides still close their external
+      resources.
+- [ ] Existing `logout`-related tests still pass; no test weakened.
+
+## Out of scope
+
+Lifting `isAuthenticated` is a separate decision that can be made
+inside this ticket OR deferred. Document the choice in the ticket
+resolution note.
+
+---
+id: UD-009
+title: Lift defaultTokenPath() into :app:core/io; eliminate 5-provider duplicate (SFTP/WebDAV/S3/OneDrive/Internxt)
+category: architecture
+priority: medium
+effort: XS
+status: closed
+closed: 2026-05-15
+resolved_by: commit bff6c1e. New :app:core/io/TokenPath.kt holds the canonical defaultTokenPath(providerId). 5 provider Configs migrated. SftpConcurrencyTest call sites updated. Behaviour byte-identical. XDG_CONFIG_HOME out of scope per ticket.
+code_refs:
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProviderFactory.kt
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ProviderFactory.kt
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt
+opened: 2026-05-02
+---
+## Problem
+
+5 providers (SFTP, WebDAV, S3, OneDrive, Internxt) each define an identical helper:
+
+```kotlin
+fun defaultTokenPath(): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", "<provider-id>")
+}
+```
+
+Only the last path segment varies by provider id.
+
+## Proposed action
+
+Lift to `:app:core` as a single helper:
+
+```kotlin
+// core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt
+package org.krost.unidrive.io
+
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * Default per-profile token storage directory:
+ *   $HOME/.config/unidrive/<providerId>
+ *
+ * The caller passes its own `id` (typically `factory.id`) so this
+ * function does not need to know which providers exist.
+ */
+fun defaultTokenPath(providerId: String): Path {
+    val home = System.getenv("HOME") ?: System.getProperty("user.home")
+    return Paths.get(home, ".config", "unidrive", providerId)
+}
+```
+
+Replace the 5 duplicates with `org.krost.unidrive.io.defaultTokenPath(id)`.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/TokenPath.kt` exists.
+- [ ] All 5 duplicates removed.
+- [ ] Behaviour byte-identical: `defaultTokenPath("onedrive")` produces the same path string the old `OneDrive`-specific helper did.
+- [ ] No test regressions.
+
+## Why architecture-range
+
+Cross-module helper lift. Same category as UD-006.
+
+## Out of scope
+
+Honouring `XDG_CONFIG_HOME` (currently the helper hardcodes `~/.config`; that's a separate ticket if/when XDG compliance becomes a goal).
