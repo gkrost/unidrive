@@ -3,6 +3,7 @@ package org.krost.unidrive.sftp
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.ScanHeartbeat
 import org.krost.unidrive.sync.computeSnapshotDelta
+import org.krost.unidrive.sync.defaultDeletedItem
 import java.nio.file.Path
 import java.time.Instant
 
@@ -132,20 +133,8 @@ class SftpProvider(
             hasChanged = { prev, curr ->
                 prev.size != curr.size || prev.mtimeSeconds != curr.mtimeSeconds
             },
-            deletedItem = { path, entry ->
-                CloudItem(
-                    id = path,
-                    name = path.substringAfterLast("/"),
-                    path = path,
-                    size = 0,
-                    isFolder = entry.isFolder,
-                    modified = null,
-                    created = null,
-                    hash = null,
-                    mimeType = null,
-                    deleted = true,
-                )
-            },
+            // UD-008: shared helper from :app:sync; SFTP uses `id = path` default.
+            deletedItem = { path, entry -> defaultDeletedItem(path, entry) },
         )
     }
 

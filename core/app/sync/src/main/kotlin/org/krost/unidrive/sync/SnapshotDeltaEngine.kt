@@ -5,6 +5,52 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.DeltaPage
 
 /**
+ * UD-008: minimal contract every snapshot-cursor entry type satisfies.
+ *
+ * The 5 in-tree snapshot providers (LocalFs, SFTP, WebDAV, S3, Rclone)
+ * each carry their own `@Serializable data class XxxSnapshotEntry` with
+ * provider-specific fields (`mtimeSeconds`, `etag`, `lastModified`,
+ * `hash` etc), but **all** expose `isFolder: Boolean`. Capturing that
+ * one common field lets [defaultDeletedItem] build the deleted-row
+ * `CloudItem` for the engine without each provider repeating an
+ * identical 11-line lambda.
+ *
+ * Implementing this interface on a snapshot entry type is optional —
+ * providers that need a non-default id (S3 uses `api.pathToKey(path)`,
+ * not the raw path) still pass an explicit `deletedItem` lambda to
+ * [computeSnapshotDelta].
+ */
+interface SnapshotEntry {
+    val isFolder: Boolean
+}
+
+/**
+ * UD-008: canonical deleted-row `CloudItem` for snapshot providers.
+ * Captures the lambda body that the audit found duplicated in 4 of 5
+ * in-tree snapshot providers (LocalFs, Rclone, SFTP, WebDAV all use
+ * `id = path`). The fifth — S3 — also uses this helper by passing its
+ * own `id = api.pathToKey(path)`, since `id` defaults to `path` when
+ * unspecified.
+ */
+fun defaultDeletedItem(
+    path: String,
+    entry: SnapshotEntry,
+    id: String = path,
+): CloudItem =
+    CloudItem(
+        id = id,
+        name = path.substringAfterLast("/"),
+        path = path,
+        size = 0,
+        isFolder = entry.isFolder,
+        modified = null,
+        created = null,
+        hash = null,
+        mimeType = null,
+        deleted = true,
+    )
+
+/**
  * Snapshot-based diff loop shared by every snapshot-cursor provider
  * (HiDrive, S3, SFTP, WebDAV, Rclone, LocalFs).
  *
