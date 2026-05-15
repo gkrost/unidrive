@@ -138,7 +138,11 @@ private class SummaryReporter : ProgressReporter {
         count: Int,
     ) {}
 
-    override fun onActionCount(total: Int) {
+    override fun onActionCount(
+        total: Int,
+        preFilterTotal: Int,
+        filterReason: String?,
+    ) {
         totalActions = total
     }
 
