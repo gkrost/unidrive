@@ -8,42 +8,48 @@ consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013
 
 ## Context
 
-A new contributor reading the ADR set today must mentally compose four
-documents to answer "what is unidrive v0.1.0 actually shipping?":
+The v0.1.0 shipping surface is the cumulative result of four decisions
+made between 2026-04-26 and 2026-04-29:
 
-| ADR | Date | Decision |
-|---|---|---|
-| [ADR-0008](0008-greenfield-restart.md) | 2026-04-26 | Greenfield restart. v0.1.0 = core-only; `ui/` and `shell-win/` at "preview" tier. |
-| [ADR-0011](0011-shell-win-removal.md) | 2026-04-28 | Remove `shell-win/` entirely. Named-pipe transport retained for the future v0.2.0 UI-on-Windows path. |
-| [ADR-0012](0012-linux-mvp-protocol-removal.md) | 2026-04-28 | Linux-only MVP. Remove `protocol/` schemas, `NamedPipeServer.kt`, `PipeSecurity.kt`, `NdjsonValidator.kt`. Windows/macOS out of scope for v0.0.x → v0.1.0. |
-| [ADR-0013](0013-ui-removal.md) | 2026-04-29 | Remove `ui/` entirely. The shipping surface is the CLI + daemon + MCP server. |
+| ADR | Date | Decision | In tree? |
+|---|---|---|---|
+| ADR-0008 | 2026-04-26 | Greenfield restart. v0.1.0 = core-only; `ui/` and `shell-win/` at "preview" tier. | Removed in commit `466d5f8` |
+| ADR-0011 | 2026-04-28 | Remove `shell-win/` entirely. Named-pipe transport initially retained for a future Windows UI. | Removed in commit `466d5f8` |
+| [ADR-0012](0012-linux-mvp-protocol-removal.md) | 2026-04-28 | Linux-only MVP. Remove `protocol/` schemas, `NamedPipeServer.kt`, `PipeSecurity.kt`, `NdjsonValidator.kt`. Windows/macOS out of scope for v0.0.x → v0.1.0. | Yes |
+| ADR-0013 | 2026-04-29 | Remove `ui/` entirely. The shipping surface is the CLI + daemon + MCP server. | Removed in commit `466d5f8` |
 
-ADR-0008's stated trade-offs ("no tray, no Explorer integration") are
-now the actual shipped state, not a temporary acceptance. Each amendment
-ADR explicitly cross-references the others via the `amends` /
-`amended_by` / `supersedes_in_part` frontmatter chain. The chain is
-faithfully recorded but never summarised. A reader who lands on
-ADR-0008 first reads dated trade-offs without realising they're already
-permanent decisions; a reader who lands on ADR-0013 last sees the final
-state but not why.
+**Three of the four source ADRs are not retained in tree.** They were
+deliberately removed along with other relocated/outdated docs in
+`466d5f8`; only ADR-0012 (the latest amendment) survives. The
+decisions themselves still hold — they're recorded in commit history
+plus this consolidator — but a reader cannot navigate to ADR-0008,
+ADR-0011, or ADR-0013 from a working copy. That gap is precisely
+what motivates this consolidator: a single in-tree document that
+states the resulting v0.1.0 surface without needing to chase
+removed files.
 
-This ADR is a **consolidator, not a rewrite.** The four source ADRs
-remain authoritative for their respective decisions. This document
-states the resulting v0.1.0 surface in one place so a contributor can
-answer "what's shipping?" without re-deriving it from four amendment
-docs.
+This ADR is a **consolidator, not a replacement.** ADR-0012 remains
+authoritative for the Linux-MVP + protocol-removal decision; the
+three removed ADRs remain authoritative in git history for their
+respective decisions. This document is the live working-copy entry
+point that answers "what's shipping?" without re-deriving it.
 
 ## Decision
 
-The v0.1.0 shipping surface is the following, derived from
-ADR-0008/0011/0012/0013 and unchanged since ADR-0013 landed
-(2026-04-29):
+The v0.1.0 shipping surface is the following. It is the cumulative
+result of the four source decisions (ADR-0008, ADR-0011,
+[ADR-0012](0012-linux-mvp-protocol-removal.md), ADR-0013) and has
+been unchanged since the last of them landed (2026-04-29).
 
 ### Platforms
 
 - **Linux** only. x86_64 + aarch64.
-- **Windows and macOS** are out of scope for v0.0.x → v0.1.0. ADR-0012
-  + ADR-0013 enumerate the re-opening criteria for each.
+- **Windows and macOS** are out of scope for v0.0.x → v0.1.0.
+  [ADR-0012](0012-linux-mvp-protocol-removal.md) §"Re-opening criteria
+  for Windows / macOS support" enumerates the conditions under which
+  either platform would return: funded effort (≥ 6 weeks), a specific
+  paying customer, or a community contributor who owns ongoing
+  maintenance.
 
 ### Components that ship
 
@@ -62,10 +68,10 @@ ADR-0008/0011/0012/0013 and unchanged since ADR-0013 landed
 
 | Component | Removed by | Re-opening criteria |
 |---|---|---|
-| `shell-win/` (Windows Explorer overlay icons + CFAPI placeholders) | ADR-0011 | See ADR-0011 §"Re-opening". |
-| `ui/` (Compose-Multiplatform tray + settings UI) | ADR-0013 | See ADR-0013 §"Re-opening". Community-owned tray UIs over the public UDS IPC are explicitly welcome — the daemon's NDJSON event stream is documented in `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt`. |
-| `protocol/` (JSON-Schema NDJSON envelope contract + golden fixtures) | ADR-0012 | See ADR-0012 §"Re-opening". |
-| Windows named-pipe transport (`NamedPipeServer.kt`, `PipeSecurity.kt`, `NdjsonValidator.kt`) | ADR-0012 | Bundled with the Windows re-opening criteria in ADR-0012. |
+| `shell-win/` (Windows Explorer overlay icons + CFAPI placeholders) | ADR-0011 (not in tree; see commit history at or before `466d5f8`) | Bundled with the Windows re-opening criteria in [ADR-0012](0012-linux-mvp-protocol-removal.md) §"Re-opening criteria for Windows / macOS support" since the Windows surface as a whole is out of scope. |
+| `ui/` (Compose-Multiplatform tray + settings UI) | ADR-0013 (not in tree; see commit history) | Community-owned tray UIs over the public UDS IPC are explicitly welcome — the daemon's NDJSON event stream is documented in `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt`. An in-tree tray would re-open ADR-0013's reasoning; needs a separate ADR. |
+| `protocol/` (JSON-Schema NDJSON envelope contract + golden fixtures) | [ADR-0012](0012-linux-mvp-protocol-removal.md) | See [ADR-0012](0012-linux-mvp-protocol-removal.md) §"Re-opening criteria". |
+| Windows named-pipe transport (`NamedPipeServer.kt`, `PipeSecurity.kt`, `NdjsonValidator.kt`) | [ADR-0012](0012-linux-mvp-protocol-removal.md) | Bundled with the Windows re-opening criteria in [ADR-0012](0012-linux-mvp-protocol-removal.md). |
 
 ### IPC
 
@@ -74,13 +80,14 @@ ADR-0008/0011/0012/0013 and unchanged since ADR-0013 landed
   consumers may subscribe to the same NDJSON event stream — there is
   no policy against it, but no formal contract layer maintained for them
   either. If a second in-tree consumer or a paying integration partner
-  materialises, ADR-0012's re-opening criteria for `protocol/` kick in.
+  materialises, [ADR-0012](0012-linux-mvp-protocol-removal.md)'s
+  re-opening criteria for `protocol/` kick in.
 
 ### Backlog ID-range bookkeeping
 
 - **UD-400..499** — rebound 2026-05-01 from the retired `shell-win` tier to `cli`. UD-401..403 stay in CLOSED.md with `category: shell-win` as historical record.
-- **UD-500..599** — reserved, formerly `ui` (retired by ADR-0013). Available for rebinding.
-- **UD-600..699** — reserved, formerly `protocol` (retired by ADR-0012). Available for rebinding.
+- **UD-500..599** — reserved, formerly `ui` (retired by ADR-0013, removed from tree along with the ADR file).
+- **UD-600..699** — reserved, formerly `protocol` (retired by [ADR-0012](0012-linux-mvp-protocol-removal.md)).
 
 See `docs/AGENT-SYNC.md` §"ID ranges" for the canonical table.
 
@@ -105,18 +112,20 @@ See `docs/AGENT-SYNC.md` §"ID ranges" for the canonical table.
 ### Neutral
 
 - No code change.
-- No retraction of any prior decision. ADR-0008/0011/0012/0013 remain
-  authoritative for their respective decisions; this document just
-  summarises their cumulative effect.
+- No retraction of any prior decision. [ADR-0012](0012-linux-mvp-protocol-removal.md)
+  remains authoritative in tree; ADR-0008 / ADR-0011 / ADR-0013 remain
+  authoritative in git history. This document summarises their
+  cumulative effect for working-copy readers.
 
 ## Alternatives considered
 
-- **Rewrite ADR-0008 in place to reflect the current surface.**
-  Rejected: ADRs are append-only by convention (see ADR-template's
-  `status: accepted | deprecated | superseded-by` field). Rewriting
-  the founding ADR would erase the decision trail of why the trade-offs
-  were originally accepted, and obscure the historical context that
-  motivated the three amendment ADRs.
+- **Restore ADR-0008 / ADR-0011 / ADR-0013 from git history.** Rejected:
+  removing them was a deliberate cleanup in commit `466d5f8`
+  ("removed relocated/outdated .md's"); reintroducing them walks back
+  that decision without authority. Their content is preserved in git
+  history and recoverable via `git show 466d5f8^:docs/adr/0008-...`
+  for the rare reader who wants to audit the source decisions in their
+  original form.
 - **Inline the v0.1.0 surface into AGENT-SYNC.md or ARCHITECTURE.md
   instead of writing an ADR.** Rejected: those documents are for
   process and architecture description, not for decision records.
