@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.io.formatSize
 import org.krost.unidrive.sync.TrashManager
 import picocli.CommandLine
 import picocli.CommandLine.*
@@ -44,15 +45,11 @@ class TrashListCommand : Runnable {
         println("\n${items.size} item(s), ${formatSize(items.sumOf { it.sizeBytes })} total")
     }
 
-    // UD-238: binary math → IEC binary labels (KiB/MiB/GiB). Previously bare K/M/G
-    // was ambiguous but the divisor is 2^10/2^20/2^30, so we commit to the binary suffix.
-    private fun formatSize(bytes: Long): String =
-        when {
-            bytes < 1024 -> "${bytes}B"
-            bytes < 1024 * 1024 -> "${bytes / 1024}KiB"
-            bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MiB"
-            else -> "${bytes / (1024 * 1024 * 1024)}GiB"
-        }
+    // UD-006: formatSize lifted to org.krost.unidrive.io.ByteFormatter.kt.
+    // Previous body used "${bytes}KiB" (no space); migrated to canonical
+    // "${bytes} KiB" (space-separated) to match the rest of the project.
+    // Column width %-10s above still fits the longest expected output
+    // ("1023 B" / "999 GiB").
 }
 
 @Command(name = "restore", description = ["Restore a trashed file"], mixinStandardHelpOptions = true)

@@ -296,16 +296,16 @@ class CliProgressReporter(
     }
 
     companion object {
-        // UD-238: math is binary (divisor 2^30), so label binary (IEC 80000-13: KiB/MiB/GiB).
-        // Labelling these "GB" under-reported decimal-SI values by ~7%; see UD-238 for the
-        // cross-channel evidence against OneDrive + Internxt.
-        fun formatSize(bytes: Long): String =
-            when {
-                bytes < 1024 -> "$bytes B"
-                bytes < 1024 * 1024 -> "${bytes / 1024} KiB"
-                bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)} MiB"
-                else -> "${bytes / (1024 * 1024 * 1024)} GiB"
-            }
+        // UD-006: formatSize delegates to org.krost.unidrive.io.formatSize.
+        // The companion-object accessor is retained as a thin pass-through
+        // because many `:app:cli` call sites already qualify with
+        // `CliProgressReporter.formatSize(...)`; migrating those to a direct
+        // `import org.krost.unidrive.io.formatSize` is a separate sweep.
+        //
+        // Output identity: previous body and lifted helper produce the same
+        // strings (`"0 B"`, `"1 KiB"`, `"953 MiB"`, etc) — UD-238 IEC binary
+        // labels preserved.
+        fun formatSize(bytes: Long): String = org.krost.unidrive.io.formatSize(bytes)
 
         // UD-408: terminalWidth() + truncateForWidth() (UD-735) deleted with the in-place
         // rewrite they served. Per-line scrollback output makes width detection moot;

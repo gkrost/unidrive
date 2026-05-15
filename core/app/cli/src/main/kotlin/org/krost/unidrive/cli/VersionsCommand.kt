@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.io.formatSize
 import org.krost.unidrive.sync.VersionManager
 import picocli.CommandLine
 import picocli.CommandLine.*
@@ -48,15 +49,9 @@ class VersionsListCommand : Runnable {
         println("\n${items.size} version(s), ${formatSize(items.sumOf { it.sizeBytes })} total")
     }
 
-    // UD-238: binary math → IEC binary labels (KiB/MiB/GiB). See TrashCommand.formatSize
-    // for the same rationale; divisor is 2^10/2^20/2^30 throughout.
-    private fun formatSize(bytes: Long): String =
-        when {
-            bytes < 1024 -> "${bytes}B"
-            bytes < 1024 * 1024 -> "${bytes / 1024}KiB"
-            bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)}MiB"
-            else -> "${bytes / (1024 * 1024 * 1024)}GiB"
-        }
+    // UD-006: formatSize lifted to org.krost.unidrive.io.ByteFormatter.kt.
+    // Previous body used "${bytes}KiB" (no space); migrated to canonical
+    // "${bytes} KiB" (space-separated) to match the rest of the project.
 }
 
 @Command(name = "restore", description = ["Restore a specific file version"], mixinStandardHelpOptions = true)

@@ -150,7 +150,8 @@ data class RawSyncConfig(
 data class RawGeneral(
     // UD-252: explicit opt-in to pin "the default profile" when invoked without -p.
     // Honoured by both the CLI and the MCP jar via [SyncConfig.resolveDefaultProfile].
-    // When unset, both jars fall back to "onedrive" (the historical CLI default).
+    // When unset, both jars fall back to `ProviderRegistry.defaultProvider()`
+    // (UD-012; "localfs" when discovered, else the first SPI-discovered factory).
     val default_profile: String? = null,
     val sync_root: String? = null,
     val poll_interval: Int? = null,
@@ -344,20 +345,31 @@ data class SyncConfig(
 
         fun load(
             configFile: Path,
-            providerId: String = "onedrive", // allow: UD-012
+            providerId: String = org.krost.unidrive.ProviderRegistry.defaultProvider(),
         ): SyncConfig {
             if (!Files.exists(configFile)) return defaults(providerId)
             val content = Files.readString(configFile)
             return parse(content, providerId)
         }
 
-        private val defaultSyncRoots =
+        // UD-012: directory-name overrides for sync roots where the provider's
+        // metadata.displayName isn't the historically-shipped directory name.
+        // Kept narrow on purpose — we don't want a new in-tree provider to
+        // silently change a user's home-directory layout. New providers
+        // default to a Title-cased provider id (e.g. "sftp" → ~/Sftp).
+        //
+        // Previously this map lived inline with a single `"onedrive" to
+        // "OneDrive"` entry; the comment-as-source-of-truth role is unchanged,
+        // only the historical "onedrive" literal at the call site is gone
+        // (callers no longer pass it as a default).
+        private val syncRootDirNameOverrides =
             mapOf(
-                "onedrive" to "OneDrive", // allow: UD-012
+                // allow: UD-012 backwards-compat — preserves existing users' ~/OneDrive directory name.
+                "onedrive" to "OneDrive",
             )
 
         fun defaultSyncRoot(providerId: String): Path =
-            Paths.get(home, defaultSyncRoots[providerId] ?: providerId.replaceFirstChar { it.uppercase() })
+            Paths.get(home, syncRootDirNameOverrides[providerId] ?: providerId.replaceFirstChar { it.uppercase() })
 
         val KNOWN_TYPES: Set<String> get() = org.krost.unidrive.ProviderRegistry.knownTypes
 
@@ -399,8 +411,7 @@ data class SyncConfig(
             }
         }
 
-        // allow: UD-012
-        fun defaults(providerId: String = "onedrive") =
+        fun defaults(providerId: String = org.krost.unidrive.ProviderRegistry.defaultProvider()) =
             SyncConfig(
                 syncRoot = defaultSyncRoot(providerId),
                 pollInterval = 60,
@@ -466,23 +477,25 @@ data class SyncConfig(
          *
          * Resolution order:
          *   1. `[general] default_profile = "..."` in config.toml, if present.
-         *   2. `"onedrive"` — the historical CLI default, used unconditionally when
-         *      the config is missing, empty, or doesn't pin a default_profile. Still
-         *      returned even if no such profile exists in the file; the caller is
-         *      responsible for handing the result to [resolveProfile], which throws
-         *      a readable "Unknown profile" error listing the configured alternatives.
+         *   2. `ProviderRegistry.defaultProvider()` (UD-012) — `"localfs"` when
+         *      discovered, else the first SPI-discovered factory id. Used
+         *      unconditionally when the config is missing, empty, or doesn't
+         *      pin a default_profile. Still returned even if no such profile
+         *      exists in the file; the caller is responsible for handing the
+         *      result to [resolveProfile], which throws a readable "Unknown
+         *      profile" error listing the configured alternatives.
          */
         fun resolveDefaultProfile(configDir: Path): String {
             val configFile = configDir.resolve("config.toml")
-            if (!Files.exists(configFile)) return "onedrive" // allow: UD-012
+            if (!Files.exists(configFile)) return org.krost.unidrive.ProviderRegistry.defaultProvider()
             return try {
                 val raw = parseRaw(Files.readString(configFile))
-                raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive" // allow: UD-012
+                raw.general.default_profile?.takeIf { it.isNotBlank() } ?: org.krost.unidrive.ProviderRegistry.defaultProvider()
             } catch (_: Exception) {
                 // Corrupt / unparseable config: fall back to the CLI default rather
                 // than crashing at startup. Downstream resolveProfile() will surface
                 // the real parse error with full context.
-                "onedrive" // allow: UD-012
+                org.krost.unidrive.ProviderRegistry.defaultProvider()
             }
         }
 
@@ -502,7 +515,7 @@ data class SyncConfig(
 
         fun parse(
             content: String,
-            profileName: String = "onedrive", // allow: UD-012
+            profileName: String = org.krost.unidrive.ProviderRegistry.defaultProvider(),
         ): SyncConfig {
             val raw = decodeRawSyncConfig(content)
             return raw.toSyncConfig(profileName)

@@ -768,17 +768,29 @@ class SyncConfigTest {
 
     // ── UD-252: resolveDefaultProfile shared between CLI and MCP ────────────────
 
+    // UD-012: assertions migrated from the literal `"onedrive"` to
+    // `ProviderRegistry.defaultProvider()`. The invariant being protected is
+    // "resolveDefaultProfile falls back to the registry's default when the
+    // config is silent" — not "it returns the historical onedrive string."
+    // Test names retain `UD-252` because they pin UD-252's CLI/MCP-parity
+    // contract; the implementation of that contract just moved from a
+    // hardcoded literal to a registry-driven choice.
+
     @Test
-    fun `UD-252 resolveDefaultProfile returns onedrive when config is missing`() {
+    fun `UD-252 resolveDefaultProfile returns registry default when config is missing`() {
         // Fresh tmpDir with no config.toml at all.
-        assertEquals("onedrive", SyncConfig.resolveDefaultProfile(tmpDir))
+        assertEquals(
+            org.krost.unidrive.ProviderRegistry.defaultProvider(),
+            SyncConfig.resolveDefaultProfile(tmpDir),
+        )
     }
 
     @Test
-    fun `UD-252 resolveDefaultProfile returns onedrive when default_profile is unset`() {
+    fun `UD-252 resolveDefaultProfile returns registry default when default_profile is unset`() {
         // The pre-UD-252 bug: MCP used to return "ds418play" here (alphabetically
-        // first provider key); CLI used to return "onedrive" via picocli defaultValue.
-        // Shared resolver must pick the CLI behaviour — "onedrive" — for parity.
+        // first provider key); CLI used to return a hardcoded literal via
+        // picocli defaultValue. Shared resolver must pick the registry default
+        // for parity — see UD-012 for the migration from literal to registry.
         val toml =
             """
             [providers.ds418play]
@@ -791,7 +803,10 @@ class SyncConfigTest {
             """.trimIndent()
         Files.writeString(tmpDir.resolve("config.toml"), toml)
 
-        assertEquals("onedrive", SyncConfig.resolveDefaultProfile(tmpDir))
+        assertEquals(
+            org.krost.unidrive.ProviderRegistry.defaultProvider(),
+            SyncConfig.resolveDefaultProfile(tmpDir),
+        )
     }
 
     @Test
@@ -828,17 +843,23 @@ class SyncConfigTest {
             """.trimIndent()
         Files.writeString(tmpDir.resolve("config.toml"), toml)
 
-        assertEquals("onedrive", SyncConfig.resolveDefaultProfile(tmpDir))
+        assertEquals(
+            org.krost.unidrive.ProviderRegistry.defaultProvider(),
+            SyncConfig.resolveDefaultProfile(tmpDir),
+        )
     }
 
     @Test
-    fun `UD-252 resolveDefaultProfile falls back to onedrive on unparseable config`() {
+    fun `UD-252 resolveDefaultProfile falls back to registry default on unparseable config`() {
         // Corrupt TOML: bare key with no value. Must not crash — downstream callers
         // will see a readable parse error from resolveProfile() once they try to
         // load the full config. Startup should stay alive.
         Files.writeString(tmpDir.resolve("config.toml"), "this is = = not toml\n[[[")
 
-        assertEquals("onedrive", SyncConfig.resolveDefaultProfile(tmpDir))
+        assertEquals(
+            org.krost.unidrive.ProviderRegistry.defaultProvider(),
+            SyncConfig.resolveDefaultProfile(tmpDir),
+        )
     }
 
     @Test
@@ -857,9 +878,12 @@ class SyncConfigTest {
             val toml: String,
             val expected: String,
         )
+        // UD-012: the two "config silent on default_profile" cases below expect
+        // the registry default rather than the historical "onedrive" literal.
+        val registryDefault = org.krost.unidrive.ProviderRegistry.defaultProvider()
         val cases =
             listOf(
-                Case("empty general", "[general]\n", "onedrive"),
+                Case("empty general", "[general]\n", registryDefault),
                 Case(
                     "multi profile no default_profile",
                     """
@@ -871,7 +895,7 @@ class SyncConfigTest {
                     [providers.onedrive]
                     type = "onedrive"
                     """.trimIndent(),
-                    "onedrive",
+                    registryDefault,
                 ),
                 Case(
                     "multi profile with default_profile",
