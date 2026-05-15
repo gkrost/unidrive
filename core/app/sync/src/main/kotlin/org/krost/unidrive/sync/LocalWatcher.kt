@@ -95,12 +95,23 @@ class LocalWatcher(
 
     fun stop() {
         running = false
-        watchService?.close()
+        try {
+            watchService?.close()
+        } catch (e: java.io.IOException) {
+            log.warn("WatchService close failed during stop(): {}", e.message)
+        }
         watchThread?.join(2000)
+        if (watchThread?.isAlive == true) {
+            log.warn("LocalWatcher thread did not exit within 2s of stop()")
+        }
         // UD-211: cancel any in-flight emit schedules and shut down the coalescer.
         pendingEmits.values.forEach { it.cancel(false) }
         pendingEmits.clear()
-        coalescer.shutdownNow()
+        coalescer.shutdown()
+        if (!coalescer.awaitTermination(2, TimeUnit.SECONDS)) {
+            log.warn("Coalescer did not shut down gracefully within 2s; forcing shutdownNow()")
+            coalescer.shutdownNow()
+        }
     }
 
     fun suppress(remotePath: String) {

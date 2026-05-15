@@ -11005,3 +11005,94 @@ under UD-766 doesn't see bare `UD-352` cites as orphans.
 When the bare `UD-352` cites are touched, prefer pointing them at the
 specific sub-letter variant they relate to and close this anchor as
 `wontfix-historical, parent of sub-tickets`.
+
+---
+id: UD-904
+title: Migrate core test framework from JUnit 4 to JUnit 5
+category: tooling
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/sync/build.gradle.kts
+  - core/app/core/build.gradle.kts
+  - core/app/cli/build.gradle.kts
+  - core/app/mcp/build.gradle.kts
+  - core/app/xtra/build.gradle.kts
+  - core/app/benchmark/build.gradle.kts
+  - core/app/e2e-360/build.gradle.kts
+  - core/providers/internxt/build.gradle.kts
+  - core/providers/rclone/build.gradle.kts
+  - core/providers/localfs/build.gradle.kts
+  - core/providers/s3/build.gradle.kts
+  - core/providers/sftp/build.gradle.kts
+  - core/providers/webdav/build.gradle.kts
+  - core/providers/onedrive/build.gradle.kts
+opened: 2026-05-15
+---
+2026-05-15: All 14 core modules currently declare `useJUnit()`
+(JUnit 4) in their `build.gradle.kts`. Surfaced when writing the
+`LocalWatcherShutdownTest` for the Top-10 hygiene round (the test
+was originally drafted in JUnit 5 / Jupiter and had to be rewritten
+in `kotlin.test` to match the existing convention).
+
+Most existing tests use `kotlin.test`, which is framework-agnostic
+and works on either backend. ~10 files use hard `org.junit.*`
+imports (JUnit 4 annotations); these need rewriting. Zero files
+use `org.junit.jupiter.*` today.
+
+Migration outline:
+1. Add JUnit 5 BOM + `junit-jupiter-engine` to `gradle/libs.versions.toml`.
+2. Flip `useJUnit()` → `useJUnitPlatform()` in all 14 build files.
+3. Rewrite the ~10 files with hard `org.junit.*` imports.
+4. Verify the full test suite passes per module.
+
+Out of scope for the Top-10 hygiene round (separate concern from
+bug-fixing). Filed here so it doesn't get lost.
+
+Spec context: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md
+(JUnit 4 vs 5 issue documented in Task 4 of the Tier 1 plan)
+
+---
+id: UD-905
+title: StateDatabase explicit transaction policy (ADR territory)
+category: design
+priority: low
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-15
+---
+2026-05-15: `StateDatabase` runs `autoCommit = true` for everything.
+Single shared connection + per-method `@Synchronized`, but bulk
+reconciler ops eat per-statement commit latency. Explicit `BEGIN/COMMIT`
+for batches would help; correctness today is preserved by the process
+lock.
+
+ADR territory — needs a written decision on transaction policy
+before code change.
+
+Tier 3 / deferred from the Top-10 hygiene round.
+
+Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §6
+
+---
+id: UD-906
+title: Re-enable Semgrep / Trivy / docker-integration CI jobs
+category: tooling
+priority: medium
+effort: M
+status: open
+code_refs:
+  - .github/workflows/build.yml
+opened: 2026-05-15
+---
+2026-05-15: `.semgrep.yml` is referenced in CI but not present;
+Trivy is commented out; the docker-integration job has been
+disabled since 2026-05-01. UD-107..110 are nominally baseline
+gates but only gitleaks is wired today.
+
+Tier 3 / deferred from the Top-10 hygiene round.
+
+Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §6
