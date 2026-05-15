@@ -1,0 +1,14 @@
+[Unit]
+Description=UniDrive cloud storage sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/unidrive sync --watch
+Restart=on-failure
+RestartSec=30
+EnvironmentFile=-%h/.config/unidrive/vault-env
+
+[Install]
+WantedBy=default.target

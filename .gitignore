@@ -1,7 +1,14 @@
 # Build outputs
 build/
 out/
-dist/
+# Note: top-level dist/ used to be globally ignored, but the end-user
+# installer sources (UD-761) live there. We instead ignore typical
+# packaging artefact patterns inside dist/ if/when they appear.
+dist/*.tar.gz
+dist/*.zip
+dist/*.deb
+dist/*.rpm
+dist/*.AppImage
 **/build/
 **/.gradle/
 .gradle/
