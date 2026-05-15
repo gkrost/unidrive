@@ -1870,3 +1870,60 @@ persistence, generic over credential type) needs human input first.
 - **UD-111** (closed/open?) — token-refresh failure telemetry.
 - **UD-331** (closed) — NonCancellable wrap mirror across providers.
 - **UD-336** (closed, sibling lift) — error-body helpers in same package.
+
+---
+id: UD-902
+title: Graceful shutdown ordering in LocalWatcher.stop()
+category: code-quality
+priority: low
+effort: S
+status: done
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalWatcher.kt
+opened: 2026-05-15
+closed: 2026-05-15
+---
+2026-05-15: Previous `stop()` called `coalescer.shutdownNow()`
+directly, interrupting in-flight debounce schedules. New ordering:
+`shutdown()` then `awaitTermination(2s)`, then `shutdownNow()` as
+fallback with WARN log. Also wraps `watchService.close()` in
+try/catch — closing an already-closed `WatchService` throws
+`IOException`, and one `IOException` should not abort the rest of
+`stop()`.
+
+Regression test: `LocalWatcherShutdownTest` runs 100 start/stop
+cycles; on Linux additionally counts `/proc/self/fd` entries
+asserting growth ≤ 16 (absorbs test-runner noise).
+
+Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §2.2 #6
+Commit: bd4a0a4
+
+---
+id: UD-903
+title: Cross-repo dependency version drift CI check
+category: tooling
+priority: medium
+effort: S
+status: done
+code_refs:
+  - scripts/check-version-drift.sh
+  - .github/workflows/version-drift.yml
+opened: 2026-05-15
+closed: 2026-05-15
+---
+2026-05-15: New `scripts/check-version-drift.sh` compares
+`kotlin`, `kotlinx-coroutines`, `kotlinx-serialization`, `ktor`
+between core and the unidrive-android sibling repo. Catalog miss
+falls back to grep on `**/build.gradle.kts`. Output policy: drift
+→ `::warning::`, exit 0 (warn-only this round); infra failure
+→ exit non-zero with clear error.
+
+GitHub Actions workflow `version-drift.yml` runs on PRs touching
+`gradle/libs.versions.toml` or the script. Mirror workflow lives
+in unidrive-android.
+
+Follow-up: promote from warn-only to fail-build after one stable
+PR cycle.
+
+Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §2.3 #10
+Commits: 56ceb3e (core), 71979af (android-side mirror)
