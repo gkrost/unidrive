@@ -1,6 +1,7 @@
 package org.krost.unidrive.internxt
 
 import io.ktor.client.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -9,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.internxt.model.*
@@ -24,8 +26,20 @@ open class AuthService(
 ) : AutoCloseable {
     private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
     private val json = Json { ignoreUnknownKeys = true }
+    // UD-204: install HttpTimeout so a slow-loris auth endpoint (the named
+    // vector from the source ticket — internxt/sdk axios setup omits the
+    // timeout) can't hang the whole sync indefinitely. Uses the same
+    // HttpDefaults values as the other Ktor clients in the tree; the
+    // four-class metadata/upload/download/auth matrix proposed in the
+    // ticket body is deferred to a follow-up that touches all providers
+    // together.
     private val httpClient = HttpClient {
         expectSuccess = false
+        install(HttpTimeout) {
+            connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
+            socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+            requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
+        }
     }
     private var credentials: InternxtCredentials? = null
 

@@ -1,6 +1,7 @@
 package org.krost.unidrive.onedrive
 
 import io.ktor.client.*
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
@@ -8,6 +9,7 @@ import io.ktor.http.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.Pkce
 import org.krost.unidrive.onedrive.model.*
@@ -19,7 +21,19 @@ class OAuthService(
 ) : AutoCloseable {
     private val log = org.slf4j.LoggerFactory.getLogger(OAuthService::class.java)
     private val json = Json { ignoreUnknownKeys = true }
-    private val httpClient = HttpClient()
+    // UD-204: install HttpTimeout so a slow-loris OAuth endpoint can't hang
+    // the auth flow indefinitely. Uses the same HttpDefaults values as the
+    // other Ktor clients in the tree; the four-class metadata/upload/
+    // download/auth matrix proposed in the ticket body is deferred to a
+    // follow-up that touches all providers together.
+    private val httpClient =
+        HttpClient {
+            install(HttpTimeout) {
+                connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
+                socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+                requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
+            }
+        }
 
     companion object {
         val SCOPES =
