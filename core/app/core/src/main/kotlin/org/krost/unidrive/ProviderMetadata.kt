@@ -66,10 +66,31 @@ object ProviderRegistry {
 
     fun allMetadata(): List<ProviderMetadata> = loader.toList().map { it.metadata }
 
-    fun allByTier(): List<ProviderMetadata> {
-        val order = listOf("Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global")
-        return allMetadata().sortedBy { order.indexOf(it.tier) }
-    }
+    /**
+     * Sort the supplied metadata list (default: all discovered providers'
+     * metadata) by the canonical tier ordering. Entries with unrecognised
+     * tier values are placed at the front (`indexOf` returns -1), which is
+     * fine for the current consumer (CLI provider table) — those would
+     * also be a configuration error worth surfacing.
+     *
+     * The `metadata` parameter is the seam UD-810's
+     * `ProviderMetadataTest.allByTier applies the canonical tier ordering`
+     * uses to exercise the sort against synthesized fixtures in
+     * `:app:core`'s test classpath (which doesn't load real providers).
+     * Codex review on PR #18 surfaced that the previous test sorted with a
+     * local recipe and never invoked this method — refactoring the
+     * signature to accept fixtures restores end-to-end coverage of the
+     * production API.
+     */
+    fun allByTier(metadata: List<ProviderMetadata> = allMetadata()): List<ProviderMetadata> =
+        metadata.sortedBy { TIER_ORDER.indexOf(it.tier) }
+
+    /**
+     * Canonical tier ordering. Exposed for tests that exercise [allByTier]
+     * with synthesized fixtures; production callers should use [allByTier]
+     * with no arguments.
+     */
+    val TIER_ORDER: List<String> = listOf("Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global")
 
     fun isKnown(type: String): Boolean = type in knownTypes
 

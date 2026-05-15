@@ -72,29 +72,33 @@ class ProviderMetadataTest {
         }
     }
 
-    // UD-810 audit: renamed from `allByTier returns sorted metadata`.
-    // The previous body iterated without checking sort order — the name
-    // promised sort verification, the body just verified non-blank tier.
+    // UD-810 audit: renamed from `allByTier returns sorted metadata` and
+    // rewritten under Codex PR #18 review feedback.
     //
-    // Synthesizing test: build one ProviderMetadata per tier value in the
-    // canonical order, sort using the same recipe `allByTier()` applies
-    // (`sortedBy { canonical.indexOf(it.tier) }`), and assert they come
-    // back in canonical order regardless of insertion order. This pins
-    // the canonical order constant in ProviderRegistry without depending
-    // on the provider classpath. The "real providers actually
-    // discoverable and tier-sorted" pin against a populated classpath
-    // belongs in :app:cli's ProviderRegistryDiscoveryTest.
+    // Previous body sorted with a LOCAL `sortedBy { canonical.indexOf(...) }`
+    // expression that never invoked `ProviderRegistry.allByTier()` — if
+    // `allByTier()` changed to the wrong order or stopped sorting entirely,
+    // the test would still pass. Codex flagged this on PR #18.
+    //
+    // Fix: `ProviderRegistry.allByTier` now takes an optional
+    // `metadata: List<ProviderMetadata>` parameter (default = `allMetadata()`)
+    // so synthesized fixtures can be injected through the real API in
+    // :app:core's classpath-less test environment. The test now exercises
+    // the actual production sort recipe.
+    //
+    // The "real providers tier-sorted" pin against a populated classpath
+    // still belongs in :app:cli's ProviderRegistryDiscoveryTest (separate
+    // chunk).
     @Test
     fun `allByTier applies the canonical tier ordering`() {
-        // Must mirror ProviderRegistry.allByTier()'s internal `order` list.
-        val canonical = listOf("Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global")
-        // Insert in reverse so a no-op sort is detectable.
-        val synthesized = canonical.reversed().map { tier -> tierStub(tier) }
-        val sorted = synthesized.sortedBy { canonical.indexOf(it.tier) }
+        // Build one fixture per canonical tier value, inserted in reverse so
+        // a no-op sort (or wrong-order sort) is detectable.
+        val synthesized = ProviderRegistry.TIER_ORDER.reversed().map { tier -> tierStub(tier) }
+        val sorted = ProviderRegistry.allByTier(synthesized)
         assertEquals(
-            canonical,
+            ProviderRegistry.TIER_ORDER,
             sorted.map { it.tier },
-            "allByTier sort recipe should produce canonical tier order",
+            "ProviderRegistry.allByTier must return entries in TIER_ORDER",
         )
     }
 
