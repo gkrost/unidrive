@@ -5,6 +5,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
+import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.onedrive.model.Token
 import java.nio.file.Files
 import java.nio.file.Path
@@ -24,8 +25,8 @@ class OneDriveProviderFactory : ProviderFactory {
             val parts = mutableListOf<String>()
             // Try to extract email/upn from JWT access token payload
             val email =
-                extractJwtClaim(token.accessToken, "preferred_username")
-                    ?: extractJwtClaim(token.accessToken, "upn")
+                JwtExtractor.extractClaim(token.accessToken, "preferred_username")
+                    ?: JwtExtractor.extractClaim(token.accessToken, "upn")
             if (email != null) parts += email
             // Token expiry
             val expiresAt = java.time.Instant.ofEpochMilli(token.expiresAt)
@@ -42,28 +43,6 @@ class OneDriveProviderFactory : ProviderFactory {
             "onedrive (${parts.joinToString(", ")})"
         } catch (_: Exception) {
             "onedrive (token unreadable)"
-        }
-    }
-
-    /** Best-effort JWT payload claim extraction — no signature verification. */
-    private fun extractJwtClaim(
-        jwt: String,
-        claim: String,
-    ): String? {
-        return try {
-            val parts = jwt.split(".")
-            if (parts.size < 2) return null
-            val payload =
-                String(
-                    java.util.Base64
-                        .getUrlDecoder()
-                        .decode(parts[1]),
-                )
-            // Simple extraction without pulling in a JSON parse for a single field
-            val regex = """"$claim"\s*:\s*"([^"]+)"""".toRegex()
-            regex.find(payload)?.groupValues?.get(1)
-        } catch (_: Exception) {
-            null
         }
     }
 

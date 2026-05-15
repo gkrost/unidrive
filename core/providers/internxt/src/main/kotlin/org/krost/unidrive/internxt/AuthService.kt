@@ -6,12 +6,10 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.auth.CredentialStore
+import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.internxt.model.*
 import java.io.BufferedReader
@@ -58,35 +56,11 @@ open class AuthService(
     /** Check if the stored JWT is expired by decoding its payload. No network call. */
     fun isJwtExpired(): Boolean {
         val jwt = credentials?.jwt ?: return true
-        return try {
-            val parts = jwt.split(".")
-            if (parts.size < 2) return true
-            // UD-308 follow-up (PR #23 Codex P2): base64url payload segments
-            // need padding so the total length is a multiple of 4. The previous
-            // `+ "=="` only worked when `raw.length % 4 == 2`; for `% 4` in
-            // {0, 3} the decode threw and the catch returned `true` ("treat
-            // as expired"). Once UD-308 wired `isJwtExpired()` into
-            // `getValidCredentials()`, that quirk would force a refresh
-            // round-trip on every API call for JWTs with non-{4k+2} payload
-            // lengths. Pad based on `length % 4` instead.
-            val raw = parts[1]
-            val padding = (4 - raw.length % 4) % 4
-            val payload =
-                String(
-                    java.util.Base64
-                        .getUrlDecoder()
-                        .decode(raw + "=".repeat(padding)),
-                )
-            val exp =
-                json
-                    .parseToJsonElement(payload)
-                    .jsonObject["exp"]
-                    ?.jsonPrimitive
-                    ?.longOrNull ?: return true
-            System.currentTimeMillis() / 1000 > exp
-        } catch (_: Exception) {
-            true // can't decode → treat as expired
-        }
+        // UD-010: body decode + exp extraction lifted to JwtExtractor.
+        // UD-308 padding invariant lives in the shared impl now. Treat
+        // unparseable / missing-exp as expired — same policy as before.
+        val exp = JwtExtractor.extractExp(jwt) ?: return true
+        return System.currentTimeMillis() / 1000 > exp
     }
 
     suspend fun initialize() {
