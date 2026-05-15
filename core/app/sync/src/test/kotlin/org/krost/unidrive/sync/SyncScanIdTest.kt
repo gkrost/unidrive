@@ -106,7 +106,11 @@ class SyncScanIdTest {
                         MDC.get("scan")?.let { observed += it }
                     }
 
-                    override fun onActionCount(total: Int) {}
+                    override fun onActionCount(
+                        total: Int,
+                        preFilterTotal: Int,
+                        filterReason: String?,
+                    ) {}
 
                     override fun onActionProgress(
                         index: Int,

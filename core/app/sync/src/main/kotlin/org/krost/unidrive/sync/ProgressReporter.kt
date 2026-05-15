@@ -58,7 +58,28 @@ interface ProgressReporter {
         total: Int,
     ) {}
 
-    fun onActionCount(total: Int)
+    /**
+     * UD-201: post-reconcile action count, with optional pre-filter total
+     * and a filter-reason label.
+     *
+     * - [total] — actions the executor will actually run (post directional
+     *   filter, post `--upload-only` / `--download-only` drop).
+     * - [preFilterTotal] — actions the reconciler decided on (pre-filter).
+     *   Defaults to [total] for source compatibility with reporters that
+     *   don't care about the divergence.
+     * - [filterReason] — short human label naming the filter that dropped
+     *   actions (e.g. `--upload-only`). Null when no filter ran or when
+     *   the filter dropped zero actions.
+     *
+     * Reporters that surface the summary (CLI) should render a divergent
+     * "reconciled vs executed" split when `preFilterTotal != total`, and
+     * a single-line summary when they're equal.
+     */
+    fun onActionCount(
+        total: Int,
+        preFilterTotal: Int = total,
+        filterReason: String? = null,
+    )
 
     fun onActionProgress(
         index: Int,
@@ -94,7 +115,11 @@ interface ProgressReporter {
             count: Int,
         ) {}
 
-        override fun onActionCount(total: Int) {}
+        override fun onActionCount(
+            total: Int,
+            preFilterTotal: Int,
+            filterReason: String?,
+        ) {}
 
         override fun onActionProgress(
             index: Int,

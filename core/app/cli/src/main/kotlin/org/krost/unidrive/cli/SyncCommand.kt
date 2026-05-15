@@ -666,7 +666,11 @@ open class SyncCommand : Runnable {
             total: Int,
         ) = delegates.forEach { it.onReconcileProgress(processed, total) }
 
-        override fun onActionCount(total: Int) = delegates.forEach { it.onActionCount(total) }
+        override fun onActionCount(
+            total: Int,
+            preFilterTotal: Int,
+            filterReason: String?,
+        ) = delegates.forEach { it.onActionCount(total, preFilterTotal, filterReason) }
 
         override fun onActionProgress(
             index: Int,

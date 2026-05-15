@@ -119,8 +119,32 @@ class CliProgressReporter(
         if (lastCount > 0) historicalScanCount[phase] = lastCount
     }
 
-    override fun onActionCount(total: Int) {
-        println("Reconciled: $total actions")
+    override fun onActionCount(
+        total: Int,
+        preFilterTotal: Int,
+        filterReason: String?,
+    ) {
+        // UD-201: distinguish reconciler verdict from executor input.
+        // When a directional filter (--upload-only / --download-only) drops
+        // actions between reconcile and apply, the old single-line summary
+        // ("Reconciled: 0 actions") misled users into thinking nothing was
+        // there. Now: two lines when divergent (with the drop reason and
+        // count), one line when they agree.
+        if (preFilterTotal != total) {
+            val reconciledStr = formatCount(preFilterTotal)
+            val executedStr = formatCount(total)
+            val droppedStr = formatCount(preFilterTotal - total)
+            val reasonSegment =
+                if (filterReason != null) {
+                    "$filterReason filter dropped $droppedStr"
+                } else {
+                    "$droppedStr dropped"
+                }
+            println("Reconciled: $reconciledStr actions")
+            println("Executed:   $executedStr ($reasonSegment)")
+        } else {
+            println("Reconciled: ${formatCount(total)} actions")
+        }
     }
 
     override fun onActionProgress(

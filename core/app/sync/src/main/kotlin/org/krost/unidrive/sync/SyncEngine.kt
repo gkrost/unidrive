@@ -288,7 +288,22 @@ class SyncEngine(
                 SyncDirection.BIDIRECTIONAL -> allActions
             }
 
-        reporter.onActionCount(actions.size)
+        // UD-201: pass both pre-filter (reconciler verdict) and post-filter
+        // (executor input) counts so reporters can distinguish "reconciler
+        // decided N actions" from "executor will run M after --upload-only
+        // / --download-only filtering." Behaviour unchanged; only the
+        // signal passed to the reporter is richer.
+        val filterReason: String? =
+            if (actions.size != allActions.size) {
+                when (syncDirection) {
+                    SyncDirection.UPLOAD -> "--upload-only"
+                    SyncDirection.DOWNLOAD -> "--download-only"
+                    SyncDirection.BIDIRECTIONAL -> null
+                }
+            } else {
+                null
+            }
+        reporter.onActionCount(actions.size, allActions.size, filterReason)
 
         if (actions.isEmpty()) {
             // UD-260 / UD-901e: promote pending cursor only if the gather pass
