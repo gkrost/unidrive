@@ -304,3 +304,19 @@ Long-running unresolved items not on the v0.0.1 critical path:
 - **Treat SPECS.md as the normative statement of intent.** `docs/ARCHITECTURE.md` is the narrative overview; SPECS is the detail.
 - **When writing code,** cite specs: "per SPECS §2.1, the IPC event `sync_started` fires once per cycle".
 - **When docs and code disagree,** open a UD item that either corrects the doc (if code is correct) or corrects the code (if doc is correct). Don't let drift accumulate.
+
+## 12. Reference docs
+
+Operator- and integrator-facing reference material that's too long
+to inline here, restored from the pre-greenfield trail (UD-763):
+
+- [`dev/webhooks-nat-setup.md`](dev/webhooks-nat-setup.md) — OneDrive
+  webhook lifecycle, config keys, `SubscriptionRenewalScheduler`
+  details, NAT-traversal recipes (ngrok, cloudflared, serveo, reverse
+  proxy). Expansion of §6 Webhook flow.
+- [`dev/ipc-protocol.md`](dev/ipc-protocol.md) — full NDJSON event
+  schema for the push-only UDS surface; the public contract for
+  third-party tray/UI consumers per ADR-0013. Expansion of §2.1.
+- [`dev/manual-test-checklist.md`](dev/manual-test-checklist.md) —
+  per-release manual smoke list covering the gaps `scripts/smoke.sh`
+  doesn't automate.

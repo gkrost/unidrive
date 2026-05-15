@@ -204,3 +204,17 @@ Only `localfs`, `s3`, `sftp` are in-scope for the MVP release quality gate. Othe
 - [ADR-0013 ui/ Removal](adr/0013-ui-removal.md)
 - [User-guide: per-verb consequences](user-guide/consequences.md) — mutation / cancel / rollback / remote-side-effects per CLI verb.
 - [CLI extension SPI](EXTENSIONS.md) — adding subcommands without forking core.
+
+## See also
+
+Operator-facing reference material restored from the pre-greenfield
+trail (UD-763):
+
+- [`dev/webhooks-nat-setup.md`](dev/webhooks-nat-setup.md) — OneDrive
+  webhook lifecycle (incl. `SubscriptionRenewalScheduler`) and
+  NAT-traversal setup recipes.
+- [`dev/ipc-protocol.md`](dev/ipc-protocol.md) — push-only UDS NDJSON
+  protocol; the public contract for third-party tray/UI consumers.
+- [`dev/manual-test-checklist.md`](dev/manual-test-checklist.md) —
+  per-release manual smoke list (covers the gaps `scripts/smoke.sh`
+  doesn't automate).
