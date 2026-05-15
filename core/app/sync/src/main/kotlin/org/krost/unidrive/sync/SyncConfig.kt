@@ -364,6 +364,7 @@ data class SyncConfig(
         // (callers no longer pass it as a default).
         private val syncRootDirNameOverrides =
             mapOf(
+                // allow: UD-012 backwards-compat — preserves existing users' ~/OneDrive directory name.
                 "onedrive" to "OneDrive",
             )
 
