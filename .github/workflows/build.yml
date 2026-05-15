@@ -32,12 +32,14 @@ concurrency:
 
 jobs:
   core:
-    name: core (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    # UD-769: Linux-only matrix per ADR-0011 + ADR-0012. windows-latest was
+    # dropped 2026-05-15 because it lied about the support surface (we
+    # don't meaningfully test on Windows — we just smoked that the JVM
+    # modules compiled) and burned 5+ minutes per PR. Re-add as a separate
+    # `continue-on-error: true` job behind a `schedule:` trigger if a
+    # future ADR re-opens Windows per ADR-0012 §"Re-opening criteria".
+    name: core (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -53,17 +55,14 @@ jobs:
         run: ./gradlew dependencies -q
 
       - name: Test-hygiene lint (UD-704-residual)
-        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: bash scripts/ci/test-hygiene.sh
 
       - name: SPI dispatch boundary check
-        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: bash scripts/ci/check-no-provider-string-dispatch.sh
 
       - name: Semgrep security scan
-        if: matrix.os == 'ubuntu-latest'
         run: pip install semgrep && semgrep scan --config .semgrep.yml --error
 
       - name: Gradle build + test + coverage
@@ -75,14 +74,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: core-test-reports-${{ matrix.os }}
+          name: core-test-reports
           path: |
             core/**/build/reports/tests/**
             core/**/build/test-results/**
           if-no-files-found: ignore
 
       - name: Upload coverage report
-        if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v7
         with:
           name: core-jacoco-merged
