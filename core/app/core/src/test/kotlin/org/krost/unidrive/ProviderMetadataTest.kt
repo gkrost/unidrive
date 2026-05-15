@@ -2,25 +2,14 @@ package org.krost.unidrive
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ProviderMetadataTest {
-    private val builtInTypes = setOf("onedrive", "rclone", "s3", "sftp", "webdav")
-
-    @Test
-    fun `knownTypes includes all 5 built-in providers`() {
-        for (type in builtInTypes) {
-            assertTrue(ProviderRegistry.isKnownType(type), "$type should be a known type")
-        }
-        assertFalse(ProviderRegistry.isKnownType("nonexistent"), "nonexistent should not be a known type")
-    }
-
-    @Test
-    fun `knownTypes is not empty`() {
-        assertTrue(ProviderRegistry.knownTypes.isNotEmpty())
-    }
+    // UD-013: deleted `knownTypes includes all 5 built-in providers` (tautological — tested
+    // `isKnownType` against the same hardcoded `defaultTypes` set the method consulted) and
+    // `knownTypes is not empty` (relied on the silent fallback that UD-013 removed). The
+    // populated-classpath equivalents live in :app:cli's ProviderRegistryDiscoveryTest.
 
     @Test
     fun `get returns null for nonexistent`() {
@@ -116,12 +105,9 @@ class ProviderMetadataTest {
             tier = tier,
         )
 
-    @Test
-    fun `isKnown checks knownTypes`() {
-        // localfs is in the default set
-        assertTrue(ProviderRegistry.isKnown("localfs"))
-        assertFalse(ProviderRegistry.isKnown("nonexistent"))
-    }
+    // UD-013: deleted `isKnown checks knownTypes` — relied on the silent fallback via
+    // `defaultTypes` for the localfs assertion. Populated-classpath equivalent lives in
+    // :app:cli's ProviderRegistryDiscoveryTest.
 
     // UD-810 audit: deleted `ProviderMetadata stores all required fields` and
     // `ProviderMetadata optional fields` — both tested Kotlin's data-class
