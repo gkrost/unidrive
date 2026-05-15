@@ -10957,7 +10957,7 @@ opened: 2026-05-15
 
 ## Issue
 
-`StateDatabase.getAllEntries()` at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:203` is missing `@Synchronized`. 21 of the 24 mutating/reading methods on `StateDatabase` use the monitor (e.g. `getEntryCount()` at line 194, `getEntriesByPrefix()` at line 212, `deleteEntry()` at line 223). `getAllEntries()` is the lone outlier, iterating a `ResultSet` without holding the lock.
+`StateDatabase.getAllEntries()` at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:203` is missing `@Synchronized`. 21 of the 22 methods on `StateDatabase` use the monitor (e.g. `getEntryCount()` at line 195, `getEntriesByPrefix()` at line 213, `deleteEntry()` at line 224). `getAllEntries()` is the lone outlier, iterating a `ResultSet` without holding the lock.
 
 ## Impact
 
