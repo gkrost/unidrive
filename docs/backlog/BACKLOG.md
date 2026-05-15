@@ -10893,33 +10893,36 @@ Tier 3 / deferred from the Top-10 hygiene round.
 Spec: ../unidrive-android/docs/superpowers/specs/2026-05-15-top10-hygiene-design.md §6
 ---
 id: UD-100
-title: UDS socket has no explicit POSIX 0600 chmod
+title: UDS socket has no explicit POSIX 0600 chmod (defense-in-depth, parent dir already 0700)
 category: security
-priority: medium
+priority: low
 effort: XS
 status: open
 code_refs:
   - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:316-326
 opened: 2026-05-15
 ---
-**Source:** External review pass 2026-05-15 cross-verified by codebase audit. Independent finding: the UDS server binds the socket file but never sets POSIX permissions on it.
+**Source:** External review pass 2026-05-15 cross-verified by codebase audit. PR #24 Codex bot review correctly pointed out that the original ticket framed the threat wrong; this rewrite is the corrected scope.
 
 ## Issue
 
-`IpcServer.start()` opens a `ServerSocketChannel` of family `UNIX` and binds it to `socketPath` (`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78`). No `Files.setPosixFilePermissions(socketPath, ...)` call follows. The socket file inherits the umask default — typically `srwxr-xr-x` (world-readable, owner-writable).
+`IpcServer.start()` opens a `ServerSocketChannel` of family `UNIX` and binds it to `socketPath` (`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78`). No `Files.setPosixFilePermissions(socketPath, ...)` call follows. The socket file inherits the umask default — typically `srwxr-xr-x`.
 
-The parent directory under `$XDG_RUNTIME_DIR/unidrive/` is created with `rwx------` (0700) by `tempSocketDir()`, which prevents cross-user access on a properly-configured tmpfs. However, on systems where `$XDG_RUNTIME_DIR` is not set, the fallback path under `/tmp/` may not have the same parent-dir protection, and same-user processes can always traverse `rwx------` if they are the same UID.
+The parent directory is created with `rwx------` (0700) by `tempSocketDir()` at `IpcServer.kt:316-326` — applied uniformly to both `$XDG_RUNTIME_DIR/unidrive-ipc-*/` and the `/tmp/unidrive-ipc-*/` fallback (`Files.createTempDirectory(prefix, asFileAttribute(rwx------))`). The parent dir 0700 is already the primary cross-user defense.
 
 ## Impact
 
-Severity: medium.
+Severity: low (defense-in-depth only).
 
-The IPC channel is push-only (broadcast loop at `IpcServer.kt:105-121`), so observers cannot inject commands. But they can:
-- Subscribe to live sync state updates (file paths being synced, progress percentages, throttle events)
-- Correlate sync activity with timing side-channels (e.g., infer file sizes from broadcast cadence)
-- Use the broadcast frames as a probe to detect whether the user is running unidrive at all
+**What chmod 0600 on the socket does NOT solve:**
+- A malicious same-user process (browser extension, sandboxed app, npm postinstall) runs as the same UID and already passes the 0700 directory check and would pass a 0600 socket check too. UNIX socket permissions only segment by UID — they cannot distinguish two processes running as the same user.
+- The push-only stream of `SyncState` snapshots remains readable to any same-UID process regardless of what chmod we put on the socket file. If that stream needs sensitivity review, that is a separate concern (see Follow-up below).
 
-Any malicious same-user process (browser extension, sandboxed app, npm install postinstall) gets free read access to the user's cloud-sync activity stream.
+**What chmod 0600 on the socket DOES solve:**
+- Parity with the parent-dir hardening. If an operator misconfigures `$XDG_RUNTIME_DIR` to be world-traversable (rare but possible — e.g., custom systemd-user setups, container environments), the parent dir 0700 protection collapses and only the socket file's own permissions stand. Today that is umask-dependent.
+- Defense-in-depth: the convention used by Vault.kt (`Vault.kt:86`) and CredentialStore.kt is to set 0600 explicitly on the sensitive file, not rely on umask. The socket file is the only sensitive artifact unidrive creates that does not follow this convention.
+- Auditability: a `0600` socket file is self-documenting in `ls -l` output; an inherited-umask one requires the auditor to reason about the parent dir.
 
 ## Fix shape
 
@@ -10936,12 +10939,24 @@ Wrap in `runCatching` because Windows lacks POSIX file permissions and the exist
 - Add a test `IpcServerPermissionsTest` that starts the server, reads `Files.getPosixFilePermissions(socketPath)`, and asserts the set equals `{OWNER_READ, OWNER_WRITE}`.
 - `assumeTrue` skip on non-POSIX hosts.
 
+## Follow-up question (not part of this ticket)
+
+If the same-user threat (browser extension reading sync state) is genuinely in scope for unidrive's threat model, the only mechanisms that address it are:
+
+1. **Per-client authentication.** First-frame token exchange or mTLS over the UDS. Heavy.
+2. **Sanitise the broadcast payload.** Strip file paths and other PII from `SyncState` before emission; only push opaque progress counters. Cheap, but loses observability for the CLI's own `status` consumer.
+3. **Reduce the broadcast audience.** Make `IpcServer` only emit if a registered subscriber identifies itself (one-way handshake), instead of unconditionally broadcasting to all `accept()`ed clients.
+
+These should be a separate ticket (likely category=security, priority=medium, effort=M) if the threat model decision is "yes, defend against same-UID observers." File a new UD-1xx for that if needed; do not bundle with this one.
+
 ## Cross-refs
 
 - `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:77-78` — bind site missing chmod
+- `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:316-326` — `tempSocketDir()` already protects parent dir with 0700 for both XDG and /tmp paths
 - `core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:27-48` — existing 0600/0700 helper used by Vault and CredentialStore
 - `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Vault.kt:86` — reference pattern for setting POSIX perms on a sensitive file
 - `docs/SECURITY.md` STRIDE row I3 (information disclosure) — should be updated once fixed
+- PR #24 review comment `r3249149257` (Codex bot) — flagged the original ticket's threat-model framing; this rewrite incorporates the correction
 ---
 id: UD-215
 title: StateDatabase.getAllEntries() missing @Synchronized
