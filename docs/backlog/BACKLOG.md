@@ -2434,95 +2434,6 @@ Useful starting points:
 
 Sample audit 2026-05-01. Source: `logic-arts-official/unidrive`@`b8e4223`, `docs/CHANGELOG.md`.
 ---
-id: UD-766
-title: Wire backlog-sync.kts into CI (build.yml)
-category: tooling
-priority: high
-effort: XS
-status: open
-code_refs:
-  - scripts/backlog-sync.kts
-  - scripts/ci/backlog-sync.sh
-  - .github/workflows/build.yml
-opened: 2026-05-01
----
-**Wire `scripts/backlog-sync.kts` into `.github/workflows/build.yml` as a CI step. Best leverage-to-effort ratio in the tree.**
-
-The script and shell wrapper both already exist (`scripts/backlog-sync.kts`, 179 lines; `scripts/ci/backlog-sync.sh`, 6 lines), but no CI job invokes them — drift goes uncaught until someone runs `kotlinc -script` locally, and most contributors don't.
-
-## What's already there
-
-- `scripts/backlog-sync.kts` — canonical orphan/stale/anchorless/abandoned checker per AGENT-SYNC.md. Exit 0 on clean (or warnings only); exit 1 on hard errors (orphan code refs, stale closed items).
-- `scripts/ci/backlog-sync.sh` — already exists as the CI wrapper. Three lines: `cd` to repo root, `exec kotlinc -script scripts/backlog-sync.kts`. Ready to call.
-- `docs/AGENT-SYNC.md` — already documents that this script is the contract. The contract just isn't enforced.
-
-## What gets caught the moment we wire it
-
-In one shot:
-- **Orphan code refs** — `// UD-xyz` in source with no matching block in `BACKLOG.md`/`CLOSED.md`.
-- **Stale closed** — IDs in `CLOSED.md` still referenced in source.
-- **Non-canonical statuses** — frontmatter `status:` outside `open|in-progress|blocked|closed`.
-- **Anchorless open** (warning) — `code_refs:` pointing at non-existent files.
-- **Abandoned** (warning) — `status: open`, no `code_refs`, opened > 30 d ago.
-- **Source-vs-CLOSED drift** — entries that disagree between BACKLOG and CLOSED.
-
-These are the failure modes that today only surface during PR review or session handover. Wiring catches them at push time.
-
-## Acceptance
-
-- New job `backlog` in `.github/workflows/build.yml` running on `ubuntu-latest` only (kotlinc-only — no JDK build needed):
-  - Checkout
-  - Set up JDK 21 (kotlinc needs it)
-  - Install kotlinc (`curl` from GitHub releases, or use a marketplace action — pick whichever is cheaper)
-  - `bash scripts/ci/backlog-sync.sh`
-- Job runs on push to `main` and on PRs (same triggers as `core`).
-- Job is **fast** — script reads docs + greps `core/` for `UD-###` patterns, no Gradle invocation. Should be < 30 s including kotlinc warmup.
-- `concurrency:` group shared with the existing `core` group so PRs don't queue duplicates.
-- Failure surfaces in the PR check list with a useful summary (the script's stderr is already shaped for humans).
-
-## Out of scope
-
-- Re-using the existing Gradle daemon — kotlinc is fine standalone for a 179-line script.
-- Strict mode for warnings — keep "anchorless open" + "abandoned" as warnings only (script default). If we want to escalate later, that's a separate ticket.
-- Running this in a pre-commit hook — separate ticket, related to UD-762's `check-docs.sh` salvage.
-
-## Provenance
-
-Discussed 2026-05-01 with maintainer. Highest leverage/effort ratio in the tree because: (a) script + wrapper already exist, (b) checks every PR + every push to `main`, (c) catches 6 distinct drift classes simultaneously.
----
-id: UD-003
-title: ADR-0014 consolidating ADR-0008/0011/0012/0013 — v0.1.0 surface
-category: architecture
-priority: high
-effort: XS
-status: open
-code_refs:
-  - docs/adr/
-opened: 2026-05-01
----
-**Write ADR-0014 consolidating the v0.1.0 surface as it stands after ADR-0008 + 0011 + 0012 + 0013.**
-
-A new contributor reading the ADR set today must mentally compose four documents to answer "what's actually shipping?":
-
-- ADR-0008 (greenfield restart): "v0.1.0 = core-only, ui/ + shell-win/ at preview"
-- ADR-0011 (remove shell-win): "actually, shell-win/ is gone"
-- ADR-0012 (Linux-only MVP + protocol/ removal): "actually, protocol/ + named pipes are gone too"
-- ADR-0013 (remove ui/): "actually, ui/ is also gone"
-
-ADR-0008's stated trade-offs ("no tray, no Explorer integration") are now the actual shipped state, not a temporary acceptance. Each amendment ADR explicitly cross-references the others (see the `amends` / `amended_by` frontmatter chain). The chain is faithfully recorded but not summarised.
-
-## Why a consolidator is the right shape (not a rewrite)
-
-ADR-0008..0013 are **historical** — they record decisions and the context at the time. ADR rule of thumb: never rewrite history; instead supersede with a new ADR that captures the *current* decision surface. ADR-0014 is that consolidation.
-
-It does **not** invalidate the four it consolidates. They stay accepted; ADR-0014 cites them as `consolidates: ADR-0008, ADR-0011, ADR-0012, ADR-0013` and is the **single answer** to "what's shipping in v0.1.0?"
-
-## Acceptance
-
-`docs/adr/0014-v0_1_0-surface.md`, ~half a page, frontmatter:
-
-```yaml
----
 id: ADR-0014
 title: v0.1.0 release surface, post-amendments
 status: accepted
@@ -2558,122 +2469,6 @@ Body sections (each one paragraph max — ADR-0014 is a summary, not a redo):
 ## Provenance
 
 Discussed 2026-05-01 with maintainer. Identified during the post-CHANGELOG-audit retrospective as the highest-leverage doc fix for new-contributor onboarding.
----
-id: UD-767
-title: Add docs/ROADMAP.md + docs/NON-GOALS.md (half page each)
-category: tooling
-priority: high
-effort: XS
-status: open
-code_refs:
-  - docs/ROADMAP.md
-  - docs/NON-GOALS.md
-  - README.md
-opened: 2026-05-01
----
-**Add `docs/ROADMAP.md` and `docs/NON-GOALS.md` — half a page each. Raises the project from "preview with strong opinions" to "preview with discoverable strategy."**
-
-The current public has rigorous tactical docs (`SPECS.md`, `ARCHITECTURE.md`, `AGENT-SYNC.md`, `BACKLOG.md`, 13 ADRs, lessons-learned files) but no single document that answers a contributor's first two questions:
-
-1. **"Where is this going?"** — answered today only by reading 13 ADRs + the BACKLOG.md (90+ tickets) + the wiki. That's a 30-minute reading task, and even after it the answer is implicit.
-2. **"What is this *not* trying to be?"** — answered today only by ADR-0011/0012/0013 (each phrased as "we removed X"), which is hard to discover proactively.
-
-Both gaps are common in open-source previews. Closing them is a half-day of writing that pays off every time someone asks "does it support Y?", "will it ever do Z?", "should I file this as a feature request?"
-
-## What goes where
-
-### `docs/ROADMAP.md` (~half a page)
-
-**Audience:** prospective contributor, prospective user, prospective sponsor.
-
-**Shape:** time-anchored milestones, not a feature list. Each milestone is one paragraph.
-
-```markdown
-# Roadmap
-
-## v0.1.0 — first release (Linux MVP)
-Quality-gated providers: localfs, s3, sftp. CLI + MCP + sync engine.
-Linux-only. Outstanding gates: <link to BACKLOG.md milestone:v0.1.0>.
-
-## v0.2.0 — preview providers graduate
-OneDrive, WebDAV, HiDrive, Internxt, Rclone leave preview status. Each
-needs: live-integration test in CI, capability-contract round-trip
-(ADR-0005), parallelism budget tuned in `ProviderMetadata`. Likely Q3.
-
-## v0.3.0 — release artefacts
-Standalone installer (`dist/install.sh`, UD-761), GitHub Releases with
-fat JAR, Scoop bucket / WinGet manifest if community appetite exists.
-Webhook-driven sync exits experimental status (UD-???).
-
-## Beyond v0.3.0 — not committed
-- Shell-extension overlays (Linux: Nautilus + Dolphin; Windows: depends
-  on appetite). See `BACKLOG_IDEAS_UI.md`.
-- Companion projects: `unidrive-android` (in flight in adjacent repo),
-  `unidrive-tray` (community).
-- Provider expansion to Google Drive, Dropbox, Box (currently only via
-  rclone gateway).
-```
-
-Cross-links into `BACKLOG.md`'s `milestone:v0.1.0` field. If we don't currently use the `milestone:` field consistently, the ROADMAP creation forces that audit.
-
-### `docs/NON-GOALS.md` (~half a page)
-
-**Audience:** anyone about to file a feature request that won't land.
-
-**Shape:** explicit list with one-line "why not" for each. Doesn't need numbering.
-
-```markdown
-# Non-goals
-
-unidrive-cli explicitly does NOT aim to:
-
-- **Be a backup tool.** Sync ≠ backup. We sync deltas; we do not snapshot
-  history-aware archives. Use restic/borg/duplicacy for that. (We do
-  retain `unidrive backup add` for one-way replication, which is
-  different from a backup tool.)
-- **Run on Windows or macOS in v0.1.0.** ADR-0012 is the authority. Both
-  are post-v0.3.0 candidates per `BACKLOG_IDEAS_UI.md`.
-- **Ship a system-tray UI in core.** ADR-0013 moved that to companion
-  projects; the daemon's UDS broadcast surface is the contract for
-  third-party trays. See `BACKLOG_IDEAS_UI.md` W11/W12.
-- **Implement provider-specific features that don't generalise.** The
-  `CloudProvider` interface is deliberately minimal; provider quirks
-  hide behind capabilities (ADR-0005). "OneDrive shared notebooks" or
-  "Dropbox Paper documents" are out unless they map to a generalisable
-  capability.
-- **Be a sync conflict resolver.** We surface conflicts (`unidrive
-  conflicts`) and offer two policies (`keep_both`, `last_writer_wins`),
-  but we do not auto-merge document contents. Document-merge tooling is
-  a different product.
-- **Replace native cloud storage clients.** OneDrive's official client
-  has features we won't replicate (cloud streams in Office, embedded
-  Teams sharing, etc.). We're a **second-class citizen** for any single
-  provider, but a **first-class citizen** for the multi-provider use
-  case. That's the trade.
-```
-
-Each non-goal cites either an ADR, a BACKLOG_IDEAS_UI section, or a "why" sentence. The list isn't fixed — adding a non-goal as the project matures is fine, and gets a date footer (`Updated YYYY-MM-DD`).
-
-## Why both, not just one
-
-A roadmap without non-goals reads as "all the things, eventually, just be patient" — which is what every preview looks like and trains contributors to file maximalist requests. Non-goals constrain expectations bidirectionally: contributors know what won't land, users know what to look elsewhere for, sponsors know the scope they're actually backing.
-
-## Acceptance
-
-- `docs/ROADMAP.md` exists, ~half a page, links to BACKLOG.md milestone field + ADR-0014 (when filed under UD-003).
-- `docs/NON-GOALS.md` exists, ~half a page, references ADR-0011/0012/0013 + ADR-0005 + `BACKLOG_IDEAS_UI.md`.
-- `README.md` adds two links in the docs section pointing at both.
-- Wiki Home page (built 2026-05-01) gets a "What's next" section with a one-liner pointer to ROADMAP.md.
-- If `BACKLOG.md` items don't currently have `milestone:` set, populate it for the ones in v0.1.0 / v0.2.0 / v0.3.0 buckets — keeps ROADMAP.md and BACKLOG.md in sync via the milestone field.
-
-## Out of scope
-
-- Detailed feature specs for v0.2.0 or v0.3.0 — those ship as separate spec files in `docs/specs/` when the time comes.
-- Marketing copy / pitch deck — different artefact, different audience.
-
-## Provenance
-
-Discussed 2026-05-01 with maintainer. Pairs with UD-003 (ADR-0014 surface consolidator) — together they make the project navigable for new contributors without reading 13 ADRs + 90 tickets.
 ---
 id: UD-004
 title: Decompose SyncEngine.kt into Reconciler + ScanCoordinator + ActionPlanner + ActionExecutor; enforce single-flight-per-profile in code
@@ -5804,3 +5599,6098 @@ CI or marked `@Tag("manual")`.
 
 Was `#85` in `unidrive-closed/docs/BACKLOG.md` before the 2026-05-13
 dissolution.
+---
+id: UD-104
+title: UD-104 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceSslTest.kt:6
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-104 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-104 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-104` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-104b`,
+   `UD-104c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceSslTest.kt:6`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-106
+title: UD-106 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/TokenBucket.kt:4
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/TokenBucketTest.kt:6
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-106 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-106 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-106` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-106b`,
+   `UD-106c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/TokenBucket.kt:4`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-108
+title: UD-108 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/ci/README.md:12
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-108 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-108 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-108` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-108b`,
+   `UD-108c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/ci/README.md:12`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-109
+title: UD-109 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/ci/README.md:13
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-109 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-109 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-109` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-109b`,
+   `UD-109c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/ci/README.md:13`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-111
+title: UD-111 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/audit/AuditLog.kt:21
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt:31
+  - scripts/dev/file_lift_findings.py:78
+  - scripts/dev/file_lift_findings.py:80
+  - scripts/dev/file_lift_findings.py:104
+  - scripts/dev/file_lift_findings.py:105
+  - scripts/dev/file_lift_findings.py:112
+  - scripts/dev/file_lift_findings.py:124
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-111 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-111 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-111` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-111b`,
+   `UD-111c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/audit/AuditLog.kt:21`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-113
+title: UD-113 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:52
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:959
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1001
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1038
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1106
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1164
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1219
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/audit/AuditLog.kt:15
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-113 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-113 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-113` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-113b`,
+   `UD-113c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:52`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-216
+title: UD-216 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/LogoutTool.kt:9
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/IdentityTool.kt:9
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt:13
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:53
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ProfileTools.kt:17
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/AdminToolsTest.kt:13
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolRegistryTest.kt:27
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/McpRoundtripIntegrationTest.kt:230
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-216 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-216 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-216` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-216b`,
+   `UD-216c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/LogoutTool.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-218
+title: UD-218 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:359
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-218 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-218 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-218` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-218b`,
+   `UD-218c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:359`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-219
+title: UD-219 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:111
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-219 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-219 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-219` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-219b`,
+   `UD-219c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:111`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-222
+title: UD-222 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:81
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:322
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:575
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:498
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:613
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:860
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1300
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1447
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-222 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-222 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-222` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-222b`,
+   `UD-222c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:81`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-223
+title: UD-223 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DeltaFromLatestTest.kt:16
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:644
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:659
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:668
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:677
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:686
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:223
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:1015
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-223 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-223 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-223` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-223b`,
+   `UD-223c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DeltaFromLatestTest.kt:16`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-224
+title: UD-224 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LsCommand.kt:12
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/LsCommandTest.kt:22
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/LsCommandTest.kt:108
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-224 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-224 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-224` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-224b`,
+   `UD-224c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LsCommand.kt:12`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-225
+title: UD-225 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:173
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:212
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:219
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:362
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:378
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:382
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:383
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:392
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-225 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-225 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-225` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-225b`,
+   `UD-225c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:173`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-226
+title: UD-226 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:22
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:21
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SweepCommand.kt:16
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SweepCommand.kt:29
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt:14
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-226 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-226 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-226` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-226b`,
+   `UD-226c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:22`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-227
+title: UD-227 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:20
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:11
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:35
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-227 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-227 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-227` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-227b`,
+   `UD-227c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:20`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-228
+title: UD-228 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/pre-commit/scope-check.sh:5
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-228 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-228 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-228` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-228b`,
+   `UD-228c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/pre-commit/scope-check.sh:5`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-231
+title: UD-231 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:18
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:105
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:24
+  - scripts/dev/file_lift_findings.py:193
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-231 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-231 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-231` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-231b`,
+   `UD-231c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:18`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-232
+title: UD-232 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:20
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/LiveGraphIntegrationTest.kt:75
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:356
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:10
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:19
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:116
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:138
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:155
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-232 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-232 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-232` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-232b`,
+   `UD-232c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:20`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-234
+title: UD-234 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:7
+  - core/app/mcp/src/main/resources/logback.xml:6
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:8
+  - core/app/cli/src/main/resources/logback.xml:7
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-234 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-234 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-234` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-234b`,
+   `UD-234c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:7`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-235
+title: UD-235 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:167
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:675
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:688
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:776
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ConfigMissingDiagnosticTest.kt:9
+  - scripts/dev/pre-commit/scope-check.sh:126
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-235 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-235 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-235` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-235b`,
+   `UD-235c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:167`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-237
+title: UD-237 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:130
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:640
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:657
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ProfileTypeResolveTest.kt:10
+  - scripts/dev/pre-commit/scope-check.sh:126
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-237 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-237 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-237` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-237b`,
+   `UD-237c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:130`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-238
+title: UD-238 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:47
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt:51
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:41
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:299
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:300
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusAuditTest.kt:10
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:52
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-238 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-238 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-238` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-238b`,
+   `UD-238c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:47`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-241
+title: UD-241 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/HelpAndConfigErrorTest.kt:13
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/HelpAndConfigErrorTest.kt:23
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-241 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-241 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-241` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-241b`,
+   `UD-241c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/HelpAndConfigErrorTest.kt:13`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-242
+title: UD-242 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:108
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:159
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:632
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/HelpAndConfigErrorTest.kt:16
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/HelpAndConfigErrorTest.kt:102
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ConfigMissingDiagnosticTest.kt:135
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ConfigMissingDiagnosticTest.kt:140
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ConfigMissingDiagnosticTest.kt:144
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-242 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-242 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-242` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-242b`,
+   `UD-242c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:108`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-243
+title: UD-243 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ShareCommand.kt:29
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:65
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:119
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ShareCommandTest.kt:136
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ShareCommandTest.kt:154
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ShareCommandTest.kt:160
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ShareCommandTest.kt:169
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/ShareCommandTest.kt:175
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-243 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-243 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-243` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-243b`,
+   `UD-243c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ShareCommand.kt:29`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-244
+title: UD-244 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt:176
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-244 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-244 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-244` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-244b`,
+   `UD-244c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt:176`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-245
+title: UD-245 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/NumericFlagValidationTest.kt:11
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-245 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-245 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-245` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-245b`,
+   `UD-245c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/NumericFlagValidationTest.kt:11`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-248
+title: UD-248 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:441
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1533
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncReason.kt:30
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncRetryNonFatalTest.kt:13
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncRetryNonFatalTest.kt:86
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncExceptionStormTest.kt:19
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncExceptionStormTest.kt:26
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncExceptionStormTest.kt:31
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-248 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-248 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-248` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-248b`,
+   `UD-248c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:441`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-249
+title: UD-249 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncExceptionStormTest.kt:19
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-249 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-249 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-249` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-249b`,
+   `UD-249c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncExceptionStormTest.kt:19`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-251
+title: UD-251 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:164
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:631
+  - core/app/cli/src/main/resources/logback.xml:27
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-251 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-251 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-251` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-251b`,
+   `UD-251c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:164`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-252
+title: UD-252 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:22
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:151
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:456
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:769
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:772
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:778
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:779
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:798
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-252 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-252 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-252` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-252b`,
+   `UD-252c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:22`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-253
+title: UD-253 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:409
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:424
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:521
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:537
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:567
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:581
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1457
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineWarnContextTest.kt:18
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-253 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-253 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-253` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-253b`,
+   `UD-253c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:409`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-255
+title: UD-255 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:68
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestIdPlugin.kt:12
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/RequestIdPluginTest.kt:19
+  - core/app/core/build.gradle.kts:13
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-255 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-255 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-255` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-255b`,
+   `UD-255c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:68`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-257
+title: UD-257 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/WatchEventsTool.kt:28
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/DaemonStatusAgreementTest.kt:28
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/DaemonStatusAgreementTest.kt:140
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/DaemonStatusAgreementTest.kt:152
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-257 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-257 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-257` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-257b`,
+   `UD-257c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/WatchEventsTool.kt:28`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-258
+title: UD-258 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/build.gradle.kts:17
+  - core/app/mcp/build.gradle.kts:184
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:6
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:9
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:12
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:42
+  - core/app/cli/build.gradle.kts:16
+  - scripts/dev/unidrive-jfr.sh:133
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-258 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-258 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-258` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-258b`,
+   `UD-258c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/build.gradle.kts:17`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-259
+title: UD-259 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:6
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:15
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:226
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:12
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:19
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:158
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/GlyphRendererTest.kt:243
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-259 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-259 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-259` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-259b`,
+   `UD-259c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt:6`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-260
+title: UD-260 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:256
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:294
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:340
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-260 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-260 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-260` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-260b`,
+   `UD-260c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:256`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-261
+title: UD-261 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:320
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:353
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:405
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-261 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-261 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-261` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-261b`,
+   `UD-261c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:320`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-263
+title: UD-263 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt:32
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneProviderFactory.kt:36
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ProviderFactory.kt:40
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProviderFactory.kt:42
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:37
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:82
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:403
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:349
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-263 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-263 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-263` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-263b`,
+   `UD-263c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProviderFactory.kt:32`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-269
+title: UD-269 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:90
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:213
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:410
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:448
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:511
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:514
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:536
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:552
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-269 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-269 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-269` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-269b`,
+   `UD-269c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:90`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-270
+title: UD-270 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/build.gradle.kts:212
+  - core/app/cli/build.gradle.kts:221
+  - core/app/cli/build.gradle.kts:257
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-270 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-270 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-270` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-270b`,
+   `UD-270c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/build.gradle.kts:212`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-271
+title: UD-271 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:67
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:89
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:98
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:105
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-271 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-271 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-271` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-271b`,
+   `UD-271c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:67`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-272
+title: UD-272 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt:26
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt:56
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt:90
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt:108
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ProcessLockTest.kt:39
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ProcessLockTest.kt:42
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ProcessLockTest.kt:50
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ProcessLockTest.kt:59
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-272 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-272 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-272` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-272b`,
+   `UD-272c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt:26`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-273
+title: UD-273 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:355
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-273 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-273 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-273` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-273b`,
+   `UD-273c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:355`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-274
+title: UD-274 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:649
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:659
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-274 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-274 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-274` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-274b`,
+   `UD-274c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:649`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-276
+title: UD-276 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavFolderDetectionTest.kt:166
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavFolderDetectionTest.kt:169
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-276 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-276 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-276` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-276b`,
+   `UD-276c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavFolderDetectionTest.kt:166`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-277
+title: UD-277 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:63
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:4
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:25
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:54
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:66
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:8
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:16
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:20
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-277 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-277 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-277` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-277b`,
+   `UD-277c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:63`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-278
+title: UD-278 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:282
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:291
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:300
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:316
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:330
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:77
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:193
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:199
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-278 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-278 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-278` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-278b`,
+   `UD-278c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:282`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-279
+title: UD-279 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:51
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:186
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:198
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-279 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-279 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-279` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-279b`,
+   `UD-279c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:51`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-282
+title: UD-282 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:21
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:51
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:133
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:429
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigStrictTest.kt:15
+  - scripts/dev/log-watch.sh:45
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-282 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-282 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-282` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-282b`,
+   `UD-282c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:21`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-283
+title: UD-283 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.kt:39
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ProfileArgValidator.kt:7
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt:87
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ProfileArgValidatorTest.kt:13
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-283 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-283 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-283` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-283b`,
+   `UD-283c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.kt:39`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-284
+title: UD-284 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:692
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:707
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:797
+  - core/app/sync/build.gradle.kts:22
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:69
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:102
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:176
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-284 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-284 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-284` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-284b`,
+   `UD-284c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:692`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-285
+title: UD-285 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:66
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:17
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:66
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:51
+  - scripts/dev/file_lift_findings.py:723
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-285 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-285 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-285` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-285b`,
+   `UD-285c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:66`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-286
+title: UD-286 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:181
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:235
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:239
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:309
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:328
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:395
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:406
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:436
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-286 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-286 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-286` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-286b`,
+   `UD-286c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:181`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-287
+title: UD-287 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:126
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:18
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:13
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:19
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:27
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:75
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/StreamingUploadTest.kt:20
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/StreamingUploadTest.kt:75
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-287 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-287 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-287` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-287b`,
+   `UD-287c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:126`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-288
+title: UD-288 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:146
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavApiServiceRetryTest.kt:16
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:284
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:80
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt:246
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-288 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-288 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-288` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-288b`,
+   `UD-288c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavApiService.kt:146`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-289
+title: UD-289 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:77
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:183
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:199
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:252
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:305
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:328
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:397
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:121
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-289 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-289 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-289` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-289b`,
+   `UD-289c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:77`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-291
+title: UD-291 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:27
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:183
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:188
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:97
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:140
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:189
+  - core/providers/webdav/src/test/kotlin/org/krost/unidrive/webdav/WebDavProviderTest.kt:206
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-291 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-291 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-291` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-291b`,
+   `UD-291c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:27`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-292
+title: UD-292 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/build.gradle.kts:118
+  - core/app/cli/build.gradle.kts:123
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-292 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-292 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-292` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-292b`,
+   `UD-292c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/build.gradle.kts:118`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-293
+title: UD-293 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:36
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:24
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:43
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/HtmlBodySniffGuardTest.kt:114
+  - scripts/dev/file_lift_findings.py:193
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-293 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-293 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-293` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-293b`,
+   `UD-293c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:36`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-294
+title: UD-294 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/RelocateTool.kt:57
+  - core/app/mcp/build.gradle.kts:238
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:403
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/RelocateMdc.kt:7
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:64
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:171
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:192
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/RelocateCommandTest.kt:201
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-294 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-294 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-294` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-294b`,
+   `UD-294c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/RelocateTool.kt:57`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-296
+title: UD-296 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:272
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-296 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-296 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-296` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-296b`,
+   `UD-296c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:272`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-297
+title: UD-297 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:231
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1477
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:624
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:716
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:729
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:742
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:755
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:773
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-297 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-297 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-297` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-297b`,
+   `UD-297c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:231`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-298
+title: UD-298 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:302
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1479
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:764
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:785
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:788
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:807
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:822
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-298 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-298 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-298` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-298b`,
+   `UD-298c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:302`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-299
+title: UD-299 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:139
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1486
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:837
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:849
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:858
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:867
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:884
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:151
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-299 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-299 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-299` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-299b`,
+   `UD-299c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:139`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-309
+title: UD-309 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:25
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-309 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-309 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-309` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-309b`,
+   `UD-309c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DownloadContentTypeGuardTest.kt:25`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-310
+title: UD-310 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:289
+  - scripts/dev/file_lift_findings.py:78
+  - scripts/dev/file_lift_findings.py:80
+  - scripts/dev/file_lift_findings.py:83
+  - scripts/dev/file_lift_findings.py:88
+  - scripts/dev/file_lift_findings.py:105
+  - scripts/dev/file_lift_findings.py:123
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-310 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-310 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-310` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-310b`,
+   `UD-310c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:289`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-311
+title: UD-311 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:75
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-311 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-311 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-311` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-311b`,
+   `UD-311c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:75`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-312
+title: UD-312 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:312
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:99
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:227
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:265
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/OAuthServiceTokenShapeTest.kt:17
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/CredentialStore.kt:13
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/CredentialStore.kt:17
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/CredentialStore.kt:19
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-312 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-312 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-312` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-312b`,
+   `UD-312c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:312`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-313
+title: UD-313 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/file_lift_findings.py:862
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-313 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-313 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-313` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-313b`,
+   `UD-313c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/file_lift_findings.py:862`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-314
+title: UD-314 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/ListChildrenPaginationTest.kt:15
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/ListChildrenPaginationTest.kt:105
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-314 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-314 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-314` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-314b`,
+   `UD-314c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/ListChildrenPaginationTest.kt:15`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-315
+title: UD-315 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DriveItemVaultTest.kt:11
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/OneDriveProviderVaultFilterTest.kt:16
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-315 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-315 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-315` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-315b`,
+   `UD-315c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/DriveItemVaultTest.kt:11`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-316
+title: UD-316 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:88
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:7
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:72
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusAuditTest.kt:10
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-316 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-316 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-316` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-316b`,
+   `UD-316c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:88`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-317
+title: UD-317 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:85
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:302
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:319
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:366
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:531
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:581
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:592
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:678
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-317 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-317 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-317` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-317b`,
+   `UD-317c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:85`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-327
+title: UD-327 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:59
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProviderFactory.kt:74
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/CloudRelocator.kt:127
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:580
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:583
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:595
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:614
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:634
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-327 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-327 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-327` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-327b`,
+   `UD-327c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:59`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-329
+title: UD-329 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/unidrive-jfr.ps1:116
+  - scripts/dev/log-watch.sh:149
+  - scripts/dev/file_lift_findings.py:294
+  - scripts/dev/file_lift_findings.py:693
+  - scripts/dev/file_lift_findings.py:706
+  - scripts/dev/file_lift_findings.py:732
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-329 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-329 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-329` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-329b`,
+   `UD-329c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/unidrive-jfr.ps1:116`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-331
+title: UD-331 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:289
+  - scripts/dev/file_lift_findings.py:79
+  - scripts/dev/file_lift_findings.py:82
+  - scripts/dev/file_lift_findings.py:88
+  - scripts/dev/file_lift_findings.py:125
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-331 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-331 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-331` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-331b`,
+   `UD-331c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:289`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-332
+title: UD-332 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/file_lift_findings.py:295
+  - scripts/dev/file_lift_findings.py:693
+  - scripts/dev/file_lift_findings.py:706
+  - scripts/dev/file_lift_findings.py:733
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-332 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-332 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-332` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-332b`,
+   `UD-332c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/file_lift_findings.py:295`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-333
+title: UD-333 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:25
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/HtmlBodySniffGuardTest.kt:16
+  - scripts/dev/file_lift_findings.py:180
+  - scripts/dev/file_lift_findings.py:186
+  - scripts/dev/file_lift_findings.py:190
+  - scripts/dev/file_lift_findings.py:195
+  - scripts/dev/file_lift_findings.py:197
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-333 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-333 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-333` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-333b`,
+   `UD-333c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-335
+title: UD-335 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:37
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:108
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:119
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:127
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:134
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:149
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:265
+  - scripts/dev/file_lift_findings.py:174
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-335 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-335 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-335` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-335b`,
+   `UD-335c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:37`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-336
+title: UD-336 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:8
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:18
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:36
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:53
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/ErrorBodyTest.kt:16
+  - scripts/dev/file_lift_findings.py:126
+  - scripts/dev/file_lift_findings.py:232
+  - scripts/dev/file_lift_findings.py:406
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-336 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-336 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-336` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-336b`,
+   `UD-336c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/ErrorBody.kt:8`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-337
+title: UD-337 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:583
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:4
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:14
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/UploadTimeoutPolicy.kt:25
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:8
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:100
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/UploadTimeoutPolicyTest.kt:103
+  - scripts/dev/file_lift_findings.py:353
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-337 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-337 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-337` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-337b`,
+   `UD-337c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:583`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-340
+title: UD-340 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:26
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/HtmlBodySniffGuardTest.kt:16
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-340 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-340 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-340` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-340b`,
+   `UD-340c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/HtmlBodySniffGuard.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-342
+title: UD-342 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:13
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:15
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/StreamingUploadTest.kt:19
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/StreamingUploadTest.kt:93
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-342 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-342 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-342` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-342b`,
+   `UD-342c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/StreamingUpload.kt:13`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-343
+title: UD-343 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/SharedJson.kt:6
+  - core/app/core/src/main/kotlin/org/krost/unidrive/SharedJson.kt:8
+  - core/app/core/build.gradle.kts:19
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-343 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-343 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-343` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-343b`,
+   `UD-343c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/SharedJson.kt:6`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-344
+title: UD-344 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:311
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:312
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/CredentialStore.kt:12
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/CredentialStore.kt:15
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:9
+  - core/app/core/src/test/kotlin/org/krost/unidrive/auth/CredentialStoreTest.kt:17
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-344 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-344 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-344` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-344b`,
+   `UD-344c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/AuthService.kt:311`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-345
+title: UD-345 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneSnapshot.kt:9
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsSnapshot.kt:10
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Snapshot.kt:10
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpSnapshot.kt:10
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavSnapshot.kt:10
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Snapshot.kt:19
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/DeltaSnapshotTest.kt:15
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/DeltaSnapshotTest.kt:56
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-345 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-345 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-345` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-345b`,
+   `UD-345c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/rclone/src/main/kotlin/org/krost/unidrive/rclone/RcloneSnapshot.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-346
+title: UD-346 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngine.kt:11
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngineTest.kt:11
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-346 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-346 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-346` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-346b`,
+   `UD-346c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SnapshotDeltaEngine.kt:11`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-347
+title: UD-347 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:9
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:24
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-347 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-347 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-347` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-347b`,
+   `UD-347c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/io/PosixPermissions.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-348
+title: UD-348 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/OAuthCallbackServer.kt:13
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/OAuthCallbackServer.kt:16
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt:4
+  - core/app/core/src/main/kotlin/org/krost/unidrive/io/OpenBrowser.kt:7
+  - core/app/core/src/test/kotlin/org/krost/unidrive/auth/OAuthCallbackServerTest.kt:9
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-348 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-348 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-348` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-348b`,
+   `UD-348c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/auth/OAuthCallbackServer.kt:13`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-350
+title: UD-350 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtHeaders.kt:9
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-350 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-350 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-350` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-350b`,
+   `UD-350c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtHeaders.kt:9`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-351
+title: UD-351 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/Pkce.kt:8
+  - core/app/core/src/main/kotlin/org/krost/unidrive/auth/Pkce.kt:11
+  - core/app/core/src/test/kotlin/org/krost/unidrive/auth/PkceTest.kt:9
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-351 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-351 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-351` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-351b`,
+   `UD-351c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/auth/Pkce.kt:8`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-353
+title: UD-353 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:583
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:281
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:287
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:302
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:414
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-353 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-353 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-353` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-353b`,
+   `UD-353c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:583`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-357
+title: UD-357 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/FolderUuidCache.kt:6
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:26
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:307
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:319
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:359
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:570
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:584
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/FolderUuidCacheTest.kt:8
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-357 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-357 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-357` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-357b`,
+   `UD-357c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/FolderUuidCache.kt:6`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-358
+title: UD-358 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:321
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:335
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-358 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-358 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-358` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-358b`,
+   `UD-358c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:321`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-359
+title: UD-359 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:723
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:784
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtFileDeletionFlagTest.kt:11
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtFileDeletionFlagTest.kt:85
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-359 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-359 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-359` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-359b`,
+   `UD-359c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:723`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-360
+title: UD-360 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:500
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:714
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:780
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:267
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:278
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:280
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:290
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:297
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-360 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-360 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-360` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-360b`,
+   `UD-360c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:500`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-361
+title: UD-361 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:501
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:542
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:617
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtFolderRecursionTest.kt:15
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-361 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-361 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-361` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-361b`,
+   `UD-361c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:501`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-366
+title: UD-366 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:145
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:226
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:253
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:258
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:98
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3Provider.kt:81
+  - core/providers/sftp/src/main/kotlin/org/krost/unidrive/sftp/SftpProvider.kt:61
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt:79
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-366 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-366 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-366` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-366b`,
+   `UD-366c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:145`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-367
+title: UD-367 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:385
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:275
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:228
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:240
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:253
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-367 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-367 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-367` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-367b`,
+   `UD-367c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:385`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-368
+title: UD-368 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:180
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:316
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:365
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:368
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:203
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:215
+  - core/app/core/src/main/kotlin/org/krost/unidrive/CloudProvider.kt:68
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-368 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-368 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-368` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-368b`,
+   `UD-368c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:180`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-369
+title: UD-369 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:277
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:310
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:404
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:670
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:68
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:76
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-369 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-369 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-369` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-369b`,
+   `UD-369c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtApiService.kt:277`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-372
+title: UD-372 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt:28
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFolder.kt:27
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtTimestamps.kt:6
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:166
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:178
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:186
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtApiServiceTest.kt:194
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-372 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-372 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-372` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-372b`,
+   `UD-372c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/model/InternxtFile.kt:28`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-373
+title: UD-373 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:714
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:720
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ReconcilerTest.kt:131
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ReconcilerTest.kt:149
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-373 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-373 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-373` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-373b`,
+   `UD-373c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:714`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-405
+title: UD-405 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:146
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:704
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:48
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:51
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:55
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:63
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:71
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:80
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-405 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-405 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-405` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-405b`,
+   `UD-405c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:146`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-406
+title: UD-406 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:308
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:322
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:330
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:506
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-406 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-406 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-406` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-406b`,
+   `UD-406c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:308`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-407
+title: UD-407 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:292
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:300
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:325
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:913
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:923
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:937
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:950
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncConfigTest.kt:963
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-407 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-407 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-407` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-407b`,
+   `UD-407c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:292`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-408
+title: UD-408 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:142
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:20
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:133
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:147
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:200
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:206
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:289
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:310
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-408 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-408 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-408` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-408b`,
+   `UD-408c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:142`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-704
+title: UD-704 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/McpRoundtripIntegrationTest.kt:25
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:395
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:409
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:430
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:447
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ToolHandlerTest.kt:863
+  - core/app/core/src/test/kotlin/org/krost/unidrive/CloudProviderDefaultsTest.kt:23
+  - core/app/core/src/test/kotlin/org/krost/unidrive/CloudProviderDefaultsTest.kt:99
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-704 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-704 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-704` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-704b`,
+   `UD-704c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/McpRoundtripIntegrationTest.kt:25`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-706
+title: UD-706 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/build.gradle.kts:4
+  - core/build.gradle.kts:28
+  - core/build.gradle.kts:35
+  - core/build.gradle.kts:41
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-706 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-706 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-706` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-706b`,
+   `UD-706c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/build.gradle.kts:4`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-709
+title: UD-709 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/build.gradle.kts:242
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-709 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-709 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-709` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-709b`,
+   `UD-709c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/build.gradle.kts:242`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-711
+title: UD-711 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/docker/test-providers.sh:4
+  - core/docker/Dockerfile.test:34
+  - core/docker/Dockerfile.test:63
+  - core/docker/docker-compose.providers.yml:1
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-711 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-711 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-711` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-711b`,
+   `UD-711c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/docker/test-providers.sh:4`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-712
+title: UD-712 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneProviderFactoryTest.kt:15
+  - core/docker/test-providers.sh:4
+  - core/docker/Dockerfile.test:34
+  - core/docker/Dockerfile.test:38
+  - core/docker/Dockerfile.test:39
+  - core/docker/docker-compose.providers.yml:98
+  - core/app/mcp/build.gradle.kts:157
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:325
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-712 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-712 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-712` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-712b`,
+   `UD-712c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/rclone/src/test/kotlin/org/krost/unidrive/rclone/RcloneProviderFactoryTest.kt:15`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-714
+title: UD-714 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/pre-commit/scope-check.sh:42
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-714 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-714 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-714` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-714b`,
+   `UD-714c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/pre-commit/scope-check.sh:42`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-723
+title: UD-723 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/install-mcps.sh:15
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-723 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-723 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-723` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-723b`,
+   `UD-723c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/install-mcps.sh:15`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-728
+title: UD-728 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/ktlint-sync.sh:93
+  - scripts/dev/backlog.py:172
+  - scripts/dev/backlog.py:337
+  - scripts/dev/pre-commit/scope-check.sh:13
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-728 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-728 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-728` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-728b`,
+   `UD-728c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/ktlint-sync.sh:93`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-730
+title: UD-730 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/install-mcps.sh:17
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-730 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-730 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-730` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-730b`,
+   `UD-730c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/install-mcps.sh:17`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-733
+title: UD-733 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:10
+  - core/app/mcp/build.gradle.kts:42
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt:797
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt:12
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt:19
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt:25
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/BuildInfoTest.kt:40
+  - core/app/cli/build.gradle.kts:46
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-733 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-733 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-733` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-733b`,
+   `UD-733c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:10`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-735
+title: UD-735 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:143
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:290
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:310
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:313
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:75
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-735 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-735 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-735` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-735b`,
+   `UD-735c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:143`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-736
+title: UD-736 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:21
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:127
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:197
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:200
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:298
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-736 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-736 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-736` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-736b`,
+   `UD-736c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:21`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-737
+title: UD-737 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:34
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:266
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:899
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:913
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:940
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:961
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:94
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:137
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-737 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-737 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-737` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-737b`,
+   `UD-737c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:34`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-738
+title: UD-738 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:13
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/StateDatabaseTest.kt:299
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/StateDatabaseTest.kt:302
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/StateDatabaseTest.kt:322
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:131
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:215
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:196
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:209
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-738 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-738 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-738` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-738b`,
+   `UD-738c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:13`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-740
+title: UD-740 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1427
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1505
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:629
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:979
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:982
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:1006
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-740 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-740 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-740` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-740b`,
+   `UD-740c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1427`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-741
+title: UD-741 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:285
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-741 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-741 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-741` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-741b`,
+   `UD-741c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:285`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-742
+title: UD-742 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ScanHeartbeat.kt:15
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:37
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:216
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:760
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:207
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:210
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/LocalScannerTest.kt:218
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:25
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-742 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-742 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-742` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-742b`,
+   `UD-742c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ScanHeartbeat.kt:15`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-745
+title: UD-745 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:371
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProgressReporter.kt:82
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt:660
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:185
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:163
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:166
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:174
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:182
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-745 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-745 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-745` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-745b`,
+   `UD-745c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:371`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-746
+title: UD-746 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:259
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-746 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-746 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-746` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-746b`,
+   `UD-746c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:259`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-747
+title: UD-747 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:167
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:200
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProgressReporter.kt:10
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProgressReporter.kt:31
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:29
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:39
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:59
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:230
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-747 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-747 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-747` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-747b`,
+   `UD-747c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:167`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-748
+title: UD-748 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:171
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:200
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProgressReporter.kt:26
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:35
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:59
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:230
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:239
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:192
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-748 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-748 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-748` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-748b`,
+   `UD-748c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:171`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-749
+title: UD-749 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:201
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-749 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-749 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-749` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-749b`,
+   `UD-749c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SyncCommandTest.kt:201`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-751
+title: UD-751 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:731
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-751 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-751 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-751` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-751b`,
+   `UD-751c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:731`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-752
+title: UD-752 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/AuthenticateAndLog.kt:6
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-752 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-752 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-752` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-752b`,
+   `UD-752c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/AuthenticateAndLog.kt:6`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-753
+title: UD-753 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt:90
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt:123
+  - core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt:151
+  - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/GraphApiService.kt:389
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:999
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1050
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:1162
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-753 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-753 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-753` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-753b`,
+   `UD-753c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/s3/src/main/kotlin/org/krost/unidrive/s3/S3ApiService.kt:90`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-756
+title: UD-756 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:24
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:50
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:409
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:463
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusCommandTest.kt:34
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusCommandTest.kt:57
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusCommandTest.kt:80
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/StatusCommandTest.kt:92
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-756 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-756 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-756` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-756b`,
+   `UD-756c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusCommand.kt:24`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-757
+title: UD-757 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:53
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:62
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:209
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:224
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:230
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:80
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:82
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/CliProgressReporterTest.kt:85
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-757 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-757 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-757` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-757b`,
+   `UD-757c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:53`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-764
+title: UD-764 (auto-filed orphan anchor — see body)
+category: cli
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt:36
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-764 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-764 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-764` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-764b`,
+   `UD-764c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/LogCommand.kt:36`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-772
+title: UD-772 (auto-filed orphan anchor — see body)
+category: tooling
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - scripts/dev/log-stats.py:76
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-772 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-772 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-772` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-772b`,
+   `UD-772c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `scripts/dev/log-stats.py:76`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-773
+title: UD-773 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestIdPlugin.kt:64
+  - core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestIdPlugin.kt:96
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/RequestIdPluginTest.kt:88
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/RequestIdPluginTest.kt:94
+  - core/app/core/src/test/kotlin/org/krost/unidrive/http/RequestIdPluginTest.kt:101
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-773 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-773 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-773` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-773b`,
+   `UD-773c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestIdPlugin.kt:64`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-812
+title: UD-812 (auto-filed orphan anchor — see body)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:35
+  - core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:74
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ReconcilerTest.kt:330
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt:133
+  - core/app/cli/src/test/kotlin/org/krost/unidrive/cli/SweepCommandTest.kt:144
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-812 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-812 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-812` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-812b`,
+   `UD-812c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/HttpRetryBudgetTest.kt:35`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-815
+title: UD-815 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/docker/Dockerfile.test:42
+  - core/docker/Dockerfile.test:58
+  - core/docker/Dockerfile.test:66
+  - core/docker/README.md:9
+  - core/docker/test-mcp.sh:4
+  - core/docker/docker-compose.mcp.yml:1
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-815 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-815 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-815` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-815b`,
+   `UD-815c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/docker/Dockerfile.test:42`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-816
+title: UD-816 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:70
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:144
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:177
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:225
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-816 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-816 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-816` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-816b`,
+   `UD-816c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/IpcServerTest.kt:70`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-817
+title: UD-817 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:416
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-817 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-817 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-817` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-817b`,
+   `UD-817c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/CloudRelocatorTest.kt:416`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-901
+title: UD-901 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:238
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:239
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:45
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:50
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:72
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:82
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/LocalScanner.kt:168
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt:46
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-901 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-901 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-901` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-901b`,
+   `UD-901c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt:238`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
+
+---
+id: UD-707
+title: UD-707 (auto-filed orphan anchor — see body)
+category: e2e
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/docker/Dockerfile.test:1
+  - .github/workflows/build.yml:101
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-707 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-707 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-707` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+
+First source ref: `core/docker/Dockerfile.test:1`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 follow-up to PR #17's UD-766 CI gate — slipped past
+the initial scan because the script's `scanRoots` doesn't include
+`.github/`, but the `core/docker/Dockerfile.test` ref still surfaces it.
+
+---
+id: UD-254
+title: UD-254 (parent anchor — see sub-letter variants)
+category: core
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:376
+opened: 2026-05-15
+---
+
+**AUTO-FILED PARENT ANCHOR.** Source code cites `UD-254` (bare, no
+sub-letter) but only sub-letter variants (`UD-254a`) exist as real
+entries. This stub exists so the `scripts/backlog-sync.kts` CI gate
+under UD-766 doesn't see bare `UD-254` cites as orphans.
+
+## Sub-letter variants
+
+- [UD-254a](#ud-254a) — MDC clone storm under MDCContext.
+
+When the bare `UD-254` cites are touched, prefer pointing them at the
+specific sub-letter variant they relate to and close this anchor as
+`wontfix-historical, parent of sub-tickets`.
+
+---
+id: UD-352
+title: UD-352 (parent anchor — see sub-letter variants)
+category: providers
+priority: low
+effort: ?
+status: open
+auto_filed: true
+code_refs:
+  - core/providers/localfs/src/main/kotlin/org/krost/unidrive/localfs/LocalFsProvider.kt:160
+opened: 2026-05-15
+---
+
+**AUTO-FILED PARENT ANCHOR.** Source code cites `UD-352` (bare, no
+sub-letter) but only sub-letter variants (`UD-352a`) exist as real
+entries. This stub exists so the `scripts/backlog-sync.kts` CI gate
+under UD-766 doesn't see bare `UD-352` cites as orphans.
+
+## Sub-letter variants
+
+- [UD-352a](#ud-352a) — see entry above for full scope.
+
+When the bare `UD-352` cites are touched, prefer pointing them at the
+specific sub-letter variant they relate to and close this anchor as
+`wontfix-historical, parent of sub-tickets`.

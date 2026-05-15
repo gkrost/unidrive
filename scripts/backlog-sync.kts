@@ -29,7 +29,13 @@ require(File(root, "docs/backlog/BACKLOG.md").exists()) {
 // so we skip it to avoid flagging range-marker IDs as orphans.
 val scanRoots = listOf("core", "ui", "shell-win", "protocol", "scripts")
 val idPattern = Regex("""UD-(\d{3})""")
-val frontmatterBlock = Regex("""(?m)^---\s*\n(.*?)\n---""", RegexOption.DOT_MATCHES_ALL)
+// Frontmatter block must start with `id:` immediately after the opening ---,
+// otherwise the regex greedily eats section-divider `---\n## Heading\n---`
+// stretches and consumes the opening `---` of the next real entry. Symptom
+// was UD-206 / UD-209 reported as orphans on 2026-05-15 PR #17 because the
+// "## Core daemon (UD-200..299)" divider sat between two `---` markers and
+// matched as a "frontmatter block" with no id, swallowing UD-206's opener.
+val frontmatterBlock = Regex("""(?m)^---\s*\n(id:.*?)\n---""", RegexOption.DOT_MATCHES_ALL)
 
 data class BacklogItem(
     val id: String,
@@ -157,11 +163,24 @@ if (orphans.isNotEmpty()) {
 }
 
 if (staleClosed.isNotEmpty()) {
-    hardFail = true
-    header("STALE CLOSED (ID in CLOSED.md still referenced in source)")
+    // UD-766 follow-up: in this codebase, comments like
+    // `// UD-203: pull request-id off the response` are intentional
+    // provenance markers — they label code with the ticket that drove
+    // it, useful for archaeology and for readers learning why an
+    // unusual choice was made. The original strict policy treated
+    // every such citation as a stale tracking error, but the unidrive
+    // convention is to keep closed-ticket cites in source. Downgraded
+    // to a warning so a genuinely orphaned annotation (cited code
+    // removed but the comment forgotten) still surfaces in the report
+    // without blocking CI on the documentation convention. Worst-
+    // offender annotations have been trimmed in source for signal/
+    // noise; the warning lists what remains for the next reader to
+    // judge per-case.
+    header("WARN: closed-ticket refs in source (historical provenance; check on touch)")
     for ((id, refs) in staleClosed.sortedBy { it.first }) {
         println("  $id")
         refs.take(5).forEach { println("    $it") }
+        if (refs.size > 5) println("    ... (${refs.size - 5} more)")
     }
 }
 

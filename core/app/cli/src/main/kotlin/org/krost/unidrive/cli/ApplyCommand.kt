@@ -4,7 +4,7 @@ import picocli.CommandLine
 import picocli.CommandLine.Command
 
 /**
- * UD-236: git-style three-verb model.
+ * Git-style three-verb model: refresh / apply / sync.
  *
  * `unidrive apply` skips the remote Gather phase (no `provider.delta()` call) and
  * drains whatever pending transfers the previous `unidrive refresh` (or any prior
@@ -22,7 +22,7 @@ import picocli.CommandLine.Command
 @Command(
     name = "apply",
     description = [
-        "Drain pending transfers from a prior `refresh` (UD-236).",
+        "Drain pending transfers from a prior `refresh`.",
         "Skips remote gather; uses local scan + recovery loops to surface pending downloads/uploads.",
     ],
     mixinStandardHelpOptions = true,

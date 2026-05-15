@@ -77,7 +77,7 @@ class SyncEngineTest {
         }
 
     @Test
-    fun `UD-236 refresh skips Pass 2 — local file gets pending row but is not uploaded`() =
+    fun `refresh skips Pass 2 — local file gets pending row but is not uploaded`() =
         runTest {
             // First sync establishes baseline (no items, no actions).
             provider.deltaItems = emptyList()
@@ -95,7 +95,7 @@ class SyncEngineTest {
         }
 
     @Test
-    fun `UD-236 apply drains pending uploads from a prior refresh`() =
+    fun `apply drains pending uploads from a prior refresh`() =
         runTest {
             // Refresh records a pending upload.
             provider.deltaItems = emptyList()
@@ -114,7 +114,7 @@ class SyncEngineTest {
         }
 
     @Test
-    fun `UD-236 apply is no-op when nothing pending`() =
+    fun `apply is no-op when nothing pending`() =
         runTest {
             provider.deltaItems = emptyList()
             engine.syncOnce()

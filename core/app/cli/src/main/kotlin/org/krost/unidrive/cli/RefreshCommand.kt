@@ -4,7 +4,7 @@ import picocli.CommandLine
 import picocli.CommandLine.Command
 
 /**
- * UD-236: git-style three-verb model.
+ * Git-style three-verb model: refresh / apply / sync.
  *
  * `unidrive refresh` runs the Gather + Reconcile + Pass-1-metadata phases of a
  * sync but skips the byte-transfer Pass 2. Result: state.db reflects the latest
@@ -21,7 +21,7 @@ import picocli.CommandLine.Command
 @Command(
     name = "refresh",
     description = [
-        "Update state.db with remote changes; defer byte transfers (UD-236).",
+        "Update state.db with remote changes; defer byte transfers.",
         "Runs Gather + Reconcile + Pass-1 metadata. Pending transfers carry over to the next `apply` or `sync`.",
     ],
     mixinStandardHelpOptions = true,

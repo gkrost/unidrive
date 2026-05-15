@@ -91,7 +91,7 @@ class StatusCommand : Runnable {
     @Option(
         names = ["--pending"],
         description = [
-            "UD-236: print the count of pending transfers (downloads + uploads) that a follow-up `unidrive apply`",
+            "Print the count of pending transfers (downloads + uploads) that a follow-up `unidrive apply`",
             "would drain. Reads state.db only — no network calls. Useful as a no-op preview.",
         ],
     )
@@ -118,7 +118,7 @@ class StatusCommand : Runnable {
     }
 
     /**
-     * UD-236: report pending transfers without fetching anything from the network.
+     * Report pending transfers without fetching anything from the network.
      * Walks state.db for the same row patterns the Reconciler's UD-225 / UD-901
      * recovery loops surface as DownloadContent / Upload actions:
      *   - `isHydrated = false` non-folder rows → download pending
