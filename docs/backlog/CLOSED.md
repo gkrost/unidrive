@@ -1447,3 +1447,250 @@ Cross-module helper lift. Same category as UD-006.
 ## Out of scope
 
 Honouring `XDG_CONFIG_HOME` (currently the helper hardcodes `~/.config`; that's a separate ticket if/when XDG compliance becomes a goal).
+
+---
+id: UD-006
+title: Lift formatSize/formatBytes (IEC byte formatting) into :app:core/io; eliminate 5+ duplicates
+category: architecture
+priority: high
+effort: S
+status: closed
+closed: 2026-05-15
+resolved_by: commit 362f564. Tight scope: ByteFormatter.kt holds canonical 'integer + space + IEC binary' (CliProgressReporter convention). TrashCommand + VersionsCommand migrated to it; CliProgressReporter.formatSize delegates. RelocateCommand/WebDavProvider/StatusAudit/BenchmarkCommand intentionally NOT migrated (different format families per ticket out-of-scope).
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CliProgressReporter.kt:284
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/VersionsCommand.kt:53
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/TrashCommand.kt:49
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/RelocateCommand.kt:374
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StatusAudit.kt:46
+  - core/providers/webdav/src/main/kotlin/org/krost/unidrive/webdav/WebDavProvider.kt
+opened: 2026-05-02
+---
+## Problem
+
+`formatSize` / `formatBytes` (IEC-binary byte formatting: `B`/`KiB`/`MiB`/`GiB`/`TiB`) is duplicated across 5 files:
+
+| File | Line | Status |
+|---|---|---|
+| `core/app/cli/src/main/kotlin/.../CliProgressReporter.kt` | 284 (companion) | canonical |
+| `core/app/cli/src/main/kotlin/.../VersionsCommand.kt` | 53 | duplicate |
+| `core/app/cli/src/main/kotlin/.../TrashCommand.kt` | 49 | duplicate |
+| `core/app/cli/src/main/kotlin/.../RelocateCommand.kt` | 374 | duplicate |
+| `core/app/cli/src/main/kotlin/.../StatusAudit.kt` | 46 | duplicate |
+| `core/providers/webdav/src/main/kotlin/.../WebDavProvider.kt` | (added by UD-???) | duplicate (this PR added a 6th, deliberately, per the SPI-contract spec §3.5) |
+
+All implement the same algorithm. Highest-ROI cleanup: lift to `:app:core` and replace 5 (or 6, including the WebDAV one this PR introduced) call-sites.
+
+## Proposed action
+
+1. Create `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt`:
+
+   ```kotlin
+   package org.krost.unidrive.io
+
+   /**
+    * Format a byte count using IEC binary prefixes (KiB, MiB, ...).
+    * One decimal place above the 1 KiB threshold.
+    */
+   fun formatSize(bytes: Long): String {
+       val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB")
+       var size = bytes.toDouble()
+       var unit = 0
+       while (size >= 1024 && unit < units.lastIndex) {
+           size /= 1024
+           unit++
+       }
+       return "%.1f %s".format(size, units[unit])
+   }
+   ```
+
+2. Replace each duplicate with `import org.krost.unidrive.io.formatSize`.
+
+3. Verify byte-identical output for representative sizes (1, 1023, 1024, 999_999_999, 50 GiB) before deleting any duplicate.
+
+## Why architecture-range
+
+This is a cross-module helper lift; the tooling category is for build/CI scripts. Architecture range fits cross-module API surface.
+
+## Acceptance criteria
+
+- [ ] `core/app/core/src/main/kotlin/org/krost/unidrive/io/ByteFormatter.kt` exists.
+- [ ] All 5 (or 6) duplicates replaced with `import org.krost.unidrive.io.formatSize`.
+- [ ] Output byte-identical for the 5 fixture sizes above (verify via test).
+- [ ] Build green; `./gradlew build test` reports the same baseline.
+
+## Out of scope
+
+Locale-aware formatting, decimal-prefix variants (KB vs KiB), or any
+behaviour change to the algorithm itself.
+
+---
+id: UD-114
+title: SECURITY.md drift: NDJSON validation claim vs ADR-0012 (NamedPipeServer + NdjsonValidator deleted)
+category: security
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-15
+resolved_by: commit 214fa78. SECURITY.md drift fixed: NDJSON inbound-validation + per-connection rate-limit claims removed (mitigations deleted with NamedPipeServer.kt under ADR-0012). T1/D1/D2 STRIDE rows annotated 'moot post-ADR-0012' with re-opening conditions. v0.0.1 baseline UD-105/UD-106 entries struck through. No code change.
+code_refs:
+  - docs/SECURITY.md:81
+  - docs/SECURITY.md:94
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcProgressReporter.kt
+opened: 2026-05-02
+---
+## Problem
+
+`docs/SECURITY.md:81` and `docs/SECURITY.md:94` claim:
+
+> **NDJSON frame validation** at IPC boundary
+> (`IpcProgressReporter.kt`) — rejects non-conforming frames before
+> dispatch.
+
+> Schema validation rejects malformed structure
+> (`IpcProgressReporter.kt`); JSON parse errors dropped.
+
+This was true before [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+retired the bidirectional named-pipe transport. With ADR-0012:
+
+- `core/app/sync/.../NamedPipeServer.kt` — **deleted**.
+- `core/app/sync/.../NdjsonValidator.kt` — **deleted**.
+- The remaining `IpcProgressReporter.kt` is a **push-only UDS
+  broadcaster**: the daemon writes NDJSON sync events out to a Unix
+  socket; nothing reads frames *into* the daemon over IPC.
+
+Verified at filing time:
+
+```
+$ find core -name "NamedPipeServer.kt" -o -name "NdjsonValidator.kt"
+(no results)
+```
+
+The mitigation referenced in `SECURITY.md` therefore does not exist
+in the current architecture. The threat model row T1 ("Tampering
+with an NDJSON command frame in flight (local loopback)") is also
+moot — there are no inbound IPC frames to tamper with.
+
+## Risk
+
+This is a **threat-model honesty** issue. A reader of `SECURITY.md`
+believes the daemon validates incoming IPC frames. It doesn't,
+because there are no incoming IPC frames. If a future change
+re-introduces an IPC inbound surface (e.g. a CLI-to-daemon command
+channel), the existing doc would falsely claim it's already
+validated.
+
+## Proposed action
+
+Update `docs/SECURITY.md`:
+
+1. **§"Current mitigations"** (line 81 area): remove the "NDJSON
+   frame validation at IPC boundary" bullet. Replace with a
+   short note describing the actual UDS-broadcast topology and
+   why it doesn't need inbound validation (because it has no
+   inbound surface).
+
+2. **STRIDE table T1** (line 94 area): either drop the row
+   entirely (no inbound IPC = no T1 threat surface) or rephrase
+   to cover what *is* exposed today — a malicious local reader
+   binding to `unidrive-<profile>.sock` and consuming frames
+   intended for the legitimate observer. That has its own
+   mitigations (`mode 0600` on the socket, `SO_PEERCRED` if we
+   ever want peer identity).
+
+3. Cross-reference [ADR-0012](adr/0012-linux-mvp-protocol-removal.md)
+   §"Removed surfaces" so the historical context is one click away.
+
+## Acceptance criteria
+
+- [ ] `grep -rn "NamedPipeServer\|NdjsonValidator" docs/SECURITY.md`
+      returns nothing.
+- [ ] `grep -n "IpcProgressReporter" docs/SECURITY.md` either
+      returns nothing or the surrounding text accurately describes
+      what the file does today (push-only UDS broadcaster).
+- [ ] STRIDE T1 row either removed or rewritten for the actual
+      threat surface.
+- [ ] No code changes required — this is purely doc drift.
+
+## Why this is its own ticket
+
+It's a security-doc fix; bundling it with general doc cleanup
+would bury it. Filing under `security` range keeps it on the
+right reviewer's radar (anyone scanning the security tier in
+`AGENT-SYNC.md`).
+
+---
+id: UD-012
+title: Replace 8x "onedrive" historical default in SyncConfig.kt with ProviderRegistry-driven default (or document via ADR)
+category: architecture
+priority: medium
+effort: S
+status: closed
+closed: 2026-05-15
+resolved_by: commit 0f80d09. Added ProviderRegistry.defaultProvider() returning 'localfs' (in-tree, zero setup) or first SPI-discovered factory. 7 SyncConfig.kt 'onedrive' literals migrated. syncRootDirNameOverrides keeps 'onedrive' to 'OneDrive' for backwards compat (no ~/OneDrive to ~/Microsoft\ OneDrive break). UD-252 tests updated to assert against registry default.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:304
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:313
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:359
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:433
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:436
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:441
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt:461
+opened: 2026-05-02
+---
+## Problem
+
+`SyncConfig.kt` hardcodes `"onedrive"` as the universal fallback default at 8 sites (verified 2026-05-02 against the post-refactor/provider-spi-contract tree):
+
+| Line | Role |
+|---|---|
+| 304 | `providerId: String = "onedrive"` (default param of `RawProvider.defaults`-helper-style ctor) |
+| 313 | `"onedrive" to "OneDrive"` — display-name override map |
+| 359 | `fun defaults(providerId: String = "onedrive")` |
+| 433 | `if (!Files.exists(configFile)) return "onedrive"` (resolveDefaultProfile waterfall) |
+| 436 | `raw.general.default_profile?.takeIf { it.isNotBlank() } ?: "onedrive"` |
+| 441 | `"onedrive"` (last fallback in resolveDefaultProfile) |
+| 461 | `profileName: String = "onedrive"` (default param) |
+
+Plus one help-text reference:
+- `core/app/cli/src/main/kotlin/.../Main.kt:474` — `RCLONE_BINARY ... default: "rclone"` (refers to the rclone *binary* on PATH, not the provider id; mentioned for completeness).
+
+The `SyncConfig` references are the "single-provider-era" artefact: the project had only OneDrive when this default was chosen. With 7 in-tree providers today, the choice is undocumented and inconsistent (display-name map at 313 only covers one provider; the rest get their default-display from elsewhere).
+
+## Proposed action
+
+Replace with a registry-driven default. Two acceptable shapes:
+
+**A) `ProviderRegistry.defaultProvider()`** that returns either:
+- the first SPI-discovered provider (deterministic by classpath order, usually `localfs` since it's pure-Java); or
+- a config-driven choice (`general.default_provider_when_none` in `config.toml`).
+
+Then `SyncConfig.kt` calls `ProviderRegistry.defaultProvider()` instead of literal `"onedrive"`. Display-name map at line 313 is removed in favour of `ProviderRegistry.getMetadata(id)?.displayName`.
+
+**B) Keep "onedrive" but document why** in an ADR. If OneDrive is genuinely the canonical default for the project's target audience, that's a defensible position — but it should be a deliberate choice with `// allow: per ADR-XXXX` markers on each site.
+
+Recommend **A**. The architecture has moved on; the literal hasn't. A registry-driven choice is also testable (parametric tests can swap the default per-test).
+
+## Acceptance criteria
+
+- [ ] Decision A vs B documented (ideally in a short ADR, e.g. ADR-0015 "default provider resolution").
+- [ ] If A: `SyncConfig.kt` has zero `"onedrive"` literals; all 8 sites consult `ProviderRegistry.defaultProvider()` or `ProviderRegistry.getMetadata`.
+- [ ] If B: each surviving literal has `// allow: per ADR-XXXX` marker (CI guard's allow-list mechanism).
+- [ ] Either way, `bash scripts/ci/check-no-provider-string-dispatch.sh` passes.
+- [ ] No regression in `resolveDefaultProfile` waterfall semantics; existing tests still green.
+
+## Why architecture-range
+
+It's a structural decision (what is the project's default provider?) with cross-module implications. UD-004 / UD-008 / UD-011 are all architecture-range; this fits.
+
+## Out of scope
+
+XDG-config-honouring resolution, multi-default support (different default per environment), profile-cycling. Those are independent later work.
+
+## Status of the CI guard
+
+`scripts/ci/check-no-provider-string-dispatch.sh` (added in
+refactor/provider-spi-contract) currently flags these 8 sites. Until
+this ticket is resolved, **the lines are tagged with `// allow:
+UD-012` markers** so CI doesn't fail on pre-existing technical debt.
+Removing those markers is part of this ticket's done-criterion.
