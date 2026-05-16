@@ -11427,3 +11427,61 @@ Drift items already fixed in the PR filing this ticket (PR for branch `docs/spec
 - `docs/AGENT-SYNC.md` — target for finding 4 option (b)
 - `docs/backlog/BACKLOG.md` — target for finding 4 option (a)
 - 2026-05-16 first-run output of the drift checker (PR-27 merge commit 820ba62)
+---
+id: UD-708
+title: Install doc: unidrive-mcp in Claude Desktop on Linux
+category: tooling
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+We ship a runnable Kotlin MCP server at `core/app/mcp/` (entry point `org.krost.unidrive.mcp.Main`) exposing 23 tool verbs + 3 resources (see [SPECS.md §2](../SPECS.md)), but **no user-facing doc explains how to wire it into Claude Desktop on Linux**. A first-time user has to reverse-engineer:
+
+- The runnable-jar location (`core/app/mcp/build/libs/mcp-all.jar` after `./gradlew :app:mcp:shadowJar` — or wherever the install script puts it).
+- The launcher invocation (`java -jar <jar> [--profile NAME]`, plus the `UNIDRIVE_PROFILE` env-var fallback).
+- The `claude_desktop_config.json` path on Linux (`~/.config/Claude/claude_desktop_config.json`).
+- The `mcpServers` JSON shape (`command`, `args`, `env`) and how the per-profile binding interacts with Claude Desktop's per-session lifecycle.
+- Where to find the MCP log when something goes wrong (`~/.local/share/unidrive/unidrive-mcp.log`).
+
+Gap surfaced during the UD-014 close-out (2026-05-16) when the user asked "do we have docs how to install/configure the mcp(s) in Claude Desktop Linux?" Answer: no.
+
+## Acceptance
+
+A new doc, recommended path **`docs/install/claude-desktop-linux.md`**, covering at minimum:
+
+- [ ] Build prerequisites (JDK 21, `./gradlew :app:mcp:shadowJar` invocation, expected jar path).
+- [ ] Claude Desktop config file location on Linux and the `mcpServers` JSON entry shape, with a working example:
+      ```json
+      {
+        "mcpServers": {
+          "unidrive": {
+            "command": "java",
+            "args": ["-jar", "/home/USER/.local/bin/unidrive-mcp-all.jar", "--profile", "onedrive"],
+            "env": {}
+          }
+        }
+      }
+      ```
+- [ ] Per-profile binding semantics (one MCP process = one profile; documented in [SPECS.md §2 lines 140–146](../SPECS.md)).
+- [ ] First-run auth flow — point at `unidrive_auth_begin` / `unidrive_auth_complete` tools (post-UD-014 these are provider-agnostic; explain the device-code UX in the LLM-conversation context).
+- [ ] Log location + the `scripts/dev/log-watch.sh` helper for triage.
+- [ ] Troubleshooting: server not appearing in Claude Desktop (config syntax, jar-path typos, `java` not on PATH), tool-call errors (profile mismatch, missing OAuth tokens), how to re-trigger auth without restarting the MCP.
+
+Cross-link from:
+- [ ] `docs/SPECS.md` §2 (top of the MCP-surface section) — add a "see install: …" pointer.
+- [ ] `core/app/mcp/` — add a short `README.md` with the build invocation and a one-liner pointing at the new install doc.
+
+## Out of scope
+
+- macOS / Windows install paths (separate tickets if/when they come up — different `claude_desktop_config.json` location, possibly different jar packaging).
+- Auto-installer (`scripts/dev/install-mcp.sh` or similar) — would be its own ticket; this one is docs-only.
+- The Python `unidrive-mcp` standalone repo at `~/dev/git/unidrive-mcp/` (different artifact, different ticket; see [2026-05-02-unidrive-mcp-standalone-repo](../plans/2026-05-02-unidrive-mcp-standalone-repo.md)).
+
+## Related
+
+- [SPECS.md §2](../SPECS.md) — MCP surface (23 tool verbs + 3 resources, per-profile binding).
+- [UD-014](CLOSED.md#ud-014) (closed) — made `unidrive_auth_begin` / `_complete` provider-agnostic; the install doc should reflect that the auth flow works for any future OAuth provider.
+- [`scripts/dev/log-watch.sh`](../../scripts/dev/log-watch.sh) — sync log triage; the install doc should mention it for MCP debugging too.
