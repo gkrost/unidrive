@@ -64,7 +64,14 @@ data class BeginAuthResult(
     val continuationHandle: String,
     /** Provider-supplied JSON-payload keys (string values to keep the
      *  wire format unambiguous). OneDrive populates verification_uri,
-     *  user_code, interval_seconds, expires_in, message. */
+     *  user_code, interval_seconds, expires_in, message.
+     *
+     *  CONTRACT: must be an insertion-order-preserving Map (i.e. a
+     *  [LinkedHashMap] built via [linkedMapOf] or `buildMap { … }`).
+     *  The MCP handler emits these keys in iteration order, so a
+     *  non-ordered map would produce nondeterministic JSON key order
+     *  across runs. Use [linkedMapOf], not [mapOf] with > 5 entries,
+     *  to keep this guarantee explicit. */
     val fields: Map<String, String>,
     /** Wall-clock deadline after which the handle is invalid. */
     val expiresAt: Instant,
@@ -112,15 +119,17 @@ suspend fun completeInteractiveAuth(
 suspend fun cancelInteractiveAuth(continuationHandle: String) { /* no-op */ }
 ```
 
+**Why `profileDir` is also passed to `completeInteractiveAuth`:** OneDrive happens to capture `profileDir` inside the device-flow state at `begin` time, so the second parameter is redundant for *that* provider. The SPI keeps it because other providers may take a stateless-complete approach where the handle is opaque and the path is needed to know where to persist tokens. Forcing every provider through a stateful registry would over-constrain the SPI; passing the path makes the contract self-sufficient regardless of how each provider chooses to remember (or not remember) state.
+
 ### 4.3 OneDrive overrides (the lift)
 
 Lift the current MCP-side `DeviceFlowState` + `DeviceFlowRegistry` (with the `OAuthService` field) into the OneDrive module, renamed to `OneDriveDeviceFlowState` / `OneDriveDeviceFlowRegistry`. Three `override` methods on `OneDriveProviderFactory`:
 
-- `beginInteractiveAuth`: instantiate `OAuthService(OneDriveConfig(profileDir))`, call `getDeviceCode()`, register state under a UUID handle, return `BeginAuthResult` with the five OneDrive fields and a 15-minute `expiresAt`.
-- `completeInteractiveAuth`: look up state by handle; on miss → `Error("Unknown or expired…")`; on expiry → `Error("Device code expired…")` + cleanup; otherwise call `pollOnceForToken` and translate `OAuthService.DevicePollOutcome` (Pending/Success/Failed) to `CompleteAuthResult`. **Every terminal path must `remove + close()`**.
+- `beginInteractiveAuth`: instantiate `OAuthService(OneDriveConfig(profileDir))`; call `getDeviceCode()` inside a `try { … } catch (e: Exception) { oauth.close(); throw e }` block — **the `HttpClient` must be closed if `getDeviceCode()` throws** because no handle has been issued yet, so the registry-based cleanup paths can't reach it. Only after a successful `getDeviceCode()` do we register the state under a UUID handle and return `BeginAuthResult` with the five OneDrive fields and a 15-minute `expiresAt`.
+- `completeInteractiveAuth`: look up state by handle; on miss → `Error("Unknown or expired…")`; on expiry → `Error("Device code expired…")` + cleanup; otherwise call `pollOnceForToken` and translate `OAuthService.DevicePollOutcome` (Pending/Success/Failed) to `CompleteAuthResult`. **On `Success`, before returning, call `oauth.saveToken(outcome.token)` to persist credentials under `profileDir`** — this is the step that fulfills the `CompleteAuthResult.Success` KDoc contract ("Tokens persisted to disk"). `saveToken` is `suspend` and may throw; the `Success` path wraps it in `try { saveToken(…) } catch (e: Exception) { remove + close(); return Error("Token received but save failed: ${e.message}") }`. **Every terminal path (Success, Error from poll, Error from save, Error from expiry) must `remove + close()`**; the `Pending` path leaves the state in place for the next poll.
 - `cancelInteractiveAuth`: `remove + close()` if present.
 
-Detailed override bodies are mechanical translations of `AuthTool.handleAuthBegin` and `handleAuthComplete` as they stand in `main` at the start of this design (commit `71711cd` baseline). No business-logic change.
+Detailed override bodies are mechanical translations of `AuthTool.handleAuthBegin` and `handleAuthComplete` as they stand in `main` at the start of this design (commit `71711cd` baseline). No business-logic change — the close-on-early-failure and the `saveToken` call are both already in the current MCP-side code at `AuthTool.kt:113` and `AuthTool.kt:207` respectively.
 
 ### 4.4 `:app:mcp` after the lift
 
@@ -246,7 +255,7 @@ The old `DeviceFlowState`, `DeviceFlowRegistry`, and the `// allow: UD-014` bloc
 
 This is the property that lets the existing `AdminToolsTest` cases continue to pass without shape edits.
 
-**JSON key-order note:** today's `auth_begin` success payload emits `profile, verification_uri, user_code, continuation_handle, interval_seconds, expires_in, message`. After UD-014 the order becomes `profile, continuation_handle, verification_uri, user_code, interval_seconds, expires_in, message` (continuation_handle hoisted, then the provider's `fields` map in insertion order). This is a key-order change, not a key-set change. MCP clients parse by key, not by position, so this is not a wire regression. Documented here so the change is intentional rather than accidental.
+**JSON key-order note:** today's `auth_begin` success payload emits `profile, verification_uri, user_code, continuation_handle, interval_seconds, expires_in, message`. After UD-014 the order becomes `profile, continuation_handle, verification_uri, user_code, interval_seconds, expires_in, message` (continuation_handle hoisted, then the provider's `fields` map in insertion order). This is a key-order change, not a key-set change. MCP clients parse by key, not by position, so this is not a wire regression. Documented here so the change is intentional rather than accidental. The `BeginAuthResult.fields` KDoc (§4.1) requires an insertion-order-preserving `Map` so the post-UD-014 order is deterministic across runs.
 
 ## 6. Tests
 
@@ -268,13 +277,14 @@ Assertions (orthogonal invariants, named per-test):
 - `complete_authorization_pending_returns_pending` — `{"error":"authorization_pending"}` drives `Pending(retryAfterSeconds=5)`; handle still resolvable on next call.
 - `complete_expired_token_returns_error_and_forgets_handle` — `{"error":"expired_token"}` drives `Error("…expired…")` and second call returns `Error("Unknown or expired…")`.
 - `cancel_releases_handle` — `cancelInteractiveAuth(handle)`; subsequent `completeInteractiveAuth` returns `Error("Unknown or expired…")`.
+- `registry_is_empty_after_each_terminal_outcome` — after `Success`, `Error(expired)`, `Error(poll-failed)`, and `cancel`, the OneDrive device-flow registry reports zero entries. This is the close-side counterpart of Risk #3: removal alone is provable via "same handle returns Error", but the registry-size assertion catches a regression where a future override would `remove` but skip `close()`. The test exposes the registry size via an `internal` test-only accessor on `OneDriveDeviceFlowRegistry`.
 
 **New 2 — `InteractiveAuthSpiContractTest`** (the cross-cutting invariant).
 
 Location: `core/app/core/src/test/kotlin/org/krost/unidrive/InteractiveAuthSpiContractTest.kt`.
 
 For every factory discovered via `ServiceLoader<ProviderFactory>`:
-- `interactive_auth_capability_and_override_agree` — if `supportsInteractiveAuth()` returns `true`, then calling `beginInteractiveAuth(tmpProfileDir)` must not throw `UnsupportedOperationException` (the throwing-default sentinel). Network exceptions are tolerated and indicate the override exists. The test catches everything *except* `UnsupportedOperationException`.
+- `interactive_auth_capability_and_override_agree` — if `supportsInteractiveAuth()` returns `true`, then calling `beginInteractiveAuth(tmpProfileDir)` must not throw `UnsupportedOperationException` (the throwing-default sentinel). Network exceptions are tolerated and indicate the override exists. The test catches `Throwable` (not just `Exception`) so a coroutine `CancellationException` from `runBlocking { … }` cannot escape unfiltered; it re-throws `UnsupportedOperationException` and tolerates everything else.
 - `non_oauth_factory_uses_default_throwing_sentinels` — pick a known non-OAuth factory (e.g. `LocalFsProviderFactory`), confirm `supportsInteractiveAuth() == false`, and confirm `beginInteractiveAuth(tmpProfileDir)` throws `UnsupportedOperationException`. Catches accidental override-without-capability-flip and accidental flip-of-default.
 
 The two tests enforce orthogonal invariants and are deliberately separate (per CLAUDE.md "orthogonal invariant decomposition"). If the contract test is removed, the OneDrive flow could silently regress without anyone noticing; if the SPI snapshot is removed, a future provider could declare support and ship a misexecuting override.
