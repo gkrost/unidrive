@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- UD-708: [`docs/MCP-USER-GUIDE.md`](MCP-USER-GUIDE.md) — canonical
+  operator + LLM-user guide for the unidrive MCP server. Covers build,
+  deploy, profile + auth, MCP-client registration (Claude Code, Claude
+  Desktop, generic stdio), the 23-tool / 3-resource surface, common
+  workflows, and triage. Plus a short
+  [`core/app/mcp/README.md`](../core/app/mcp/README.md) module pointer
+  and a "see install:" cross-link from
+  [SPECS.md §2.2](SPECS.md#22-surface-b--mcp-json-rpc-20-over-stdio).
 - Intake of `benchmark` module from unidrive-closed (UD-701 cloud
   provider speed ranking). New CLI surface: `unidrive benchmark ...`
   (top-level subcommand on `Main`; was `unidrive provider benchmark`
@@ -36,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls, works correctly as HashMap key}`. Per UD-813 audit.
 
 ### Fixed
+- UD-283: SPECS.md §2.2 was stale on MCP `profile` tool-arg semantics
+  — claimed the field was "silently ignored", but `ProfileArgValidator`
+  (UD-283 implementation) actually short-circuits with a structured
+  `-32602 INVALID_PARAMS` error when the arg doesn't match the active
+  profile. Doc now matches the code at
+  [`ProfileArgValidator.kt:33`](../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ProfileArgValidator.kt).
 - UD-758: MCP `initialize` now responds with the server-supported
   protocol version instead of rejecting any non-matching client
   version with `-32602 INVALID_PARAMS`. Pre-fix, Claude Code 2.1.143

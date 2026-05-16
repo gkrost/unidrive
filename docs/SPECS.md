@@ -113,6 +113,11 @@ Two distinct IPC surfaces exist. Each has its own transport and format. (A third
 
 ### 2.2 Surface B — MCP JSON-RPC 2.0 over stdio
 
+> **Install / operate:** see [`docs/MCP-USER-GUIDE.md`](MCP-USER-GUIDE.md)
+> for the build → deploy → profile-config → MCP-client-registration
+> walkthrough (Claude Code, Claude Desktop, generic stdio). This
+> section is the normative wire-format reference only.
+
 **Transport:** child process stdin/stdout. Framing: one JSON-RPC frame per line (no `Content-Length` prefixes).
 
 **Tool set (23, 💻 verified** at `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62`):
@@ -143,7 +148,7 @@ MCP is a separate surface — it speaks to external LLM clients, not to the shel
 2. `UNIDRIVE_PROFILE` environment variable, or
 3. the first profile in `config.toml` (fallback via `resolveDefaultProfile(configDir)`).
 
-A `profile` field inside a tool-call's `arguments` object is **silently ignored** — tool input schemas do not declare it. To drive a different profile, relaunch the MCP server with a different env or flag. Driving multiple profiles from one LLM conversation today means spawning multiple MCP processes; a per-call profile argument would require redesigning `ProfileContext` to be per-tool rather than per-process. Tracked loosely under UD-601 because the envelope migration is the natural place to add routing metadata.
+A `profile` field inside a tool-call's `arguments` object is **validated, not routed.** Per [UD-283](backlog/CLOSED.md#ud-283), `ProfileArgValidator.profileMismatchError` ([`ProfileArgValidator.kt:33`](../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ProfileArgValidator.kt#L33)) compares any caller-supplied `profile` against the active `ProfileContext` and short-circuits with a JSON-RPC `-32602 INVALID_PARAMS` response when they differ — carrying structured `error.data` (`requestedProfile`, `activeProfile`, `configuredProfiles`, `supportedProviderTypes`) the LLM can read to reformulate. To drive a different profile, relaunch the MCP server with a different env or flag, or register a second MCP under another name. Driving multiple profiles from one LLM conversation today means spawning multiple MCP processes; a per-call profile argument would require redesigning `ProfileContext` to be per-tool rather than per-process. Tracked loosely under UD-601 because the envelope migration is the natural place to add routing metadata.
 
 ## 3. Provider capability matrix
 
