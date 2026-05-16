@@ -4,26 +4,11 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 class SpiDiscoveryTest {
-    // UD-813 audit: invariant — the 5 canonical built-in provider ids all resolve to
-    // known. Previously asserted only that knownTypes was non-empty (the original name
-    // promised "includes 5", the body checked nothing of the kind).
-    @Test
-    fun `knownTypes includes standard 5 built-in providers`() {
-        val canonical = listOf("onedrive", "s3", "sftp", "webdav", "rclone")
-        for (id in canonical) {
-            assertTrue(ProviderRegistry.isKnownType(id), "expected '$id' to be a known type")
-        }
-    }
-
-    @Test
-    fun `isKnownType validates built-in providers`() {
-        assertTrue(ProviderRegistry.isKnownType("onedrive"))
-        assertTrue(ProviderRegistry.isKnownType("s3"))
-        assertTrue(ProviderRegistry.isKnownType("sftp"))
-        assertTrue(ProviderRegistry.isKnownType("webdav"))
-        assertTrue(ProviderRegistry.isKnownType("rclone"))
-        assertTrue(!ProviderRegistry.isKnownType("nonexistent"))
-    }
+    // UD-013: deleted `knownTypes includes standard 5 built-in providers` and
+    // `isKnownType validates built-in providers`. Both exercised the removed `isKnownType`
+    // method, which only ever consulted a hardcoded `defaultTypes` fallback set — making
+    // the assertions tautological (the method tested itself against its own constant).
+    // The populated-classpath equivalent lives in :app:cli's ProviderRegistryDiscoveryTest.
 
     // UD-813 audit: this module's test classpath does NOT include the provider
     // implementations (they live in separate Gradle modules), so

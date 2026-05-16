@@ -38,11 +38,12 @@ data class ProviderMetadata(
 object ProviderRegistry {
     private val loader: ServiceLoader<ProviderFactory> = ServiceLoader.load(ProviderFactory::class.java)
 
-    private val defaultTypes = setOf("localfs", "onedrive", "rclone", "s3", "sftp", "webdav")
-
     val knownTypes: Set<String> by lazy {
         val discovered = loader.toList().map { it.id }.toSet()
-        if (discovered.isEmpty()) defaultTypes else discovered
+        if (discovered.isEmpty()) {
+            error("No ProviderFactory implementations found via ServiceLoader — providers/ JARs missing from classpath?")
+        }
+        discovered
     }
 
     fun get(id: String): ProviderFactory? = loader.toList().find { it.id == id }
@@ -93,8 +94,6 @@ object ProviderRegistry {
     val TIER_ORDER: List<String> = listOf("Local", "DE-hosted", "EU-hosted", "Self-hosted", "Global")
 
     fun isKnown(type: String): Boolean = type in knownTypes
-
-    fun isKnownType(type: String): Boolean = type in defaultTypes
 
     /**
      * UD-012: the registry's opinion of "what should we default to when the
