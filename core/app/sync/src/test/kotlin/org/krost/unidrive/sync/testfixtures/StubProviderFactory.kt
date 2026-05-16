@@ -21,11 +21,20 @@ import java.nio.file.Path
  * depend on those type IDs being known, not just on the lookup being
  * non-empty.
  *
- * Once UD-013 lands and removes the silent fallback, we need real
- * `ProviderFactory` instances whose `id` matches each expected type.
- * UD-821 ships one stub per default type: registering them via
+ * **Source of truth for which stubs to register: the production SPI
+ * registrations under `core/providers/<id>/src/main/resources/META-INF/
+ * services/org.krost.unidrive.ProviderFactory`**, NOT the (stale)
+ * `defaultTypes` list. The fallback list was a 6-element snapshot from
+ * before `internxt` landed and was never updated. UD-821 ships one stub
+ * per real provider module so the test SPI mirrors what the production
+ * classpath actually offers — that way removing the stale fallback in
+ * UD-013 doesn't preserve the same staleness via this test fixture.
+ *
+ * Current set: localfs, onedrive, rclone, s3, sftp, webdav, internxt.
+ * Add a stub here whenever a new `core/providers/<id>/` module ships an
+ * SPI registration. Registering them via
  * `META-INF/services/org.krost.unidrive.ProviderFactory` makes
- * ServiceLoader return the same set the fallback used to fake.
+ * ServiceLoader return the same set production would.
  *
  * `create()` deliberately throws if invoked — tests must either inject
  * their own `CloudProvider` or not exercise the provider-instantiation
@@ -79,3 +88,6 @@ class StubSftpFactory : StubProviderFactory("sftp")
 
 /** UD-821: stub matching real `webdav` factory id. */
 class StubWebdavFactory : StubProviderFactory("webdav")
+
+/** UD-821: stub matching real `internxt` factory id. */
+class StubInternxtFactory : StubProviderFactory("internxt")
