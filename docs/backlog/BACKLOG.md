@@ -11383,3 +11383,195 @@ Cross-link from:
 - [SPECS.md §2](../SPECS.md) — MCP surface (23 tool verbs + 3 resources, per-profile binding).
 - [UD-014](CLOSED.md#ud-014) (closed) — made `unidrive_auth_begin` / `_complete` provider-agnostic; the install doc should reflect that the auth flow works for any future OAuth provider.
 - [`scripts/dev/log-watch.sh`](../../scripts/dev/log-watch.sh) — sync log triage; the install doc should mention it for MCP debugging too.
+---
+id: UD-221
+title: InteractiveAuthSpiContractTest pulls provider HTTP stacks into :app:core test classpath
+category: core
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+The UD-014 implementation added a cross-cutting SPI snapshot test `InteractiveAuthSpiContractTest` at `core/app/core/src/test/kotlin/org/krost/unidrive/InteractiveAuthSpiContractTest.kt`. To exercise `ServiceLoader<ProviderFactory>` and assert per-factory capability/override agreement, the test needed access to concrete factory classes — so `core/app/core/build.gradle.kts` now declares:
+
+```kotlin
+testImplementation(project(":providers:localfs"))
+testImplementation(project(":providers:onedrive"))
+```
+
+This pulled **29 new entries** into `core/app/core/gradle.lockfile`, all transitive deps of the provider modules: ktor-cio, ktor-network-tls, sqlite-jdbc, kotlin-reflect, kotlinx-coroutines-jdk8, okio, ktor-serialization-kotlinx, kotlinx-datetime-jvm, ktoml-*. None of these are needed by `:app:core`'s production code; they only enter via the provider modules' implementation deps becoming runtime-classpath-visible to `:app:core:test`.
+
+Question: is this acceptable, or should the SPI snapshot test move out of `:app:core` to keep the SPI module's test fixture minimal?
+
+## Options
+
+**(A) Keep as-is** (status quo after UD-014).
+- *Pro*: One snapshot test covers every provider via ServiceLoader; adding a new provider that declares `supportsInteractiveAuth=true` automatically gets verified without touching the test.
+- *Pro*: The test catches misconfiguration at SPI level (the layer that needs to know).
+- *Con*: `:app:core` now compiles transitively against full HTTP stacks at test time. Lockfile shows ktor-cio (~MB), which is overkill for "does this factory exist and override `beginInteractiveAuth`".
+- *Con*: Adding a new provider whose deps don't match the existing transitive closure will trigger more lockfile churn.
+
+**(B) Move to a new `:app:test-contracts` module** (or similar) that aggregates cross-cutting integration-shaped tests but has no production code.
+- *Pro*: `:app:core` keeps its current minimal-deps test fixture (kotlin-test, ktor-client-mock, kotlinx-coroutines-test).
+- *Con*: Adds a Gradle module just for a single test.
+- *Con*: Discovery question — does the new module need to depend on all providers explicitly, or pick them up via ServiceLoader at runtime only?
+
+**(C) Replace ServiceLoader sweep with a hand-maintained list in the test** (`listOf(OneDriveProviderFactory(), LocalFsProviderFactory(), ...)`).
+- *Pro*: No transitive-deps explosion; only the providers the test names land on the classpath.
+- *Con*: Hand-maintained — adding a new provider that declares the capability requires editing the test, defeating the orthogonal-invariant-decomposition point.
+
+## Recommendation
+
+(A) is fine in the short term — the lockfile entries are deterministic, the test is fast (~1.5s wall), and the alternative is over-engineering for a non-problem. File this ticket to track the question, revisit when:
+- A future provider adds a heavy dep (e.g. a JCA crypto module) that we'd rather not bleed into `:app:core`'s test classpath.
+- The `:app:core` lockfile drifts often enough to be annoying.
+
+## Acceptance
+
+- [ ] Decide between (A), (B), (C) — likely (A) for now.
+- [ ] If (A): document the test-deps-on-providers pattern in `docs/dev/CODE-STYLE.md` or similar so future SPI-cross-cutting tests follow the same shape.
+- [ ] If (B): create the new module; move the test; update lockfile.
+
+## Related
+
+- [UD-014](CLOSED.md#ud-014) — introduced the test classpath bleed.
+- [UD-013 / UD-821](CLOSED.md#ud-013) (PRs #29, #30) — earlier work on `:app:sync` test-scope ProviderFactory stubs; same shape of "test needs provider impls without `:app` proper depending on them".
+---
+id: UD-229
+title: IpcServer.kt:69 uses DelicateCoroutinesApi without opt-in or structured scope
+category: core
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:69:22` emits this Kotlin compile warning on every build:
+
+```
+w: This is a delicate API and its use requires care. Make sure you fully read and understand documentation of the declaration that is marked as a delicate API.
+```
+
+Pre-existing — surfaced during the UD-014 session's composite-wide `./gradlew build` runs. The warning indicates use of `@DelicateCoroutinesApi`-annotated API, most likely `GlobalScope.launch` or similar.
+
+## Acceptance
+
+- [ ] Read `IpcServer.kt:69` and identify the delicate API call.
+- [ ] Either:
+  - Wrap with `@OptIn(DelicateCoroutinesApi::class)` with a one-line comment explaining why the unstructured-concurrency use is intentional, or
+  - Refactor to a structured `CoroutineScope` so the warning disappears organically (preferred if the IPC server has a natural lifetime — e.g. tied to the daemon's lifecycle).
+- [ ] `./gradlew :app:sync:compileKotlin --warning-mode=all` no longer surfaces the warning.
+
+## Out of scope
+
+Other Kotlin compile warnings (e.g. `OneDriveProvider.kt:235` redundant safe-call — tracked separately under UD-319).
+
+## Related
+
+- Surfaced during the [UD-014](CLOSED.md#ud-014) build runs (2026-05-16); pre-existing.
+---
+id: UD-319
+title: OneDriveProvider.kt:235 unnecessary safe call on non-null ParentReference
+category: providers
+priority: low
+effort: XS
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProvider.kt:235:99` emits this Kotlin compile warning on every build:
+
+```
+w: Unnecessary safe call on a non-null receiver of type 'ParentReference'.
+```
+
+The code uses `?.` on a `ParentReference` that the compiler has already proved non-nullable. Trivial to fix — either remove the `?.` or restructure the call so the safe-call is on the actually-nullable parent.
+
+Surfaced during the UD-014 session's composite-wide `./gradlew build` runs. Pre-existing.
+
+## Acceptance
+
+- [ ] Read `OneDriveProvider.kt:235:99` and confirm which `?.` is unnecessary.
+- [ ] Replace with `.` (plain dot) or refactor.
+- [ ] `./gradlew :providers:onedrive:compileKotlin --warning-mode=all` no longer surfaces the warning.
+- [ ] No behavioural change — this is a pure-syntax cleanup that the compiler already proved equivalent.
+
+## Out of scope
+
+Other Kotlin compile warnings tracked separately (UD-229 for `IpcServer.kt`).
+
+## Related
+
+- Surfaced during the [UD-014](CLOSED.md#ud-014) build runs (2026-05-16); pre-existing.
+---
+id: UD-320
+title: OneDrive OAuthService.getDeviceCode missing postWithFlakeRetry wrapper
+category: providers
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt:119` defines `getDeviceCode()` — the FIRST call in the device-flow handshake — and it does NOT use the `postWithFlakeRetry(...)` helper that wraps the other four OAuth endpoint calls in the same class (`exchangeCodeForToken`, `pollOnceForToken`, `refreshToken`, `pollForToken`).
+
+Consequence: a TLS handshake blip or transient network error on the very first `/devicecode` POST hard-fails the entire interactive-auth flow before any handle has been issued. The rest of the flow tolerates flakes via the 2-attempt retry helper (UD-311's design); the first call doesn't.
+
+Surfaced during the [UD-014](CLOSED.md#ud-014) end-to-end code review (2026-05-16) as Minor finding #4; left out of UD-014's scope because UD-014 was the SPI refactor, not the retry-policy fix.
+
+## Acceptance
+
+- [ ] Wrap the `getDeviceCode()` body's `httpClient.post(...)` in `postWithFlakeRetry("getDeviceCode") { ... }`, matching the pattern at `OAuthService.kt:91` (`exchangeCodeForToken`).
+- [ ] Add a contract-test arm to `OneDriveInteractiveAuthContractTest` that fails-then-succeeds the first `/devicecode` call (via `MockEngine` returning a 500 then a 200) and asserts `beginInteractiveAuth` ultimately succeeds. Tests the retry behaviour directly.
+- [ ] `./gradlew :providers:onedrive:test` green.
+
+## Out of scope
+
+- The four-class metadata/upload/download/auth Ktor-client matrix from the original UD-204 ticket body. That's a bigger refactor across all providers; not blocked by this small one-call hardening.
+
+## Related
+
+- [UD-311](CLOSED.md#ud-311) — `postWithFlakeRetry` helper (the existing pattern this ticket extends to one more call site).
+- [UD-204](BACKLOG.md#ud-204) — broader HTTP-client timeout/retry matrix; this is a focused subset.
+- [UD-014](CLOSED.md#ud-014) — end-to-end review (Minor #4) surfaced this gap.
+---
+id: UD-710
+title: docs/dev/lessons/README.md index drift — 3 lesson files missing from table
+category: tooling
+priority: low
+effort: XS
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`docs/dev/lessons/README.md` is the canonical index for the `docs/dev/lessons/` directory. Three lesson files exist in the directory but are NOT listed in the index table:
+
+- `http-retry-policy.md`
+- `internxt-notifications-websocket.md`
+- `tool-result-injection-scoping.md`
+
+Surfaced during the UD-014 session (2026-05-16) when filing a new lesson (`subagent-detached-head-checkout.md`, PR #34). Pre-existing drift, not introduced by UD-014.
+
+The drift means an agent reading the README to discover applicable lessons via the index will miss three of them. The CLAUDE.md "one truth sync discipline" pattern (code ↔ docs ↔ knowledge move together) wants the index complete.
+
+## Acceptance
+
+- [ ] Read each of the three orphan lesson files and write a one-line "when it bites" summary matching the existing table style.
+- [ ] Append three new rows to the index table at `docs/dev/lessons/README.md` in chronological order (or wherever fits the existing pattern — the table is currently rough-chronological).
+- [ ] Verify no other lesson files in the dir are missing from the index. `ls docs/dev/lessons/*.md | wc -l` should equal `grep -c '^| \[' docs/dev/lessons/README.md` + the README header row + the new lesson from PR #34.
+
+## Out of scope
+
+- Rewriting the lesson files themselves.
+- Reordering the table (alphabetical vs chronological is a separate aesthetic call; keep chronological for now).
+- Filing tickets for each lesson's referenced code surface — that's per-lesson hygiene.
+
+## Related
+
+- PR #34 — filed `subagent-detached-head-checkout.md` and flagged this drift in its body.
