@@ -2495,6 +2495,8 @@ code_refs:
   - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt:80-101
   - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderFactory.kt
   - core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OAuthService.kt
+lessons:
+  - docs/dev/lessons/subagent-detached-head-checkout.md  # PR #34 — surfaced twice during this session's subagent-driven execution
 opened: 2026-05-02
 ---
 ## Problem
