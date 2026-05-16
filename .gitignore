@@ -62,3 +62,7 @@ docs/internal/
 **/.venv-mcps/
 **/.venv/
 
+# UD-776: per-run JSON sidecar from verify-cli.py — markdown matrix is
+# committed, JSON is a local-only artifact with per-row timings.
+docs/dev/cli-verification-matrix.json
+

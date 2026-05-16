@@ -31,6 +31,7 @@ for the gitignore policy.
 | [silent-phases-look-like-hangs.md](silent-phases-look-like-hangs.md) | A long-running engine phase with no log/heartbeat is indistinguishable from a deadlock | Adding or auditing any pass inside `SyncEngine.doSyncOnce` |
 | [pending-row-recovery-invariants.md](pending-row-recovery-invariants.md) | Adding a write site means auditing every read site for the new invariants | Introducing a new persistent row shape (new column, new "pending" flag, new null-remoteId state) — *before* the PR merges |
 | [subagent-detached-head-checkout.md](subagent-detached-head-checkout.md) | Subagent `git checkout` can silently detach the host shell's HEAD | Multi-task plan execution dispatching implementer subagents that emit commits; verify host `git branch --show-current` after every claimed commit |
+| [cli-surface-verify-before-doc.md](cli-surface-verify-before-doc.md) | Every documented CLI command needs a matrix row before docs ship | Writing user-facing docs that include fenced `unidrive ...` shell blocks |
 | [mcp-protocol-version-negotiation.md](mcp-protocol-version-negotiation.md) | MCP server must answer `initialize` with what it supports, never error | Touching `McpServer.handleInitialize` or any newly-added version-negotiated protocol surface |
 
 ## Adding new lessons

@@ -2750,3 +2750,85 @@ First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.k
 Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
 CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
 its design notes are in the PR #17 comment thread.
+
+---
+id: UD-776
+title: CLI command-surface verification matrix runner
+category: tooling
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-16
+resolved_by: commit b1d5228. scripts/dev/verify-cli.py runner + docs/dev/cli-verification-matrix.md snapshot + lesson; 127 PASS/0 FAIL/5 SKIP at first run, includes regression rows for the 4 PR #39 fabrications
+opened: 2026-05-16
+---
+## Problem
+
+PR #39 (UD-708 MCP user guide) had four documented CLI commands that
+didn't exist in the picocli surface — three caught by Codex review,
+one by manual audit. Same class of bug will repeat as long as docs
+are written from memory of the tool surface instead of empirical
+verification.
+
+## Acceptance
+
+A standalone test harness that exercises every `@Command` and
+representative `@Option` / `@Parameters` mutation against a real
+deployed `unidrive` jar in a hermetic sandbox, captures exit code +
+stdout + stderr per row, and emits a markdown matrix
+(`expected vs actual`) committed under `docs/dev/`.
+
+- [ ] `scripts/dev/verify-cli.py` — Python stdlib runner. Reads an
+      inline `MATRIX: list[Case]` definition; each Case is
+      `(label, argv, env_extra, expected_exit, expected_stdout_regex,
+      expected_stderr_regex, skip_reason)`. Spawns `unidrive` as
+      `subprocess.run` with `UNIDRIVE_CONFIG_DIR` pointed at an
+      ephemeral sandbox per invocation. Compares actuals against
+      expecteds; emits a PASS / FAIL / SKIP row per case.
+- [ ] Sandbox bootstrap inside the script: per-run temp dir with
+      `config.toml` carrying 3 `localfs` profiles (`vp-<rand>-a`,
+      `vp-<rand>-b`, `vp-<rand>-bogus`). Profile `bogus` has an
+      intentionally invalid `sync_root` so error-path rows have
+      something to bite on. Tear-down via `shutil.rmtree` unless
+      `--keep-sandbox`.
+- [ ] Matrix coverage of all 23 top-level subcommands (and the 6
+      groups' inner subcommands) across the 10 test classes in the
+      plan: T1 `--help`, T2 no-args, T3 happy path with valid `-p`,
+      T4 unknown profile, T5 unknown long flag, T6 unknown short
+      flag, T7 required-flag missing, T8 `--flag=val` vs `--flag val`,
+      T9 `-v` INHERIT scope (UD-271), T10 `--help` overrides bad
+      args. Plus cross-cutting: bare `unidrive`, `--version`,
+      `-c /nonexistent/dir`. Cloud-only rows (auth flows, share on
+      OneDrive, etc.) are SKIP'd with explicit `skip_reason`.
+- [ ] `docs/dev/cli-verification-matrix.md` — regenerated golden
+      snapshot, committed. Header carries `PASS / FAIL / SKIP` counts
+      and a timestamp.
+- [ ] First-pass execution surfaces drift to fix in follow-up
+      commits before PR merges — every FAIL row either becomes a
+      bug ticket or a documented expected-behavior note.
+
+## Out of scope
+
+- Live cloud-provider integration (only `localfs`). OAuth / Internxt /
+  S3 / etc. rows produce `SKIP`, not `FAIL`.
+- Performance, load, concurrency, network-failure injection. The
+  matrix verifies CLI **surface**, not business logic — that's what
+  the 1427 unit tests cover.
+- Windows path edge cases beyond what `localfs` exercises.
+- Kotlin / `:app:cli:test`-side reimplementation. The harness is
+  intentionally external (subprocess) so picocli runs in-process the
+  same way operators invoke it.
+
+## Related
+
+- [PR #39](https://github.com/gkrost/unidrive/pull/39) — the four
+  documented-command-doesn't-exist bugs that motivated this ticket.
+- [UD-708](backlog/CLOSED.md#ud-708) — MCP user guide, the doc that
+  surfaced the drift problem.
+- [UD-815](backlog/CLOSED.md#ud-815) — existing Docker MCP harness;
+  same shape (external black-box) but for MCP JSON-RPC, not CLI.
+
+## Plan ref
+
+Full design in conversation thread for UD-708 follow-up (2026-05-16).
+Effort estimate ~5–7 h, single-day work.

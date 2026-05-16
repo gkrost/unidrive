@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- UD-776: [`scripts/dev/verify-cli.py`](../scripts/dev/verify-cli.py) +
+  [`docs/dev/cli-verification-matrix.md`](dev/cli-verification-matrix.md)
+  — empirical CLI surface verifier. Drives every `@Command` × representative
+  option mutation against an ephemeral `localfs` sandbox, captures
+  exit/stdout/stderr per row, and emits a diff-stable markdown matrix
+  (127 PASS · 0 FAIL · 5 SKIP at first run). Includes regression rows
+  pinning the four fabricated commands from PR #39 (`identity`,
+  `auth begin`, `auth complete`, `profile add --name`) as picocli
+  usage errors. Lesson at
+  [`docs/dev/lessons/cli-surface-verify-before-doc.md`](dev/lessons/cli-surface-verify-before-doc.md).
 - UD-708: [`docs/MCP-USER-GUIDE.md`](MCP-USER-GUIDE.md) — canonical
   operator + LLM-user guide for the unidrive MCP server. Covers build,
   deploy, profile + auth, MCP-client registration (Claude Code, Claude
