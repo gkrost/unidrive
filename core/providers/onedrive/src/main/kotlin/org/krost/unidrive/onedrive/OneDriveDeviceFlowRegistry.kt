@@ -8,10 +8,18 @@ import java.util.concurrent.ConcurrentHashMap
  * for OneDrive's interactive auth. The provider owns this registry
  * because it owns the OAuthService (and its HttpClient) lifecycle.
  *
- * Lifecycle invariant: every terminal outcome of completeInteractiveAuth
- * (Success, Failure from poll, Failure from save, Failure from expiry) must
- * call [OneDriveDeviceFlowRegistry.remove] and close the resulting state's
- * oauthService. Pending leaves the state in place for the next poll.
+ * Lifecycle invariant: every terminal outcome that resolves an existing
+ * handle must call [OneDriveDeviceFlowRegistry.remove] and close the
+ * resulting state's oauthService. The terminal arms are:
+ *   - completeInteractiveAuth → Success
+ *   - completeInteractiveAuth → Failure(expired)         (handle expired before poll)
+ *   - completeInteractiveAuth → Failure(poll-exception)  (JSON parse / unexpected error)
+ *   - completeInteractiveAuth → Failure(save-failed)     (saveToken threw)
+ *   - completeInteractiveAuth → Failure(poll-Failed)     (DevicePollOutcome.Failed)
+ *   - cancelInteractiveAuth                              (caller abandoned the flow)
+ * Pending leaves the state in place for the next poll. The
+ * "unknown-handle" Failure path returns without remove/close because no
+ * state was ever registered.
  */
 internal data class OneDriveDeviceFlowState(
     val deviceCode: String,

@@ -145,6 +145,53 @@ class OneDriveInteractiveAuthContractTest {
         }
     }
 
+    /** /devicecode succeeds; /token returns 4xx with an unrecognised error
+     *  code → DevicePollOutcome.Failed (the "else" arm in pollOnceForToken). */
+    private fun deviceCodeThenFailedEngine(): MockEngine {
+        var call = 0
+        return MockEngine { _ ->
+            call += 1
+            when (call) {
+                1 ->
+                    respond(
+                        content = ByteReadChannel(deviceCodeResponseBody()),
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+                else ->
+                    respond(
+                        content = ByteReadChannel("""{"error":"invalid_grant"}"""),
+                        status = HttpStatusCode.BadRequest,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+            }
+        }
+    }
+
+    /** /devicecode succeeds; /token returns 200 with a body that fails JSON
+     *  deserialisation → SerializationException escapes pollOnceForToken
+     *  and is caught by the generic exception arm in completeInteractiveAuth. */
+    private fun deviceCodeThenMalformedTokenEngine(): MockEngine {
+        var call = 0
+        return MockEngine { _ ->
+            call += 1
+            when (call) {
+                1 ->
+                    respond(
+                        content = ByteReadChannel(deviceCodeResponseBody()),
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+                else ->
+                    respond(
+                        content = ByteReadChannel("""{"this": "is not a TokenResponse shape"}"""),
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+            }
+        }
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────
 
     @Test
@@ -189,7 +236,7 @@ class OneDriveInteractiveAuthContractTest {
         }
 
     @Test
-    fun complete_authorization_pending_returns_pending() =
+    fun complete_authorization_pending_returns_pending_and_preserves_handle() =
         runBlocking {
             val factory = factoryWithEngine(deviceCodeThenPendingEngine())
             val begin = factory.beginInteractiveAuth(tmpProfileDir)
@@ -197,13 +244,18 @@ class OneDriveInteractiveAuthContractTest {
 
             assertTrue(outcome is CompleteAuthResult.Pending)
             assertEquals(5L, outcome.retryAfterSeconds)
+            // Pending must NOT drain the registry — the handle stays live for
+            // the next poll. Dual of registry_is_empty_after_each_terminal_outcome.
+            assertEquals(1, OneDriveDeviceFlowRegistry.sizeForTest(), "Pending must preserve registry entry")
 
             // Handle is still resolvable for the next poll.
             val second = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
             assertTrue(second is CompleteAuthResult.Pending)
+            assertEquals(1, OneDriveDeviceFlowRegistry.sizeForTest(), "second Pending must still preserve entry")
 
             // Cleanup
             factory.cancelInteractiveAuth(begin.continuationHandle)
+            assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest())
         }
 
     @Test
@@ -244,11 +296,60 @@ class OneDriveInteractiveAuthContractTest {
             s.completeInteractiveAuth(tmpProfileDir, sBegin.continuationHandle)
             assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Success")
 
-            // Expired-token error path
+            // Expired-token error path (DevicePollOutcome.Failed via expired_token)
             val e = factoryWithEngine(deviceCodeThenExpiredEngine())
             val eBegin = e.beginInteractiveAuth(tmpProfileDir)
             e.completeInteractiveAuth(tmpProfileDir, eBegin.continuationHandle)
             assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Failure(expired)")
+
+            // Failed-with-unrecognised-error path (DevicePollOutcome.Failed via else arm)
+            val f = factoryWithEngine(deviceCodeThenFailedEngine())
+            val fBegin = f.beginInteractiveAuth(tmpProfileDir)
+            val fOutcome = f.completeInteractiveAuth(tmpProfileDir, fBegin.continuationHandle)
+            assertTrue(fOutcome is CompleteAuthResult.Failure)
+            assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Failure(poll-Failed)")
+
+            // Malformed-token-body path (SerializationException escapes
+            // pollOnceForToken → generic catch arm in completeInteractiveAuth).
+            val m = factoryWithEngine(deviceCodeThenMalformedTokenEngine())
+            val mBegin = m.beginInteractiveAuth(tmpProfileDir)
+            val mOutcome = m.completeInteractiveAuth(tmpProfileDir, mBegin.continuationHandle)
+            assertTrue(mOutcome is CompleteAuthResult.Failure)
+            assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Failure(poll-exception)")
+
+            // saveToken-fails path: pre-create a *subdirectory* named token.json
+            // at the path CredentialStore will try to write. The atomic-write
+            // (Files.move REPLACE_EXISTING to a directory target) will throw,
+            // exercising the saveToken catch arm in completeInteractiveAuth.
+            // This is more reliable cross-platform than setReadOnly on the
+            // parent directory (which can silently no-op as root or on FS
+            // modes that allow file creation in mode 0555 dirs).
+            //
+            // We need a fresh profileDir for this arm so the prior arms'
+            // token.json doesn't pre-exist as a regular file.
+            val svProfileDir = Files.createTempDirectory("ud-014-savefail-")
+            try {
+                Files.createDirectory(svProfileDir.resolve("token.json"))
+                val sv = factoryWithEngine(deviceCodeThenTokenEngine())
+                val svBegin = sv.beginInteractiveAuth(svProfileDir)
+                val svOutcome = sv.completeInteractiveAuth(svProfileDir, svBegin.continuationHandle)
+                assertTrue(
+                    svOutcome is CompleteAuthResult.Failure,
+                    "token.json-as-directory must fail saveToken; got $svOutcome",
+                )
+                assertTrue(
+                    svOutcome.message.contains("save failed", ignoreCase = true) ||
+                        svOutcome.message.lowercase().contains("token"),
+                    "save-failure message should mention save/token; got '${svOutcome.message}'",
+                )
+                assertEquals(
+                    0,
+                    OneDriveDeviceFlowRegistry.sizeForTest(),
+                    "registry must drain after Failure(save-failed)",
+                )
+            } finally {
+                svProfileDir.toFile().deleteRecursively()
+            }
 
             // Cancel path
             val c = factoryWithEngine(deviceCodeOnlyEngine())

@@ -1,7 +1,6 @@
 package org.krost.unidrive.onedrive
 
 import kotlinx.serialization.json.Json
-import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.BeginAuthResult
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CompleteAuthResult
@@ -177,13 +176,14 @@ open class OneDriveProviderFactory : ProviderFactory {
         }
 
         val oauth = state.oauthService
+        // pollOnceForToken is total: it catches its own network errors and
+        // returns DevicePollOutcome.Failed. The only way an exception escapes
+        // is via 2xx-with-malformed-body (SerializationException from the
+        // TokenResponse decode at OAuthService.kt:193) or an unexpected JVM
+        // error. Either way we drain the registry and surface Failure.
         val outcome: OAuthService.DevicePollOutcome =
             try {
                 oauth.pollOnceForToken(state.deviceCode)
-            } catch (e: AuthenticationException) {
-                OneDriveDeviceFlowRegistry.remove(continuationHandle)
-                oauth.close()
-                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
             } catch (e: Exception) {
                 OneDriveDeviceFlowRegistry.remove(continuationHandle)
                 oauth.close()
