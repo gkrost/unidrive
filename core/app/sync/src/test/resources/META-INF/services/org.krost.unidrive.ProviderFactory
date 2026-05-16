@@ -1,0 +1,6 @@
+org.krost.unidrive.sync.testfixtures.StubLocalfsFactory
+org.krost.unidrive.sync.testfixtures.StubOnedriveFactory
+org.krost.unidrive.sync.testfixtures.StubRcloneFactory
+org.krost.unidrive.sync.testfixtures.StubS3Factory
+org.krost.unidrive.sync.testfixtures.StubSftpFactory
+org.krost.unidrive.sync.testfixtures.StubWebdavFactory
