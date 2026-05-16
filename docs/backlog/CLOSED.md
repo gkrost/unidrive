@@ -2675,7 +2675,8 @@ Gap surfaced during the UD-014 close-out (2026-05-16) when the user asked "do we
 A new doc, recommended path **`docs/install/claude-desktop-linux.md`**, covering at minimum:
 
 - [ ] Build prerequisites (JDK 21, `./gradlew :app:mcp:shadowJar` invocation, expected jar path).
-- [ ] Claude Desktop config file location on Linux and the `mcpServers` JSON entry shape, with a working example:
+- [ ] Claude Desktop config file location on Linux and the `mcpServers` JSON entry shape, with a working example.
+      _Original draft example (paths INCORRECT — `unidrive-mcp-all.jar` was a guess; the shadowJar emits `unidrive-mcp-<version>.jar` and `:app:mcp:deploy` copies it to `~/.local/lib/unidrive/`, not `~/.local/bin/`. The correct working example shipped in [`docs/MCP-USER-GUIDE.md §5.2`](../MCP-USER-GUIDE.md#52-claude-desktop-linux). Original example retained below for archeology only.)_
       ```json
       {
         "mcpServers": {

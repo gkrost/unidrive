@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Session review packet
+  [`docs/dev/2026-05-16-mcp-cli-session-review.md`](dev/2026-05-16-mcp-cli-session-review.md)
+  — self-contained brief for an external reviewer (peer AI agent or
+  human co-maintainer) auditing the three PRs that landed 2026-05-16
+  (UD-758 / UD-708+UD-283 / UD-776). Files four follow-up tickets
+  (UD-777 CI gate, UD-778 MCP matrix, UD-409 `-c` UX, UD-410 `-p`
+  ordering docs), sweeps residual doc drift in
+  `docs/dev/manual-test-checklist.md` (three fabricated CLI
+  commands), and adds a supersession note to the UD-708 closed-
+  ticket body where the pre-fix JSON example used a jar path the
+  build doesn't produce.
 - UD-776: [`scripts/dev/verify-cli.py`](../scripts/dev/verify-cli.py) +
   [`docs/dev/cli-verification-matrix.md`](dev/cli-verification-matrix.md)
   — empirical CLI surface verifier. Drives every `@Command` × representative

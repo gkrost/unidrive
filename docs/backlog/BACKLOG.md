@@ -11688,3 +11688,264 @@ addressed pre-merge.
   reuse.
 - [`docs/dev/2026-05-16-mcp-cli-session-review.md`](../dev/2026-05-16-mcp-cli-session-review.md)
   §2 — audit pass that re-confirmed this is still live in main.
+
+---
+id: UD-777
+title: CI pre-merge gate for verify-cli.py matrix
+category: tooling
+priority: medium
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`scripts/dev/verify-cli.py` (landed in [UD-776](CLOSED.md#ud-776), PR
+#40) ships with a golden matrix snapshot at
+`docs/dev/cli-verification-matrix.md` but **nothing actually runs it
+in CI**. The discipline depends on a contributor remembering to
+re-generate after every CLI change — exactly the kind of "remember to
+do it" that decays.
+
+## Acceptance
+
+A pre-merge CI gate that:
+
+- [ ] Builds the CLI shadow jar (`./gradlew :app:cli:deploy` or
+      equivalent task that produces a runnable jar at a known path).
+- [ ] Runs `python scripts/dev/verify-cli.py` against the freshly
+      built jar.
+- [ ] Fails the gate if:
+   - any `FAIL` row appears, OR
+   - the committed `docs/dev/cli-verification-matrix.md` differs
+     from the regenerated one (`git diff --exit-code`).
+- [ ] Surfaces the failing rows in the CI log so the PR author can
+      see which assertions broke without downloading artifacts.
+- [ ] Runs only when relevant paths change to avoid burning minutes
+      on doc-only PRs: trigger on `core/app/cli/**.kt`,
+      `scripts/dev/verify-cli.py`,
+      `docs/dev/cli-verification-matrix.md`.
+
+## Out of scope
+
+- Cloud-provider matrix rows (currently `SKIP`'d in the script).
+  Those need live OAuth and shouldn't gate every PR.
+- Generalizing the gate to the MCP — that's a parallel ticket
+  ([UD-778](BACKLOG.md#ud-778)).
+
+## Related
+
+- [UD-776](CLOSED.md#ud-776) — the matrix runner itself.
+- [`docs/dev/lessons/cli-surface-verify-before-doc.md`](../dev/lessons/cli-surface-verify-before-doc.md)
+  — the discipline the gate enforces.
+- [PR #40](https://github.com/gkrost/unidrive/pull/40) — landing
+  commit.
+
+## Implementation sketch
+
+GitHub Actions snippet (rough):
+
+```yaml
+verify-cli:
+  if: contains(github.event.pull_request.changed_files, 'core/app/cli/')
+      || contains(github.event.pull_request.changed_files, 'scripts/dev/verify-cli.py')
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-java@v4
+      with: { distribution: zulu, java-version: 21 }
+    - run: ./gradlew :app:cli:deploy
+    - run: python scripts/dev/verify-cli.py
+    - run: git diff --exit-code docs/dev/cli-verification-matrix.md
+```
+---
+id: UD-778
+title: MCP tool-surface verification matrix runner
+category: tooling
+priority: medium
+effort: M
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+[UD-776](CLOSED.md#ud-776) gave us a CLI command-surface verifier
+(`scripts/dev/verify-cli.py`) that catches doc-vs-CLI drift. There is
+**no equivalent for the MCP tool surface.** The same class of bug
+[PR #39](https://github.com/gkrost/unidrive/pull/39) shipped on the
+CLI side — documented commands that don't exist — can recur on the
+MCP side:
+
+- A doc that names an MCP tool that doesn't exist
+  (`unidrive_does_not_exist`).
+- A doc that names a tool arg that isn't in the tool's input schema
+  (e.g. `unidrive_sync` doesn't have a `--frobnicate` arg).
+- A doc that describes a tool's response shape incorrectly.
+
+## Acceptance
+
+A standalone test harness in the same spirit as `verify-cli.py`:
+
+- [ ] `scripts/dev/verify-mcp.py` — Python stdlib runner. Spawns the
+      `unidrive-mcp-<v>.jar` as a subprocess, drives JSON-RPC over
+      stdio, asserts per-tool behavior against expectations.
+- [ ] Hermetic sandbox identical to `verify-cli.py` — `UNIDRIVE_CONFIG_DIR`
+      + `-Duser.home=` JVM property + `LOCALAPPDATA` / `XDG_*` env
+      overrides (UD-776's lessons apply byte-for-byte here).
+- [ ] Coverage classes:
+   - **M1 tools/list** — verify the MCP advertises exactly 23 tools
+     with the names in [SPECS.md §2.2](../SPECS.md#22-surface-b--mcp-json-rpc-20-over-stdio).
+     Regression-grade: if the count changes, either the spec is
+     stale or a tool was added without doc sync.
+   - **M2 resources/list** — verify the 3 documented resources
+     (`unidrive://config`, `unidrive://conflicts`,
+     `unidrive://profiles`).
+   - **M3 tool input-schema** — for every tool, call `tools/list`
+     and assert the input-schema properties match what the user
+     guide / SPECS reference. Pins arg names.
+   - **M4 tool happy-path** — invoke each tool against a `localfs`
+     sandbox profile, assert the response shape (`result.content`,
+     `result.isError`).
+   - **M5 regression rows** — pin known fabrications as errors
+     (e.g. `unidrive_does_not_exist` returns `error.code=-32602
+     Unknown tool`).
+- [ ] Output: `docs/dev/mcp-verification-matrix.md` golden snapshot
+      mirroring the CLI matrix.
+
+## Out of scope
+
+- Cloud-provider auth flows (`unidrive_auth_begin` /
+  `unidrive_auth_complete`) — same SKIP discipline as CLI.
+- Performance / concurrency under load.
+
+## Related
+
+- [UD-776](CLOSED.md#ud-776) — sibling CLI harness, design template.
+- [UD-777](BACKLOG.md#ud-777) — CI gate; this matrix should gate
+  the same way.
+- [`docs/MCP-USER-GUIDE.md`](../MCP-USER-GUIDE.md) — the doc whose
+  claims need verifying.
+- [UD-815](CLOSED.md#ud-815) — existing Docker MCP harness; same
+  shape (external black-box) but already runs end-to-end sync
+  through MCP. The new matrix is shallower / argument-surface
+  focused; the two complement.
+
+## Plan ref
+
+Discussed in `docs/dev/2026-05-16-mcp-cli-session-review.md` (the
+session review packet that filed this ticket).
+---
+id: UD-409
+title: CLI: -c on nonexistent dir exits silently — print actionable stderr
+category: cli
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`unidrive -c /no/such/dir status` (and any other subcommand) exits
+with status=1 and **prints nothing**. Operators get no signal about
+what went wrong — only the non-zero exit. Verified by row 007 of the
+[CLI verification matrix](../dev/cli-verification-matrix.md)
+(`root-bogus-config-dir`).
+
+The matrix row passes because we only asserted `exit=1`. A useful
+behaviour pin would additionally assert a clear stderr message.
+
+## Acceptance
+
+- [ ] When `-c <path>` (or `--config-dir <path>`) points at a
+      directory that doesn't exist, print to stderr a clear
+      message like:
+      ```
+      Error: config directory not found: /no/such/dir/verify-cli-bogus-xyzzy
+      Hint: run `unidrive profile add` to create the default config, or
+            pass -c <existing-dir>.
+      ```
+      and then exit non-zero.
+- [ ] Cover the same behaviour when `-c` is given but unreadable
+      (POSIX permission error) — same message shape, different
+      `Hint`.
+- [ ] Update CLI verification matrix row 007 to additionally assert
+      the stderr regex (`stderr_match=r"config directory not found"`).
+
+## Out of scope
+
+- Auto-creating the directory. The CLI already auto-creates the
+  default config dir under `~/.config/unidrive/`; an explicit `-c`
+  override is a stronger signal of "I know what I'm doing" and
+  silent creation could mask typos.
+- Symlink-target validation. If the path is a broken symlink it
+  surfaces as the same not-found error.
+
+## Related
+
+- [UD-776](CLOSED.md#ud-776) — matrix row that surfaced this.
+- [`Main.kt:57`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt#L57)
+  — `-c/--config-dir` declaration.
+- [`SyncConfig.defaultConfigDir`](../../core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt)
+  — likely where the error path needs the friendly message.
+---
+id: UD-410
+title: CLI: document canonical '-p <profile> <subcommand>' ordering
+category: cli
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+The `-p/--provider` option is declared on `Main`
+([`Main.kt:64`](../../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt#L64))
+as a top-level option, **not** on individual subcommands. The canonical
+invocation form is therefore:
+
+```bash
+unidrive -p <profile> <subcommand> [<args>]
+# e.g. unidrive -p onedrive-personal sync --dry-run
+```
+
+Picocli also accepts the option after the subcommand (`unidrive sync
+-p <profile>` works because of how the top-level option scope leaks
+through) but the parent-position form is the canonical one. **Neither
+the CLI's own help text nor any user-facing doc states this
+explicitly,** which is what produced the bug in PR #39 where the MCP
+user guide initially used `--profile <X>` as if it were a subcommand
+option (it isn't; that flag doesn't exist on the CLI at all — `-p`
+or `--provider` are the only forms).
+
+## Acceptance
+
+- [ ] Top-level `unidrive --help` output mentions the canonical
+      ordering near the `-p` flag description, e.g.
+      `Provider profile name or type. Place BEFORE the subcommand:
+       'unidrive -p <profile> <subcommand>'`.
+- [ ] [`docs/MCP-USER-GUIDE.md`](../MCP-USER-GUIDE.md) §4 and
+      [`docs/SPECS.md §2.2`](../SPECS.md#22-surface-b--mcp-json-rpc-20-over-stdio)
+      get a one-sentence note: the CLI uses `-p/--provider` (top-level
+      position); the MCP launcher uses `-p/--profile` (different long
+      name, same position; see
+      [`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:81`](../../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt#L81)).
+- [ ] CLI verification matrix already has the
+      `regr-profile-add-rejects-name-flag` row that catches `--name`
+      as fabricated; add a parallel row pinning that CLI rejects
+      `--profile <X>` as an unknown flag (catches the inverse drift).
+
+## Out of scope
+
+- Aligning the CLI and MCP long-name spelling (`--provider` vs
+  `--profile`). Both ship; renaming either is a breaking change and
+  needs its own ADR.
+
+## Related
+
+- [PR #39](https://github.com/gkrost/unidrive/pull/39) — surfaced
+  this drift.
+- [UD-776](CLOSED.md#ud-776) — CLI verification matrix.
+- [UD-778](BACKLOG.md#ud-778) — MCP tool-surface matrix should pin
+  the MCP launcher's `--profile` similarly.
+- [`docs/dev/lessons/cli-surface-verify-before-doc.md`](../dev/lessons/cli-surface-verify-before-doc.md)
+  — discipline this ticket reinforces.
