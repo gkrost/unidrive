@@ -1,6 +1,7 @@
 package org.krost.unidrive.s3
 
 import org.krost.unidrive.sync.Snapshot
+import org.krost.unidrive.sync.SnapshotTestSupport
 import kotlin.test.*
 
 class S3SnapshotTest {
@@ -36,14 +37,12 @@ class S3SnapshotTest {
 
     @Test
     fun `empty snapshot encodes and decodes`() {
-        val snapshot = S3Snapshot(entries = emptyMap(), timestamp = 0L)
-        val decoded = decode(snapshot.encode())
-        assertTrue(decoded.entries.isEmpty())
+        SnapshotTestSupport.verifyEmptySnapshotRoundTrip(S3SnapshotEntry.serializer())
     }
 
     @Test
     fun `decode rejects invalid base64`() {
-        assertFailsWith<Exception> { decode("not-valid-base64!!!") }
+        SnapshotTestSupport.verifyInvalidBase64Rejects(S3SnapshotEntry.serializer())
     }
 
     @Test

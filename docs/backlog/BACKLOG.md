@@ -2971,6 +2971,7 @@ category: architecture
 priority: low
 effort: XS
 status: open
+depends_on: UD-821
 code_refs:
   - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:41
   - core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt:74-76
@@ -2978,6 +2979,8 @@ code_refs:
   - core/app/core/src/test/kotlin/org/krost/unidrive/SpiDiscoveryTest.kt
 opened: 2026-05-02
 ---
+
+> **2026-05-15 update:** Tier-3 batch attempted this and surfaced that `:app:sync:test` fails 7 tests because its test classpath has no `META-INF/services/org.krost.unidrive.ProviderFactory` resource — the silent fallback was masking this. Implementation is correct; it just needs UD-821 (test-scope stub `ProviderFactory`) to land first. Agent's working branch `refactor/UD-013-remove-isKnownType-dead-code` (commit `d0389f1`) is preserved locally for re-merge once UD-821 closes.
 ## Problem
 
 `core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt`
@@ -3206,53 +3209,6 @@ Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is t
 ## Why this wasn't done in PR #9
 
 Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
----
-id: UD-774
-title: Temporarily disable ktlint plugin to speed up session iteration
-category: tooling
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/build.gradle.kts
-  - core/gradle/libs.versions.toml
-opened: 2026-05-02
----
-**Disable the ktlint plugin's `apply` block in [core/build.gradle.kts](core/build.gradle.kts) across all subprojects, behind a single boolean toggle. ktlint adds ~20–30 s to every full `./gradlew build` and was the dominant cost in tight edit-test loops during multi-fix sessions (e.g. the UD-240g/UD-240i sequence on 2026-05-02). Re-enable is one line.**
-
-## Why temporary
-
-Long term, ktlint stays. The discipline of consistent formatting + the baseline mechanism for legacy violations is load-bearing for the project's "agents and humans share the codebase" model ([CODE-STYLE.md](docs/dev/CODE-STYLE.md), [docs/dev/lessons/ktlint-baseline-drift.md](docs/dev/lessons/ktlint-baseline-drift.md)).
-
-Short term, when iterating on a single module's `.kt` files (typical session shape: edit → run module test → repeat), ktlint runs on the full project's main + test source sets every time, even when only one file changed. On a 9-module composite that's the longest task in the build graph, by a wide margin.
-
-The toggle is intentionally crude — flip a `val ktlintEnabled = false` to `true` and the plugin lights up everywhere. This trades zero re-enable friction for zero per-invocation flexibility, which is the right tradeoff for a session-pace-of-work concern.
-
-## Acceptance
-
-- `core/build.gradle.kts` has a clearly-named compile-time toggle at the top of the `subprojects { ... }` block. When `false` (the new default after this ticket), no `ktlintCheck` / `ktlintFormat` / `ktlintMainSourceSetCheck` / `ktlintTestSourceSetCheck` tasks register on any subproject.
-- `./gradlew tasks --all` no longer lists ktlint tasks.
-- `./gradlew build` runs ~20–30 s faster on a warm daemon. Spot-check.
-- `./gradlew :app:sync:test` (single-module) runs end-to-end with no ktlint dependency.
-- The plugin declaration in [core/gradle/libs.versions.toml](core/gradle/libs.versions.toml) is left in place — only the *application* in `core/build.gradle.kts` is gated. Re-enable is one line of code.
-- Existing `<module>/config/ktlint/baseline.xml` files stay where they are. They become unused-but-harmless while the toggle is off; they snap back into use on re-enable.
-- [scripts/dev/ktlint-sync.sh](scripts/dev/ktlint-sync.sh) is left as-is. It will fail with "task not found" while the toggle is off — expected and acceptable for a temporary disable. A user re-enabling ktlint also re-enables the sync script in the same flip.
-- [scripts/dev/pre-commit/scope-check.sh](scripts/dev/pre-commit/scope-check.sh)'s `chore(ktlint)` rule (which restricts ktlint scope commits to `baseline.xml` only) is left as-is. The rule fires only on `chore(ktlint)`-scoped commits, which won't happen while the toggle is off.
-
-## Re-enable plan
-
-When session-pace work settles, flip the toggle back to `true` and:
-
-1. Run `scripts/dev/ktlint-sync.sh` to absorb any drift in baselines from the disable window.
-2. Verify `./gradlew build` is fully green (ktlint + tests).
-3. Close UD-774 with a `resolved_by: commit <sha>` referencing the re-enable commit.
-
-No data-loss path exists: nothing about disabling stores state outside the toggle line, so re-enable is reversible at any time.
-
-## Surfaced
-
-2026-05-02 session, after the UD-240g + UD-240i sequence (4 successive `./gradlew build` invocations totalling ~6 minutes of which ktlint was ~30 % of wall time). User explicitly asked to disable in-session.
-
 ---
 id: UD-254a
 title: MDC clone storm under MDCContext — 80 percent of JFR allocation pressure
@@ -3976,59 +3932,6 @@ Key choice: `(provider-id, method, args)` — e.g. `"internxt:listChildren:/Docu
 
 - drive-desktop `src/infra/drive-server-wip/in/get-in-flight-request.ts` — direct shape source.
 - Cross-repo synthesis: "the single highest-leverage finding."
----
-id: UD-207
-title: Codify HTTP retry-policy matrix (5xx/4xx/network/unknown) in HttpRetryBudget KDoc + tests
-category: core
-priority: low
-effort: XS
-status: open
-opened: 2026-05-04
----
-**Source:** drive-desktop research (agent `a876235`, 2026-05-04). Drive-desktop's `client-wrapper.service.ts` carries this comment as the cleanest retry-policy doc-comment in any of the three Internxt repos:
-
-> 2XX: success, 3XX/4XX: don't retry (except 408/429), 5XX: retry always, network errors: retry always, unknown exceptions: retry up to 3.
-
-unidrive's `HttpRetryBudget` (UD-228) should adopt this as its **canonical, documented matrix** — written into the budget's KDoc, locked in unit tests, and cross-linked from `docs/dev/lessons/`. Currently the policy lives in code and per-provider audits but isn't centralised.
-
-## Code refs
-
-- `core/app/core/src/main/kotlin/org/krost/unidrive/http/HttpRetryBudget.kt` — KDoc target
-- `core/app/core/src/test/kotlin/org/krost/unidrive/http/HttpRetryBudgetTest.kt` — extend with explicit matrix-row tests
-
-## Proposed matrix (verbatim)
-
-| Class | HTTP status / signal | Retry? | Cap | Backoff | Notes |
-|-------|----------------------|--------|-----|---------|-------|
-| Success | 2xx | n/a | n/a | n/a | |
-| Permanent client error | 4xx (except 408, 429) | **No** | n/a | n/a | Fail fast |
-| Timeout | 408 | Yes | budget.maxRetries | exp + jitter | |
-| Throttle | 429 | Yes | budget.maxRetries | honor `Retry-After` (cap = budget.maxRetryAfter) | UD-232 alignment |
-| Server error | 5xx | Yes | budget.maxRetries | exp + jitter | |
-| Network error (connect/read/SSL) | (no status) | Yes | budget.maxRetries | exp + jitter | |
-| Unknown exception | (caller-classified `Unknown`) | Yes | min(3, budget.maxRetries) | exp + jitter | The lower cap is deliberate |
-
-`exp + jitter` = exponential backoff with full jitter, base=1s, cap=`budget.maxRetryAfter`.
-
-## Acceptance
-
-- `HttpRetryBudget.kt` KDoc includes the table verbatim (markdown table fine).
-- `HttpRetryBudgetTest` has one test per row, asserting the budget's `decide(...)` returns the expected outcome.
-- A second test: removing any row (mocked) fails the suite — locks the matrix as a contract.
-- `docs/dev/lessons/http-retry-policy.md` (new) summarises the matrix with a link back to the budget code.
-- Per-provider audit docs (`docs/providers/*-robustness.md`) cross-link to the matrix instead of restating it.
-
-## Notes
-
-- This is documentation + test-locking, not a behaviour change (assuming the current `HttpRetryBudget` already implements the matrix). If implementation diverges from the matrix, file follow-up tickets per divergence — do not silently rewrite the budget here.
-- Pairs with UD-330 (cross-provider rollout) — when reviewers ask "what's the retry policy?" they should be able to point to this doc, not the code.
-- Out of scope: per-provider override hooks. The budget is intentionally one-policy-fits-all; provider-specific exceptions get their own ticket.
-
-## Cross-refs
-
-- drive-desktop `src/infra/drive-server-wip/in/client-wrapper.service.ts` — quotation source.
-- UD-228 / UD-330 — the budget itself and its rollout.
-- UD-232 — throttle / Retry-After.
 ---
 id: UD-208
 title: Audit JWT-refresh model across providers; verify per-call check vs scheduler-based
@@ -11590,3 +11493,89 @@ Recommended: Option 1 (sweep) as a one-time cleanup, then evaluate whether Optio
 - `scripts/dev/backlog.py` — the script that creates these anchors
 - `docs/backlog/BACKLOG.md` UD-216, UD-218, UD-219 — current orphan-anchor entries
 - 2026-05-15 tier-2 batch session — where this friction surfaced
+---
+id: UD-821
+title: Add test-scope ProviderFactory stub to :app:sync (unblocks UD-013)
+category: tests
+priority: medium
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/test/kotlin/
+opened: 2026-05-15
+---
+**Source:** 2026-05-15 tier-3 batch surfaced this blocker while implementing UD-013 (which proposed replacing the silent SPI-discovery fallback with `error(...)`). When the silent fallback is removed, `./gradlew :app:sync:test` fails 7 tests because `:app:sync`'s test classpath has no provider implementations registered via `ServiceLoader`.
+
+## Issue
+
+`ProviderRegistry` (in `:app:core`) uses `ServiceLoader.load(ProviderFactory::class.java)` to discover provider plugins at runtime. Each provider module ships `src/main/resources/META-INF/services/org.krost.unidrive.ProviderFactory` listing its factory class.
+
+`:app:sync` does NOT depend on any provider module — by design, it depends only on `:app:core` to keep the engine provider-agnostic. So when `:app:sync`'s tests run, the `ServiceLoader` lookup returns empty.
+
+Today this is masked by the `defaultTypes` silent fallback that UD-013 wants to delete. Without that fallback, 7 `:app:sync` tests fail because they construct a `ProviderRegistry` and expect a non-empty result.
+
+## Impact
+
+Severity: medium.
+
+Blocks UD-013 (fail-loud SPI discovery). UD-013 is the right thing to do — silent fallbacks hide misconfiguration in production — but cannot land until the test fixture is in place.
+
+Confirmed in the tier-3 batch's UD-013 worktree:
+
+```
+./gradlew :app:sync:test
+451 tests completed, 7 failed
+> Task :app:sync:test FAILED
+```
+
+The 7 failing tests will be the ones that construct a `ProviderRegistry` directly or indirectly.
+
+## Fix shape
+
+Add a test-scope stub `ProviderFactory` and a META-INF/services file pointing at it.
+
+1. Create `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/testfixtures/StubProviderFactory.kt`:
+   ```kotlin
+   package org.krost.unidrive.sync.testfixtures
+
+   import org.krost.unidrive.CloudProvider
+   import org.krost.unidrive.ProviderFactory
+   import org.krost.unidrive.ProviderMetadata
+
+   /**
+    * Test-only ProviderFactory so :app:sync tests don't trip on the
+    * fail-loud SPI discovery from UD-013. Returns a stub CloudProvider
+    * that throws if any operation is actually invoked — tests must
+    * either inject their own provider or not exercise the provider path.
+    */
+   class StubProviderFactory : ProviderFactory {
+       override val metadata = ProviderMetadata(
+           id = "stub-test",
+           displayName = "Stub (test fixture)",
+       )
+
+       override fun create(config: Map<String, Any?>): CloudProvider =
+           error("StubProviderFactory.create() called — tests must inject a real provider")
+
+       override fun isAuthenticated(): Boolean = false
+   }
+   ```
+
+   (Adapt the `ProviderFactory` signature to whatever the current interface is; the above sketches it.)
+
+2. Create `core/app/sync/src/test/resources/META-INF/services/org.krost.unidrive.ProviderFactory` containing one line:
+   ```
+   org.krost.unidrive.sync.testfixtures.StubProviderFactory
+   ```
+
+3. Verify: `./gradlew :app:sync:test` passes with the UD-013 fail-loud change applied. If any of the 7 originally-failing tests still fail, they were depending on specific provider IDs (`localfs`, etc.); update them to use `"stub-test"` or to inject a provider explicitly rather than relying on SPI discovery.
+
+## Cross-refs
+
+- UD-013 — the fail-loud SPI discovery change blocked on this
+- `core/app/core/src/main/kotlin/org/krost/unidrive/ProviderMetadata.kt` — where the fail-loud `error(...)` would go (currently has the silent fallback)
+- 2026-05-15 tier-3 batch surfaced this — agent's report flagged it correctly
+
+## Ordering
+
+Land UD-821 first, then UD-013 can land cleanly. Don't reverse the order — UD-013 alone breaks main.
