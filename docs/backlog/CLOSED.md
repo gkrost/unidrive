@@ -2646,3 +2646,107 @@ Cursor, mcp-cli, and anything else that's tracked the spec since 2024-11.
   — the hard equality check to remove.
 - `core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/McpServerTest.kt:59-68`
   — the existing `initialize handshake` test (still valid, no change needed).
+
+---
+id: UD-708
+title: Install doc: unidrive-mcp in Claude Desktop on Linux
+category: tooling
+priority: low
+effort: S
+status: closed
+closed: 2026-05-16
+resolved_by: commit 8b20377. docs/MCP-USER-GUIDE.md (canonical install/use guide) + core/app/mcp/README.md + SPECS.md §2.2 cross-link
+opened: 2026-05-16
+---
+## Problem
+
+We ship a runnable Kotlin MCP server at `core/app/mcp/` (entry point `org.krost.unidrive.mcp.Main`) exposing 23 tool verbs + 3 resources (see [SPECS.md §2](../SPECS.md)), but **no user-facing doc explains how to wire it into Claude Desktop on Linux**. A first-time user has to reverse-engineer:
+
+- The runnable-jar location (`core/app/mcp/build/libs/mcp-all.jar` after `./gradlew :app:mcp:shadowJar` — or wherever the install script puts it).
+- The launcher invocation (`java -jar <jar> [--profile NAME]`, plus the `UNIDRIVE_PROFILE` env-var fallback).
+- The `claude_desktop_config.json` path on Linux (`~/.config/Claude/claude_desktop_config.json`).
+- The `mcpServers` JSON shape (`command`, `args`, `env`) and how the per-profile binding interacts with Claude Desktop's per-session lifecycle.
+- Where to find the MCP log when something goes wrong (`~/.local/share/unidrive/unidrive-mcp.log`).
+
+Gap surfaced during the UD-014 close-out (2026-05-16) when the user asked "do we have docs how to install/configure the mcp(s) in Claude Desktop Linux?" Answer: no.
+
+## Acceptance
+
+A new doc, recommended path **`docs/install/claude-desktop-linux.md`**, covering at minimum:
+
+- [ ] Build prerequisites (JDK 21, `./gradlew :app:mcp:shadowJar` invocation, expected jar path).
+- [ ] Claude Desktop config file location on Linux and the `mcpServers` JSON entry shape, with a working example:
+      ```json
+      {
+        "mcpServers": {
+          "unidrive": {
+            "command": "java",
+            "args": ["-jar", "/home/USER/.local/bin/unidrive-mcp-all.jar", "--profile", "onedrive"],
+            "env": {}
+          }
+        }
+      }
+      ```
+- [ ] Per-profile binding semantics (one MCP process = one profile; documented in [SPECS.md §2 lines 140–146](../SPECS.md)).
+- [ ] First-run auth flow — point at `unidrive_auth_begin` / `unidrive_auth_complete` tools (post-UD-014 these are provider-agnostic; explain the device-code UX in the LLM-conversation context).
+- [ ] Log location + the `scripts/dev/log-watch.sh` helper for triage.
+- [ ] Troubleshooting: server not appearing in Claude Desktop (config syntax, jar-path typos, `java` not on PATH), tool-call errors (profile mismatch, missing OAuth tokens), how to re-trigger auth without restarting the MCP.
+
+Cross-link from:
+- [ ] `docs/SPECS.md` §2 (top of the MCP-surface section) — add a "see install: …" pointer.
+- [ ] `core/app/mcp/` — add a short `README.md` with the build invocation and a one-liner pointing at the new install doc.
+
+## Out of scope
+
+- macOS / Windows install paths (separate tickets if/when they come up — different `claude_desktop_config.json` location, possibly different jar packaging).
+- Auto-installer (`scripts/dev/install-mcp.sh` or similar) — would be its own ticket; this one is docs-only.
+- The Python `unidrive-mcp` standalone repo at `~/dev/git/unidrive-mcp/` (different artifact, different ticket; see [2026-05-02-unidrive-mcp-standalone-repo](../plans/2026-05-02-unidrive-mcp-standalone-repo.md)).
+
+## Related
+
+- [SPECS.md §2](../SPECS.md) — MCP surface (23 tool verbs + 3 resources, per-profile binding).
+- [UD-014](CLOSED.md#ud-014) (closed) — made `unidrive_auth_begin` / `_complete` provider-agnostic; the install doc should reflect that the auth flow works for any future OAuth provider.
+- [`scripts/dev/log-watch.sh`](../../scripts/dev/log-watch.sh) — sync log triage; the install doc should mention it for MCP debugging too.
+
+---
+id: UD-283
+title: UD-283 (auto-filed orphan anchor — see body)
+category: core
+priority: low
+effort: ?
+status: closed
+closed: 2026-05-16
+resolved_by: commit 8b20377. SPECS.md §2.2 now reflects ProfileArgValidator's validate-and-error behavior
+auto_filed: true
+code_refs:
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.kt:39
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/ProfileArgValidator.kt:7
+  - core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt:87
+  - core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/ProfileArgValidatorTest.kt:13
+opened: 2026-05-15
+---
+
+**AUTO-FILED ORPHAN ANCHOR.** UD-283 is referenced in source code but had
+no entry in `BACKLOG.md` / `CLOSED.md`, blocking the
+`scripts/backlog-sync.kts` CI gate landed under UD-766. This stub
+exists to unblock the gate.
+
+## Next steps for a reviewer
+
+When you touch the referenced code or want to drive UD-283 to completion:
+
+1. **Real concern** → replace this body with a real title + scope + priority,
+   remove the `auto_filed: true` flag, set `effort`. The ticket is yours.
+2. **Stale comment** → strip the `UD-283` from the source ref(s) below
+   and close this ticket as `wontfix-historical` in CLOSED.md.
+3. **Sub-letter variant of an already-closed parent** (e.g. `UD-283b`,
+   `UD-283c` exist but the parent does not) → close this as
+   `wontfix-historical, parent of closed sub-tickets`.
+
+First source ref: `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/JsonRpc.kt:39`. See `code_refs` for the full list.
+
+## Provenance
+
+Bulk-filed 2026-05-15 to clear the inventory blocking PR #17's UD-766
+CI gate. The clearing script lived briefly at `/tmp/file-orphans.py`;
+its design notes are in the PR #17 comment thread.
