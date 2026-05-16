@@ -2588,3 +2588,61 @@ Re-implementing the OneDrive OAuth flow itself (the existing `OAuthService` is t
 ## Why this wasn't done in PR #9
 
 Adding two SPI methods + lifting OneDrive's auth plumbing + a contract test is its own focused change — would have doubled PR #9's scope. The narrowing guard added on review keeps the runtime behaviour correct (only OneDrive auth begins) while the SPI cleanup proceeds in this ticket.
+
+---
+id: UD-758
+title: MCP: respond with server's supported protocol version instead of erroring
+category: tooling
+priority: high
+effort: S
+status: closed
+closed: 2026-05-16
+resolved_by: commit f1fe643. respond with server-supported protocol version instead of erroring
+opened: 2026-05-16
+---
+The MCP server in `core/app/mcp/` hard-rejects any `initialize` request whose
+`protocolVersion` isn't the exact string `"2024-11-05"`, returning JSON-RPC
+`-32602 INVALID_PARAMS`. Per the MCP lifecycle spec the server MUST instead
+respond with a version *it* supports and let the client decide whether to
+continue:
+
+> If the server supports the requested protocol version, it MUST respond with
+> the same version. Otherwise, the server MUST respond with another protocol
+> version it supports.
+
+Today's Claude Code (2.1.143) announces `"2025-11-25"` in `initialize`, the
+server errors, and the client drops the connection. End-user symptom:
+
+```
+$ claude mcp list
+unidrive: ... - ✗ Failed to connect
+```
+
+`--debug-file` captures the actual error:
+
+```
+MCP server "unidrive": Connection failed after 603ms:
+MCP error -32602: Unsupported protocol version: 2025-11-25. Server supports 2024-11-05
+```
+
+Same root cause will affect Claude Desktop on the 2025-* protocol bumps,
+Cursor, mcp-cli, and anything else that's tracked the spec since 2024-11.
+
+## Acceptance criteria
+
+- `McpServer.handleInitialize` always responds with `protocolVersion: "2024-11-05"`
+  (the version this server actually speaks), regardless of what the client
+  proposed.
+- When the client's version differs from the server's, log a single WARN line
+  for operator visibility — don't error.
+- Add a regression test in `McpServerTest.kt` that drives `initialize` with
+  `"2025-11-25"` and asserts a `result` (not `error`) carrying
+  `protocolVersion: "2024-11-05"`.
+- `claude mcp list` should show the server as `✓ Connected`.
+
+## Code refs
+
+- `core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/McpServer.kt:57-67`
+  — the hard equality check to remove.
+- `core/app/mcp/src/test/kotlin/org/krost/unidrive/mcp/McpServerTest.kt:59-68`
+  — the existing `initialize handshake` test (still valid, no change needed).

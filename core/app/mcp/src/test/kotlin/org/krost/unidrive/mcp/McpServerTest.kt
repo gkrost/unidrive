@@ -68,6 +68,21 @@ class McpServerTest {
     }
 
     @Test
+    fun `initialize downgrades newer client protocol version to server's supported`() {
+        // UD-758: clients on 2025-* protocol revs (Claude Code 2.1.143+ announces
+        // "2025-11-25") must get a successful handshake answering with the server's
+        // supported version, not an INVALID_PARAMS error.
+        val responses =
+            runSession(
+                """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}""",
+            )
+        assertEquals(1, responses.size)
+        assertTrue(responses[0]["error"] == null, "handshake must not error: ${responses[0]}")
+        val result = responses[0]["result"]?.jsonObject!!
+        assertEquals("2024-11-05", result["protocolVersion"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun `tools list returns registered tools`() {
         val responses =
             runSession(

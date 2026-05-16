@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls, works correctly as HashMap key}`. Per UD-813 audit.
 
 ### Fixed
+- UD-758: MCP `initialize` now responds with the server-supported
+  protocol version instead of rejecting any non-matching client
+  version with `-32602 INVALID_PARAMS`. Pre-fix, Claude Code 2.1.143
+  (announcing `2025-11-25`) and every other client on a post-2024-11-05
+  protocol rev would see `claude mcp list` report
+  `unidrive: ✗ Failed to connect`. Lifts the version into the
+  `SUPPORTED_PROTOCOL_VERSION` constant in `JsonRpc.kt`; emits a single
+  WARN for operator visibility when the client and server versions
+  diverge. See [`docs/dev/lessons/mcp-protocol-version-negotiation.md`](dev/lessons/mcp-protocol-version-negotiation.md).
 - UD-211: `LocalWatcher` coalesces editor atomic-save bursts (vim
   `:w`, JetBrains/Emacs write-tmp-and-rename) into a single
   trailing-edge emit per path per quiet window. Previous leading-edge

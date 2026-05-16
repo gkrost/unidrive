@@ -61,12 +61,14 @@ fun buildToolResult(
 
 // ── MCP capability response builders ────────────────────────────────────────────
 
+const val SUPPORTED_PROTOCOL_VERSION = "2024-11-05"
+
 fun buildInitializeResult(
     serverName: String,
     serverVersion: String,
 ): JsonElement =
     buildJsonObject {
-        put("protocolVersion", "2024-11-05")
+        put("protocolVersion", SUPPORTED_PROTOCOL_VERSION)
         put(
             "capabilities",
             buildJsonObject {
