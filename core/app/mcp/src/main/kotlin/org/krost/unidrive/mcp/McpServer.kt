@@ -1,6 +1,7 @@
 package org.krost.unidrive.mcp
 
 import kotlinx.serialization.json.*
+import org.slf4j.LoggerFactory
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -11,6 +12,7 @@ class McpServer(
     private val resources: List<McpResource>,
     private val resourceReader: (String) -> Pair<String, String>?, // uri → (mimeType, text)
 ) {
+    private val log = LoggerFactory.getLogger(McpServer::class.java)
     private val stdout = PrintWriter(System.out, false)
 
     fun run() {
@@ -54,16 +56,17 @@ class McpServer(
         id: JsonElement,
         params: JsonObject?,
     ) {
+        // UD-758: the MCP lifecycle spec requires the server to answer `initialize` with
+        // a version it supports and let the client decide whether to continue — never
+        // error out the handshake. Pre-fix we rejected anything ≠ "2024-11-05" with
+        // INVALID_PARAMS, which broke Claude Code 2.1.143+ (announces "2025-11-25").
         val clientVersion = params?.get("protocolVersion")?.jsonPrimitive?.content
-        if (clientVersion != null && clientVersion != "2024-11-05") {
-            send(
-                buildErrorResponse(
-                    id,
-                    ErrorCodes.INVALID_PARAMS,
-                    "Unsupported protocol version: $clientVersion. Server supports 2024-11-05",
-                ),
+        if (clientVersion != null && clientVersion != SUPPORTED_PROTOCOL_VERSION) {
+            log.warn(
+                "Client requested MCP protocol {} — responding with server-supported {}",
+                clientVersion,
+                SUPPORTED_PROTOCOL_VERSION,
             )
-            return
         }
         send(buildResponse(id, buildInitializeResult("unidrive-mcp", BuildInfo.versionString())))
     }
