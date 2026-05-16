@@ -101,6 +101,30 @@ interface ProviderFactory {
      * and have no interactive begin/complete handshake.
      */
     fun supportsInteractiveAuth(): Boolean = false
+
+    /**
+     * Begin an interactive auth flow. Only invoked when
+     * [supportsInteractiveAuth] returns true. The throwing default is
+     * the sentinel that pairs with the capability gate — UD-014.
+     */
+    suspend fun beginInteractiveAuth(profileDir: java.nio.file.Path): BeginAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+
+    /**
+     * Resume an interactive auth flow with the handle from
+     * [beginInteractiveAuth]. Returns Success / Pending / Failure.
+     */
+    suspend fun completeInteractiveAuth(
+        profileDir: java.nio.file.Path,
+        continuationHandle: String,
+    ): CompleteAuthResult =
+        throw UnsupportedOperationException("$id has no interactive auth flow")
+
+    /**
+     * Abandon an in-flight interactive auth flow. Default no-op.
+     * Implementations release per-handle resources (HTTP clients, timers).
+     */
+    suspend fun cancelInteractiveAuth(continuationHandle: String) { /* no-op */ }
 }
 
 /** Offline credential health diagnostic (no network calls). */
