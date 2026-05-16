@@ -1,7 +1,10 @@
 package org.krost.unidrive.onedrive
 
 import kotlinx.serialization.json.Json
+import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.BeginAuthResult
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.CompleteAuthResult
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
@@ -9,8 +12,9 @@ import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.onedrive.model.Token
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 
-class OneDriveProviderFactory : ProviderFactory {
+open class OneDriveProviderFactory : ProviderFactory {
     override val id = "onedrive"
 
     override fun describeConnection(
@@ -120,4 +124,103 @@ class OneDriveProviderFactory : ProviderFactory {
     }
 
     override fun supportsInteractiveAuth(): Boolean = true
+
+    override suspend fun beginInteractiveAuth(profileDir: Path): BeginAuthResult {
+        val oauth = newOAuthServiceForBegin(profileDir)
+        val deviceCode =
+            try {
+                oauth.getDeviceCode()
+            } catch (e: Exception) {
+                // No handle issued yet — close the HttpClient here, the
+                // registry-cleanup paths cannot reach it.
+                oauth.close()
+                throw e
+            }
+
+        val state =
+            OneDriveDeviceFlowState(
+                deviceCode = deviceCode.deviceCode,
+                expiresAtMillis = System.currentTimeMillis() + deviceCode.expiresIn * 1000L,
+                oauthService = oauth,
+            )
+        val handle = OneDriveDeviceFlowRegistry.put(state)
+
+        return BeginAuthResult.of(
+            continuationHandle = handle,
+            fields =
+                linkedMapOf(
+                    "verification_uri" to deviceCode.verificationUri,
+                    "user_code" to deviceCode.userCode,
+                    "interval_seconds" to deviceCode.interval.toString(),
+                    "expires_in" to deviceCode.expiresIn.toString(),
+                    "message" to deviceCode.message,
+                ),
+            expiresAt = Instant.ofEpochMilli(state.expiresAtMillis),
+            retryAfterSeconds = deviceCode.interval,
+        )
+    }
+
+    override suspend fun completeInteractiveAuth(
+        profileDir: Path,
+        continuationHandle: String,
+    ): CompleteAuthResult {
+        val state =
+            OneDriveDeviceFlowRegistry.get(continuationHandle)
+                ?: return CompleteAuthResult.Failure(
+                    "Unknown or expired continuation_handle. Call auth_begin again.",
+                )
+
+        if (System.currentTimeMillis() > state.expiresAtMillis) {
+            OneDriveDeviceFlowRegistry.remove(continuationHandle)
+            state.oauthService.close()
+            return CompleteAuthResult.Failure("Device code expired. Call auth_begin again.")
+        }
+
+        val oauth = state.oauthService
+        val outcome: OAuthService.DevicePollOutcome =
+            try {
+                oauth.pollOnceForToken(state.deviceCode)
+            } catch (e: AuthenticationException) {
+                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                oauth.close()
+                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
+            } catch (e: Exception) {
+                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                oauth.close()
+                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
+            }
+
+        return when (outcome) {
+            is OAuthService.DevicePollOutcome.Pending ->
+                CompleteAuthResult.Pending(outcome.retryAfterSeconds)
+            is OAuthService.DevicePollOutcome.Success -> {
+                try {
+                    oauth.saveToken(outcome.token)
+                } catch (e: Exception) {
+                    OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                    oauth.close()
+                    return CompleteAuthResult.Failure("Token received but save failed: ${e.message}")
+                }
+                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                oauth.close()
+                CompleteAuthResult.Success
+            }
+            is OAuthService.DevicePollOutcome.Failed -> {
+                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                oauth.close()
+                CompleteAuthResult.Failure(outcome.message)
+            }
+        }
+    }
+
+    override suspend fun cancelInteractiveAuth(continuationHandle: String) {
+        OneDriveDeviceFlowRegistry.remove(continuationHandle)?.oauthService?.close()
+    }
+
+    /** UD-014 test seam: subclassed in OneDriveInteractiveAuthContractTest
+     *  to inject a Ktor MockEngine-backed HttpClient. Production code
+     *  uses the default. Open + internal so the test in the same module
+     *  can override; never overridden in production. */
+    internal open fun newOAuthServiceForBegin(profileDir: Path): OAuthService =
+        OAuthService(OneDriveConfig(tokenPath = profileDir))
 }
