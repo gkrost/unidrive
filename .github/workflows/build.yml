@@ -31,6 +31,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Detect whether any "code" paths changed (Kotlin/Gradle, CI scripts,
+  # workflows). Pure-doc / pure-backlog / pure-dist PRs skip the expensive
+  # `core` Gradle build. `backlog` + `gitleaks` always run because they
+  # validate the doc-only changes themselves.
+  #
+  # Code paths (any match -> code-changed=true):
+  #   core/**            — JVM sources, Gradle config, lock files
+  #   scripts/ci/**      — CI scripts the build runs
+  #   .github/workflows/**  — workflow changes must self-test
+  #   .semgrep.yml, .trivyignore, .gitleaks.toml  — security gates
+  #
+  # Doc-only paths (everything else, e.g. docs/, dist/, scripts/nautilus/,
+  # *.md, AGENTS.md, CLAUDE.md, CONTRIBUTING.md) -> code-changed=false.
+  changes:
+    name: detect-changes
+    runs-on: ubuntu-latest
+    outputs:
+      code-changed: ${{ steps.filter.outputs.code-changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+          # If base is missing (new branch, force-push, initial commit), run core to be safe.
+          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
+            echo "code-changed=true" >> "$GITHUB_OUTPUT"
+            echo "Base SHA missing — defaulting code-changed=true."
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base..$head" || true)
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+          code_changed=false
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            case "$f" in
+              core/*|scripts/ci/*|.github/workflows/*|.semgrep.yml|.trivyignore|.gitleaks.toml)
+                code_changed=true
+                break
+                ;;
+            esac
+          done <<< "$changed"
+          echo "code-changed=$code_changed" >> "$GITHUB_OUTPUT"
+          echo "Decision: code-changed=$code_changed"
+
   core:
     # UD-769: Linux-only matrix per ADR-0011 + ADR-0012. windows-latest was
     # dropped 2026-05-15 because it lied about the support surface (we
@@ -39,6 +94,8 @@ jobs:
     # `continue-on-error: true` job behind a `schedule:` trigger if a
     # future ADR re-opens Windows per ADR-0012 §"Re-opening criteria".
     name: core (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.code-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
