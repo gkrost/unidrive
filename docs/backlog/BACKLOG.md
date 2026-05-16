@@ -11384,7 +11384,7 @@ Cross-link from:
 - [UD-014](CLOSED.md#ud-014) (closed) — made `unidrive_auth_begin` / `_complete` provider-agnostic; the install doc should reflect that the auth flow works for any future OAuth provider.
 - [`scripts/dev/log-watch.sh`](../../scripts/dev/log-watch.sh) — sync log triage; the install doc should mention it for MCP debugging too.
 ---
-id: UD-221
+id: UD-246
 title: InteractiveAuthSpiContractTest pulls provider HTTP stacks into :app:core test classpath
 category: core
 priority: low
@@ -11439,7 +11439,7 @@ Question: is this acceptable, or should the SPI snapshot test move out of `:app:
 - [UD-014](CLOSED.md#ud-014) — introduced the test classpath bleed.
 - [UD-013 / UD-821](CLOSED.md#ud-013) (PRs #29, #30) — earlier work on `:app:sync` test-scope ProviderFactory stubs; same shape of "test needs provider impls without `:app` proper depending on them".
 ---
-id: UD-229
+id: UD-250
 title: IpcServer.kt:69 uses DelicateCoroutinesApi without opt-in or structured scope
 category: core
 priority: low
@@ -11467,13 +11467,13 @@ Pre-existing — surfaced during the UD-014 session's composite-wide `./gradlew 
 
 ## Out of scope
 
-Other Kotlin compile warnings (e.g. `OneDriveProvider.kt:235` redundant safe-call — tracked separately under UD-319).
+Other Kotlin compile warnings (e.g. `OneDriveProvider.kt:235` redundant safe-call — tracked separately under UD-339).
 
 ## Related
 
 - Surfaced during the [UD-014](CLOSED.md#ud-014) build runs (2026-05-16); pre-existing.
 ---
-id: UD-319
+id: UD-339
 title: OneDriveProvider.kt:235 unnecessary safe call on non-null ParentReference
 category: providers
 priority: low
@@ -11502,13 +11502,13 @@ Surfaced during the UD-014 session's composite-wide `./gradlew build` runs. Pre-
 
 ## Out of scope
 
-Other Kotlin compile warnings tracked separately (UD-229 for `IpcServer.kt`).
+Other Kotlin compile warnings tracked separately (UD-250 for `IpcServer.kt`).
 
 ## Related
 
 - Surfaced during the [UD-014](CLOSED.md#ud-014) build runs (2026-05-16); pre-existing.
 ---
-id: UD-320
+id: UD-374
 title: OneDrive OAuthService.getDeviceCode missing postWithFlakeRetry wrapper
 category: providers
 priority: low
