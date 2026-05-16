@@ -87,7 +87,7 @@ sealed class CompleteAuthResult {
     data class Pending(val retryAfterSeconds: Long) : CompleteAuthResult()
 
     /** Terminal failure with a user-displayable message. */
-    data class Error(val message: String) : CompleteAuthResult()
+    data class Failure(val message: String) : CompleteAuthResult()
 }
 ```
 
@@ -126,7 +126,7 @@ suspend fun cancelInteractiveAuth(continuationHandle: String) { /* no-op */ }
 Lift the current MCP-side `DeviceFlowState` + `DeviceFlowRegistry` (with the `OAuthService` field) into the OneDrive module, renamed to `OneDriveDeviceFlowState` / `OneDriveDeviceFlowRegistry`. Three `override` methods on `OneDriveProviderFactory`:
 
 - `beginInteractiveAuth`: instantiate `OAuthService(OneDriveConfig(profileDir))`; call `getDeviceCode()` inside a `try { … } catch (e: Exception) { oauth.close(); throw e }` block — **the `HttpClient` must be closed if `getDeviceCode()` throws** because no handle has been issued yet, so the registry-based cleanup paths can't reach it. Only after a successful `getDeviceCode()` do we register the state under a UUID handle and return `BeginAuthResult` with the five OneDrive fields and a 15-minute `expiresAt`.
-- `completeInteractiveAuth`: look up state by handle; on miss → `Error("Unknown or expired…")`; on expiry → `Error("Device code expired…")` + cleanup; otherwise call `pollOnceForToken` and translate `OAuthService.DevicePollOutcome` (Pending/Success/Failed) to `CompleteAuthResult`. **On `Success`, before returning, call `oauth.saveToken(outcome.token)` to persist credentials under `profileDir`** — this is the step that fulfills the `CompleteAuthResult.Success` KDoc contract ("Tokens persisted to disk"). `saveToken` is `suspend` and may throw; the `Success` path wraps it in `try { saveToken(…) } catch (e: Exception) { remove + close(); return Error("Token received but save failed: ${e.message}") }`. **Every terminal path (Success, Error from poll, Error from save, Error from expiry) must `remove + close()`**; the `Pending` path leaves the state in place for the next poll.
+- `completeInteractiveAuth`: look up state by handle; on miss → `Failure("Unknown or expired…")`; on expiry → `Failure("Device code expired…")` + cleanup; otherwise call `pollOnceForToken` and translate `OAuthService.DevicePollOutcome` (Pending/Success/Failed) to `CompleteAuthResult`. **On `Success`, before returning, call `oauth.saveToken(outcome.token)` to persist credentials under `profileDir`** — this is the step that fulfills the `CompleteAuthResult.Success` KDoc contract ("Tokens persisted to disk"). `saveToken` is `suspend` and may throw; the `Success` path wraps it in `try { saveToken(…) } catch (e: Exception) { remove + close(); return Failure("Token received but save failed: ${e.message}") }`. **Every terminal path (Success, Failure from poll, Failure from save, Failure from expiry) must `remove + close()`**; the `Pending` path leaves the state in place for the next poll.
 - `cancelInteractiveAuth`: `remove + close()` if present.
 
 Detailed override bodies are mechanical translations of `AuthTool.handleAuthBegin` and `handleAuthComplete` as they stand in `main` at the start of this design (commit `71711cd` baseline). No business-logic change — the close-on-early-failure and the `saveToken` call are both already in the current MCP-side code at `AuthTool.kt:113` and `AuthTool.kt:207` respectively.
@@ -226,7 +226,7 @@ private fun handleAuthComplete(args: JsonObject, ctx: ProfileContext): JsonEleme
                 }.toString(),
             )
         }
-        is CompleteAuthResult.Error -> {
+        is CompleteAuthResult.Failure -> {
             McpHandleRouter.forget(handle)
             buildToolResult(
                 buildJsonObject {
@@ -273,11 +273,11 @@ Mechanism: add an internal-visibility test constructor `OAuthService(config: One
 Assertions (orthogonal invariants, named per-test):
 - `factory_declares_interactive_auth_support` — `OneDriveProviderFactory.supportsInteractiveAuth() == true`.
 - `begin_returns_well_formed_payload` — `BeginAuthResult` has non-empty `continuationHandle`; `fields` contains `verification_uri`, `user_code`, `interval_seconds`, `expires_in`, `message`; `expiresAt` in the future; `retryAfterSeconds == 5` (matches fixture).
-- `complete_success_persists_token_and_forgets_handle` — canned 2xx token response drives `CompleteAuthResult.Success`, `token.json` materialises under `profileDir`, calling `completeInteractiveAuth` again with the same handle returns `Error("Unknown or expired…")`.
+- `complete_success_persists_token_and_forgets_handle` — canned 2xx token response drives `CompleteAuthResult.Success`, `token.json` materialises under `profileDir`, calling `completeInteractiveAuth` again with the same handle returns `Failure("Unknown or expired…")`.
 - `complete_authorization_pending_returns_pending` — `{"error":"authorization_pending"}` drives `Pending(retryAfterSeconds=5)`; handle still resolvable on next call.
-- `complete_expired_token_returns_error_and_forgets_handle` — `{"error":"expired_token"}` drives `Error("…expired…")` and second call returns `Error("Unknown or expired…")`.
-- `cancel_releases_handle` — `cancelInteractiveAuth(handle)`; subsequent `completeInteractiveAuth` returns `Error("Unknown or expired…")`.
-- `registry_is_empty_after_each_terminal_outcome` — after `Success`, `Error(expired)`, `Error(poll-failed)`, and `cancel`, the OneDrive device-flow registry reports zero entries. This is the close-side counterpart of Risk #3: removal alone is provable via "same handle returns Error", but the registry-size assertion catches a regression where a future override would `remove` but skip `close()`. The test exposes the registry size via an `internal` test-only accessor on `OneDriveDeviceFlowRegistry`.
+- `complete_expired_token_returns_error_and_forgets_handle` — `{"error":"expired_token"}` drives `Failure("…expired…")` and second call returns `Failure("Unknown or expired…")`.
+- `cancel_releases_handle` — `cancelInteractiveAuth(handle)`; subsequent `completeInteractiveAuth` returns `Failure("Unknown or expired…")`.
+- `registry_is_empty_after_each_terminal_outcome` — after `Success`, `Failure(expired)`, `Failure(poll-failed)`, and `cancel`, the OneDrive device-flow registry reports zero entries. This is the close-side counterpart of Risk #3: removal alone is provable via "same handle returns Failure", but the registry-size assertion catches a regression where a future override would `remove` but skip `close()`. The test exposes the registry size via an `internal` test-only accessor on `OneDriveDeviceFlowRegistry`.
 
 **New 2 — `InteractiveAuthSpiContractTest`** (the cross-cutting invariant).
 
@@ -294,7 +294,7 @@ The two tests enforce orthogonal invariants and are deliberately separate (per C
 | # | Likelihood × blast | Risk | Mitigation |
 |---|---|---|---|
 | 1 | MID × LOW | `runBlocking` topology shift — `AuthTool` keeps the runBlocking (now wraps a `suspend` SPI method); OneDrive override is itself `suspend`. Net thread topology unchanged. | None needed; verify by `./gradlew test` on `:app:mcp` and on `:providers:onedrive`. |
-| 2 | MID × MID | `AuthenticationException` import leaves `:app:mcp`. The two pre-existing catch arms in `AuthTool` are shape-identical (`e.message ?: e.javaClass.simpleName`); collapsing them in `:app:mcp` is correct. | The contract test asserts that an `AuthenticationException` thrown inside `pollOnceForToken` reaches the user as `CompleteAuthResult.Error(message=<original message>)`. |
+| 2 | MID × MID | `AuthenticationException` import leaves `:app:mcp`. The two pre-existing catch arms in `AuthTool` are shape-identical (`e.message ?: e.javaClass.simpleName`); collapsing them in `:app:mcp` is correct. | The contract test asserts that an `AuthenticationException` thrown inside `pollOnceForToken` reaches the user as `CompleteAuthResult.Failure(message=<original message>)`. |
 | 3 | LOW × HIGH | Lifetime leak on `OAuthService.HttpClient`. Every terminal path through `completeInteractiveAuth` must `remove + close()`. | The contract test's "after Success, the same handle returns Error" property indirectly proves removal. An assertion that `OneDriveDeviceFlowRegistry` reports zero entries after each terminal outcome closes the gap. |
 | 4 | LOW × MID | `McpHandleRouter` state is process-scoped. MCP restart mid-flow invalidates handles. | Same as today; documented in the `McpHandleRouter` KDoc. |
 | 5 | LOW × LOW | Internxt accidentally activating. After UD-014, even an accidental `supportsInteractiveAuth()=true` flip yields a clear `UnsupportedOperationException` from the throwing default, not a misexecuted OneDrive flow. | Strict improvement over today; no mitigation needed. |

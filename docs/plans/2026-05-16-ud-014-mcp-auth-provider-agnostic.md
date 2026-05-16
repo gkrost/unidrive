@@ -91,7 +91,7 @@ sealed class CompleteAuthResult {
     ) : CompleteAuthResult()
 
     /** Terminal failure with a user-displayable message. */
-    data class Error(
+    data class Failure(
         val message: String,
     ) : CompleteAuthResult()
 }
@@ -297,7 +297,7 @@ import java.util.concurrent.ConcurrentHashMap
  * because it owns the OAuthService (and its HttpClient) lifecycle.
  *
  * Lifecycle invariant: every terminal outcome of completeInteractiveAuth
- * (Success, Error from poll, Error from save, Error from expiry) must
+ * (Success, Failure from poll, Failure from save, Failure from expiry) must
  * call [OneDriveDeviceFlowRegistry.remove] and close the resulting state's
  * oauthService. Pending leaves the state in place for the next poll.
  */
@@ -399,7 +399,7 @@ with the block that adds the three overrides (full code below; this is the longe
             )
         val handle = OneDriveDeviceFlowRegistry.put(state)
 
-        return BeginAuthResult(
+        return BeginAuthResult.of(
             continuationHandle = handle,
             fields =
                 linkedMapOf(
@@ -420,12 +420,12 @@ with the block that adds the three overrides (full code below; this is the longe
     ): CompleteAuthResult {
         val state =
             OneDriveDeviceFlowRegistry.get(continuationHandle)
-                ?: return CompleteAuthResult.Error("Unknown or expired continuation_handle. Call auth_begin again.")
+                ?: return CompleteAuthResult.Failure("Unknown or expired continuation_handle. Call auth_begin again.")
 
         if (System.currentTimeMillis() > state.expiresAtMillis) {
             OneDriveDeviceFlowRegistry.remove(continuationHandle)
             state.oauthService.close()
-            return CompleteAuthResult.Error("Device code expired. Call auth_begin again.")
+            return CompleteAuthResult.Failure("Device code expired. Call auth_begin again.")
         }
 
         val oauth = state.oauthService
@@ -435,11 +435,11 @@ with the block that adds the three overrides (full code below; this is the longe
             } catch (e: AuthenticationException) {
                 OneDriveDeviceFlowRegistry.remove(continuationHandle)
                 oauth.close()
-                return CompleteAuthResult.Error(e.message ?: e.javaClass.simpleName)
+                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
             } catch (e: Exception) {
                 OneDriveDeviceFlowRegistry.remove(continuationHandle)
                 oauth.close()
-                return CompleteAuthResult.Error(e.message ?: e.javaClass.simpleName)
+                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
             }
 
         return when (outcome) {
@@ -451,7 +451,7 @@ with the block that adds the three overrides (full code below; this is the longe
                 } catch (e: Exception) {
                     OneDriveDeviceFlowRegistry.remove(continuationHandle)
                     oauth.close()
-                    return CompleteAuthResult.Error("Token received but save failed: ${e.message}")
+                    return CompleteAuthResult.Failure("Token received but save failed: ${e.message}")
                 }
                 OneDriveDeviceFlowRegistry.remove(continuationHandle)
                 oauth.close()
@@ -460,7 +460,7 @@ with the block that adds the three overrides (full code below; this is the longe
             is OAuthService.DevicePollOutcome.Failed -> {
                 OneDriveDeviceFlowRegistry.remove(continuationHandle)
                 oauth.close()
-                CompleteAuthResult.Error(outcome.message)
+                CompleteAuthResult.Failure(outcome.message)
             }
         }
     }
@@ -484,10 +484,10 @@ git commit -m "feat(UD-014): OneDriveProviderFactory overrides beginInteractiveA
 
 Mechanical lift of AuthTool.handleAuthBegin/handleAuthComplete bodies
 into the provider. Lifecycle invariant: every terminal outcome
-(Success/Error-from-poll/Error-from-save/Error-from-expiry) does
+(Success/Failure-from-poll/Failure-from-save/Failure-from-expiry) does
 remove+close on OneDriveDeviceFlowRegistry; Pending leaves state in
 place. saveToken wrapped in try/catch so a disk-write failure
-surfaces as CompleteAuthResult.Error rather than dangling state.
+surfaces as CompleteAuthResult.Failure rather than dangling state.
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
@@ -712,8 +712,8 @@ This needs a *two-step* MockEngine: first request → `/devicecode` JSON; second
 
         // Same handle on a second call must now be unknown.
         val second = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
-        assertTrue(second is CompleteAuthResult.Error)
-        assertTrue((second as CompleteAuthResult.Error).message.contains("Unknown or expired"))
+        assertTrue(second is CompleteAuthResult.Failure)
+        assertTrue((second as CompleteAuthResult.Failure).message.contains("Unknown or expired"))
     }
 ```
 
@@ -790,13 +790,13 @@ Run the single test. Expected: PASS.
         val begin = factory.beginInteractiveAuth(tmpProfileDir)
         val outcome = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
 
-        assertTrue(outcome is CompleteAuthResult.Error)
-        assertTrue((outcome as CompleteAuthResult.Error).message.contains("expired", ignoreCase = true))
+        assertTrue(outcome is CompleteAuthResult.Failure)
+        assertTrue((outcome as CompleteAuthResult.Failure).message.contains("expired", ignoreCase = true))
 
         // Handle now unknown.
         val second = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
-        assertTrue(second is CompleteAuthResult.Error)
-        assertTrue((second as CompleteAuthResult.Error).message.contains("Unknown or expired"))
+        assertTrue(second is CompleteAuthResult.Failure)
+        assertTrue((second as CompleteAuthResult.Failure).message.contains("Unknown or expired"))
     }
 ```
 
@@ -813,8 +813,8 @@ Run. Expected: PASS.
         factory.cancelInteractiveAuth(begin.continuationHandle)
 
         val outcome = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
-        assertTrue(outcome is CompleteAuthResult.Error)
-        assertTrue((outcome as CompleteAuthResult.Error).message.contains("Unknown or expired"))
+        assertTrue(outcome is CompleteAuthResult.Failure)
+        assertTrue((outcome as CompleteAuthResult.Failure).message.contains("Unknown or expired"))
     }
 ```
 
@@ -837,7 +837,7 @@ This is the close-side counterpart of Risk #3. It uses `OneDriveDeviceFlowRegist
         val e = factoryWithEngine(deviceCodeThenExpiredEngine())
         val eBegin = e.beginInteractiveAuth(tmpProfileDir)
         e.completeInteractiveAuth(tmpProfileDir, eBegin.continuationHandle)
-        assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Error(expired)")
+        assertEquals(0, OneDriveDeviceFlowRegistry.sizeForTest(), "registry must drain after Failure(expired)")
 
         // Cancel path
         val c = factoryWithEngine(deviceCodeOnlyEngine())
@@ -1042,7 +1042,7 @@ private fun handleAuthComplete(
                 }.toString(),
             )
         }
-        is CompleteAuthResult.Error -> {
+        is CompleteAuthResult.Failure -> {
             McpHandleRouter.forget(handle)
             buildToolResult(
                 buildJsonObject {

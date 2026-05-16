@@ -65,7 +65,7 @@ sealed class CompleteAuthResult {
     ) : CompleteAuthResult()
 
     /** Terminal failure with a user-displayable message. */
-    data class Error(
+    data class Failure(
         val message: String,
     ) : CompleteAuthResult()
 }
