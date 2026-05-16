@@ -11579,3 +11579,80 @@ Add a test-scope stub `ProviderFactory` and a META-INF/services file pointing at
 ## Ordering
 
 Land UD-821 first, then UD-013 can land cleanly. Don't reverse the order — UD-013 alone breaks main.
+---
+id: UD-705
+title: Address remaining 4 doc-drift findings from check-docs.sh first run
+category: tooling
+priority: low
+effort: M
+status: open
+code_refs:
+  - docs/SPECS.md
+  - docs/AGENT-SYNC.md
+  - scripts/ci/check-docs.sh
+opened: 2026-05-16
+---
+**Source:** 2026-05-16 first-run of `scripts/ci/check-docs.sh` (the doc-drift checker landed in PR #27 / UD-762). Five drift findings surfaced on `main`; one (stale `providers/hidrive` ref) is fixed in the same PR as this ticket is filed. The remaining 4 are bundled here.
+
+## Drift findings to address
+
+### 1. Kotlin version mismatch
+
+`core/gradle/libs.versions.toml` declares `kotlin = "2.3.21"`. `docs/SPECS.md` toolchain row says `Kotlin | 2.3.20 ✅ | 2.3.20`. Bump the SPECS.md row to `2.3.21` (or pin the catalog to `2.3.20` if there was a deliberate reason to downgrade — verify via `git log core/gradle/libs.versions.toml | head`).
+
+### 2. Module count: 15 actual vs SPECS.md says 13
+
+`core/settings.gradle.kts` includes 15 modules. SPECS.md §1.1 header says "13 Gradle modules". The table body in SPECS.md §1.1 may be missing rows for `providers:internxt` and `providers:localfs` (or the count includes/excludes ones the doc doesn't). Audit:
+
+```bash
+grep -cE '^include\(":(app|providers):' core/settings.gradle.kts   # gets 15
+grep -E '^\| `(app|providers)/' docs/SPECS.md | wc -l               # gets 8
+```
+
+Fix shape: update the header number to match `settings.gradle.kts`, and ensure every module is rowed in the table.
+
+### 3. CLI subcommand count: 23 actual vs SPECS.md says 19
+
+`core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` has 23 `*Command::class` entries in its `subcommands = [...]` block. SPECS.md says "PicoCLI, 19 subcommands". Audit:
+
+```bash
+sed -n '/subcommands = \[/,/^\s*]/p' core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt | grep -c '::class'   # 23
+grep "19 subcommands" docs/SPECS.md   # find the claim
+```
+
+Fix shape: update the count, refresh the per-subcommand listing if present.
+
+### 4. 94 BACKLOG.md tickets with `category:` mismatching their ID's range bucket
+
+The check-docs.sh script's check #7 parses `docs/AGENT-SYNC.md`'s ID-range table and verifies each open BACKLOG.md ticket's `category:` matches the range allowed for its ID hundreds bucket. 94 tickets currently mismatch. Sample (first 5):
+
+- UD-206 category=providers, bucket 2 (= core)
+- UD-230 category=docs, bucket 2 (= core)
+- UD-371 category=sync, bucket 3 (= providers)
+- UD-104 category=providers, bucket 1 (= security)
+- UD-106 category=core, bucket 1 (= security)
+
+Root cause is a contract-vs-practice mismatch: the AGENT-SYNC.md range table was conceived as an *allocation rule* (where to file new IDs); the `category:` field has been used as a *free-form scope tag*. These two purposes diverged silently.
+
+Three remediation options:
+
+a. **Tighten enforcement, rebalance categories.** Mass-edit the 94 tickets to match their ID's bucket. Single biggest change to BACKLOG.md ever. Risky.
+
+b. **Relax the contract.** Update AGENT-SYNC.md to document that `category:` is descriptive only and not bound to the ID range. Remove check #7 from check-docs.sh (or downgrade to warn-only). Single doc + script edit. Lowest risk.
+
+c. **Split the schema.** Add a new `allocation_range:` field that's bound to the ID, keep `category:` free-form. Both checkers stay; no ticket bodies change.
+
+Recommendation: option (b). The 94-ticket churn of option (a) is high-risk for low value; option (c) adds schema complexity for the same effective result.
+
+## Out of scope here
+
+Drift items already fixed in the PR filing this ticket (PR for branch `docs/specs-drift-fixes-2026-05-16`): the stale `providers/hidrive` row in SPECS.md.
+
+## Cross-refs
+
+- UD-762 — the drift checker that surfaced these
+- `scripts/ci/check-docs.sh` — runs the 7 checks
+- `docs/SPECS.md` — target for findings 1, 2, 3
+- `docs/AGENT-SYNC.md` — target for finding 4 option (b)
+- `docs/backlog/BACKLOG.md` — target for finding 4 option (a)
+- 2026-05-16 first-run output of the drift checker (PR-27 merge commit 820ba62)

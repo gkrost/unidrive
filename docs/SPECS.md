@@ -57,7 +57,6 @@ have to change to bring them back.
 | `providers/sftp` | Apache MINA SSHD, snapshot delta | [`core/providers/sftp/`](../core/providers/sftp) | ✅ |
 | `providers/webdav` | Ktor+Basic, PROPFIND, MOVE | [`core/providers/webdav/`](../core/providers/webdav) | ✅ |
 | `providers/rclone` | CLI gateway to 70+ backends | [`core/providers/rclone/`](../core/providers/rclone) | ✅ |
-| `providers/hidrive` | IONOS HiDrive v2.1 | [`core/providers/hidrive/`](../core/providers/hidrive) | ✅ |
 | `providers/internxt` | Internxt w/ client-side crypto | [`core/providers/internxt/`](../core/providers/internxt) | ✅ |
 | `providers/localfs` | Local-to-local + testing | [`core/providers/localfs/`](../core/providers/localfs) | ✅ |
 
@@ -157,7 +156,6 @@ A `profile` field inside a tool-call's `arguments` object is **silently ignored*
 | sftp | ✅ | 🟡 (snapshot via mtime+size) | ❌ | ❌ | ❌ | 🟡 (df) | SSH key / password |
 | webdav | ✅ | 🟡 (PROPFIND snapshot) | ❌ | ❌ | ❓ audit pending | 🟡 (RFC 4331 PROPFIND; server-dependent — see [UD-325](backlog/CLOSED.md#ud-325)) | HTTP Basic; `trust_all_certs` wired via Ktor Apache5 engine + `PoolingAsyncClientConnectionManager` + `NoopHostnameVerifier` ([UD-104](backlog/CLOSED.md#ud-104); engine changed in [UD-326](backlog/CLOSED.md#ud-326)) |
 | rclone | ✅ | 🟡 (lsjson snapshot) | ❌ | ❌ | ❌ | 🟡 (`rclone about`) | rclone config |
-| hidrive | ✅ | 🟡 | ❌ | ❌ | ❓ | ❓ | OAuth2 |
 | internxt | ✅ | 🟡 | ❌ | ❌ | ❓ | ❓ | REST + client-side AES-256 |
 | localfs | ✅ | ✅ (`Files.walk`) | ❌ | ❌ | 🟡 (`file://` URI, see `LocalFsProvider.kt:189-192`) | ✅ | N/A |
 
