@@ -2,55 +2,50 @@ package org.krost.unidrive.mcp
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
-import org.krost.unidrive.AuthenticationException
-import org.krost.unidrive.onedrive.OAuthService
-import org.krost.unidrive.onedrive.OneDriveConfig
-import org.krost.unidrive.onedrive.model.DeviceCodeResponse
-import java.util.UUID
+import org.krost.unidrive.BeginAuthResult
+import org.krost.unidrive.CompleteAuthResult
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * UD-216 — Two-phase device-code auth over MCP.
+ * UD-216 — Two-phase device-code auth over MCP, made provider-agnostic
+ * by UD-014. The actual flow body lives behind ProviderFactory's
+ * beginInteractiveAuth / completeInteractiveAuth / cancelInteractiveAuth
+ * SPI methods; this file is just the JSON-RPC adapter.
  *
- * The CLI's `auth --device-code` blocks for up to 15 minutes polling the
- * provider every ~5s. That model does not map onto single-shot MCP tool
- * calls, so we split the flow into `_begin` (issues the user-facing URL +
- * user code, returns an opaque handle) and `_complete` (one poll per call).
+ * Per-handle device-flow state (HTTP clients, device codes, expiry) is
+ * owned by the provider that issued the handle. This file's only
+ * persistent state is the [McpHandleRouter] — a flat map from handle
+ * to provider-type-id, used to route auth_complete back to the right
+ * factory.
  *
- * Handles live in an in-process map. If the MCP server restarts mid-flow
- * the caller just starts over — device-codes are cheap and expire in 15 min
- * anyway.
+ * State is process-scoped. If the MCP server restarts mid-flow the
+ * caller just starts over — device codes are cheap and expire in
+ * ~15 min anyway.
  */
-internal data class DeviceFlowState(
-    val profileName: String,
-    val providerType: String,
-    val deviceCode: String,
-    val intervalSeconds: Long,
-    val expiresAtMillis: Long,
-    val oauthService: OAuthService,
-)
+internal object McpHandleRouter {
+    private val routes: ConcurrentHashMap<String, String> = ConcurrentHashMap()
 
-internal object DeviceFlowRegistry {
-    private val states: ConcurrentHashMap<String, DeviceFlowState> = ConcurrentHashMap()
-
-    fun put(state: DeviceFlowState): String {
-        val handle = UUID.randomUUID().toString()
-        states[handle] = state
-        return handle
+    fun register(
+        handle: String,
+        providerType: String,
+    ) {
+        routes[handle] = providerType
     }
 
-    fun get(handle: String): DeviceFlowState? = states[handle]
+    fun providerFor(handle: String): String? = routes[handle]
 
-    fun remove(handle: String): DeviceFlowState? = states.remove(handle)
+    fun forget(handle: String) {
+        routes.remove(handle)
+    }
 }
 
 val authBeginTool =
     ToolDef(
         name = "unidrive_auth_begin",
         description =
-            "Start the OAuth device-code flow for the current profile (OneDrive only). " +
-                "Returns a verification URL, user code, and an opaque continuation handle. " +
-                "Call unidrive_auth_complete with the handle to poll for token issuance.",
+            "Start the interactive auth flow for the current profile (if it supports interactive auth). " +
+                "Returns a continuation handle plus provider-specific instructions (e.g. a verification URL " +
+                "and user code for device-flow). Call unidrive_auth_complete with the handle to advance.",
         inputSchema = objectSchema(),
         handler = ::handleAuthBegin,
     )
@@ -59,7 +54,7 @@ val authCompleteTool =
     ToolDef(
         name = "unidrive_auth_complete",
         description =
-            "Poll once for an outstanding device-code flow started by unidrive_auth_begin. " +
+            "Poll once for an outstanding auth flow started by unidrive_auth_begin. " +
                 "Returns status=pending (retry later), status=ok (token persisted to disk), " +
                 "or status=failed with an error message. The handle is cleared on ok/failed.",
         inputSchema =
@@ -87,56 +82,24 @@ private fun handleAuthBegin(
             isError = true,
         )
     }
-    // UD-014: the SPI capability gate above is the long-term contract,
-    // but the handler body below still hardcodes OneDriveConfig +
-    // OAuthService and would mis-execute against any other provider
-    // that returned true from supportsInteractiveAuth(). Until the auth
-    // flow itself is provider-agnostic in the SPI, narrow the
-    // implementation surface back to OneDrive with an explicit guard.
-    // allow: UD-014
-    if (ctx.profileInfo.type != "onedrive") {
-        return buildToolResult(
-            "Provider '${ctx.profileInfo.type}' declares interactive-auth support " +
-                "but the unidrive_auth_begin handler is currently OneDrive-specific. " +
-                "Tracking generalisation in UD-014.",
-            isError = true,
-        )
-    }
 
-    val config = OneDriveConfig(tokenPath = ctx.profileDir)
-    val oauth = OAuthService(config)
-
-    val deviceCode: DeviceCodeResponse =
+    val result: BeginAuthResult =
         try {
-            runBlocking { oauth.getDeviceCode() }
+            runBlocking { factory.beginInteractiveAuth(ctx.profileDir) }
         } catch (e: Exception) {
-            oauth.close()
             return buildToolResult(
-                "Failed to start device-code flow: ${e.message ?: e.javaClass.simpleName}",
+                "Failed to start interactive auth: ${e.message ?: e.javaClass.simpleName}",
                 isError = true,
             )
         }
 
-    val state =
-        DeviceFlowState(
-            profileName = ctx.profileName,
-            providerType = ctx.profileInfo.type,
-            deviceCode = deviceCode.deviceCode,
-            intervalSeconds = deviceCode.interval,
-            expiresAtMillis = System.currentTimeMillis() + deviceCode.expiresIn * 1000L,
-            oauthService = oauth,
-        )
-    val handle = DeviceFlowRegistry.put(state)
+    McpHandleRouter.register(result.continuationHandle, ctx.profileInfo.type)
 
     return buildToolResult(
         buildJsonObject {
             put("profile", ctx.profileName)
-            put("verification_uri", deviceCode.verificationUri)
-            put("user_code", deviceCode.userCode)
-            put("continuation_handle", handle)
-            put("interval_seconds", deviceCode.interval)
-            put("expires_in", deviceCode.expiresIn)
-            put("message", deviceCode.message)
+            put("continuation_handle", result.continuationHandle)
+            for ((k, v) in result.fields) put(k, v)
         }.toString(),
     )
 }
@@ -149,8 +112,8 @@ private fun handleAuthComplete(
         args["continuation_handle"]?.jsonPrimitive?.content
             ?: return buildToolResult("Missing 'continuation_handle' argument", isError = true)
 
-    val state =
-        DeviceFlowRegistry.get(handle)
+    val providerType =
+        McpHandleRouter.providerFor(handle)
             ?: return buildToolResult(
                 buildJsonObject {
                     put("status", "failed")
@@ -159,33 +122,22 @@ private fun handleAuthComplete(
                 isError = true,
             )
 
-    if (System.currentTimeMillis() > state.expiresAtMillis) {
-        DeviceFlowRegistry.remove(handle)
-        state.oauthService.close()
-        return buildToolResult(
-            buildJsonObject {
-                put("status", "failed")
-                put("error", "Device code expired. Call unidrive_auth_begin again.")
-            }.toString(),
-        )
-    }
-
-    val oauth = state.oauthService
-    val outcome: OAuthService.DevicePollOutcome =
-        try {
-            runBlocking { oauth.pollOnceForToken(state.deviceCode) }
-        } catch (e: AuthenticationException) {
-            DeviceFlowRegistry.remove(handle)
-            oauth.close()
-            return buildToolResult(
+    val factory =
+        org.krost.unidrive.ProviderRegistry
+            .get(providerType)
+            ?: return buildToolResult(
                 buildJsonObject {
                     put("status", "failed")
-                    put("error", e.message ?: e.javaClass.simpleName)
+                    put("error", "Provider '$providerType' no longer registered.")
                 }.toString(),
+                isError = true,
             )
+
+    val outcome: CompleteAuthResult =
+        try {
+            runBlocking { factory.completeInteractiveAuth(ctx.profileDir, handle) }
         } catch (e: Exception) {
-            DeviceFlowRegistry.remove(handle)
-            oauth.close()
+            McpHandleRouter.forget(handle)
             return buildToolResult(
                 buildJsonObject {
                     put("status", "failed")
@@ -195,38 +147,24 @@ private fun handleAuthComplete(
         }
 
     return when (outcome) {
-        is OAuthService.DevicePollOutcome.Pending ->
+        is CompleteAuthResult.Pending ->
             buildToolResult(
                 buildJsonObject {
                     put("status", "pending")
                     put("retry_after_seconds", outcome.retryAfterSeconds)
                 }.toString(),
             )
-        is OAuthService.DevicePollOutcome.Success -> {
-            try {
-                runBlocking { oauth.saveToken(outcome.token) }
-            } catch (e: Exception) {
-                DeviceFlowRegistry.remove(handle)
-                oauth.close()
-                return buildToolResult(
-                    buildJsonObject {
-                        put("status", "failed")
-                        put("error", "Token received but save failed: ${e.message}")
-                    }.toString(),
-                )
-            }
-            DeviceFlowRegistry.remove(handle)
-            oauth.close()
+        CompleteAuthResult.Success -> {
+            McpHandleRouter.forget(handle)
             buildToolResult(
                 buildJsonObject {
                     put("status", "ok")
-                    put("profile", state.profileName)
+                    put("profile", ctx.profileName)
                 }.toString(),
             )
         }
-        is OAuthService.DevicePollOutcome.Failed -> {
-            DeviceFlowRegistry.remove(handle)
-            oauth.close()
+        is CompleteAuthResult.Failure -> {
+            McpHandleRouter.forget(handle)
             buildToolResult(
                 buildJsonObject {
                     put("status", "failed")
