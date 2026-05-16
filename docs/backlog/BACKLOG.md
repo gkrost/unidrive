@@ -11575,3 +11575,45 @@ The drift means an agent reading the README to discover applicable lessons via t
 ## Related
 
 - PR #34 — filed `subagent-detached-head-checkout.md` and flagged this drift in its body.
+---
+id: UD-717
+title: backlog.py next-id should scan prose references, not just frontmatter
+category: tooling
+priority: low
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`scripts/dev/backlog.py`'s `all_ids()` function (line 53) only scans frontmatter `id: UD-XXX` lines in BACKLOG.md and CLOSED.md. It does NOT scan prose references to UD-XXX in the same files, nor in any other doc (specs, plans, lessons, code comments, etc.).
+
+Consequence: `next-id CATEGORY` will hand out IDs that have prior repo-wide references but no frontmatter block. These IDs were typically allocated to research notes, deliverable IDs in `docs/providers/*.md`, closed-ticket cross-references, or "see also UD-XXX" mentions. Filing a new ticket under such an ID creates ambiguity — future `grep UD-XXX` returns both the new ticket and the unrelated prior allocation, breaking AGENT-SYNC's "IDs live forever" contract.
+
+## Worked failure (PR #35, 2026-05-16)
+
+Filing five session findings via `python3 scripts/dev/backlog.py next-id <category>` allocated:
+  - UD-221 → collided with a closed UI tray submenu ticket (`CLOSED.md:176`)
+  - UD-229 → collided with "OneDrive Graph coverage" research (`BACKLOG.md:115/127/332/349`)
+  - UD-319 → collided with Internxt robustness deliverable (`docs/providers/internxt-robustness.md`)
+  - UD-320 → collided with OneDrive robustness deliverable (`docs/providers/onedrive-robustness.md`)
+
+Codex review on PR #35 caught the four collisions; remap commit `b32ec5b` moved them to UD-246 / UD-250 / UD-339 / UD-374. Cost: ~20 minutes plus a code-review round.
+
+## Acceptance
+
+- [ ] `next_free_id(category)` (script line 62) consults a second set of "referenced anywhere in docs/scripts/core" IDs and skips any candidate that appears in either set.
+- [ ] `file_ticket_impl` (line 109) keeps the strict frontmatter-only dup-check for `uid in all_ids()` (we WANT that — duplicate frontmatter blocks are broken). But it should ALSO print a warning if the new uid is referenced in prose somewhere ("warning: UD-XXX already referenced in N location(s) — proceeding anyway").
+- [ ] Performance: a single inventory pass over `docs/` + `scripts/` + `core/` should complete in well under 1s for the current repo size; cache the result for the duration of a single script invocation.
+- [ ] Smoke test in a new `scripts/dev/tests/test_backlog.py` (or similar): allocate a fresh `next-id`, manually insert a prose reference to the next-next-id in a tempfile, re-run `next-id`, confirm the script skips the prose-referenced ID and returns the one after.
+
+## Out of scope
+
+- Refusing to allocate IDs with prose references (strict mode). The semantics chosen here are warn-and-skip-in-next-id, not refuse-and-error.
+- Retroactive de-duplication of the existing collisions in the tree (those would each need a deliberate hygiene PR per pair).
+- Extending the inventory to also scan git history (`git grep UD-XXX` across all refs). YAGNI — current-tree scan is the right scope; if someone resurrects a long-dead ID via a force-push, that's not this script's problem.
+
+## Related
+
+- [PR #35](https://github.com/gkrost/unidrive/pull/35) — surfaced the failure mode via Codex review.
+- [docs/AGENT-SYNC.md](../AGENT-SYNC.md) — "IDs live forever and are referenced from docs/code" contract this hardening enforces.

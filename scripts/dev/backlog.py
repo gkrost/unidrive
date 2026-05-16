@@ -51,11 +51,58 @@ CATEGORY_RANGES = {
 
 
 def all_ids() -> set[str]:
+    """Strict: frontmatter `id:` blocks in BACKLOG.md + CLOSED.md only.
+
+    Used by file_ticket_impl's dup-check — we WANT this to be strict
+    because a duplicate frontmatter block is a real broken state.
+    """
     out: set[str] = set()
     for path in (BACKLOG, CLOSED):
         text = path.read_text(encoding="utf-8")
         for m in re.finditer(r"^id: (UD-\d{3}[a-z]?)", text, re.MULTILINE):
             out.add(m.group(1))
+    return out
+
+
+# Roots scanned for prose UD-XXX references. Kept narrow so the inventory
+# pass stays sub-second on the current tree; extend if a new doc/source
+# location becomes a routine home for UD-XXX cross-references.
+_REFERENCE_ROOTS = ("docs", "scripts", "core")
+_REFERENCE_GLOBS = ("*.md", "*.kt", "*.py", "*.sh")
+
+# Cache the referenced-ids inventory for the duration of a single script
+# invocation. Mutations to BACKLOG.md during this run are not reflected
+# (next-id is a read-only verb; file/close are write verbs that don't
+# re-call referenced_ids on themselves).
+_referenced_cache: set[str] | None = None
+
+
+def referenced_ids() -> set[str]:
+    """Permissive: every UD-XXX appearing anywhere in docs/scripts/core.
+
+    Used by next_free_id to avoid handing out IDs that are referenced
+    in prose (closed-ticket cross-refs, research notes, deliverable
+    IDs in docs/providers/, "see also" mentions in code comments).
+    See UD-717 for the failure mode this prevents.
+    """
+    global _referenced_cache
+    if _referenced_cache is not None:
+        return _referenced_cache
+    out: set[str] = set()
+    pat = re.compile(r"\bUD-(\d{3})[a-z]?\b")
+    for root in _REFERENCE_ROOTS:
+        root_path = REPO / root
+        if not root_path.is_dir():
+            continue
+        for glob in _REFERENCE_GLOBS:
+            for path in root_path.rglob(glob):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for m in pat.finditer(text):
+                    out.add(f"UD-{m.group(1)}")
+    _referenced_cache = out
     return out
 
 
@@ -65,9 +112,12 @@ def next_free_id(category: str) -> str:
             f"unknown category: {category}. valid: {', '.join(sorted(set(CATEGORY_RANGES)))}"
         )
     lo, hi = CATEGORY_RANGES[category]
-    used = {int(x.split("-")[1][:3]) for x in all_ids()}
+    # UD-717: skip IDs that appear in prose anywhere, not just frontmatter.
+    # Prior allocations live in CLOSED.md history, research notes
+    # (docs/providers/*.md), and "see also" cross-refs throughout the tree.
+    blocked = {int(x.split("-")[1][:3]) for x in all_ids() | referenced_ids()}
     for n in range(lo, hi + 1):
-        if n not in used:
+        if n not in blocked:
             return f"UD-{n:03d}"
     raise SystemExit(f"no free IDs left in {category} range ({lo}..{hi})")
 
@@ -122,6 +172,17 @@ def file_ticket_impl(
     """
     if uid in all_ids():
         raise SystemExit(f"{uid} already exists")
+    # UD-717: refuse-loud is too strict (would block legitimate filings
+    # under IDs that are only casually mentioned), warn-loud is enough.
+    # next_free_id already steers callers away from prose-referenced IDs;
+    # this catches the case where someone hand-picks an ID via --id.
+    if uid in referenced_ids():
+        print(
+            f"warning: {uid} is already referenced in prose somewhere in "
+            f"docs/scripts/core — proceeding, but future `grep {uid}` will "
+            f"return both the new ticket and the prior reference. See UD-717.",
+            file=sys.stderr,
+        )
     if priority not in ("low", "medium", "high", "critical"):
         raise SystemExit(f"invalid priority: {priority}")
     if effort not in ("XS", "S", "M", "L", "XL"):
