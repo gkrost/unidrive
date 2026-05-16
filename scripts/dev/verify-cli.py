@@ -145,10 +145,30 @@ def run_case(case: Case, java: str, jar: Path, config_dir: str, sandbox_home: st
         return Result(case, -1, "", "", 0, "SKIP", case.skip_reason)
     env = os.environ.copy()
     env["UNIDRIVE_CONFIG_DIR"] = config_dir
-    env["HOME"] = sandbox_home               # POSIX home-dir fallback
-    env["USERPROFILE"] = sandbox_home        # Windows home-dir fallback
+    # Hermetic sandbox: redirect every path source the JVM / logback can pick up.
+    # `HOME` / `USERPROFILE` alone are NOT enough — `System.getProperty("user.home")`
+    # is resolved by the JVM from native APIs (Windows SHGetFolderPath, POSIX
+    # getpwuid), so we override it explicitly via -D below. We also override
+    # LOCALAPPDATA / XDG_* because logback.xml resolves
+    # `${LOCALAPPDATA:-${user.home}/.local/share}/unidrive` for the log dir
+    # (see core/app/cli/src/main/resources/logback.xml). Without these, every
+    # row in the matrix would append a few lines to the operator's real
+    # `unidrive.log`.
+    env["HOME"] = sandbox_home
+    env["USERPROFILE"] = sandbox_home
+    env["LOCALAPPDATA"] = sandbox_home
+    env["APPDATA"] = sandbox_home
+    env["XDG_CONFIG_HOME"] = str(Path(sandbox_home) / ".config")
+    env["XDG_DATA_HOME"] = str(Path(sandbox_home) / ".local" / "share")
+    env["XDG_CACHE_HOME"] = str(Path(sandbox_home) / ".cache")
+    env["XDG_RUNTIME_DIR"] = str(Path(sandbox_home) / "run")
     env.update(case.env_extra)
-    full_argv = [java, "-jar", str(jar)] + case.argv
+    full_argv = [
+        java,
+        f"-Duser.home={sandbox_home}",
+        "-jar",
+        str(jar),
+    ] + case.argv
     t0 = time.monotonic()
     try:
         cp = subprocess.run(
@@ -466,13 +486,18 @@ def emit_markdown(results: list[Result], out: Path, jar: Path) -> tuple[int, int
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
+CANONICAL_MATRIX_PATH = "docs/dev/cli-verification-matrix.md"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="CLI verification matrix runner (UD-776).")
     ap.add_argument("--jar", help="Path to unidrive-<v>.jar (default: auto-discover).")
     ap.add_argument(
         "--out",
-        default="docs/dev/cli-verification-matrix.md",
-        help="Output markdown path (default: docs/dev/cli-verification-matrix.md).",
+        default=CANONICAL_MATRIX_PATH,
+        help=f"Output markdown path (default: {CANONICAL_MATRIX_PATH}). When --filter "
+             "is set, the default is rejected to prevent clobbering the canonical "
+             "snapshot with a partial matrix — pass an explicit --out (e.g. /tmp/foo.md).",
     )
     ap.add_argument("--filter", help="Regex to filter case labels (substring match).")
     ap.add_argument(
@@ -492,6 +517,15 @@ def main() -> int:
         help="Path to java (default: PATH lookup).",
     )
     args = ap.parse_args()
+
+    # Guard against silently clobbering the committed snapshot with a partial
+    # matrix when the operator runs --filter for fast iteration.
+    if args.filter and args.out == CANONICAL_MATRIX_PATH:
+        sys.exit(
+            f"error: --filter is set but --out defaults to {CANONICAL_MATRIX_PATH}; "
+            "a filtered run would replace the canonical snapshot with a partial "
+            "matrix. Pass an explicit --out (e.g. --out /tmp/verify-cli-scratch.md)."
+        )
 
     jar = find_jar(args.jar)
     print(f"[verify-cli] jar:    {jar}", file=sys.stderr)
