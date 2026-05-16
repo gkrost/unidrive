@@ -23,8 +23,8 @@ Two perspectives, sharply distinct:
 
 - The chosen MCP client lists the unidrive server as **✓ Connected**.
 - The LLM can call `unidrive_quota` and get bytes back.
-- The LLM can call `unidrive_sync` and observe events via
-  `unidrive_watch_events`.
+- The LLM can call `unidrive_sync` and receive its synchronous summary
+  payload (`downloaded`, `uploaded`, `conflicts`, …).
 
 ---
 
@@ -88,17 +88,35 @@ profile selection](SPECS.md#22-surface-b--mcp-json-rpc-20-over-stdio)).
 It needs `-p <profile>` at startup; that profile must already exist in
 the config TOML.
 
-Bootstrap via the CLI:
+Two ways to bootstrap:
+
+### 3.1 Via the CLI's interactive wizard (recommended for humans)
 
 ```bash
-./gradlew :app:cli:deploy
-unidrive profile add --name onedrive-personal --type onedrive --sync-path ~/clouds/onedrive
+./gradlew :app:cli:deploy   # if you haven't already
+unidrive profile add
 ```
 
-Config schema: [`docs/config-schema/config.example.toml`](config-schema/config.example.toml).
-Persistent state for that profile lives at
-`~/.config/unidrive/<profile>/` (Linux) and includes the OAuth token,
-state DB, and conflict log.
+The wizard ([`ProfileAddCommand.kt`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/ProfileCommand.kt))
+prompts in order:
+
+1. Provider type (numbered selection from `onedrive`, `internxt`, `s3`,
+   `sftp`, `webdav`, `hidrive`, `rclone`, `localfs`).
+2. Profile name (default = the type).
+3. Sync root path.
+4. Provider-specific credentials (SPI-driven via `factory.credentialPrompts()`).
+
+A TTY is required — running `unidrive profile add` without an
+interactive terminal errors out. Pure-script bootstrapping is best
+done via the MCP tool `unidrive_profile_add` (see §7) or by editing
+`config.toml` directly.
+
+### 3.2 By editing the config TOML
+
+Schema: [`docs/config-schema/config.example.toml`](config-schema/config.example.toml).
+Persistent state for the profile lives at
+`~/.config/unidrive/<profile>/` (Linux) — OAuth token, state DB,
+conflict log.
 
 ## 4. Authenticate the profile
 
@@ -109,13 +127,19 @@ Two paths, chosen by provider:
 **Option A — via the CLI before MCP registration:**
 
 ```bash
-unidrive auth begin --profile onedrive-personal
-# follow the device-code URL, enter the user code
-unidrive auth complete --profile onedrive-personal
+unidrive -p onedrive-personal auth                    # browser flow (default)
+unidrive -p onedrive-personal auth --device-code      # device-code flow (OneDrive)
 ```
 
-**Option B — let the LLM do it once registered.** The MCP exposes
-`unidrive_auth_begin` and `unidrive_auth_complete`. Since [UD-014](backlog/CLOSED.md#ud-014)
+The CLI's `auth` is a single, blocking command ([`AuthCommand.kt`](../core/app/cli/src/main/kotlin/org/krost/unidrive/cli/AuthCommand.kt))
+— no two-phase begin/complete. It calls the provider's
+`authenticate(...)` and prints `Authenticated to <displayName>` on
+success. Profile selection is the top-level `-p/--provider` flag, not
+a subcommand option.
+
+**Option B — let the LLM do it once registered.** The MCP exposes the
+two-phase `unidrive_auth_begin` / `unidrive_auth_complete` pair, which
+is **MCP-only** (the CLI is one-shot). Since [UD-014](backlog/CLOSED.md#ud-014)
 the dance is provider-agnostic — works for any provider whose
 `ProviderFactory.supportsInteractiveAuth()` returns true (see
 [`AuthTool.kt:42`](../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/AuthTool.kt)).
@@ -136,12 +160,17 @@ for provider-specific shapes). Per-provider field set documented in
 
 ### 4.3 Verify the auth worked
 
+The CLI doesn't have an `identity` subcommand — `unidrive_identity` is
+MCP-only. From the shell, the cheapest token-exercising probe is
+quota:
+
 ```bash
-unidrive identity --profile onedrive-personal
+unidrive -p onedrive-personal quota
 ```
 
-Should print a userPrincipalName / email / bucket-owner-id. Same
-information is available to the LLM via the `unidrive_identity` tool.
+A successful response (numbers in bytes) proves the token works
+end-to-end. Once the MCP is registered, the same information surfaces
+via the `unidrive_identity` and `unidrive_quota` tools.
 
 ## 5. Register the MCP with your LLM client
 
@@ -278,7 +307,7 @@ Also catalogued in [SPECS.md §2.2](SPECS.md#22-surface-b--mcp-json-rpc-20-over-
 | | `unidrive_profile_remove` | Delete a profile + its state DB |
 | | `unidrive_profile_set` | Update profile settings |
 | | `unidrive_config` | Read / write top-level config knobs |
-| **Stream** | `unidrive_watch_events` | Long-poll the `IpcProgressReporter` event stream — `sync_started`, `scan_progress`, `action_progress`, `transfer_progress`, `sync_complete`, etc. (full shape in [SPECS.md §2.1](SPECS.md#21-surface-a--daemon--consumer-push-only-event-stream)) |
+| **Stream** | `unidrive_watch_events` | Poll the **separately-running** `unidrive sync` daemon's `IpcProgressReporter` events — `sync_started`, `scan_progress`, `action_progress`, `transfer_progress`, `sync_complete`, etc. (full shape in [SPECS.md §2.1](SPECS.md#21-surface-a--daemon--consumer-push-only-event-stream)). Returns `status: daemon_not_running` if there's no daemon. **Does not see** events from an MCP-invoked `unidrive_sync` — that path is synchronous and returns a summary directly (see §9.1). |
 
 ## 8. The resource surface — 3 URIs
 
@@ -305,7 +334,7 @@ find concrete prompts useful when validating wiring end-to-end.
 | "Free 5 GB locally" | "Free the 20 largest pinned files older than 30 days" | `unidrive_ls` → `unidrive_free` (loop) |
 | "Resolve all conflicts" | "List conflicts, take the newest-mtime side for each" | `unidrive_conflicts` → `unidrive_sync` |
 | "Make this folder a share link" | "Share `~/cloud/onedrive/Reports/Q3` read-only" | `unidrive_share` |
-| "Track a long sync" | "Run a full sync and tell me when it's done" | `unidrive_sync` + `unidrive_watch_events` (subscribe) |
+| "Track a long sync" | "Run a full sync and tell me when it's done" | `unidrive_sync` (blocks; returns summary on completion). To see per-action progress live, start `unidrive -p <profile> sync --watch` in a separate shell and call `unidrive_watch_events` against that daemon. |
 | "Onboard a new account" | "Add a profile, walk me through auth, then initial sync" | `unidrive_profile_add` → `unidrive_auth_begin` → wait → `unidrive_auth_complete` → `unidrive_sync` → `unidrive_watch_events` |
 | "Why did sync fail last night?" | "Show recent conflicts and the last sync error" | `unidrive_conflicts` + read `unidrive://conflicts` resource |
 
@@ -322,9 +351,20 @@ find concrete prompts useful when validating wiring end-to-end.
   `supportedProviderTypes` — the LLM can read `error.data` to
   reformulate. Routing to a different profile requires a separate MCP
   registration (one profile = one process; see §5.5).
-- **`unidrive_sync` is fire-and-forget.** The MCP returns once the
-  reconcile pass kicks off, not once it completes. For long syncs the
-  LLM should call `unidrive_watch_events` immediately afterward.
+- **`unidrive_sync` is synchronous.** The MCP runs
+  `engine.syncOnce(...)` inside `runBlocking` ([`SyncTool.kt:98`](../core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/SyncTool.kt))
+  and only returns once the Gather → Reconcile → Apply cycle has
+  finished. The response payload is the summary
+  (`downloaded`, `uploaded`, `conflicts`, `totalActions`, `durationMs`).
+  The LLM should expect a tool-call duration in the tens of seconds to
+  many minutes depending on the workload — the JSON-RPC `id` will
+  resolve when the sync completes, not when it begins.
+- **`unidrive_watch_events` watches the separate daemon, not the
+  MCP-invoked sync.** If you want live per-action progress, start a
+  separate daemon (`unidrive -p <profile> sync --watch` in another
+  shell) — the MCP can then surface its `IpcProgressReporter` events
+  via `unidrive_watch_events`. With no daemon running, the tool
+  returns `status: daemon_not_running` and an empty event list.
 - **Token-refresh failures surface as 401-class tool errors.** Recovery
   path is `unidrive_auth_begin` again; the persisted token is
   replaced atomically.
