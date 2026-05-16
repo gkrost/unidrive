@@ -18,22 +18,26 @@ import java.util.concurrent.TimeUnit
 
 class OAuthService(
     private val config: OneDriveConfig,
-) : AutoCloseable {
-    private val log = org.slf4j.LoggerFactory.getLogger(OAuthService::class.java)
-    private val json = Json { ignoreUnknownKeys = true }
     // UD-204: install HttpTimeout so a slow-loris OAuth endpoint can't hang
     // the auth flow indefinitely. Uses the same HttpDefaults values as the
     // other Ktor clients in the tree; the four-class metadata/upload/
     // download/auth matrix proposed in the ticket body is deferred to a
     // follow-up that touches all providers together.
-    private val httpClient =
+    //
+    // UD-014: this is a default-valued constructor arg so test code can
+    // pass a Ktor MockEngine-backed HttpClient (via OneDriveProviderFactory's
+    // newOAuthServiceForBegin hook). Production code uses the default.
+    private val httpClient: HttpClient =
         HttpClient {
             install(HttpTimeout) {
                 connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
                 socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
                 requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
             }
-        }
+        },
+) : AutoCloseable {
+    private val log = org.slf4j.LoggerFactory.getLogger(OAuthService::class.java)
+    private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         val SCOPES =
