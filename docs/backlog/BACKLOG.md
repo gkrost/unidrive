@@ -12432,3 +12432,43 @@ The 669 count almost certainly **isn't a separate state-drift bug** — it's dow
 - UD-377 — structural delta-path fix.
 - UD-378 — duplicate-remote_id reconciliation migration.
 - 2026-05-17 audit report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md) — original 669-count claim with correction footnote.
+---
+id: UD-256c
+title: Strengthen 4 weak UD-256 tests (challenge-test-assertion review)
+category: core
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt
+opened: 2026-05-17
+---
+**Strengthen four weak UD-256 tests flagged by independent validation.**
+
+The 2026-05-17 second-pass validator (`validation-report-2026-05-17.md`, agent-a0070d9f00a4c1415's worktree) audited the UD-256 test suite in `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt` against `main` (`d1fb70a`). Of the 13 UD-256 tests, four were classified as **weak/tautological** — they call `syncOnce()` and only assert that no exception was thrown. They would pass even if `syncOnce()` did nothing. Per the `challenge-test-assertion` skill, the assertion should reflect the business invariant, not the implementation's silence.
+
+## The four weak tests
+
+1. `UD-256 a --sync-path run on a scoped profile is never refused` — currently only verifies "no throw". Should also assert: persisted `effective_scope` was unioned with the new path (or stayed identical if the path was already present), and the run completed reconciliation against the requested scope.
+2. `UD-256 fresh profile with no persisted scope does not refuse bare bidirectional` — currently only verifies "no throw". Should also assert: `effective_scope` stays absent / empty in state.db after the run.
+3. `UD-256 upload-only with persisted scope is not refused` — currently only verifies "no throw". Should also assert: the run reached the reconcile / apply phase (e.g. a reporter signal fired) and effective_scope was NOT mutated by the upload-only run.
+4. `UD-256 download-only with persisted scope is not refused` — same as #3, mirror for download direction.
+
+## Why this matters
+
+The dry-run-side-effect-leak fixed by `0fcd1f1` (PR #45's Codex P1 review) would have been caught earlier if test #1 had asserted on `effective_scope` state after the call. The same kind of regression could land again in a refactor.
+
+## Acceptance
+
+- Each of the four tests gains assertions on observable state after `syncOnce()` returns.
+- The new assertions are not tautological — they would FAIL if `syncOnce()` did nothing.
+- `./gradlew :app:sync:test` green.
+- A small `RecordingReporter` extension (or use existing one) verifies the reporter saw the expected phase progression for tests #3 and #4.
+
+## Cross-refs
+
+- UD-256 (parent) — the scope-persistence feature.
+- UD-256a (sibling) — audit-log session header.
+- UD-256b (sibling) — NoSuchMethodError startup investigation.
+- UD-813 (open) — broader test-audit using the `challenge-test-assertion` rubric. This ticket is a narrow application of UD-813 to UD-256's test set; fold or coordinate as appropriate.
+- Validator report: `validation-report-2026-05-17.md` in worktree `agent-a0070d9f00a4c1415` (uncommitted).
