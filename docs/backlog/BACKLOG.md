@@ -11518,3 +11518,173 @@ Codex review on PR #35 caught the four collisions; remap commit `b32ec5b` moved 
 
 - [PR #35](https://github.com/gkrost/unidrive/pull/35) — surfaced the failure mode via Codex review.
 - [docs/AGENT-SYNC.md](../AGENT-SYNC.md) — "IDs live forever and are referenced from docs/code" contract this hardening enforces.
+---
+id: UD-375
+title: OneDrive auth_begin emits interval_seconds/expires_in as strings, breaking numeric MCP clients
+category: providers
+priority: medium
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`OneDriveProviderFactory.beginInteractiveAuth` emits
+`interval_seconds` and `expires_in` as JSON **strings** instead of
+numbers when packing the result into `BeginAuthResult.fields`:
+
+```kotlin
+// core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/
+//   OneDriveProviderFactory.kt:153-154
+"interval_seconds" to deviceCode.interval.toString(),
+"expires_in" to deviceCode.expiresIn.toString(),
+```
+
+The MCP `unidrive_auth_begin` tool embeds whatever
+`BeginAuthResult.fields` contains verbatim into its JSON response.
+Before UD-014's refactor (when each provider had its own per-MCP
+auth handler), these two fields were emitted as JSON numbers. Now
+they're strings. Any MCP client doing `parseFloat(response.interval_seconds)`
+sees `"5"` instead of `5`; clients that rely on the numeric type
+break or need special-casing.
+
+Flagged by Codex on [PR #32](https://github.com/gkrost/unidrive/pull/32#discussion_r3253099866-ish)
+(the UD-014 provider-agnostic MCP auth refactor); not addressed
+pre-merge.
+
+## Root cause
+
+`BeginAuthResult.fields` is typed as `Map<String, String>` (likely),
+so the call site has to stringify everything regardless of underlying
+type. The MCP tool serializer then has no way to know which were
+originally numeric.
+
+## Acceptance
+
+- [ ] `BeginAuthResult.fields` carries typed values — likely
+      `Map<String, JsonElement>` (the kotlinx.serialization JSON
+      AST type already used elsewhere in MCP wiring) — so callers
+      can distinguish strings, numbers, booleans.
+- [ ] OneDrive's `beginInteractiveAuth` emits `interval_seconds` and
+      `expires_in` as `JsonPrimitive(deviceCode.interval)` /
+      `JsonPrimitive(deviceCode.expiresIn)` — they reach the MCP
+      response as JSON numbers.
+- [ ] Other providers' overrides updated to use `JsonPrimitive(...)`
+      for string fields too (`verification_uri`, `user_code`,
+      `message` — all currently strings; behaviour identical
+      post-fix, but the type plumbing is uniform).
+- [ ] Round-trip test in `:app:mcp` test suite asserts
+      `interval_seconds` parses as a JSON number after going
+      through the MCP serializer.
+
+## Out of scope
+
+- Renaming the field set. `verification_uri` / `user_code` etc. are
+  the documented wire fields from the OAuth device-code RFC and the
+  MCP user guide; renaming would be a breaking change.
+- Cross-provider field-set harmonization. Internxt + future
+  providers might emit different fields; this ticket fixes the
+  type-erasure on the OneDrive fields specifically.
+
+## Related
+
+- [PR #32](https://github.com/gkrost/unidrive/pull/32) — UD-014
+  refactor that introduced the regression.
+- [UD-014](../backlog/CLOSED.md#ud-014) — provider-agnostic
+  interactive-auth.
+- [UD-822](BACKLOG.md#ud-822) — companion ticket for the live-OAuth
+  test leak surfaced by the same PR #32 review.
+- [`docs/dev/2026-05-16-mcp-cli-session-review.md`](../dev/2026-05-16-mcp-cli-session-review.md)
+  §2 — the audit pass that re-confirmed this finding is still
+  live in main.
+---
+id: UD-822
+title: InteractiveAuthSpiContractTest invokes live Azure OAuth + leaks HttpClient
+category: tests
+priority: medium
+effort: S
+status: open
+opened: 2026-05-16
+---
+## Problem
+
+`InteractiveAuthSpiContractTest.interactive_auth_capability_and_override_agree`
+([`core/app/core/src/test/kotlin/org/krost/unidrive/InteractiveAuthSpiContractTest.kt:39-60`](../../core/app/core/src/test/kotlin/org/krost/unidrive/InteractiveAuthSpiContractTest.kt#L39))
+iterates every `ProviderFactory` discovered via `ServiceLoader` and
+calls `factory.beginInteractiveAuth(tmpProfileDir)` on each one that
+declares `supportsInteractiveAuth() == true`.
+
+For the OneDrive factory this **invokes the production device-code
+flow against Azure** (`https://login.microsoftonline.com/...`). Two
+problems:
+
+1. **Test depends on external network.** In offline CI runners or
+   environments behind a strict egress firewall the test slows down
+   to the timeout and may flake. The test catches all `Throwable`s
+   on lines 53-58 (so a timeout / network failure is silently
+   tolerated), but a successful call (network reachable + Azure
+   responding fast) is the more insidious case — see (2).
+
+2. **OAuthService / HttpClient leak.** When the call succeeds,
+   `OneDriveProviderFactory.beginInteractiveAuth` registers a
+   `OneDriveDeviceFlowState` carrying a live `OAuthService` (which
+   owns a Ktor HttpClient) in
+   `OneDriveDeviceFlowRegistry.put(state)` (see
+   [`OneDriveProviderFactory.kt:145`](../../core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveProviderFactory.kt#L145)).
+   The test discards the returned `BeginAuthResult` immediately —
+   the handle is never cancelled, so the `HttpClient` stays open
+   until JVM exit. Across a test-suite run with N OAuth providers
+   this becomes N leaked HTTP clients.
+
+Flagged by Codex on [PR #32](https://github.com/gkrost/unidrive/pull/32);
+the comment recommended either mocking the OneDrive factory or
+verifying the override without invoking the live flow. Not
+addressed pre-merge.
+
+## Acceptance
+
+- [ ] Test verifies the SPI invariant ("declared capability → override
+      exists") **without** invoking the live device-code flow.
+- [ ] Two viable approaches:
+   - **A — Reflection-based override check.** Verify that the
+     factory class declares a non-default `beginInteractiveAuth`
+     method (via `Class.getDeclaredMethod` comparison against the
+     SAM's default impl), without ever calling it. Test runs in
+     <10 ms with no network.
+   - **B — Test factory inversion.** Inject a mock OAuth client into
+     a test-only OneDrive factory variant that returns a synthetic
+     device-code response. Existing
+     [`ProviderFactory` test-scope stubs in `:app:sync`](../backlog/CLOSED.md#ud-821)
+     (UD-821) are the template.
+   - Preference: (A) — smaller surface, faster, no test-only code
+     in production paths.
+- [ ] If the test must invoke the flow (to detect *runtime* misuse
+      such as a deprecated SDK still in the codebase), wrap in a
+      `try/finally` that calls
+      `OneDriveDeviceFlowRegistry.cancel(handle)` to release the
+      HttpClient. Belt-and-braces; preferred only if (A) is
+      somehow infeasible.
+- [ ] CI runs the test in <10 s wall time. Today it can hit the
+      Azure device-code endpoint's normal latency (~300-500 ms per
+      OAuth provider) which is acceptable but the leak is not.
+
+## Out of scope
+
+- Generalising the contract test pattern to other capability SPIs
+  (webhook, share, delta). Same lesson would apply but each has
+  its own resource-lifecycle shape.
+
+## Related
+
+- [PR #32](https://github.com/gkrost/unidrive/pull/32) — UD-014
+  refactor that landed this test.
+- [UD-014](../backlog/CLOSED.md#ud-014) — provider-agnostic
+  interactive-auth.
+- [UD-375](BACKLOG.md#ud-375) — companion ticket for the
+  `auth_begin` wire-format regression surfaced by the same PR #32
+  review.
+- [UD-821](../backlog/CLOSED.md#ud-821) — test-scope
+  `ProviderFactory` stub pattern that the (B) approach would
+  reuse.
+- [`docs/dev/2026-05-16-mcp-cli-session-review.md`](../dev/2026-05-16-mcp-cli-session-review.md)
+  §2 — audit pass that re-confirmed this is still live in main.
