@@ -33,6 +33,8 @@ for the gitignore policy.
 | [subagent-detached-head-checkout.md](subagent-detached-head-checkout.md) | Subagent `git checkout` can silently detach the host shell's HEAD | Multi-task plan execution dispatching implementer subagents that emit commits; verify host `git branch --show-current` after every claimed commit |
 | [cli-surface-verify-before-doc.md](cli-surface-verify-before-doc.md) | Every documented CLI command needs a matrix row before docs ship | Writing user-facing docs that include fenced `unidrive ...` shell blocks |
 | [mcp-protocol-version-negotiation.md](mcp-protocol-version-negotiation.md) | MCP server must answer `initialize` with what it supports, never error | Touching `McpServer.handleInitialize` or any newly-added version-negotiated protocol surface |
+| [validator-pin-to-sha-not-branch.md](validator-pin-to-sha-not-branch.md) | Validator agents pointed at a branch name can read pre-fix commits and report wrong findings | Spawning a read-and-report agent against a PR branch that may be force-pushed / squash-merged / auto-updated during the review cycle |
+| [json-special-chars-on-windows-fs.md](json-special-chars-on-windows-fs.md) | `"`, `\`, newline are JSON-special AND Windows-FS-illegal — extract the formatter, don't round-trip through the FS | Writing or auditing a JSONL log writer that takes a user-controlled path on a Windows CI runner |
 
 ## Adding new lessons
 
