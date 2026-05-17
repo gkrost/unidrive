@@ -7,6 +7,9 @@ on:
       - 'scripts/check-version-drift.sh'
       - '.github/workflows/version-drift.yml'
 
+permissions:
+  contents: read
+
 jobs:
   drift-check:
     runs-on: ubuntu-latest
