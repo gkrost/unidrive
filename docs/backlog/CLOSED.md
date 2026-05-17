@@ -2915,3 +2915,49 @@ originally numeric.
 - [`docs/dev/2026-05-16-mcp-cli-session-review.md`](../dev/2026-05-16-mcp-cli-session-review.md)
   §2 — the audit pass that re-confirmed this finding is still
   live in main.
+
+---
+id: UD-718
+title: unidrive.cmd and unidrive-jfr.cmd reference stale unidrive-0.0.0-greenfield.jar on Windows
+category: tooling
+priority: low
+effort: XS
+status: closed
+closed: 2026-05-17
+resolved_by: commit 239d9994b2b26b5f15ace082910678b80114bae9. version-agnostic Windows .cmd templates under dist/windows/ + glob-based jar resolution in scripts/dev/unidrive-jfr.{ps1,sh}; deploy task untouched per scripts-only scope
+opened: 2026-05-17
+---
+**Stale jar reference in launcher scripts under `%LOCALAPPDATA%\unidrive\` on Windows.**
+
+Both `unidrive.cmd` and `unidrive-jfr.cmd` reference `unidrive-0.0.0-greenfield.jar`, which does not exist — the current shipped jar is `unidrive-0.0.1.jar`:
+
+```
+%LOCALAPPDATA%\unidrive\
+  unidrive-0.0.1.jar        (42 MB, 2026-05-16)
+  unidrive-mcp-0.0.1.jar    (42 MB, 2026-05-16)
+  unidrive.cmd              → java -jar "%~dp0unidrive-0.0.0-greenfield.jar" %*       BROKEN
+  unidrive-jfr.cmd          → java -XX:StartFlightRecording=... -jar "%~dp0unidrive-0.0.0-greenfield.jar" %*   BROKEN
+  unidrive.ps1              → java -jar 'C:\Users\gerno\AppData\Local\unidrive\unidrive-0.0.1.jar' @args   OK
+  unidrive-watch.cmd        → java ... -jar "C:\Users\gerno\AppData\Local\unidrive\unidrive-0.0.1.jar" sync --watch   OK
+```
+
+The user has been calling `unidrive.ps1` directly, masking the rot in the `.cmd` wrappers. The 2026-05-17 JFR session sidestepped `unidrive-jfr.cmd` and built the `java` command inline for the same reason.
+
+## What to change
+
+- Update `unidrive.cmd` and `unidrive-jfr.cmd` to reference `unidrive-0.0.1.jar`.
+- Better: rewrite both to glob `unidrive-*.jar` and use the newest match (mimic the `unidrive.ps1` approach minus the hard-coded version), so the next version bump doesn't re-break them.
+- Even better: ship a single canonical launcher and document which one to use; the current four-script proliferation invites drift.
+
+Windows support is community best-effort per ADR-0012, but these launchers exist and don't work today, which leaves a confused user (anyone who calls `unidrive` from cmd.exe rather than PowerShell) thinking the install is broken.
+
+## Acceptance
+
+- `unidrive.cmd` and `unidrive-jfr.cmd` work against the current jar on a fresh Windows install.
+- Either jar reference is version-agnostic OR the install script writes the launchers from a template at install time using the actual jar name.
+- A short README in `%LOCALAPPDATA%\unidrive\` (or the install instructions) clarifies which launcher to use for which scenario.
+
+## Cross-refs
+
+- ADR-0012 — Linux-MVP scope; Windows is community best-effort. This is a low-effort improvement within that scope.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).

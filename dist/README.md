@@ -5,6 +5,9 @@ distro install — it's a thin bash wrapper around the fat shadowJars produced
 by `./gradlew shadowJar`. Packaging for `.deb` / `.rpm` / AppImage / flatpak
 is tracked under separate backlog items.
 
+Windows community-best-effort launcher templates live under
+[`windows/`](windows/) — see UD-718.
+
 ## What it does
 
 `install.sh` drops the built fat JAR(s) into `~/.local/lib/unidrive/`,
