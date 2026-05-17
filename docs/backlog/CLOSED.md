@@ -3137,3 +3137,41 @@ The 669 count almost certainly **isn't a separate state-drift bug** — it's dow
 - UD-377 — structural delta-path fix.
 - UD-378 — duplicate-remote_id reconciliation migration.
 - 2026-05-17 audit report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md) — original 669-count claim with correction footnote.
+
+---
+id: UD-256b
+title: Investigate 41 NoSuchMethodError thrown in first minute of sync startup (JFR 2026-05-17)
+category: core
+priority: low
+effort: S
+status: closed
+closed: 2026-05-17
+resolved_by: commit 1fda1a45176b967e7612e29f83a010ca2ec4c922. Resolved by existing lesson docs/dev/lessons/jfr-internal-noSuchMethodError.md (2026-04-29, UD-280 investigation). JFR's jdk.JavaErrorThrow event captures JVM-internal NoSuchMethodErrors used as control flow; the 41/min observed at sync startup are not real dependency drift. Lesson predates the ticket; ticket was filed before checking the existing knowledge.
+code_refs:
+  - core/gradle/libs.versions.toml
+opened: 2026-05-17
+---
+**JFR profile of `unidrive sync --dry-run` (2026-05-17, `inxt_gernot_krost_posteo`, jar `unidrive-0.0.1.jar`) reports 41 `java.lang.NoSuchMethodError` thrown in the first minute of execution.**
+
+JFR rule output verbatim:
+
+> Rule Id: Errors — The program generated an average of 41 errors per minute during 17.05.2026, 09:27:31.000 – 09:28:31. 41 errors were thrown in total. The most common error was `java.lang.NoSuchMethodError`, which was thrown 41 times.
+
+JFR snapshot kept at `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr` (1.2 MB). Run completed normally (no fatal crash), so the errors are caught and recovery succeeds — but `NoSuchMethodError` at runtime is a strong signal of dependency / classpath drift (a class loaded from one version of a library, a call site compiled against a different version). Easy to ignore until it isn't.
+
+## What to investigate
+
+- Open the JFR in JMC (or via `mcp__jfr-analyzer__getReport` for a summary) and read the stack traces of the `Java Error` event class. 12.2 % of error traces were truncated at `-XX:FlightRecorderOptions=stackdepth=64`; bump to 256 if the first look is inconclusive.
+- Likely candidates: Kotlin stdlib version (libs.versions.toml `kotlin = "2.3.21"`), Ktor / kotlinx-serialization, picocli, sqlite-jdbc. Check `core/gradle/libs.versions.toml` against what's actually packaged into the shadow jar.
+- If reproducible: add a smoke test that fails the build on any `NoSuchMethodError` thrown during a no-op `sync --dry-run` startup.
+
+## Acceptance
+
+- Root cause identified (which call site, which library mismatch).
+- Either the offending dependency version is pinned/aligned, OR the call site is rewritten to use the available API, OR an explicit shading rule fixes the classpath ambiguity.
+- A smoke test guards against regression.
+
+## Cross-refs
+
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+- JFR snapshot: `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr`.
