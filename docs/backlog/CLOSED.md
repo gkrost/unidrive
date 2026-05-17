@@ -3146,7 +3146,7 @@ priority: low
 effort: S
 status: closed
 closed: 2026-05-17
-resolved_by: commit 1fda1a45176b967e7612e29f83a010ca2ec4c922. Resolved by existing lesson docs/dev/lessons/jfr-internal-noSuchMethodError.md (2026-04-29, UD-280 investigation). JFR's jdk.JavaErrorThrow event captures JVM-internal NoSuchMethodErrors used as control flow; the 41/min observed at sync startup are not real dependency drift. Lesson predates the ticket; ticket was filed before checking the existing knowledge.
+resolved_by: commit 329c5bb0552071f3a8fccac0f913349e9ba7dbfd (the commit that introduced the lesson on 2026-04-29 under UD-280). The lesson docs/dev/lessons/jfr-internal-noSuchMethodError.md establishes that JFR's jdk.JavaErrorThrow event captures JVM-internal NoSuchMethodErrors used as control flow; the 41/min observed at sync startup are not real dependency drift. UD-256b was filed before checking the existing knowledge surface; the resolution was always-already in main.
 code_refs:
   - core/gradle/libs.versions.toml
 opened: 2026-05-17
