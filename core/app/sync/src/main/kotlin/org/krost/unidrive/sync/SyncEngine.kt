@@ -1761,17 +1761,26 @@ class SyncEngine(
         return kept
     }
 
-    // UD-264: append a JSON line to skipped-ops.jsonl. Mirrors logFailure's
-    // shape so the post-mortem reader can grep / jq across both files. No-op
-    // if no log path was wired (CLI sets it; tests that don't care leave it
-    // null).
+    // UD-264: append a JSON line to skipped-ops.jsonl. Goes through
+    // kotlinx.serialization.json so the output is always valid JSONL even
+    // when an action's path contains JSON-special chars (`"`, `\`, newline).
+    // PR #46 Codex P2 (2026-05-17): the prior hand-built triple-quoted
+    // template broke parsing for valid Linux/cloud filenames — failures.jsonl
+    // already had ~119 PARSE_ERR entries from the same bug class in
+    // logFailure (separate ticket to follow). The audit-of-record observed a
+    // path like `/\ninternxt-cli.desktop` in the wild, so this is not
+    // hypothetical. No-op if no log path was wired (CLI sets it; tests that
+    // don't care leave it null).
+    //
+    // The JSON-formatting is lifted into [formatSkippedOpJson] so a unit
+    // test can exercise nasty paths without going through LocalScanner (which
+    // would reject them at the OS-path layer on Windows).
     private fun logSkippedOp(
         action: SyncAction,
         reason: String,
     ) {
         val path = skippedOpsLogPath ?: return
-        val kind = actionLabel(action)
-        val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}","reason":"$reason"}"""
+        val line = formatSkippedOpJson(actionLabel(action), action.path, reason, Instant.now())
         Files.createDirectories(path.parent)
         Files.writeString(path, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
@@ -1839,5 +1848,27 @@ class SyncEngine(
          * outage and stop the pass so the watch loop can back off.
          */
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+
+        /**
+         * UD-264 / PR #46 Codex P2: format a `skipped-ops.jsonl` row using
+         * kotlinx.serialization.json so the output is always valid JSONL
+         * regardless of what the path / reason / action label contains.
+         * Public for unit-testing with paths that the OS would reject at the
+         * filesystem layer (`"`, `\`, newline — all banned on Windows but
+         * legal on Linux/cloud).
+         */
+        internal fun formatSkippedOpJson(
+            action: String,
+            path: String,
+            reason: String,
+            ts: Instant,
+        ): String =
+            kotlinx.serialization.json
+                .buildJsonObject {
+                    put("ts", kotlinx.serialization.json.JsonPrimitive(ts.toString()))
+                    put("action", kotlinx.serialization.json.JsonPrimitive(action))
+                    put("path", kotlinx.serialization.json.JsonPrimitive(path))
+                    put("reason", kotlinx.serialization.json.JsonPrimitive(reason))
+                }.toString()
     }
 }

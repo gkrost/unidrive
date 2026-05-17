@@ -941,6 +941,37 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-264 PR46-Codex formatSkippedOpJson is parseable for paths with JSON-special chars`() {
+        // PR #46 Codex P2: paths can contain `"`, `\`, and newline. failures.jsonl
+        // already had ~119 PARSE_ERR entries from the same bug class in logFailure
+        // (the audit observed `/\ninternxt-cli.desktop` in the wild). The prior
+        // hand-built triple-quoted template produced invalid JSON for these.
+        //
+        // We test the formatter directly because the OS rejects these characters
+        // in real paths on Windows — LocalScanner throws InvalidPathException
+        // before any code under test can run. The lifted formatter has no FS
+        // dependency, so this unit test exercises exactly the hazard.
+        val nasty = "/Doc \"with\" \\back and\nnewline\t\r"
+        val ts = Instant.parse("2026-05-17T10:00:00Z")
+        val line = SyncEngine.formatSkippedOpJson(action = "del-remote", path = nasty, reason = "top_level_never_hydrated", ts = ts)
+
+        // The output must be a single line of valid JSON.
+        assertTrue(!line.contains('\n'), "formatted line must not contain a raw newline; got: $line")
+        val json = kotlinx.serialization.json.Json
+        val obj = json.parseToJsonElement(line) as kotlinx.serialization.json.JsonObject
+
+        // Required fields present with correct shapes.
+        val storedPath = (obj["path"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedReason = (obj["reason"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedAction = (obj["action"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedTs = (obj["ts"] as kotlinx.serialization.json.JsonPrimitive).content
+        assertEquals(nasty, storedPath, "path must round-trip exactly")
+        assertEquals("top_level_never_hydrated", storedReason)
+        assertEquals("del-remote", storedAction)
+        assertEquals("2026-05-17T10:00:00Z", storedTs)
+    }
+
+    @Test
     fun `UD-264 del-remote for top-level WITH hydrated descendant is propagated`() =
         runTest {
             // Three unhydrated folders under /Documents, PLUS one hydrated
