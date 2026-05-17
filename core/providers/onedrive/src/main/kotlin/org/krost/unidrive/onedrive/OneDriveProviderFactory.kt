@@ -1,6 +1,7 @@
 package org.krost.unidrive.onedrive
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import org.krost.unidrive.BeginAuthResult
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CompleteAuthResult
@@ -146,13 +147,18 @@ open class OneDriveProviderFactory : ProviderFactory {
 
         return BeginAuthResult.of(
             continuationHandle = handle,
+            // UD-375: typed JsonPrimitive values so the MCP serializer emits
+            // numerics as JSON numbers (not strings). Pre-fix the .toString()
+            // on `interval` and `expiresIn` made every numeric field arrive
+            // as a JSON string on the wire, breaking clients parsing it as
+            // a number.
             fields =
                 linkedMapOf(
-                    "verification_uri" to deviceCode.verificationUri,
-                    "user_code" to deviceCode.userCode,
-                    "interval_seconds" to deviceCode.interval.toString(),
-                    "expires_in" to deviceCode.expiresIn.toString(),
-                    "message" to deviceCode.message,
+                    "verification_uri" to JsonPrimitive(deviceCode.verificationUri),
+                    "user_code" to JsonPrimitive(deviceCode.userCode),
+                    "interval_seconds" to JsonPrimitive(deviceCode.interval),
+                    "expires_in" to JsonPrimitive(deviceCode.expiresIn),
+                    "message" to JsonPrimitive(deviceCode.message),
                 ),
             expiresAt = Instant.ofEpochMilli(state.expiresAtMillis),
             retryAfterSeconds = deviceCode.interval,

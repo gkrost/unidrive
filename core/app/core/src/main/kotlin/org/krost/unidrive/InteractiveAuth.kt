@@ -1,5 +1,6 @@
 package org.krost.unidrive
 
+import kotlinx.serialization.json.JsonElement
 import java.time.Instant
 
 /**
@@ -14,9 +15,14 @@ data class BeginAuthResult(
     /** Opaque handle the caller passes to completeInteractiveAuth. */
     val continuationHandle: String,
     /**
-     * Provider-supplied JSON-payload keys (string values to keep the
-     * wire format unambiguous). OneDrive populates verification_uri,
-     * user_code, interval_seconds, expires_in, message.
+     * Provider-supplied JSON-payload keys with TYPED values so the
+     * MCP handler can emit them in the JSON-RPC response without
+     * coercing every field to a string. OneDrive populates
+     * verification_uri (string), user_code (string), interval_seconds
+     * (number), expires_in (number), message (string). [UD-375] —
+     * pre-fix this was Map<String, String> and the numerics arrived
+     * as JSON strings on the wire, breaking MCP clients that parsed
+     * them numerically.
      *
      * CONTRACT: iteration order matters — the MCP handler emits these
      * keys in iteration order. Callers in `:app:core`'s sister
@@ -25,7 +31,7 @@ data class BeginAuthResult(
      * primary-constructor calls bypass that and require the caller
      * to guarantee a [LinkedHashMap] / `linkedMapOf` / `buildMap`.
      */
-    val fields: Map<String, String>,
+    val fields: Map<String, JsonElement>,
     /** Wall-clock deadline after which the handle is invalid. */
     val expiresAt: Instant,
     /** Provider-suggested polling interval, if applicable. */
@@ -41,7 +47,7 @@ data class BeginAuthResult(
          */
         fun of(
             continuationHandle: String,
-            fields: Map<String, String>,
+            fields: Map<String, JsonElement>,
             expiresAt: Instant,
             retryAfterSeconds: Long? = null,
         ): BeginAuthResult =
