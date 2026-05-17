@@ -77,7 +77,17 @@ class DoctorCommand : Runnable {
         val profileDir = parent.providerConfigDir()
         val syncRoot = profile.syncRoot
 
-        val checks = runChecks(profileDir, syncRoot, full)
+        // PR #47 Codex P2: thread exclude_patterns through to the orphans check.
+        // Mirrors SyncCommand.run wiring. Doctor is read-only and must still
+        // run on a wedged config, so any error falls back to no excludes.
+        val excludePatterns: List<String> =
+            try {
+                parent.loadSyncConfig().effectiveExcludePatterns(profile.name)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+
+        val checks = runChecks(profileDir, syncRoot, full, excludePatterns = excludePatterns)
         if (json) {
             println(renderJson(checks))
         } else {
@@ -102,6 +112,7 @@ class DoctorCommand : Runnable {
         syncRoot: Path,
         full: Boolean,
         nowOverride: Instant? = null,
+        excludePatterns: List<String> = emptyList(),
     ): List<CheckResult> {
         val now = nowOverride ?: Instant.now()
         val results = mutableListOf<CheckResult>()
@@ -116,7 +127,7 @@ class DoctorCommand : Runnable {
                 db.initialize()
                 results += checkCursorFreshness(db, now)
                 results += checkHydrationDrift(db, syncRoot, full)
-                results += checkLocalOrphans(db, syncRoot, full)
+                results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
                 results += checkEffectiveScope(db)
                 results += checkQuotaFreshness(db, now)
             } finally {
@@ -265,6 +276,7 @@ class DoctorCommand : Runnable {
         db: StateDatabase,
         syncRoot: Path,
         full: Boolean,
+        excludePatterns: List<String> = emptyList(),
     ): CheckResult {
         val name = "local-orphans"
         if (!Files.exists(syncRoot)) {
@@ -272,6 +284,7 @@ class DoctorCommand : Runnable {
         }
         var orphanCount = 0
         var scanned = 0
+        var excluded = 0
         val sampleOrphans = mutableListOf<String>()
         val sidecarDirs = setOf(".unidrive-trash", ".unidrive-versions")
         Files.walk(syncRoot).use { stream ->
@@ -284,6 +297,16 @@ class DoctorCommand : Runnable {
                 if (rel.isEmpty()) continue
                 // Skip sidecar dirs
                 if (sidecarDirs.any { rel == it || rel.startsWith("$it/") }) continue
+                // PR #47 Codex P2: skip configured excludes (same path-key
+                // shape LocalScanner.isExcluded uses: leading slash, forward
+                // slashes). Without this filter a profile with
+                // exclude_patterns = ["/Videos/**"] reports every excluded
+                // file as an orphan and falsely trips the WARN threshold.
+                val relForGlob = "/$rel"
+                if (excludePatterns.any { pattern -> org.krost.unidrive.sync.Reconciler.matchesGlob(relForGlob, pattern) }) {
+                    excluded++
+                    continue
+                }
                 scanned++
                 val dbPath = "/$rel"
                 if (db.getEntry(dbPath) == null) {
@@ -295,7 +318,8 @@ class DoctorCommand : Runnable {
         }
         val scope = if (full) "full walk" else "sample $scanned files"
         val severity = if (orphanCount > 100) Severity.WARN else Severity.OK
-        val summary = "$orphanCount orphans of $scanned files scanned ($scope)"
+        val excludedNote = if (excluded > 0) " (skipped $excluded excluded files)" else ""
+        val summary = "$orphanCount orphans of $scanned files scanned ($scope)$excludedNote"
         val detail = mutableListOf<String>()
         if (sampleOrphans.isNotEmpty()) {
             detail += "sample orphans (on disk, no state.db row):"

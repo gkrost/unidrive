@@ -59,9 +59,10 @@ class DoctorCommandTest {
     private fun runDoctor(
         full: Boolean = false,
         now: Instant = Instant.parse("2026-05-17T12:00:00Z"),
+        excludePatterns: List<String> = emptyList(),
     ): List<DoctorCommand.CheckResult> {
         val cmd = DoctorCommand()
-        return cmd.runChecks(profileDir, syncRoot, full, nowOverride = now)
+        return cmd.runChecks(profileDir, syncRoot, full, nowOverride = now, excludePatterns = excludePatterns)
     }
 
     private fun result(
@@ -328,7 +329,53 @@ class DoctorCommandTest {
         )
     }
 
-    // ── Doctor is read-only — sync_state must be untouched after a run ────
+    // PR #47 Codex P2 -- local-orphans must respect exclude_patterns
+
+    @Test
+    fun `PR47-Codex local-orphans skips files matching exclude_patterns`() {
+        // A profile with /Videos/** excluded (mirrors the audit-of-record's
+        // onedrive-test config). Put 150 files in /Videos on disk; do NOT
+        // seed state.db rows for them. Without the fix, doctor counts 150
+        // orphans and trips WARN (> 100). With the fix, all 150 are skipped
+        // as excluded and the check reports OK.
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        Files.createDirectories(syncRoot.resolve("Videos"))
+        repeat(150) { i -> Files.writeString(syncRoot.resolve("Videos").resolve("clip-$i.mp4"), "x") }
+
+        // Without exclude pattern -> 150 orphans -> WARN.
+        val withoutExclude = result(runDoctor(), "local-orphans")
+        assertEquals(
+            DoctorCommand.Severity.WARN,
+            withoutExclude.severity,
+            "expected WARN without excludes; got summary=${withoutExclude.summary}",
+        )
+        assertTrue(
+            withoutExclude.summary.contains("150 orphans"),
+            "expected 150 orphans without excludes; got '${withoutExclude.summary}'",
+        )
+
+        // With exclude pattern -> 0 orphans -> OK.
+        val withExclude = result(runDoctor(excludePatterns = listOf("/Videos/**")), "local-orphans")
+        assertEquals(
+            DoctorCommand.Severity.OK,
+            withExclude.severity,
+            "expected OK with /Videos/** excluded; got summary=${withExclude.summary}",
+        )
+        assertTrue(
+            withExclude.summary.contains("0 orphans"),
+            "expected 0 orphans with /Videos/** excluded; got '${withExclude.summary}'",
+        )
+        assertTrue(
+            withExclude.summary.contains("skipped 150 excluded files"),
+            "expected excluded-count note in summary; got '${withExclude.summary}'",
+        )
+    }
+
+    // Doctor is read-only -- sync_state must be untouched after a run
 
     @Test
     fun `doctor does not mutate sync_state`() {
