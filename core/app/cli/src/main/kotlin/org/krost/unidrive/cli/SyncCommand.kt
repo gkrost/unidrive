@@ -62,6 +62,23 @@ open class SyncCommand : Runnable {
     @Option(names = ["--sync-path"], description = ["Limit sync to a subtree, e.g. --sync-path /Documents"])
     var syncPath: String? = null
 
+    // UD-256: operator opt-in to take a profile out of scoped-bidirectional mode.
+    // After any --sync-path run, the engine persists the scope and refuses bare
+    // bidirectional apply on that profile (which would propagate "out-of-scope
+    // cloud paths = local deletes" to the cloud). --full-tree clears the persisted
+    // scope and runs whole-cloud reconciliation in one go. Mutually exclusive with
+    // --sync-path (you either widen or you scope; you can't do both in one run).
+    @Option(
+        names = ["--full-tree"],
+        description = [
+            "UD-256: clear the profile's persisted --sync-path history and run whole-cloud",
+            "bidirectional reconciliation. DANGER: this is the operation that produced the",
+            "2026-05-16 incident — use only when the local sync_root is known to mirror the",
+            "entire cloud (otherwise --sync-path is the right answer).",
+        ],
+    )
+    var fullTree: Boolean = false
+
     // UD-243: picocli @ArgGroup(exclusive = true) rejects `--upload-only
     // --download-only` together at parse time with exit 2, instead of letting
     // the flags slide through to the engine. `multiplicity = "0..1"` keeps
@@ -141,6 +158,15 @@ open class SyncCommand : Runnable {
             throw CommandLine.ParameterException(
                 spec.commandLine(),
                 "--propagate-deletes is only valid together with --upload-only.",
+            )
+        }
+        // UD-256: --full-tree (clear persisted scope, reconcile whole cloud) and
+        // --sync-path (constrain to a subtree, add to persisted scope) are
+        // contradictory in the same invocation. Reject at parse time.
+        if (fullTree && syncPath != null) {
+            throw CommandLine.ParameterException(
+                spec.commandLine(),
+                "--full-tree and --sync-path are mutually exclusive: --full-tree clears the persisted scope and reconciles the whole cloud; --sync-path constrains a single subtree.",
             )
         }
         // UD-405: normalise --sync-path at the CLI boundary. PowerShell tab-
@@ -281,6 +307,7 @@ open class SyncCommand : Runnable {
                 if (forceDelete) append(", force-delete")
                 if (propagateDeletes) append(", propagate-deletes")
                 if (watch) append(", watch")
+                if (fullTree) append(", full-tree")
             }
         // UD-741: include sync_path conditionally — silent when unset (the
         // common case), surfaced when set so the user can spot a typo'd
@@ -364,6 +391,9 @@ open class SyncCommand : Runnable {
                 // UD-223: CLI flag wins over config.toml per-profile setting.
                 fastBootstrap = fastBootstrap || profile.rawProvider?.fast_bootstrap == true,
                 auditLog = auditLog,
+                // UD-256: pass --full-tree through to the engine so it clears the
+                // persisted effective_scope and bypasses the bare-bidirectional refusal.
+                allowFullTreeReconciliation = fullTree,
             )
 
         Files.createDirectories(config.syncRoot)

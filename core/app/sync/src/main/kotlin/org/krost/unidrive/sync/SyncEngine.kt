@@ -52,6 +52,14 @@ class SyncEngine(
     // UD-113: optional structured audit log of mutations (Download/Upload/Delete/Move/
     // CreateRemoteFolder). Wired from CLI/MCP startup; null in tests that don't need it.
     private val auditLog: org.krost.unidrive.sync.audit.AuditLog? = null,
+    // UD-256: operator opt-in for full-tree bidirectional after the profile has been
+    // used with --sync-path. When true, the persisted effective_scope is cleared and
+    // this run reconciles against the entire cloud (which is what the user wants when
+    // they're consciously taking the profile out of scoped mode). When false (the
+    // default), a bare bidirectional apply on a profile with non-empty persisted
+    // scope is refused with a guidance message — the 2026-05-16 405-cloud-delete
+    // incident on inxt_gernot_krost_posteo would have been caught here.
+    private val allowFullTreeReconciliation: Boolean = false,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -157,6 +165,66 @@ class SyncEngine(
                     "spurious del-remote actions. Run with --reset to wipe state " +
                     "and re-sync from scratch, or revert sync_root in config.toml.",
             )
+        }
+
+        // UD-256: scope-persistence guard against the 2026-05-16
+        // delete-the-cloud-by-bidirectional-on-partial-local pattern.
+        //
+        // A profile that has ever been operated with `--sync-path` accumulates
+        // a persisted `effective_scope` (sync_state key, TAB-separated list of
+        // normalised paths). On every run:
+        //  - If `syncPath` is set this run: UNION it into the persisted scope
+        //    (whether the scope was previously empty or not). The run proceeds
+        //    with the runtime scope filter as before.
+        //  - If `syncPath` is NULL and the persisted scope is non-empty and the
+        //    run is bidirectional-apply: REFUSE unless --full-tree was passed.
+        //    The reconciler would otherwise treat every cloud path outside the
+        //    persisted scope as "user-deleted-locally" and propagate DELETE.
+        //  - If `--full-tree` was passed: clear the persisted scope (the user
+        //    is consciously taking the profile out of scoped mode) and proceed.
+        //  - Dry-run is allowed-with-warning, not refused, so the operator can
+        //    inspect what a `--full-tree` would do without an unrecoverable
+        //    commitment.
+        //  - Upload-only and download-only are not refused — UD-737 already
+        //    blocks delete propagation in those modes, so the catastrophe
+        //    pattern can't trigger from the directions alone.
+        val priorScope = loadEffectiveScope()
+        if (allowFullTreeReconciliation) {
+            if (priorScope.isNotEmpty()) {
+                log.info(
+                    "UD-256: --full-tree clears persisted effective_scope ({} entries)",
+                    priorScope.size,
+                )
+                db.setSyncState("effective_scope", "")
+            }
+        } else if (syncPath != null) {
+            val unioned = (priorScope + syncPath).distinct()
+            if (unioned.size != priorScope.size) {
+                log.info(
+                    "UD-256: persisting effective_scope += '{}' (now {} entry/entries)",
+                    syncPath,
+                    unioned.size,
+                )
+                db.setSyncState("effective_scope", unioned.joinToString("\t"))
+            }
+        } else if (priorScope.isNotEmpty() && syncDirection == SyncDirection.BIDIRECTIONAL) {
+            val msg =
+                "UD-256: this profile has been used with scoped operations " +
+                    "(--sync-path) in the past. Persisted effective_scope: " +
+                    priorScope.joinToString(", ") { "'$it'" } + ". " +
+                    "Running un-scoped bidirectional reconciliation would treat " +
+                    "every cloud path outside the persisted scope as a deletion " +
+                    "candidate. Either: (a) pass --sync-path <one of the above> " +
+                    "to operate within the existing scope, or (b) pass --full-tree " +
+                    "to clear the persisted scope and re-enable whole-cloud " +
+                    "reconciliation (DANGER — this is the path that produced the " +
+                    "2026-05-16 405-folder-delete incident; only use when the " +
+                    "local sync_root is known to mirror the entire cloud)."
+            if (dryRun) {
+                reporter.onWarning(msg)
+            } else {
+                throw IllegalStateException(msg)
+            }
         }
 
         // Auto-purge expired trash entries
@@ -1487,6 +1555,16 @@ class SyncEngine(
             ancestors.add("/" + parts.subList(0, i).joinToString("/"))
         }
         return ancestors
+    }
+
+    // UD-256: read the persisted `effective_scope` list (TAB-separated, no entries
+    // contain TAB — state.db inspection 2026-05-17 confirmed zero paths with
+    // control characters). Empty string / missing key both mean "no scope ever
+    // persisted" → return empty list (no constraint).
+    private fun loadEffectiveScope(): List<String> {
+        val raw = db.getSyncState("effective_scope") ?: return emptyList()
+        if (raw.isEmpty()) return emptyList()
+        return raw.split("\t").filter { it.isNotEmpty() }
     }
 
     // UD-297: literally-empty syncRoot detector. Narrow on purpose — any

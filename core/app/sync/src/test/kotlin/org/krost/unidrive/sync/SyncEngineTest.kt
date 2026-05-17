@@ -1332,4 +1332,123 @@ class SyncEngineTest {
             org.krost.unidrive.CapabilityResult
                 .Success(remoteIdExists[remoteId] ?: true)
     }
+
+    // UD-256 — persist --sync-path scope across runs; refuse bare bidirectional
+    // when prior scoped runs left an effective_scope behind.
+
+    private fun engineForScope(
+        reporter: ProgressReporter = ProgressReporter.Silent,
+        syncPath: String? = null,
+        syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
+        allowFullTreeReconciliation: Boolean = false,
+    ) = SyncEngine(
+        provider = provider,
+        db = db,
+        syncRoot = syncRoot,
+        conflictPolicy = ConflictPolicy.KEEP_BOTH,
+        reporter = reporter,
+        syncPath = syncPath,
+        syncDirection = syncDirection,
+        allowFullTreeReconciliation = allowFullTreeReconciliation,
+    )
+
+    @Test
+    fun `UD-256 first run with --sync-path persists the scope into sync_state`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            assertEquals("/Documents", db.getSyncState("effective_scope"))
+        }
+
+    @Test
+    fun `UD-256 second --sync-path run unions into the persisted scope`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            engineForScope(syncPath = "/Photos").syncOnce()
+            val stored = db.getSyncState("effective_scope")!!.split("\t").toSet()
+            assertEquals(setOf("/Documents", "/Photos"), stored)
+        }
+
+    @Test
+    fun `UD-256 repeating the same --sync-path does not duplicate the entry`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            assertEquals("/Documents", db.getSyncState("effective_scope"))
+        }
+
+    @Test
+    fun `UD-256 bare bidirectional apply on a profile with persisted scope throws`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineForScope().syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("UD-256"))
+            assertTrue(ex.message!!.contains("/Documents"))
+            assertTrue(ex.message!!.contains("--sync-path") || ex.message!!.contains("--full-tree"))
+        }
+
+    @Test
+    fun `UD-256 bare bidirectional dry-run on scoped profile warns instead of throwing`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val reporter = RecordingReporter()
+            engineForScope(reporter = reporter).syncOnce(dryRun = true)
+            assertTrue(
+                reporter.warnings.any { it.contains("UD-256") && it.contains("/Documents") },
+                "expected UD-256 warning, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-256 --full-tree clears persisted scope and allows the run`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            engineForScope(allowFullTreeReconciliation = true).syncOnce(dryRun = false)
+            // Cleared (stored as empty string, treated as no scope on read).
+            assertEquals("", db.getSyncState("effective_scope"))
+        }
+
+    @Test
+    fun `UD-256 a --sync-path run on a scoped profile is never refused`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            // Running with a --sync-path (even a different one) must succeed —
+            // the user is operating inside scoped mode, which is the safe path.
+            engineForScope(syncPath = "/Photos").syncOnce(dryRun = false)
+        }
+
+    @Test
+    fun `UD-256 fresh profile with no persisted scope does not refuse bare bidirectional`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            // No prior --sync-path run; effective_scope key is absent.
+            engineForScope().syncOnce(dryRun = false)
+        }
+
+    @Test
+    fun `UD-256 upload-only with persisted scope is not refused`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            // UPLOAD direction is push-additive per UD-737; the delete-the-cloud
+            // pattern cannot trigger, so UD-256 does not refuse the run.
+            engineForScope(syncDirection = SyncDirection.UPLOAD).syncOnce(dryRun = false)
+        }
+
+    @Test
+    fun `UD-256 download-only with persisted scope is not refused`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            engineForScope(syncDirection = SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
+        }
 }
