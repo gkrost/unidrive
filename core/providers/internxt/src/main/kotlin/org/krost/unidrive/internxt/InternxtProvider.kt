@@ -570,14 +570,7 @@ class InternxtProvider(
         uuid: String,
         folderMap: Map<String, InternxtFolder>,
         rootUuid: String,
-    ): String {
-        if (uuid == rootUuid) return ""
-        val folder = folderMap[uuid] ?: return ""
-        val parentPath = folder.parentUuid?.let { buildFolderPath(it, folderMap, rootUuid) } ?: ""
-        // UD-317: sanitise name returned by createFolder API.
-        val name = sanitizeName(folder.plainName ?: folder.name ?: "")
-        return "$parentPath/$name"
-    }
+    ): String = Companion.buildFolderPath(uuid, folderMap, rootUuid)
 
     override suspend fun quota(): QuotaInfo = api.getQuota()
 
@@ -831,6 +824,34 @@ class InternxtProvider(
                 // the `status` enum. Mirrors the folder helper at line ~562.
                 deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
             )
+        }
+
+        /**
+         * UD-376: testable seam for the delta path-resolution walk.
+         *
+         * WARNING — current behaviour is buggy on incomplete folderMaps.
+         * When `folderMap` is missing a non-root ancestor (typical
+         * outcome of a /folders delta page that only returned the
+         * changed leaves), this function silently returns `""`, which
+         * propagates into `(File|Folder).toDeltaCloudItem` as an empty
+         * `parentPath` and ends up rooting the item at `/`. The
+         * `InternxtProvider_DeltaPathResolutionTest` "missing
+         * ancestor" case pins this behaviour as a regression target;
+         * flipping the assertion is part of the structural fix
+         * (see docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md
+         * for the three candidate strategies).
+         */
+        internal fun buildFolderPath(
+            uuid: String,
+            folderMap: Map<String, InternxtFolder>,
+            rootUuid: String,
+        ): String {
+            if (uuid == rootUuid) return ""
+            val folder = folderMap[uuid] ?: return ""
+            val parentPath = folder.parentUuid?.let { buildFolderPath(it, folderMap, rootUuid) } ?: ""
+            // UD-317: sanitise name returned by createFolder API.
+            val name = sanitizeName(folder.plainName ?: folder.name ?: "")
+            return "$parentPath/$name"
         }
 
         /** UD-317: pure converter for delta folder entries (parentPath already resolved by caller). */
