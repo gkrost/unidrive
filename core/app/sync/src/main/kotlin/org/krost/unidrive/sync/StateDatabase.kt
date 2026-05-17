@@ -210,6 +210,55 @@ class StateDatabase(
         }
     }
 
+    /**
+     * UD-264: cheap "has anything under this top-level ever been hydrated
+     * locally?" probe for the top-level-never-hydrated delete guard. The
+     * top-level is passed as e.g. `/Documents`; we test against descendants
+     * under `/Documents/`. Returns true on the first hit (`LIMIT 1`) — the
+     * intent is "is this subtree known to the user", not a count.
+     *
+     * The path-LIKE index (`idx_sync_entries_path_lower`) doesn't help here
+     * because we're filtering on the additional column, but the predicate is
+     * narrow enough (single-segment prefix, short-circuit on first row) that
+     * we don't need a dedicated index even for 280k-row state.dbs.
+     */
+    @Synchronized
+    fun hasHydratedDescendant(topLevel: String): Boolean {
+        val pattern = "${escapeLike(topLevel)}/%"
+        conn
+            .prepareStatement(
+                "SELECT 1 FROM sync_entries WHERE (path = ? OR path LIKE ? ESCAPE '\\') " +
+                    "AND (is_hydrated = 1 OR local_mtime IS NOT NULL) LIMIT 1",
+            ).use { stmt ->
+                stmt.setString(1, topLevel)
+                stmt.setString(2, pattern)
+                val rs = stmt.executeQuery()
+                return rs.next()
+            }
+    }
+
+    /**
+     * UD-265: count tracked entries under a given top-level cloud path
+     * (e.g. `/Documents`). Used by the per-subtree deletion safeguard to
+     * compute the denominator when evaluating "delete N% of this subtree".
+     * Counts the top-level row itself plus all descendants — matches what
+     * the deletion plan operates on.
+     */
+    @Synchronized
+    fun countEntriesUnderTopLevel(topLevel: String): Int {
+        val pattern = "${escapeLike(topLevel)}/%"
+        conn
+            .prepareStatement(
+                "SELECT COUNT(*) FROM sync_entries WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            ).use { stmt ->
+                stmt.setString(1, topLevel)
+                stmt.setString(2, pattern)
+                val rs = stmt.executeQuery()
+                rs.next()
+                return rs.getInt(1)
+            }
+    }
+
     @Synchronized
     fun getEntriesByPrefix(prefix: String): List<SyncEntry> {
         conn.prepareStatement("SELECT * FROM sync_entries WHERE path LIKE ? ESCAPE '\\'").use { stmt ->

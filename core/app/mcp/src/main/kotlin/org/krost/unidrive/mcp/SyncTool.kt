@@ -87,10 +87,15 @@ private fun handleSync(
                     syncPath = syncPath,
                     syncDirection = direction,
                     maxDeletePercentage = ctx.config.maxDeletePercentage,
+                    // UD-265: two-axis reframing — absolute count + per-subtree percentage.
+                    maxDeleteAbsolute = ctx.config.maxDeleteAbsolute,
+                    maxDeletePerSubtreePercent = ctx.config.maxDeletePerSubtreePercent,
                     verifyIntegrity = ctx.config.verifyIntegrity,
                     providerId = ctx.profileInfo.type,
                     useTrash = ctx.config.useTrash,
                     placeholder = placeholder,
+                    // UD-264: skipped-ops audit log sibling of failures.jsonl.
+                    skippedOpsLogPath = ctx.profileDir.resolve("skipped-ops.jsonl"),
                 )
 
             // UD-254: MCP-invoked sync is classified MANUAL since the caller

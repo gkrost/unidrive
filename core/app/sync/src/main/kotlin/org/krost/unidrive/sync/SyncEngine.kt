@@ -36,6 +36,15 @@ class SyncEngine(
     // source of truth" semantics. No effect outside SyncDirection.UPLOAD.
     private val propagateDeletes: Boolean = false,
     private val maxDeletePercentage: Int = 50,
+    // UD-265: two new axes on the deletion safeguard. maxDeletePercentage stays
+    // for back-compat (still trips); these add an absolute cap (catches
+    // wide-blast on large drives where any sane percentage is still a
+    // catastrophe) and a per-top-level-subtree percentage (catches
+    // 100%-of-/Documents/Foo runs that are 0.1% of the whole drive). Either
+    // axis tripping aborts apply / warns in dry-run; --force-delete bypasses
+    // all three. 0 disables the corresponding check.
+    private val maxDeleteAbsolute: Int = 50,
+    private val maxDeletePerSubtreePercent: Int = 80,
     private val verifyIntegrity: Boolean = false,
     private val providerId: String = "",
     private val useTrash: Boolean = true,
@@ -60,6 +69,22 @@ class SyncEngine(
     // scope is refused with a guidance message — the 2026-05-16 405-cloud-delete
     // incident on inxt_gernot_krost_posteo would have been caught here.
     private val allowFullTreeReconciliation: Boolean = false,
+    // UD-264: opt-out for the top-level-never-hydrated guard. When false (default)
+    // the engine SKIPS any del-remote action whose top-level cloud folder has
+    // never held a hydrated descendant locally — exactly the 2026-05-16 incident
+    // shape on `inxt_gernot_krost_posteo`, where state.db indexed 280k entries
+    // but no descendant of /Documents/CyberLink/ etc. ever had local_mtime or
+    // is_hydrated=1 (the official Internxt client wrote them to cloud; the user
+    // never downloaded them through unidrive). When true the guard still logs
+    // skipped paths to skipped-ops.jsonl but does NOT drop the action — for the
+    // rare case where the operator genuinely wants to purge a never-touched
+    // top-level (e.g. final cleanup after rename).
+    private val ignoreTopLevelGuard: Boolean = false,
+    // UD-264: sibling of failureLogPath. When non-null and a delete is dropped
+    // (or would have been dropped, if ignoreTopLevelGuard=true), append a JSON
+    // line: {"ts":"...","action":"del-remote","path":"...","reason":"..."}.
+    // Null in tests that don't care about audit output.
+    private val skippedOpsLogPath: Path? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -341,12 +366,31 @@ class SyncEngine(
         // heartbeat instead of going silent for many seconds on big first-syncs;
         // UD-901a: pass syncPath so the recovery loops respect scope and don't
         // resurrect orphans outside the user's requested subtree).
-        val allActions = reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
+        val reconciledActions = reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
             updateRemoteEntries(allRemoteChanges)
         }
+
+        // UD-264: top-level-never-hydrated guard. For every DeleteRemote action,
+        // check whether *any* descendant under the action's top-level cloud
+        // folder has ever been hydrated locally (is_hydrated=1 OR local_mtime
+        // IS NOT NULL). If not, the top-level has never been touched by this
+        // unidrive install — propagating deletes outward would mirror the
+        // 2026-05-16 incident shape, where state.db indexed 280k entries via
+        // delta but no descendant of /Documents/CyberLink/, /.userhome/win11/
+        // etc. ever held a hydrated local row (the user used the official
+        // Internxt client to write them to cloud; unidrive only ever saw them
+        // through delta). forceDelete bypasses; --ignore-top-level-guard logs
+        // but does not skip. Skipped paths are appended to skipped-ops.jsonl
+        // for post-mortem visibility.
+        val allActions =
+            if (forceDelete) {
+                reconciledActions
+            } else {
+                applyTopLevelHydrationGuard(reconciledActions)
+            }
 
         // Phase 2a: Direction filter
         val actions =
@@ -404,14 +448,33 @@ class SyncEngine(
             return
         }
 
-        // Phase 2b: Deletion safeguard. UD-298: also evaluate in dry-run —
-        // emit reporter.onWarning instead of throwing so the user still sees
-        // the planned actions but cannot miss the warning. Non-dry-run
-        // throws (current behaviour preserved).
-        if (!forceDelete && maxDeletePercentage in 1..99) {
-            val deleteCount = actions.count { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
+        // Phase 2b: Deletion safeguards.
+        //
+        // UD-298: legacy whole-inventory percentage check. Still in place for
+        // back-compat — preserves the same threshold name and behaviour that
+        // operators have come to rely on. Evaluates in dry-run as a warning
+        // (UD-298 reframe) and throws otherwise.
+        //
+        // UD-265: two additional axes on top of the legacy check.
+        //   1) maxDeleteAbsolute (default 50): trips on any run planning > N
+        //      deletes, regardless of inventory size. Catches "wide blast"
+        //      runs on large drives where 0.14 % of 280k entries (the
+        //      2026-05-16 incident: 405 deletes) is still a catastrophe.
+        //   2) maxDeletePerSubtreePercent (default 80): trips when any single
+        //      top-level cloud folder affected by deletes has > N% of its
+        //      tracked entries marked for deletion. Catches "delete 100 % of
+        //      /Documents/CyberLink/" runs that are tiny fractions of the
+        //      whole drive but catastrophic within their subtree.
+        //
+        // Any single axis tripping aborts apply / warns in dry-run.
+        // forceDelete bypasses all three. 0 disables the corresponding axis.
+        if (!forceDelete) {
+            val deleteActions = actions.filter { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
+            val deleteCount = deleteActions.size
             val totalEntries = db.getEntryCount()
-            if (totalEntries > 0 && deleteCount > 10) {
+
+            // UD-298 legacy whole-inventory percentage axis.
+            if (maxDeletePercentage in 1..99 && totalEntries > 0 && deleteCount > 10) {
                 val pct = deleteCount * 100 / totalEntries
                 if (pct > maxDeletePercentage) {
                     val msg =
@@ -422,6 +485,46 @@ class SyncEngine(
                         reporter.onWarning(msg)
                     } else {
                         throw IllegalStateException(msg)
+                    }
+                }
+            }
+
+            // UD-265 axis 1: absolute count cap.
+            if (maxDeleteAbsolute > 0 && deleteCount > maxDeleteAbsolute) {
+                val msg =
+                    "UD-265 Deletion safeguard: $deleteCount deletes planned, " +
+                        "exceeding max_delete_absolute=$maxDeleteAbsolute. " +
+                        "sync_root='$syncRoot'. Use --force-delete to override."
+                if (dryRun) {
+                    reporter.onWarning(msg)
+                } else {
+                    throw IllegalStateException(msg)
+                }
+            }
+
+            // UD-265 axis 2: per-top-level-subtree percentage cap. Group
+            // delete actions by their top-level segment, count the tracked
+            // entries under that top-level in state.db, and compare. Skip
+            // subtrees with fewer than 5 tracked entries — small folders
+            // produce noisy 100% trips on legitimate cleanups.
+            if (maxDeletePerSubtreePercent in 1..99 && deleteCount > 0) {
+                val byTopLevel = deleteActions.groupBy { topLevelOf(it.path) }
+                for ((top, group) in byTopLevel) {
+                    if (top == null) continue
+                    val tracked = db.countEntriesUnderTopLevel(top)
+                    if (tracked < 5) continue
+                    val pct = group.size * 100 / tracked
+                    if (pct > maxDeletePerSubtreePercent) {
+                        val msg =
+                            "UD-265 Deletion safeguard: ${group.size} of $tracked entries " +
+                                "under top-level '$top' ($pct%) would be deleted, exceeding " +
+                                "max_delete_per_subtree_percent=$maxDeletePerSubtreePercent%. " +
+                                "sync_root='$syncRoot'. Use --force-delete to override."
+                        if (dryRun) {
+                            reporter.onWarning(msg)
+                        } else {
+                            throw IllegalStateException(msg)
+                        }
                     }
                 }
             }
@@ -1587,6 +1690,90 @@ class SyncEngine(
         val raw = db.getSyncState("effective_scope") ?: return emptyList()
         if (raw.isEmpty()) return emptyList()
         return raw.split("\t").filter { it.isNotEmpty() }
+    }
+
+    // UD-264: extract the top-level cloud-path segment from an absolute path.
+    // `/Documents/CyberLink/Foo` -> `/Documents`. Root-only paths (`/`, ``) or
+    // single-segment paths under root (`/Foo`) return their own value as the
+    // top-level. Returns null for paths that don't start with `/`, which never
+    // happens in production but keeps callers honest.
+    private fun topLevelOf(path: String): String? {
+        if (!path.startsWith("/")) return null
+        val trimmed = path.trimStart('/')
+        if (trimmed.isEmpty()) return null
+        val firstSlash = trimmed.indexOf('/')
+        return "/" + if (firstSlash < 0) trimmed else trimmed.substring(0, firstSlash)
+    }
+
+    // UD-264: filter `del-remote` actions against the top-level-never-hydrated
+    // guard. For each candidate, identify its top-level segment; if state.db
+    // has zero rows under that top-level with is_hydrated=1 OR local_mtime
+    // IS NOT NULL, the top-level has never been locally hydrated and the
+    // delete is dropped (or, with --ignore-top-level-guard, kept but logged).
+    // Cache per (top-level, run) so a wide-blast plan doesn't hammer the DB.
+    // DeleteLocal is NOT covered here — the guard's purpose is to refuse
+    // *cloud-side* deletes triggered by a partial-local-tree reconciliation.
+    private fun applyTopLevelHydrationGuard(actions: List<SyncAction>): List<SyncAction> {
+        if (actions.none { it is SyncAction.DeleteRemote }) return actions
+        val hydrationCache = mutableMapOf<String, Boolean>()
+        val kept = mutableListOf<SyncAction>()
+        var skipped = 0
+        for (action in actions) {
+            if (action !is SyncAction.DeleteRemote) {
+                kept.add(action)
+                continue
+            }
+            val top = topLevelOf(action.path)
+            if (top == null) {
+                kept.add(action)
+                continue
+            }
+            val everHydrated =
+                hydrationCache.getOrPut(top) {
+                    db.hasHydratedDescendant(top)
+                }
+            if (everHydrated) {
+                kept.add(action)
+            } else {
+                // Log to skipped-ops.jsonl regardless of opt-out — operators
+                // need the audit trail either way.
+                logSkippedOp(action, "top_level_never_hydrated")
+                if (ignoreTopLevelGuard) {
+                    // Opt-out: keep the action in the plan (still logged).
+                    kept.add(action)
+                } else {
+                    skipped++
+                    log.warn(
+                        "UD-264: skipping del-remote for {} — top-level '{}' has never had a hydrated descendant",
+                        action.path,
+                        top,
+                    )
+                }
+            }
+        }
+        if (skipped > 0) {
+            log.warn(
+                "UD-264: skipped {} del-remote action(s) for never-hydrated top-level subtrees " +
+                    "(see skipped-ops.jsonl). Pass --ignore-top-level-guard to override.",
+                skipped,
+            )
+        }
+        return kept
+    }
+
+    // UD-264: append a JSON line to skipped-ops.jsonl. Mirrors logFailure's
+    // shape so the post-mortem reader can grep / jq across both files. No-op
+    // if no log path was wired (CLI sets it; tests that don't care leave it
+    // null).
+    private fun logSkippedOp(
+        action: SyncAction,
+        reason: String,
+    ) {
+        val path = skippedOpsLogPath ?: return
+        val kind = actionLabel(action)
+        val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}","reason":"$reason"}"""
+        Files.createDirectories(path.parent)
+        Files.writeString(path, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
 
     // UD-297: literally-empty syncRoot detector. Narrow on purpose — any

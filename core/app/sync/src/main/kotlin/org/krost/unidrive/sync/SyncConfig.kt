@@ -161,6 +161,15 @@ data class RawGeneral(
     val log_file: String? = null,
     val max_bandwidth_kbps: Int? = null,
     val max_delete_percentage: Int? = null,
+    // UD-265: two-axis reframing of the deletion safeguard. The existing
+    // max_delete_percentage stays as-is (back-compat); these add an absolute
+    // cap that defends against wide-blast on large inventories where any
+    // sane percentage is still a catastrophe, and a per-subtree percentage
+    // that catches "delete 100 % of one top-level" runs which are tiny
+    // fractions of the whole drive (the 2026-05-16 incident shape: 405
+    // deletes = 0.14 % of 280k entries, well under the old 50 % brake).
+    val max_delete_absolute: Int? = null,
+    val max_delete_per_subtree_percent: Int? = null,
     val sync_direction: String? = null,
     val client_location: String? = null,
     val client_network: String? = null,
@@ -254,6 +263,12 @@ data class SyncConfig(
     val logFile: Path?,
     val maxBandwidthKbps: Int? = null,
     val maxDeletePercentage: Int = 50,
+    // UD-265: defaults chosen to trip on the 2026-05-16 incident shape
+    // (405 deletes of a never-locally-hydrated subtree) while staying out
+    // of the way of routine sync activity (single-folder cleanups, small
+    // local-rm batches).
+    val maxDeleteAbsolute: Int = 50,
+    val maxDeletePerSubtreePercent: Int = 80,
     val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
     val clientLocation: String? = null,
     val clientNetwork: String? = null,
@@ -421,6 +436,8 @@ data class SyncConfig(
                 logFile = null,
                 maxBandwidthKbps = null,
                 maxDeletePercentage = 50,
+                maxDeleteAbsolute = 50,
+                maxDeletePerSubtreePercent = 80,
                 syncDirection = SyncDirection.BIDIRECTIONAL,
                 clientLocation = null,
                 clientNetwork = null,
@@ -566,6 +583,8 @@ data class SyncConfig(
                 logFile = logFile,
                 maxBandwidthKbps = general.max_bandwidth_kbps,
                 maxDeletePercentage = (general.max_delete_percentage ?: 50).coerceIn(0, 100),
+                maxDeleteAbsolute = (general.max_delete_absolute ?: 50).coerceAtLeast(0),
+                maxDeletePerSubtreePercent = (general.max_delete_per_subtree_percent ?: 80).coerceIn(0, 100),
                 syncDirection = general.sync_direction?.let { parseDirection(it) } ?: SyncDirection.BIDIRECTIONAL,
                 clientLocation = general.client_location,
                 clientNetwork = general.client_network,
