@@ -12210,3 +12210,218 @@ Hypotheses:
 - UD-303 (open) — Internxt tie-break delta walk to defeat pagination drift. Adjacent.
 - UD-360 / UD-361 — partial gather issues, possibly the upstream cause if (2) holds.
 - 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-377
+title: Structural fix: Internxt buildFolderPath collapses to root when ancestor absent from delta page
+category: providers
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:569
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtProvider_DeltaPathResolutionTest.kt
+opened: 2026-05-17
+---
+**Structural fix for the Internxt delta-path collapse identified in UD-376.**
+
+See [docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md](docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md) on the `UD-376-internxt-xxx-phantom` branch for the full evidence trail.
+
+## What's broken
+
+[InternxtProvider.kt:569-580](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt#L569) — `buildFolderPath` silently returns `""` when an ancestor folder UUID is not in the current delta page's `folderMap` (because that ancestor didn't change in the cursor window). The empty parentPath flows through `(File|Folder).toDeltaCloudItem` and the item ends up wrongly rooted at `/<name>`. Any deep-tree item whose immediate parent changed (but whose grandparent didn't) gets re-emitted at the cloud root with the same `remote_id` as the deep-path row from the prior full scan.
+
+Scope on the affected profile (`inxt_gernot_krost_posteo`): **~84,000 duplicate-remote_id rows** in state.db, all root-collapse pairs. UD-376's pinned regression test (`InternxtProvider_DeltaPathResolutionTest.kt`) captures the current wrong output — flip the assertions when the fix lands.
+
+## Three candidate fixes (from UD-376's audit note)
+
+1. **Signal incomplete + drop the affected items.** `buildFolderPath` returns `null` on ancestor-miss; `delta()` drops the item and sets `complete = false`. Engine refuses to promote the cursor. **Risk:** every delta becomes incomplete forever for sufficiently deep trees → blocks cursor advancement permanently. Needs an escape valve.
+2. **Resolve missing parents on demand.** `api.getFolderMetadata(parentUuid)`, populate `folderMap`, retry. **Risk:** N extra API calls per delta page; could re-trigger 429 storms (UD-303).
+3. **Look up missing parent from state.db.** `StateDatabase.getEntryByRemoteId(parentUuid)` already exists; use its `path` as the parent. **Risk:** circular — if the DB itself has phantom rows (which here it does, 84k of them), the lookup returns a stale path. Needs UD-378's migration to land first OR validate-against-API on each miss.
+
+Option (3) with API-validation-on-miss is the most attractive long-term: zero amortised cost (most parents WILL be in `folderMap`), no cursor stall, robust to a clean DB. Requires UD-378 to land first or run in tandem.
+
+## Acceptance
+
+- `buildFolderPath` no longer returns `""` for non-root items. The chosen strategy is documented in a UD-377 comment block at the call site.
+- The UD-376 regression test in `InternxtProvider_DeltaPathResolutionTest.kt` has its assertions flipped (was: pins wrong output; becomes: pins correct output). The companion `companion-buildFolderPath ...` happy-path test stays as a regression guard.
+- New integration test (or live-fixture replay) exercises a delta page that omits an ancestor and asserts the resulting `CloudItem.path` matches the full chain.
+- No new 429 spike on the affected profile after the fix (option 2 risk).
+- All existing `:providers:internxt:test` cases still pass.
+
+## Cross-refs
+
+- UD-376 (open) — the parked investigation that surfaced this. Closes after this lands.
+- UD-378 — state.db duplicate-remote_id reconciliation; either lands first or in tandem with this fix.
+- UD-303 (open) — Internxt tie-break delta walk; adjacent concern.
+- UD-225 — download-recovery loop that re-emits the deep-path orphans; nothing to change there if the fix lands, but verify no regression.
+- 2026-05-17 audit note: `docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md` on the `UD-376-internxt-xxx-phantom` branch.
+---
+id: UD-378
+title: State.db duplicate-remote_id reconciliation migration (~84k orphan rows from UD-376)
+category: providers
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-17
+---
+**One-shot reconciliation pass for the ~84,000 duplicate-remote_id rows in `inxt_gernot_krost_posteo`'s state.db.**
+
+UD-376's investigation discovered the duplicates: same Internxt `remote_id` appearing under two paths in `sync_entries` — the canonical deep path from full-scan + a root-collapsed path from a later delta. UD-377 fixes the upstream bug going forward; this ticket cleans up what's already in the DB.
+
+Scope on the affected profile:
+
+```
+SELECT COUNT(DISTINCT remote_id), COUNT(remote_id), COUNT(*) FROM sync_entries;
+-- 195,513  279,615  280,194  → ~84,000 duplicate-remote_id rows
+```
+
+Spot-checked one (`0001166e-2b05-4d7d-be54-f8b7bec24590`):
+
+- 2026-05-05: `/19notte78/Pictures/Sandra.A.Penina.Sarah.Photo.Pack.2007.2019/MetArt Network/MetArt_2009-01-10_PRESENTING-SANDRA-SANDRA-A-by-ZLATKO_968dc_high/MetArt_Presenting-Sandra_Sandra-A_high_0093.jpg`
+- 2026-05-16: `/MetArt_Presenting-Sandra_Sandra-A_high_0093.jpg`
+
+Both rows share the same UUID. One is the truth; the other is a UD-376 ghost.
+
+## What to build
+
+A `unidrive repair --duplicate-remote-ids` flow (under a new `RepairCommand.kt`, or wired into `unidrive doctor --fix` if UD-268 lands a remediation surface first) that:
+
+1. Identifies all `remote_id` values with > 1 row in `sync_entries`.
+2. For each duplicate cluster, picks the canonical row using this priority:
+   1. The row whose path resolves through a live remote ancestor chain (verify via `provider.getMetadata(parentPath)` — one API call per cluster, paginate carefully).
+   2. If both resolve / neither resolves: pick the row with `is_hydrated=1` (the user has the bytes locally — keep that as authoritative).
+   3. If still ambiguous: pick the more recent `last_synced`.
+3. Delete the losers from `sync_entries`.
+4. Audit-log the operation per-cluster (`audit-YYYY-MM-DD.jsonl`, new action `Repair/DropDuplicate`).
+
+Run the whole thing inside a single SQLite transaction. Refuse if state.db has < some sanity floor (e.g. < 1000 entries — defensive against accidentally running on a wiped profile). Surface a `--dry-run` mode that reports cluster counts + sample paths without mutation (the user can re-use it to triage scope).
+
+## Acceptance
+
+- New `unidrive repair --duplicate-remote-ids` (or equivalent under `doctor --fix`) clears all duplicate-remote_id clusters on the affected profile.
+- After running on `inxt_gernot_krost_posteo`'s real state.db: `COUNT(DISTINCT remote_id) == COUNT(remote_id)`.
+- Audit log records each drop with the kept-path and dropped-paths visible.
+- `--dry-run` flag exists and is side-effect-free.
+- New integration test seeds 100 duplicate clusters; the repair drops 100 rows; the remaining count is `original - 100`.
+
+## Dependency
+
+Best landed in tandem with UD-377: if UD-378 lands first without UD-377, the next delta sync immediately re-creates the same duplicates. If UD-377 lands first without UD-378, the existing duplicates persist as historical noise and continue to feed UD-225's download-recovery loop. Recommended sequencing: implement both in one PR or merge UD-377 then UD-378 within the same release window.
+
+## Cross-refs
+
+- UD-376 (open) — the investigation that surfaced this. Closes when UD-377 + UD-378 land.
+- UD-377 — structural delta-path fix that prevents new duplicates.
+- UD-225 (history) — download-recovery loop that interacts with the orphans.
+- UD-267 — hydration drift detector. The "669 ghost-hydrated rows" finding is largely UD-376 collateral; UD-378's migration will fix most of them. UD-267 needs reconsideration after this lands (see UD-267a).
+- UD-268 (open) — `unidrive doctor` is the natural surface for the repair command if it lands a remediation tier.
+---
+id: UD-256c
+title: Strengthen 4 weak UD-256 tests (challenge-test-assertion review)
+category: core
+priority: low
+effort: XS
+status: open
+code_refs:
+  - core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt
+opened: 2026-05-17
+---
+**Strengthen four weak UD-256 tests flagged by independent validation.**
+
+The 2026-05-17 second-pass validator (`validation-report-2026-05-17.md`, agent-a0070d9f00a4c1415's worktree) audited the UD-256 test suite in `core/app/sync/src/test/kotlin/org/krost/unidrive/sync/SyncEngineTest.kt` against `main` (`d1fb70a`). Of the 13 UD-256 tests, four were classified as **weak/tautological** — they call `syncOnce()` and only assert that no exception was thrown. They would pass even if `syncOnce()` did nothing. Per the `challenge-test-assertion` skill, the assertion should reflect the business invariant, not the implementation's silence.
+
+## The four weak tests
+
+1. `UD-256 a --sync-path run on a scoped profile is never refused` — currently only verifies "no throw". Should also assert: persisted `effective_scope` was unioned with the new path (or stayed identical if the path was already present), and the run completed reconciliation against the requested scope.
+2. `UD-256 fresh profile with no persisted scope does not refuse bare bidirectional` — currently only verifies "no throw". Should also assert: `effective_scope` stays absent / empty in state.db after the run.
+3. `UD-256 upload-only with persisted scope is not refused` — currently only verifies "no throw". Should also assert: the run reached the reconcile / apply phase (e.g. a reporter signal fired) and effective_scope was NOT mutated by the upload-only run.
+4. `UD-256 download-only with persisted scope is not refused` — same as #3, mirror for download direction.
+
+## Why this matters
+
+The dry-run-side-effect-leak fixed by `0fcd1f1` (PR #45's Codex P1 review) would have been caught earlier if test #1 had asserted on `effective_scope` state after the call. The same kind of regression could land again in a refactor.
+
+## Acceptance
+
+- Each of the four tests gains assertions on observable state after `syncOnce()` returns.
+- The new assertions are not tautological — they would FAIL if `syncOnce()` did nothing.
+- `./gradlew :app:sync:test` green.
+- A small `RecordingReporter` extension (or use existing one) verifies the reporter saw the expected phase progression for tests #3 and #4.
+
+## Cross-refs
+
+- UD-256 (parent) — the scope-persistence feature.
+- UD-256a (sibling) — audit-log session header.
+- UD-256b (sibling) — NoSuchMethodError startup investigation.
+- UD-813 (open) — broader test-audit using the `challenge-test-assertion` rubric. This ticket is a narrow application of UD-813 to UD-256's test set; fold or coordinate as appropriate.
+- Validator report: `validation-report-2026-05-17.md` in worktree `agent-a0070d9f00a4c1415` (uncommitted).
+---
+id: UD-267b
+title: Hydration-drift remediation: three-cohort split (supersedes UD-267a)
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-17
+---
+**Successor to UD-267a after two independent validators (2026-05-17) refuted UD-267a's "block on UD-377+UD-378" premise.**
+
+The 669 ghost-hydrated rows in `inxt_gernot_krost_posteo`'s state.db split into **three cohorts with different remediations**. No single fix works for all of them, and UD-377+UD-378 only touch one cohort (and even there can't always resolve correctly).
+
+Validator reports (uncommitted, in worktree dirs):
+- `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`
+- `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`
+
+Both validators agree on the breakdown, computed with different toolchains (V1: Python `sqlite3` + `os.walk` + `jq`; V2: sqlite3 CLI + SQL self-joins + `find`).
+
+## The three cohorts
+
+### Cohort A — Unique `remote_id`, no twin (425 rows / 63.5 %)
+
+State.db has exactly one row for this `remote_id`. The row is flagged `is_hydrated=1` with a `local_mtime` set, but the file is missing on disk. `last_synced` predominantly 2026-05-03/05 (the post-full-scan cohort).
+
+**Most likely cause:** file was downloaded by unidrive, then deleted out-of-band locally (Explorer, `rm`, an app that cleaned up its cache, jar-hotswap corruption per `memory/feedback_jar_hotswap.md`, etc.). Unidrive didn't see the delete because a local scan hasn't visited that path since.
+
+**Remediation:** detect, then clear `is_hydrated`, null `local_mtime` and `local_size`. The next sync treats the row as "remote file, not yet downloaded" → downloads it fresh. Pure self-heal.
+
+### Cohort B — NULL `remote_id`, epoch-zero `last_synced` (92 rows / 13.8 %)
+
+Rows where `remote_id IS NULL` AND `last_synced = '1970-01-01T00:00:00Z'`. These are failed-stub artifacts from interrupted operations (e.g. a download started before the remote metadata was confirmed, then crashed).
+
+**Remediation:** just `DELETE` them. There's nothing to recover; they're tombstones from a crash that never re-converged. Safe to drop unconditionally.
+
+### Cohort C — `remote_id` set, sibling row(s) exist, ALL siblings also missing (152 rows / 22.7 %)
+
+Both the ghost AND its UD-376 root-collapse twin point at files that aren't on disk. The file is genuinely gone — neither the canonical deep path NOR the phantom shallow path has it.
+
+**Remediation:** drop the entire cluster (both/all rows for that `remote_id`). The next full scan re-discovers the file from the cloud as a fresh entry. UD-378 alone is insufficient — its "drop duplicates, keep the survivor with the live local file" rule has no survivor here.
+
+UD-378's logic needs an extra clause for this cohort: when ALL siblings of a duplicate cluster are missing from disk, drop them all (don't try to pick a winner).
+
+## Why UD-267a was wrong
+
+UD-267a hypothesised that the 669 ghosts were largely the deep-path side of UD-376 root-collapse pairs whose root-collapsed twin was on disk (i.e. file moved with the rename, deep-path row was the stale one). Both validators independently found **0/669 ghosts have a sibling whose file is on disk** — the hypothesis required this to be the dominant case; instead it's the empty case.
+
+Additional clincher (V2 Q1d): every one of the 669 ghosts has `last_synced` ≤ 2026-05-12 — they ALL predate the 2026-05-16 incident that produced the 84k duplicate rows. The 669 are an independent legacy phenomenon, not collateral from the incident.
+
+## Acceptance
+
+- New detector subcommand or doctor-check segregates the 669 (or future equivalent set) into the three cohorts and reports counts + samples.
+- A `unidrive repair --hydration-drift` (or similar) applies the cohort-specific remediation:
+  - Cohort A: clear `is_hydrated`, null local fields. Audit log per-row.
+  - Cohort B: delete rows. Audit log per-row.
+  - Cohort C: drop the whole cluster (sibling rows too). Audit log per-cluster.
+- `--dry-run` mode reports what would happen without mutation.
+- Integration test seeds a state.db with the three cohorts, repair drops/clears the right counts.
+
+## Cross-refs
+
+- UD-267 (parent, open) — the original hydration-drift ticket. After UD-267b lands the implementation, UD-267 can close.
+- UD-267a (open → close as superseded by this ticket).
+- UD-377 — Internxt delta-path fix. Independent of UD-267b.
+- UD-378 — duplicate-remote_id reconciliation. **Needs amendment**: its "drop dup, keep the live-file one" rule must add a clause "if no sibling has a live file, drop them all" — that's the cohort-C path. Worth updating UD-378's body or filing UD-378a after this ticket lands.
+- UD-268 (`unidrive doctor`) — the detector half of this naturally extends doctor's hydration-drift check.
+- Validator 1: `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`.
+- Validator 2: `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`.
