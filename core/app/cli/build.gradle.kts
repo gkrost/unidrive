@@ -3,6 +3,7 @@ import java.util.concurrent.TimeUnit
 
 plugins {
     kotlin("jvm")
+    kotlin("plugin.serialization")
     application
     id("com.gradleup.shadow") version libs.versions.shadow.get()
 }
@@ -373,6 +374,7 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.slf4j) // UD-212: MDCContext for profile MDC propagation
+    implementation(libs.kotlinx.serialization.json) // UD-268: doctor --json output + audit-log JSONL parsing
     implementation(libs.picocli)
     implementation(libs.logback.classic)
 

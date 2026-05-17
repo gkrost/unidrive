@@ -37,6 +37,7 @@ import java.nio.file.Paths
         ApplyCommand::class,
         SweepCommand::class,
         StatusCommand::class,
+        DoctorCommand::class,
         GetCommand::class,
         LsCommand::class,
         FreeCommand::class,
