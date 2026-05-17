@@ -35,14 +35,17 @@ The checklist below picks up where smoke.sh stops.
 
 ## 1. Provider configuration
 
-- [ ] `unidrive profile create <name> --provider <p>` for each in
-      scope (`localfs`, `s3`, `sftp`). Verify `config.toml` rewrite
-      preserves comments and other profiles.
+- [ ] `unidrive profile add` (interactive wizard) for each in scope
+      (`localfs`, `s3`, `sftp`). Verify `config.toml` rewrite preserves
+      comments and other profiles. (CLI has no non-interactive variant
+      — drive the MCP `unidrive_profile_add` tool for scripted setups.)
 - [ ] `unidrive profile list` enumerates all configured profiles.
 - [ ] `unidrive profile remove <name>` cleanly drops the section,
       leaves siblings intact, deletes per-profile state DB.
-- [ ] `unidrive identity` (MCP-only tool) returns the active
-      `(profile, provider)` tuple.
+- [ ] MCP `unidrive_identity` tool call returns the active
+      `(profile, provider)` tuple. (CLI has no `identity` subcommand;
+      probe via `unidrive -p <profile> quota` instead, which
+      exercises the same auth path.)
 
 ## 2. Initial sync (full cold start)
 
@@ -127,8 +130,10 @@ The checklist below picks up where smoke.sh stops.
       POSIX `0600` before deletion.
 - [ ] Next sync fails with a clear "not authenticated" message,
       not a stack trace.
-- [ ] Re-login via `unidrive auth begin / auth complete` (or MCP
-      equivalents) restores access.
+- [ ] Re-login via `unidrive -p <profile> auth` (single blocking
+      command; add `--device-code` for OneDrive non-browser flow) or
+      the MCP two-phase pair `unidrive_auth_begin` /
+      `unidrive_auth_complete` restores access.
 
 ## 11. Profile switching (MCP)
 
