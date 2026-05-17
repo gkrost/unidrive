@@ -12283,3 +12283,152 @@ Hypotheses:
 - UD-303 (open) — Internxt tie-break delta walk to defeat pagination drift. Adjacent.
 - UD-360 / UD-361 — partial gather issues, possibly the upstream cause if (2) holds.
 - 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-377
+title: Structural fix: Internxt buildFolderPath collapses to root when ancestor absent from delta page
+category: providers
+priority: high
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt:569
+  - core/providers/internxt/src/test/kotlin/org/krost/unidrive/internxt/InternxtProvider_DeltaPathResolutionTest.kt
+opened: 2026-05-17
+---
+**Structural fix for the Internxt delta-path collapse identified in UD-376.**
+
+See [docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md](docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md) on the `UD-376-internxt-xxx-phantom` branch for the full evidence trail.
+
+## What's broken
+
+[InternxtProvider.kt:569-580](core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt#L569) — `buildFolderPath` silently returns `""` when an ancestor folder UUID is not in the current delta page's `folderMap` (because that ancestor didn't change in the cursor window). The empty parentPath flows through `(File|Folder).toDeltaCloudItem` and the item ends up wrongly rooted at `/<name>`. Any deep-tree item whose immediate parent changed (but whose grandparent didn't) gets re-emitted at the cloud root with the same `remote_id` as the deep-path row from the prior full scan.
+
+Scope on the affected profile (`inxt_gernot_krost_posteo`): **~84,000 duplicate-remote_id rows** in state.db, all root-collapse pairs. UD-376's pinned regression test (`InternxtProvider_DeltaPathResolutionTest.kt`) captures the current wrong output — flip the assertions when the fix lands.
+
+## Three candidate fixes (from UD-376's audit note)
+
+1. **Signal incomplete + drop the affected items.** `buildFolderPath` returns `null` on ancestor-miss; `delta()` drops the item and sets `complete = false`. Engine refuses to promote the cursor. **Risk:** every delta becomes incomplete forever for sufficiently deep trees → blocks cursor advancement permanently. Needs an escape valve.
+2. **Resolve missing parents on demand.** `api.getFolderMetadata(parentUuid)`, populate `folderMap`, retry. **Risk:** N extra API calls per delta page; could re-trigger 429 storms (UD-303).
+3. **Look up missing parent from state.db.** `StateDatabase.getEntryByRemoteId(parentUuid)` already exists; use its `path` as the parent. **Risk:** circular — if the DB itself has phantom rows (which here it does, 84k of them), the lookup returns a stale path. Needs UD-378's migration to land first OR validate-against-API on each miss.
+
+Option (3) with API-validation-on-miss is the most attractive long-term: zero amortised cost (most parents WILL be in `folderMap`), no cursor stall, robust to a clean DB. Requires UD-378 to land first or run in tandem.
+
+## Acceptance
+
+- `buildFolderPath` no longer returns `""` for non-root items. The chosen strategy is documented in a UD-377 comment block at the call site.
+- The UD-376 regression test in `InternxtProvider_DeltaPathResolutionTest.kt` has its assertions flipped (was: pins wrong output; becomes: pins correct output). The companion `companion-buildFolderPath ...` happy-path test stays as a regression guard.
+- New integration test (or live-fixture replay) exercises a delta page that omits an ancestor and asserts the resulting `CloudItem.path` matches the full chain.
+- No new 429 spike on the affected profile after the fix (option 2 risk).
+- All existing `:providers:internxt:test` cases still pass.
+
+## Cross-refs
+
+- UD-376 (open) — the parked investigation that surfaced this. Closes after this lands.
+- UD-378 — state.db duplicate-remote_id reconciliation; either lands first or in tandem with this fix.
+- UD-303 (open) — Internxt tie-break delta walk; adjacent concern.
+- UD-225 — download-recovery loop that re-emits the deep-path orphans; nothing to change there if the fix lands, but verify no regression.
+- 2026-05-17 audit note: `docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md` on the `UD-376-internxt-xxx-phantom` branch.
+---
+id: UD-378
+title: State.db duplicate-remote_id reconciliation migration (~84k orphan rows from UD-376)
+category: providers
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-17
+---
+**One-shot reconciliation pass for the ~84,000 duplicate-remote_id rows in `inxt_gernot_krost_posteo`'s state.db.**
+
+UD-376's investigation discovered the duplicates: same Internxt `remote_id` appearing under two paths in `sync_entries` — the canonical deep path from full-scan + a root-collapsed path from a later delta. UD-377 fixes the upstream bug going forward; this ticket cleans up what's already in the DB.
+
+Scope on the affected profile:
+
+```
+SELECT COUNT(DISTINCT remote_id), COUNT(remote_id), COUNT(*) FROM sync_entries;
+-- 195,513  279,615  280,194  → ~84,000 duplicate-remote_id rows
+```
+
+Spot-checked one (`0001166e-2b05-4d7d-be54-f8b7bec24590`):
+
+- 2026-05-05: `/19notte78/Pictures/Sandra.A.Penina.Sarah.Photo.Pack.2007.2019/MetArt Network/MetArt_2009-01-10_PRESENTING-SANDRA-SANDRA-A-by-ZLATKO_968dc_high/MetArt_Presenting-Sandra_Sandra-A_high_0093.jpg`
+- 2026-05-16: `/MetArt_Presenting-Sandra_Sandra-A_high_0093.jpg`
+
+Both rows share the same UUID. One is the truth; the other is a UD-376 ghost.
+
+## What to build
+
+A `unidrive repair --duplicate-remote-ids` flow (under a new `RepairCommand.kt`, or wired into `unidrive doctor --fix` if UD-268 lands a remediation surface first) that:
+
+1. Identifies all `remote_id` values with > 1 row in `sync_entries`.
+2. For each duplicate cluster, picks the canonical row using this priority:
+   1. The row whose path resolves through a live remote ancestor chain (verify via `provider.getMetadata(parentPath)` — one API call per cluster, paginate carefully).
+   2. If both resolve / neither resolves: pick the row with `is_hydrated=1` (the user has the bytes locally — keep that as authoritative).
+   3. If still ambiguous: pick the more recent `last_synced`.
+3. Delete the losers from `sync_entries`.
+4. Audit-log the operation per-cluster (`audit-YYYY-MM-DD.jsonl`, new action `Repair/DropDuplicate`).
+
+Run the whole thing inside a single SQLite transaction. Refuse if state.db has < some sanity floor (e.g. < 1000 entries — defensive against accidentally running on a wiped profile). Surface a `--dry-run` mode that reports cluster counts + sample paths without mutation (the user can re-use it to triage scope).
+
+## Acceptance
+
+- New `unidrive repair --duplicate-remote-ids` (or equivalent under `doctor --fix`) clears all duplicate-remote_id clusters on the affected profile.
+- After running on `inxt_gernot_krost_posteo`'s real state.db: `COUNT(DISTINCT remote_id) == COUNT(remote_id)`.
+- Audit log records each drop with the kept-path and dropped-paths visible.
+- `--dry-run` flag exists and is side-effect-free.
+- New integration test seeds 100 duplicate clusters; the repair drops 100 rows; the remaining count is `original - 100`.
+
+## Dependency
+
+Best landed in tandem with UD-377: if UD-378 lands first without UD-377, the next delta sync immediately re-creates the same duplicates. If UD-377 lands first without UD-378, the existing duplicates persist as historical noise and continue to feed UD-225's download-recovery loop. Recommended sequencing: implement both in one PR or merge UD-377 then UD-378 within the same release window.
+
+## Cross-refs
+
+- UD-376 (open) — the investigation that surfaced this. Closes when UD-377 + UD-378 land.
+- UD-377 — structural delta-path fix that prevents new duplicates.
+- UD-225 (history) — download-recovery loop that interacts with the orphans.
+- UD-267 — hydration drift detector. The "669 ghost-hydrated rows" finding is largely UD-376 collateral; UD-378's migration will fix most of them. UD-267 needs reconsideration after this lands (see UD-267a).
+- UD-268 (open) — `unidrive doctor` is the natural surface for the repair command if it lands a remediation tier.
+---
+id: UD-267a
+title: Reconsider UD-267 hydration drift in light of UD-376 findings (block on UD-377 + UD-378)
+category: core
+priority: medium
+effort: XS
+status: open
+opened: 2026-05-17
+---
+**Reconsideration of UD-267 in light of UD-376's findings.** This ticket exists to block UD-267 implementation until the root cause is understood and the duplicate-row situation is cleaned up.
+
+## What changed
+
+The 2026-05-17 audit reported 669 state.db rows with `is_hydrated=1` but no file on disk — framed as "hydration drift, probably out-of-band local deletes or jar-hotswap corruption". UD-267 was filed to detect + self-heal by clearing the hydration flag.
+
+UD-376's investigation (`docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md`) discovered that **the same profile has ~84,000 duplicate-remote_id rows in state.db** — pairs of deep-path + root-collapsed-path entries for the same Internxt UUID, produced by a path-resolution bug in `InternxtProvider.buildFolderPath`. The deep-path side of each pair is exactly the shape that registers as "ghost-hydrated":
+
+- Deep path written at full-scan, `is_hydrated=1` after the file downloads.
+- Later delta re-emits the SAME UUID at a collapsed path. New row `is_hydrated=0`.
+- Engine downloads against the new path; the deep-path row is now an orphan, still flagged hydrated, still pointing at a file location that doesn't have the file.
+
+The 669 count almost certainly **isn't a separate state-drift bug** — it's downstream of UD-376. Validating this before implementing UD-267's self-heal flow matters: clearing the hydration flag on the deep-path row would mask the fact that the row is a UD-376 ghost and should be DROPPED entirely (per UD-378's migration), not retained-with-cleared-flag.
+
+## What to do
+
+1. **Block UD-267 implementation on UD-377 + UD-378 landing first.** Once the delta-path fix is in and the duplicate-remote_id reconciliation has run on the affected profile, re-measure the ghost-hydrated count.
+2. If post-cleanup the count is ≈ 0, UD-267's design needs no detector — UD-377/UD-378 absorbed the failure mode. Close UD-267 as resolved-by-UD-377-and-UD-378.
+3. If post-cleanup the count is still meaningfully > 0, UD-267 proceeds as originally designed (detector + self-heal-by-clearing-hydration-flag) for the actually-orthogonal cases (out-of-band local deletes, jar-hotswap corruption, partial-rescan).
+
+## Acceptance
+
+- UD-267 stays in `status: open` but its body gains a "Blocked by UD-377, UD-378" note.
+- A short measurement script — `scripts/dev/check-hydration-drift.sh` or similar — exists so the post-UD-378 re-measure is one command.
+- Decision recorded in CHANGELOG.md or session-notes once the measurement is taken.
+
+## Cross-refs
+
+- UD-267 (open) — the parent ticket whose design this reconsiders.
+- UD-376 (open) — investigation that surfaced the systemic root-collapse.
+- UD-377 — structural delta-path fix.
+- UD-378 — duplicate-remote_id reconciliation migration.
+- 2026-05-17 audit report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md) — original 669-count claim with correction footnote.
