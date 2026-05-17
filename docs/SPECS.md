@@ -50,7 +50,7 @@ have to change to bring them back.
 | `app/core` | Provider-agnostic interfaces (CloudProvider, CloudItem, DeltaPage, ProviderRegistry SPI) | [`core/app/core/`](../core/app/core) | ✅ |
 | `app/sync` | Three-phase sync engine (gather→reconcile→apply), SQLite state DB, inotify watcher, placeholder management, conflict log, credential vault | [`core/app/sync/`](../core/app/sync) | ✅ |
 | `app/xtra` | AES-256-GCM client-side encryption with RSA-2048-OAEP key wrapping | [`core/app/xtra/`](../core/app/xtra) | ✅ |
-| `app/cli` | PicoCLI, 19 subcommands | [`core/app/cli/`](../core/app/cli) | ✅ |
+| `app/cli` | PicoCLI, 24 subcommands | [`core/app/cli/`](../core/app/cli) | ✅ |
 | `app/mcp` | MCP server with 23 tools | [`core/app/mcp/`](../core/app/mcp) | 💻 **23 tools verified** (`core/app/mcp/src/main/kotlin/org/krost/unidrive/mcp/Main.kt:36-62`) |
 | `providers/onedrive` | MS Graph, OAuth2, webhook subscriptions, shared-folder support | [`core/providers/onedrive/`](../core/providers/onedrive) | ✅ |
 | `providers/s3` | SigV4 HTTP, snapshot delta | [`core/providers/s3/`](../core/providers/s3) | ✅ |

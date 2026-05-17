@@ -12079,41 +12079,6 @@ Why each field:
 - UD-268 — doctor surfaces session-attributed destructive activity.
 - 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
 ---
-id: UD-256b
-title: Investigate 41 NoSuchMethodError thrown in first minute of sync startup (JFR 2026-05-17)
-category: core
-priority: low
-effort: S
-status: open
-code_refs:
-  - core/gradle/libs.versions.toml
-opened: 2026-05-17
----
-**JFR profile of `unidrive sync --dry-run` (2026-05-17, `inxt_gernot_krost_posteo`, jar `unidrive-0.0.1.jar`) reports 41 `java.lang.NoSuchMethodError` thrown in the first minute of execution.**
-
-JFR rule output verbatim:
-
-> Rule Id: Errors — The program generated an average of 41 errors per minute during 17.05.2026, 09:27:31.000 – 09:28:31. 41 errors were thrown in total. The most common error was `java.lang.NoSuchMethodError`, which was thrown 41 times.
-
-JFR snapshot kept at `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr` (1.2 MB). Run completed normally (no fatal crash), so the errors are caught and recovery succeeds — but `NoSuchMethodError` at runtime is a strong signal of dependency / classpath drift (a class loaded from one version of a library, a call site compiled against a different version). Easy to ignore until it isn't.
-
-## What to investigate
-
-- Open the JFR in JMC (or via `mcp__jfr-analyzer__getReport` for a summary) and read the stack traces of the `Java Error` event class. 12.2 % of error traces were truncated at `-XX:FlightRecorderOptions=stackdepth=64`; bump to 256 if the first look is inconclusive.
-- Likely candidates: Kotlin stdlib version (libs.versions.toml `kotlin = "2.3.21"`), Ktor / kotlinx-serialization, picocli, sqlite-jdbc. Check `core/gradle/libs.versions.toml` against what's actually packaged into the shadow jar.
-- If reproducible: add a smoke test that fails the build on any `NoSuchMethodError` thrown during a no-op `sync --dry-run` startup.
-
-## Acceptance
-
-- Root cause identified (which call site, which library mismatch).
-- Either the offending dependency version is pinned/aligned, OR the call site is rewritten to use the available API, OR an explicit shading rule fixes the classpath ambiguity.
-- A smoke test guards against regression.
-
-## Cross-refs
-
-- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
-- JFR snapshot: `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr`.
----
 id: UD-376
 title: Internxt: phantom _XXX path segment in failed down requests (e.g. /_INBOX/_XXX/...)
 category: providers
@@ -12374,3 +12339,151 @@ Additional clincher (V2 Q1d): every one of the 669 ghosts has `last_synced` ≤ 
 - UD-268 (`unidrive doctor`) — the detector half of this naturally extends doctor's hydration-drift check.
 - Validator 1: `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`.
 - Validator 2: `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`.
+---
+id: UD-264a
+title: logFailure JSON-escape parity with UD-264's logSkippedOp fix
+category: core
+priority: medium
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-05-17
+---
+**Pre-existing bug class flagged during PR #46 Codex review** (P2 on the new `logSkippedOp` writer). `logFailure` in `SyncEngine.kt:~1613-1640` has the same hand-built-JSON shape and the same hazard.
+
+## What's broken
+
+```kotlin
+val msg = (error.message ?: error.javaClass.simpleName).replace("\"", "\\\"")
+val fromSegment =
+    when (action) {
+        is SyncAction.MoveRemote -> ""","from_path":"${action.fromPath}""""
+        is SyncAction.MoveLocal -> ""","from_path":"${action.fromPath}""""
+        else -> ""
+    }
+val line = """{"ts":"${Instant.now()}","action":"$kind","path":"${action.path}"$fromSegment,"error":"$msg"}"""
+```
+
+Only the error message is JSON-escaped (and only `"` — backslash and newlines are still hazards). Paths and `fromPath` are interpolated raw. Any of these is enough to break the line:
+
+- A path containing `\n` — the 2026-05-17 audit observed `/\ninternxt-cli.desktop` in the real `failures.jsonl`.
+- A path containing `"` — Linux / many cloud providers allow it.
+- A path containing `\` — same.
+- An error message containing newlines — common with HTTP error bodies, stack traces in surfaced exceptions, multi-line API error responses.
+
+## Evidence this is biting in the wild
+
+The 2026-05-17 audit of `inxt_gernot_krost_posteo` parsed the last 1000 lines of `failures.jsonl` and found **~119 PARSE_ERR entries** that the parser couldn't read as JSON. UD-264's fix lifted JSON formatting to `SyncEngine.formatSkippedOpJson` (kotlinx-serialization-backed) for the new `skipped-ops.jsonl` writer. This ticket extends the same fix to `logFailure`.
+
+## What to change
+
+Replace the triple-quoted template in `logFailure` with the same `kotlinx.serialization.json.buildJsonObject` shape `formatSkippedOpJson` already uses. Likely move the helper to a generic `internal fun formatFailureLogJson(action, path, fromPath, error, ts)` that mirrors the existing shape and lives next to `formatSkippedOpJson` in `SyncEngine.Companion`.
+
+## Acceptance
+
+- `logFailure` formats every field through `kotlinx.serialization.json`.
+- New unit test in the same testable-helper pattern as UD-264's `formatSkippedOpJson` test: feed an action with a path containing `"`, `\`, `\n`, `\t`, `\r` and an error message with embedded newlines; assert the output line parses cleanly and round-trips every field.
+- The 119 historical PARSE_ERR lines in `inxt_gernot_krost_posteo/failures.jsonl` are NOT retroactively fixed — they're frozen evidence of the pre-fix behaviour. Future writes are.
+
+## Cross-refs
+
+- UD-264 (closed by PR #46) — parent fix that flagged this parity issue.
+- 2026-05-17 audit: 119 PARSE_ERR entries in failures.jsonl on the affected profile.
+- PR #46 Codex review: https://github.com/gkrost/unidrive/pull/46 (P2 comment on `logSkippedOp` that prompted this).
+---
+id: UD-268a
+title: unidrive doctor v2: 4 deferred checks (state-vs-config, failure spike, credential health, JFR perf)
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/DoctorCommand.kt
+opened: 2026-05-17
+---
+**Doctor v2 checks deferred from UD-268's v1.** UD-268 landed 7 of 11 checks in PR #47. The 4 deferred checks are documented inline at the bottom of `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/DoctorCommand.kt` (search "DEFERRED v2 checks").
+
+## Checks to add
+
+1. **State-vs-config sync_root drift.** Compare `db.getSyncState("sync_root")` against `profile.syncRoot` (the live config-resolved value). UD-299 already detects this elsewhere but doctor should surface the same signal. **Severity**: ⚠️ on mismatch, ❌ if mismatch + state.db has >10 entries (the run will produce mass del-remote).
+
+2. **Recent failure spike from failures.jsonl.** Tail last 7 days of `failures.jsonl` in `parent.providerConfigDir()`, bucket by `(action, truncated error)`, flag top 3. The 2026-05-17 sample would have led with `down :: 429 1015` (861 entries). **Severity**: ⚠️ if any bucket > 100 in 7 days, ❌ if > 1000.
+
+3. **Credential health.** Bind `parent.checkCredentialHealth` (or equivalent — find the surface SyncCommand/StatusCommand uses) for the active profile and surface the same OK / Warning / Missing / ExpiresIn(d) result. **Severity**: ⚠️ Warning, ❌ Missing.
+
+4. **JFR-friendly perf snapshot.** Read `last_scan_secs_remote` / `last_scan_count_remote` from sync_state, compute items-per-second. Warn if < 10 items/s — that's the threshold the 2026-05-17 audit found correlated with Cloudflare 1015 rate-limiting on Internxt.
+
+## Why deferred
+
+UD-268's v1 had a tight scope review window. Each of the 4 checks needs extra wiring that isn't trivial:
+
+- State-vs-config: trivial query, but needs to skip clean when state.db's `sync_root` key is unset (first-run case).
+- Recent failure spike: needs a JSONL parser + bucket logic + small heuristic for "truncated error" key. ~50 LOC.
+- Credential health: needs to find the right `Main` / parent surface to call without instantiating a real provider. SyncCommand does it via `provider.authenticateAndLog()` — too heavy for a read-only doctor; need a lighter probe.
+- JFR perf: trivial division but bikeshed-worthy thresholds.
+
+The 4 are documented inline so a future agent can pick them up without re-deriving from scratch.
+
+## Acceptance
+
+- All 4 checks land in `DoctorCommand.runChecks`, each as its own `CheckResult` row, each documented inline at the call site.
+- Inline `DEFERRED v2 checks` comment block at the bottom of `DoctorCommand.kt` is removed (or trimmed to "all 11 checks live").
+- Each new check has a unit test in `DoctorCommandTest.kt` mirroring the v1 patterns (clean → OK, threshold-trip → WARN, severe → ERR).
+- `--json` output includes the new checks.
+- Total runtime on a 200k-entry profile stays under 30 s.
+
+## Cross-refs
+
+- UD-268 (closed by PR #47) — v1 parent.
+- UD-256 — `effective_scope` check is already live in v1.
+- UD-267b — three-cohort hydration drift; doctor's v1 hydration check counts the total; v2 could segregate the three cohorts once UD-267b's detector lands.
+- 2026-05-17 audit report — sources for threshold defaults.
+---
+id: UD-378a
+title: Amend UD-378: cohort-C drops the whole cluster when all siblings missing on disk
+category: providers
+priority: medium
+effort: XS
+status: open
+opened: 2026-05-17
+---
+**Amend UD-378's de-dupe logic for the "all siblings missing on disk" case** surfaced by the 2026-05-17 two-validator pass.
+
+## What UD-378 says today
+
+UD-378's body picks a canonical row per duplicate-`remote_id` cluster using this priority:
+
+1. The row whose path resolves through a live remote ancestor chain.
+2. If both resolve / neither resolves: pick the row with `is_hydrated=1` (the user has the bytes locally).
+3. If still ambiguous: pick the more recent `last_synced`.
+
+The losers get dropped.
+
+## What the data showed
+
+Both 2026-05-17 validators independently categorised the duplicate clusters in `inxt_gernot_krost_posteo`. For the **152 / 669** clusters that share their `remote_id` with a sibling, **0 of those siblings have a live file on disk** — meaning the canonical "keep the one with the file" rule has no signal. UD-267b cohort C captures this precisely: file is genuinely gone, both/all rows point at locations the file no longer occupies.
+
+If UD-378 runs with its current rule against cohort C, it picks an arbitrary "winner" — likely the deep-path row (highest `is_hydrated`) — and keeps it. But that row is stale; the bytes aren't there. On the next sync the engine's UD-225 download-recovery loop will retry the download against the wrong path, fail, and the orphan persists.
+
+## What to change
+
+Add an explicit Cohort C branch to UD-378's de-dupe rule, BEFORE the existing priority chain:
+
+> **0. If ALL siblings in the cluster are missing on disk: drop the entire cluster.** The next full scan re-discovers the file from the cloud as a fresh entry under the correct path. No "winner" is picked because there's no on-disk evidence to anchor one.
+
+Then continue with the existing priority chain for clusters where at least one sibling has a live file.
+
+## Acceptance
+
+- UD-378's body / implementation includes the Cohort-C branch.
+- An integration test seeds a duplicate cluster where every sibling row's path has NO file on disk; the migration drops every row in that cluster (cluster size → 0).
+- Audit log records the drop with `reason=all_siblings_missing` (or similar) so post-migration the operator can see how many clusters fell to this branch vs the regular winner-picker.
+
+## Cross-refs
+
+- UD-378 (open) — parent; this ticket sharpens its de-dupe rule.
+- UD-267b (open) — three-cohort hydration drift; Cohort C is exactly this case.
+- 2026-05-17 validator reports (uncommitted, in agent worktree dirs):
+  - V1: `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`
+  - V2: `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`
