@@ -2962,6 +2962,84 @@ Windows support is community best-effort per ADR-0012, but these launchers exist
 - ADR-0012 — Linux-MVP scope; Windows is community best-effort. This is a low-effort improvement within that scope.
 
 ---
+id: UD-264
+title: Reconciler guard: never delete a remote top-level folder whose subtree has never been hydrated locally
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-05-17
+resolved_by: commit 0e3f4ce. Filter step in SyncEngine.applyTopLevelHydrationGuard skips DeleteRemote actions whose top-level cloud folder has no hydrated descendant in state.db (hydrated = is_hydrated=1 OR local_mtime IS NOT NULL; the top-level row itself qualifies). Skipped paths go to skipped-ops.jsonl alongside failures.jsonl. --ignore-top-level-guard CLI flag opts out (still logs). Per-(top-level, run) cache keeps the DB cheap.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt
+opened: 2026-05-17
+---
+**Defence-in-depth guard surfaced by the 2026-05-16 Internxt delete incident.** Even when UD-256 (scope persistence) lands, a second cheap-and-narrow safety helps: refuse to propagate a remote-side delete for any top-level cloud folder whose subtree has *never* held a hydrated local file.
+
+## What to change
+
+In the reconciler, before emitting a `del-remote` (or `move-to-trash`) action whose path lives under a particular top-level cloud folder, check: has state.db ever had any descendant of that top-level path with `is_hydrated=1` (or with a non-null `local_mtime`)? If not, abort the delete and log the path with `skip_reason="top_level_never_hydrated"`.
+
+The check is cheap: one SQL with `path LIKE '/Foo/%' AND (is_hydrated=1 OR local_mtime IS NOT NULL) LIMIT 1`. Cache the answer per (top-level prefix, run) to avoid hammering the DB.
+
+This would have prevented yesterday's 405 deletes on `/Documents/CyberLink/...`, `/.userhome/win11/apps/jdownloader/...`, etc. on `inxt_gernot_krost_posteo`: state.db indexed them (as `is_hydrated=0`) because the official Internxt client wrote them to cloud, but the user never downloaded them through unidrive, so no row under those top-levels has ever been hydrated.
+
+## Acceptance
+
+- Reconciler emits 0 `del-remote` actions for top-level cloud paths with no hydrated descendant ever.
+- Skipped paths are logged (`failures.jsonl` or a new `skipped-ops.jsonl`) with reason `top_level_never_hydrated` for visibility.
+- New unit test in `ReconcilerTest` for the guard.
+- An `--ignore-top-level-guard` opt-out exists for the rare case where the user genuinely wants to purge a never-touched top-level (e.g. final cleanup after rename).
+
+## Cross-refs
+
+- UD-256 — scope persistence (root-cause fix; this is defence-in-depth on top).
+- UD-265 — reframe `maxDeletePercentage`.
+- UD-266 — plan-then-apply checkpoint.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+
+---
+id: UD-265
+title: Reframe maxDeletePercentage: add maxDeleteAbsolute and per-subtree threshold
+category: core
+priority: high
+effort: S
+status: closed
+closed: 2026-05-17
+resolved_by: commit 0e3f4ce. Two new SyncConfig keys: max_delete_absolute (default 50) and max_delete_per_subtree_percent (default 80). The existing max_delete_percentage stays operative for back-compat. Either axis tripping aborts apply / warns in dry-run; --force-delete bypasses all three. Per-subtree check groups DeleteRemote actions by top-level segment and queries StateDatabase.countEntriesUnderTopLevel; a 5-entry floor avoids noise on small folders. The 'pending-plan-{ts}.jsonl + --apply-plan' operator checkpoint mentioned in the ticket body is deferred to UD-266 per the cross-ref.
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:38
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+opened: 2026-05-17
+---
+**Existing safety net is too coarse for large inventories.** [SyncEngine.kt:38](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L38) defaults to `maxDeletePercentage = 50` — abort if a single run would delete more than 50 % of tracked entries. With 280,194 entries on `inxt_gernot_krost_posteo`, 50 % = 140,097 deletes before the brake engages. The 2026-05-16 incident deleted 405 items (0.14 %) — well under the brake, and clearly catastrophic.
+
+## What to change
+
+Two-axis threshold:
+
+- **Absolute count**: `maxDeleteAbsolute = 50` (configurable). Trips on any run planning > N deletes, regardless of inventory size. Catches "wide blast" scenarios that the percentage misses on large drives.
+- **Per-subtree percentage**: instead of "% of total tracked entries", evaluate the percentage *within each top-level subtree affected by deletes*. A run that wants to delete 100 % of `/Documents/CyberLink/` should trip even though it's 0.04 % of the total drive.
+
+When either threshold trips, abort the apply phase, persist the planned actions to `pending-plan-{ts}.jsonl`, and instruct the operator to inspect and re-run with `--apply-plan` (cross-ref UD-266).
+
+`useTrash=true` (the current default for Internxt via UD-367) is NOT a substitute for these checks — Internxt's trash has a 30-day retention window per the `trashRetentionDays: 30` config value, so a delete the user doesn't notice for a month becomes permanent.
+
+## Acceptance
+
+- New config keys `maxDeleteAbsolute` (default 50) and `maxDeletePerSubtreePercent` (default 80) in `config.toml` + `SyncConfig`.
+- Reconciler / engine applies both checks; either tripping aborts apply.
+- Aborted run writes `pending-plan-{ts}.jsonl` with the planned actions.
+- Updated `unidrive sync --apply-plan <file>` honours the persisted plan (deferred to UD-266 if scope creeps).
+- Existing `maxDeletePercentage` semantic preserved for back-compat (still trips; just no longer the only check).
+
+## Cross-refs
+
+- UD-256 — scope persistence (root cause).
+- UD-264 — top-level-never-seen-locally guard (defence-in-depth, narrower than this).
+- UD-266 — plan-then-apply (operator checkpoint when this trips).
+
+---
 id: UD-268
 title: unidrive doctor: one-shot read-only diagnostic for state/disk/cursor/failure drift
 category: core

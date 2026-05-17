@@ -105,6 +105,23 @@ open class SyncCommand : Runnable {
     @Option(names = ["--force-delete"], description = ["Override deletion safeguard (max_delete_percentage)"])
     var forceDelete: Boolean = false
 
+    // UD-264: opt-out for the top-level-never-hydrated delete guard. Default
+    // (false) skips del-remote actions whose top-level cloud folder has never
+    // had a hydrated descendant locally — exactly the 2026-05-16 incident
+    // shape. When true, the engine still records skipped paths to
+    // skipped-ops.jsonl but does NOT drop the action. Reserved for the rare
+    // case where the operator genuinely wants to purge a never-touched
+    // top-level (e.g. final cleanup after rename).
+    @Option(
+        names = ["--ignore-top-level-guard"],
+        description = [
+            "UD-264: bypass the top-level-never-hydrated del-remote guard. DANGER: this re-enables",
+            "the 2026-05-16 incident pattern — only use when you've audited skipped-ops.jsonl and",
+            "consciously want to purge a cloud subtree that has never been hydrated locally.",
+        ],
+    )
+    var ignoreTopLevelGuard: Boolean = false
+
     @Option(
         names = ["--propagate-deletes"],
         description = [
@@ -377,6 +394,9 @@ open class SyncCommand : Runnable {
                 syncDirection = effectiveDirection,
                 propagateDeletes = propagateDeletes,
                 maxDeletePercentage = config.maxDeletePercentage,
+                // UD-265: two-axis reframing — absolute count + per-subtree percentage.
+                maxDeleteAbsolute = config.maxDeleteAbsolute,
+                maxDeletePerSubtreePercent = config.maxDeletePerSubtreePercent,
                 verifyIntegrity = config.verifyIntegrity,
                 providerId = profile.type,
                 useTrash = config.useTrash,
@@ -394,6 +414,9 @@ open class SyncCommand : Runnable {
                 // UD-256: pass --full-tree through to the engine so it clears the
                 // persisted effective_scope and bypasses the bare-bidirectional refusal.
                 allowFullTreeReconciliation = fullTree,
+                // UD-264: opt-out for the top-level-never-hydrated guard.
+                ignoreTopLevelGuard = ignoreTopLevelGuard,
+                skippedOpsLogPath = parent.providerConfigDir().resolve("skipped-ops.jsonl"),
             )
 
         Files.createDirectories(config.syncRoot)

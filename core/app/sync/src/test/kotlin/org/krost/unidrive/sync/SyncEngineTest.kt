@@ -838,6 +838,360 @@ class SyncEngineTest {
             )
         }
 
+    // UD-264 — top-level-never-hydrated del-remote guard
+
+    /**
+     * Seed unhydrated *folder* rows under [topLevel]. Reconciler emits
+     * DeleteRemote for unhydrated folder entries that are missing locally
+     * (the unhydrated-file branch in [Reconciler] converts to DownloadContent
+     * instead; UD-264 specifically defends against the folder shape — the
+     * 2026-05-16 incident deleted 405 folder rows). Cursor is non-null so the
+     * detectMissingAfterFullSync branch doesn't intercept.
+     */
+    private fun seedUnhydratedFolders(
+        topLevel: String,
+        count: Int,
+    ) {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        // Seed the top-level folder row itself + N descendants. None hydrated.
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = topLevel,
+                remoteId = "id-tl-$topLevel",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = now,
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = now,
+            ),
+        )
+        for (i in 0 until count) {
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "$topLevel/sub-$i",
+                    remoteId = "id-$topLevel-$i",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = now,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = now,
+                ),
+            )
+        }
+        db.setSyncState("delta_cursor", "seeded-cursor")
+    }
+
+    private fun engineWithGuards(
+        reporter: ProgressReporter = ProgressReporter.Silent,
+        ignoreTopLevelGuard: Boolean = false,
+        skippedOpsLogPath: Path? = null,
+        maxDeleteAbsolute: Int = 10_000,
+        maxDeletePerSubtreePercent: Int = 0, // disabled by default for UD-264 fixtures
+        maxDeletePercentage: Int = 0, // disabled by default for UD-264 fixtures
+    ) = SyncEngine(
+        provider = provider,
+        db = db,
+        syncRoot = syncRoot,
+        conflictPolicy = ConflictPolicy.KEEP_BOTH,
+        reporter = reporter,
+        maxDeletePercentage = maxDeletePercentage,
+        maxDeleteAbsolute = maxDeleteAbsolute,
+        maxDeletePerSubtreePercent = maxDeletePerSubtreePercent,
+        ignoreTopLevelGuard = ignoreTopLevelGuard,
+        skippedOpsLogPath = skippedOpsLogPath,
+    )
+
+    @Test
+    fun `UD-264 del-remote for never-hydrated top-level is skipped`() =
+        runTest {
+            // Three unhydrated folders under /Documents; sync_root has one file
+            // so UD-297 doesn't preempt. Provider returns no delta.
+            seedUnhydratedFolders("/Documents", count = 3)
+            Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
+            val reporter = RecordingReporter()
+            engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce(dryRun = true)
+
+            // All deletes were filtered out, so no DeleteRemote events surface.
+            assertTrue(
+                reporter.actions.none { it.label == "del-remote" && it.path.startsWith("/Documents") },
+                "expected del-remote for /Documents/* to be filtered, got: ${reporter.actions}",
+            )
+            // Audit log captures the skip with the documented reason.
+            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written")
+            val logBody = Files.readString(logPath)
+            assertTrue(
+                logBody.contains("top_level_never_hydrated"),
+                "skipped-ops.jsonl should record the reason, got: $logBody",
+            )
+            assertTrue(
+                logBody.contains("\"path\":\"/Documents"),
+                "skipped-ops.jsonl should record the skipped path, got: $logBody",
+            )
+        }
+
+    @Test
+    fun `UD-264 PR46-Codex formatSkippedOpJson is parseable for paths with JSON-special chars`() {
+        // PR #46 Codex P2: paths can contain `"`, `\`, and newline. failures.jsonl
+        // already had ~119 PARSE_ERR entries from the same bug class in logFailure
+        // (the audit observed `/\ninternxt-cli.desktop` in the wild). The prior
+        // hand-built triple-quoted template produced invalid JSON for these.
+        //
+        // We test the formatter directly because the OS rejects these characters
+        // in real paths on Windows — LocalScanner throws InvalidPathException
+        // before any code under test can run. The lifted formatter has no FS
+        // dependency, so this unit test exercises exactly the hazard.
+        val nasty = "/Doc \"with\" \\back and\nnewline\t\r"
+        val ts = Instant.parse("2026-05-17T10:00:00Z")
+        val line = SyncEngine.formatSkippedOpJson(action = "del-remote", path = nasty, reason = "top_level_never_hydrated", ts = ts)
+
+        // The output must be a single line of valid JSON.
+        assertTrue(!line.contains('\n'), "formatted line must not contain a raw newline; got: $line")
+        val json = kotlinx.serialization.json.Json
+        val obj = json.parseToJsonElement(line) as kotlinx.serialization.json.JsonObject
+
+        // Required fields present with correct shapes.
+        val storedPath = (obj["path"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedReason = (obj["reason"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedAction = (obj["action"] as kotlinx.serialization.json.JsonPrimitive).content
+        val storedTs = (obj["ts"] as kotlinx.serialization.json.JsonPrimitive).content
+        assertEquals(nasty, storedPath, "path must round-trip exactly")
+        assertEquals("top_level_never_hydrated", storedReason)
+        assertEquals("del-remote", storedAction)
+        assertEquals("2026-05-17T10:00:00Z", storedTs)
+    }
+
+    @Test
+    fun `UD-264 del-remote for top-level WITH hydrated descendant is propagated`() =
+        runTest {
+            // Three unhydrated folders under /Documents, PLUS one hydrated
+            // descendant file. The hydrated descendant is the user signal
+            // that this subtree IS known to unidrive — guard must allow
+            // delete propagation through.
+            seedUnhydratedFolders("/Documents", count = 3)
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/Documents/hydrated-file.txt",
+                    remoteId = "id-hyd",
+                    remoteHash = "h",
+                    remoteSize = 100,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 100,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            // Place the hydrated file on disk so reconciler doesn't propose
+            // a separate DeleteRemote for it.
+            Files.createDirectories(syncRoot.resolve("Documents"))
+            Files.writeString(syncRoot.resolve("Documents/hydrated-file.txt"), "x".repeat(100))
+            provider.deltaItems = emptyList()
+
+            val reporter = RecordingReporter()
+            engineWithGuards(reporter = reporter).syncOnce(dryRun = true)
+
+            // del-remote for /Documents/sub-* must show up — guard did not strip them.
+            assertTrue(
+                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents/sub-") },
+                "expected del-remote for /Documents/sub-* to flow through, got: ${reporter.actions}",
+            )
+        }
+
+    @Test
+    fun `UD-264 --ignore-top-level-guard lets the delete through and still logs`() =
+        runTest {
+            seedUnhydratedFolders("/Documents", count = 3)
+            Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
+            val reporter = RecordingReporter()
+            engineWithGuards(
+                reporter = reporter,
+                ignoreTopLevelGuard = true,
+                skippedOpsLogPath = logPath,
+            ).syncOnce(dryRun = true)
+
+            // Opt-out keeps the deletes in the plan.
+            assertTrue(
+                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents") },
+                "ignore-top-level-guard should let del-remote flow, got: ${reporter.actions}",
+            )
+            // ... but still logs them for audit.
+            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written even on opt-out")
+            val logBody = Files.readString(logPath)
+            assertTrue(
+                logBody.contains("top_level_never_hydrated"),
+                "opt-out path still writes the audit line, got: $logBody",
+            )
+        }
+
+    // UD-265 — two-axis deletion safeguard (absolute + per-subtree)
+
+    @Test
+    fun `UD-265 planning more than maxDeleteAbsolute aborts in apply`() =
+        runTest {
+            // 60 hydrated DB entries, sync_root has one file so UD-297 stays
+            // quiet. With maxDeleteAbsolute=50 (default), the 59-delete plan
+            // trips the absolute axis. Whole-inventory percentage is at 59/60
+            // ~ 98% which would ALSO trip UD-298, so we set
+            // maxDeletePercentage=0 to disable that axis and isolate UD-265.
+            seedDbEntries(60)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithGuards(maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                        .syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("max_delete_absolute"))
+        }
+
+    @Test
+    fun `UD-265 planning more than maxDeleteAbsolute warns in dry-run`() =
+        runTest {
+            seedDbEntries(60)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val reporter = RecordingReporter()
+            engineWithGuards(reporter = reporter, maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                .syncOnce(dryRun = true)
+
+            assertTrue(
+                reporter.warnings.any { it.contains("max_delete_absolute") },
+                "expected dry-run warning for absolute cap, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `UD-265 per-subtree percentage trips when one top-level is mostly deleted`() =
+        runTest {
+            // 20 entries under /Documents (all hydrated); only one of them
+            // exists locally → 19 DeleteRemote actions = 95 % of /Documents.
+            // Total inventory is only 20 entries so we also need to bypass
+            // UD-298 (max_delete_percentage). maxDeleteAbsolute=10000 so the
+            // absolute axis stays out of the way too — we want to isolate the
+            // per-subtree axis. Place 9 unrelated hydrated entries under
+            // /Other to demonstrate the per-subtree (not whole-inventory)
+            // semantics.
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // Use unique sizes per entry so the reconciler's move-detection
+            // heuristic (matching DeleteRemote + Upload of equal size) doesn't
+            // collapse the 19 /Documents deletes into moves to /Other.
+            for (i in 0 until 20) {
+                db.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/Documents/file-$i.txt",
+                        remoteId = "id-doc-$i",
+                        remoteHash = "h-$i",
+                        remoteSize = (1000 + i).toLong(),
+                        remoteModified = now,
+                        localMtime = now.toEpochMilli(),
+                        localSize = (1000 + i).toLong(),
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+            }
+            // /Other entries get sizes that don't collide with /Documents.
+            for (i in 0 until 9) {
+                db.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/Other/file-$i.txt",
+                        remoteId = "id-other-$i",
+                        remoteHash = "ho-$i",
+                        remoteSize = (5000 + i).toLong(),
+                        remoteModified = now,
+                        localMtime = now.toEpochMilli(),
+                        localSize = (5000 + i).toLong(),
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+            }
+            db.setSyncState("delta_cursor", "seeded-cursor")
+
+            // Keep one /Documents file and all of /Other on disk at the
+            // matching sizes so they reconcile as UNCHANGED and we only see
+            // 19 /Documents/* deletes flow.
+            Files.createDirectories(syncRoot.resolve("Documents"))
+            Files.writeString(syncRoot.resolve("Documents/file-0.txt"), "x".repeat(1000))
+            Files.createDirectories(syncRoot.resolve("Other"))
+            for (i in 0 until 9) {
+                Files.writeString(syncRoot.resolve("Other/file-$i.txt"), "x".repeat(5000 + i))
+            }
+            provider.deltaItems = emptyList()
+
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithGuards(
+                        maxDeleteAbsolute = 10_000,
+                        maxDeletePerSubtreePercent = 80,
+                        maxDeletePercentage = 0,
+                    ).syncOnce(dryRun = false)
+                }
+            assertTrue(
+                ex.message!!.contains("max_delete_per_subtree_percent"),
+                "expected per-subtree message, got: ${ex.message}",
+            )
+            assertTrue(ex.message!!.contains("/Documents"))
+        }
+
+    @Test
+    fun `UD-265 force-delete bypasses both new axes`() =
+        runTest {
+            seedDbEntries(60)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            // No exception even though the absolute cap is well under the
+            // 59-delete plan.
+            engineWithGuards(maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                .syncOnce(dryRun = false, forceDelete = true)
+        }
+
+    @Test
+    fun `UD-265 existing maxDeletePercentage axis still trips`() =
+        runTest {
+            // Same fixture as the UD-298 test — 99 of 100 entries deleted —
+            // but explicitly request the maxDeletePercentage axis only by
+            // setting maxDeleteAbsolute high. This documents the back-compat
+            // contract: the legacy axis stays operative.
+            seedDbEntries(100)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithGuards(
+                        maxDeleteAbsolute = 10_000,
+                        maxDeletePerSubtreePercent = 0,
+                        maxDeletePercentage = 50,
+                    ).syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("max_delete_percentage"))
+        }
+
     // UD-299 — track sync_root, refuse run when changed
 
     private fun engineWithSyncRoot(root: Path) =
