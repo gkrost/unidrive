@@ -11870,3 +11870,459 @@ or `--provider` are the only forms).
   the MCP launcher's `--profile` similarly.
 - [`docs/dev/lessons/cli-surface-verify-before-doc.md`](../dev/lessons/cli-surface-verify-before-doc.md)
   — discipline this ticket reinforces.
+---
+id: UD-256
+title: Persist --sync-path scope across runs; refuse un-scoped bidirectional on scoped profiles
+category: core
+priority: critical
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:194
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:220
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:252
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt:62
+opened: 2026-05-17
+---
+**Root-cause finding from the 2026-05-16 Internxt delete incident** (`inxt_gernot_krost_posteo`, audit log 11:38–11:47: 405 successful `Delete` actions against cloud folders that exist in the official mount but were never present in unidrive's local `sync_root`).
+
+## What is broken
+
+`--sync-path` is respected at runtime ([SyncEngine.kt:194-198](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L194), [SyncEngine.kt:220-225](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L220), [SyncEngine.kt:252-254](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L252) — UD-901a). But the scope value itself is **not persisted anywhere** — not in state.db, not in config.toml, not in audit.
+
+The pattern that bites:
+
+1. User uploads a subtree: `unidrive sync --upload-only --sync-path='/AfA - Gründungsprozess'` (and others over time).
+2. UD-737 makes `--upload-only` push-additive — no local-side delete propagation. Safe.
+3. The local `sync_root` ends up holding only the union of those scoped pushes (5 top-level folders on disk, vs 16 in the cloud).
+4. A later bare `unidrive sync` (no `--sync-path`, no `--upload-only`, no `--direction`) runs **bidirectional, full scope**. `remoteChanges` = entire cloud, `localChanges` = the partial local tree. Reconciler reads "remote present, local absent" as "user deleted locally" and propagates DELETE.
+
+`maxDeletePercentage = 50` ([SyncEngine.kt:38](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L38)) doesn't catch this — 405 deletes against 280,194 tracked entries is 0.14 %, well under the threshold. Deletes went through `trashItems` (UD-367) so they're recoverable from Internxt trash within the 30-day retention window, but the design clearly intended a much smaller blast radius.
+
+## What to change
+
+Store the union of all `--sync-path` values ever seen for a profile in state.db (call it `effective_scope`, a set of normalised path prefixes). On any subsequent bidirectional run:
+
+- If `effective_scope` is non-empty AND no `--sync-path` was passed AND no explicit opt-in flag (e.g. `--expand-scope` or `--full-tree`) was given: REFUSE to run, print the persisted scope, instruct the user to either pass `--sync-path` matching the historical scope or explicitly opt into full-tree reconciliation.
+- If `--sync-path` is passed, UNION it into `effective_scope` and continue.
+- If `--expand-scope` / `--full-tree` is passed, clear or widen `effective_scope` after explicit confirmation.
+
+This is the data-loss-prevention root-cause fix. UD-257 (top-level guard) and UD-258 (delete threshold) are defence-in-depth on top of it.
+
+## Acceptance
+
+- `state.db.sync_state` gains an `effective_scope` key (JSON array of normalised paths).
+- First-ever `--sync-path` run on a profile persists that value; subsequent runs with no `--sync-path` AND no opt-in error out before reconciliation begins.
+- Reconciler honours `effective_scope` as the union of allowed prefixes, same way it currently honours `syncPath`.
+- New `--expand-scope <path>` / `--full-tree` flags exist to widen the scope explicitly.
+- New integration test: scoped upload run + bare bidirectional run → bare run aborts with a guidance message, NOT a delete plan.
+
+## Cross-refs
+
+- UD-405 (closed) — `--sync-path` normalisation. Same UX axis.
+- UD-901a (closed) — recovery loops respect syncPath at runtime. This ticket persists it across runs.
+- UD-362 (open) — scoped delta at provider tier. Performance angle of the same scope concern.
+- UD-257 — top-level-never-seen-locally delete guard (defence-in-depth).
+- UD-258 — `maxDeletePercentage` reframing (defence-in-depth).
+- UD-259 — plan-then-apply for destructive ops (operator checkpoint).
+- UD-263 — audit-log `--sync-path` so post-incident attribution is possible.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-264
+title: Reconciler guard: never delete a remote top-level folder whose subtree has never been hydrated locally
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt
+opened: 2026-05-17
+---
+**Defence-in-depth guard surfaced by the 2026-05-16 Internxt delete incident.** Even when UD-256 (scope persistence) lands, a second cheap-and-narrow safety helps: refuse to propagate a remote-side delete for any top-level cloud folder whose subtree has *never* held a hydrated local file.
+
+## What to change
+
+In the reconciler, before emitting a `del-remote` (or `move-to-trash`) action whose path lives under a particular top-level cloud folder, check: has state.db ever had any descendant of that top-level path with `is_hydrated=1` (or with a non-null `local_mtime`)? If not, abort the delete and log the path with `skip_reason="top_level_never_hydrated"`.
+
+The check is cheap: one SQL with `path LIKE '/Foo/%' AND (is_hydrated=1 OR local_mtime IS NOT NULL) LIMIT 1`. Cache the answer per (top-level prefix, run) to avoid hammering the DB.
+
+This would have prevented yesterday's 405 deletes on `/Documents/CyberLink/...`, `/.userhome/win11/apps/jdownloader/...`, etc. on `inxt_gernot_krost_posteo`: state.db indexed them (as `is_hydrated=0`) because the official Internxt client wrote them to cloud, but the user never downloaded them through unidrive, so no row under those top-levels has ever been hydrated.
+
+## Acceptance
+
+- Reconciler emits 0 `del-remote` actions for top-level cloud paths with no hydrated descendant ever.
+- Skipped paths are logged (`failures.jsonl` or a new `skipped-ops.jsonl`) with reason `top_level_never_hydrated` for visibility.
+- New unit test in `ReconcilerTest` for the guard.
+- An `--ignore-top-level-guard` opt-out exists for the rare case where the user genuinely wants to purge a never-touched top-level (e.g. final cleanup after rename).
+
+## Cross-refs
+
+- UD-256 — scope persistence (root-cause fix; this is defence-in-depth on top).
+- UD-265 — reframe `maxDeletePercentage`.
+- UD-266 — plan-then-apply checkpoint.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-265
+title: Reframe maxDeletePercentage: add maxDeleteAbsolute and per-subtree threshold
+category: core
+priority: high
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt:38
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncConfig.kt
+opened: 2026-05-17
+---
+**Existing safety net is too coarse for large inventories.** [SyncEngine.kt:38](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt#L38) defaults to `maxDeletePercentage = 50` — abort if a single run would delete more than 50 % of tracked entries. With 280,194 entries on `inxt_gernot_krost_posteo`, 50 % = 140,097 deletes before the brake engages. The 2026-05-16 incident deleted 405 items (0.14 %) — well under the brake, and clearly catastrophic.
+
+## What to change
+
+Two-axis threshold:
+
+- **Absolute count**: `maxDeleteAbsolute = 50` (configurable). Trips on any run planning > N deletes, regardless of inventory size. Catches "wide blast" scenarios that the percentage misses on large drives.
+- **Per-subtree percentage**: instead of "% of total tracked entries", evaluate the percentage *within each top-level subtree affected by deletes*. A run that wants to delete 100 % of `/Documents/CyberLink/` should trip even though it's 0.04 % of the total drive.
+
+When either threshold trips, abort the apply phase, persist the planned actions to `pending-plan-{ts}.jsonl`, and instruct the operator to inspect and re-run with `--apply-plan` (cross-ref UD-266).
+
+`useTrash=true` (the current default for Internxt via UD-367) is NOT a substitute for these checks — Internxt's trash has a 30-day retention window per the `trashRetentionDays: 30` config value, so a delete the user doesn't notice for a month becomes permanent.
+
+## Acceptance
+
+- New config keys `maxDeleteAbsolute` (default 50) and `maxDeletePerSubtreePercent` (default 80) in `config.toml` + `SyncConfig`.
+- Reconciler / engine applies both checks; either tripping aborts apply.
+- Aborted run writes `pending-plan-{ts}.jsonl` with the planned actions.
+- Updated `unidrive sync --apply-plan <file>` honours the persisted plan (deferred to UD-266 if scope creeps).
+- Existing `maxDeletePercentage` semantic preserved for back-compat (still trips; just no longer the only check).
+
+## Cross-refs
+
+- UD-256 — scope persistence (root cause).
+- UD-264 — top-level-never-seen-locally guard (defence-in-depth, narrower than this).
+- UD-266 — plan-then-apply (operator checkpoint when this trips).
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-266
+title: Plan-then-apply for destructive sync runs: --apply-plan operator checkpoint
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli/SyncCommand.kt
+opened: 2026-05-17
+---
+**Operator checkpoint for destructive bidirectional reconciliations.** Today the sync engine plans + applies in one pass. When the plan turns out to be a mass-delete (cf. UD-256 / UD-264 / UD-265), the operator only sees it in `audit-*.jsonl` *after* execution.
+
+## What to change
+
+When a sync run's plan exceeds a destructive-action threshold (e.g. > N `del-remote` or > M total mutating actions), the engine:
+
+1. Serialises the planned action list to `{profile}/pending-plan-{timestamp}.jsonl` (one JSON action per line, same shape as `audit-*.jsonl` but with `phase=planned`).
+2. Aborts apply; prints a one-page summary (per-action-type counts + top-N affected paths) and the path to the saved plan.
+3. Exits with a non-zero status documenting "destructive-plan-deferred".
+
+The user inspects the plan and either:
+
+- Edits or trims it (it's a plain JSONL file) and re-runs `unidrive sync --apply-plan <file>` to execute the (possibly edited) plan against the current state. The engine re-validates each action's preconditions before applying.
+- Discards it; the next normal `unidrive sync` re-plans from scratch.
+
+Threshold defaults: anything planning > 50 deletes OR > 500 mutating actions triggers the checkpoint. Configurable per-profile via `destructivePlanCheckpoint = { deletes: 50, total: 500 }` in config.toml.
+
+This is the same pattern as `terraform plan` / `terraform apply`. It does not slow the common case (small delta) — the checkpoint only fires when the plan crosses the threshold.
+
+## Acceptance
+
+- New CLI flag `--apply-plan <file>` consumes a pending-plan JSONL.
+- New config block `destructivePlanCheckpoint` with `deletes` and `total` thresholds.
+- Engine writes `pending-plan-{ts}.jsonl` and aborts apply when threshold trips.
+- `--apply-plan` re-validates preconditions (e.g. file hash hasn't changed since plan capture) and refuses individual actions that no longer apply, with a per-action skip reason in the output.
+- `unidrive plan list` / `plan show <file>` CLI helpers for inspection (could split into a follow-up).
+- New integration test: bidirectional run with > 50 planned deletes aborts without mutating state; `--apply-plan <captured-file>` then runs the plan.
+
+## Cross-refs
+
+- UD-256 — scope persistence (root cause).
+- UD-265 — `maxDeletePercentage` reframing (one of several triggers for the checkpoint).
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-267
+title: Hydration drift detector + self-heal (669 ghost-hydrated rows observed on inxt_gernot_krost_posteo)
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-05-17
+---
+**Hydration-flag drift observed in the wild.** On profile `inxt_gernot_krost_posteo` (state.db at `C:\Users\gerno\.unidrive\inxt_gernot_krost_posteo\state.db`), **669 rows have `is_hydrated=1` but the file does not exist on disk** at the expected path under `sync_root`.
+
+## Numbers (2026-05-17, robust HashSet-based cross-check)
+
+| | |
+|---|---:|
+| state.db total entries | 280,194 |
+| state.db files (is_folder=0) | 275,009 |
+| state.db files flagged hydrated (is_hydrated=1) | 131,110 |
+| state.db files flagged hydrated AND missing on disk | **669** |
+| state.db files flagged unhydrated AND present on disk | 0 |
+| disk files (under sync_root) | 130,531 |
+| disk files not in state.db (potential local orphans) | 90 |
+| state rows with `is_hydrated=1 AND local_mtime IS NULL` | 0 (model invariant holds) |
+
+So state.db is internally consistent (no NULL-mtime hydrated rows), but disagrees with disk reality on 669 paths. Likely causes:
+
+- User deleted files out-of-band (Explorer / `rm`), and unidrive hasn't re-scanned that subtree.
+- Jar hot-swap corruption on Windows mid-write (CLAUDE.md / [feedback_jar_hotswap.md](memory/feedback_jar_hotswap.md)). The user has a documented history of this on this profile.
+- Local rescan was interrupted and never converged.
+- Race during a previous `--reset` or partial cursor advance.
+
+The drift is dangerous because a bidirectional reconcile sees `is_hydrated=1` (engine "knows" the file is local), then the file isn't there to upload, then it may emit a download or — depending on the path — a `del-remote` if state.db has been re-derived to say "local was deleted".
+
+## What to change
+
+Two parts:
+
+### A. Detector — `unidrive doctor --hydration-drift`
+
+Walk state.db rows flagged hydrated, `Files.exists()` check each against `sync_root + path`. Report counts + sample paths. Should be a sub-command (or part of UD-268's `unidrive doctor`). Cheap — file existence check on 131k paths is < 30 s on a warm cache.
+
+### B. Self-heal — `unidrive sync --repair-hydration-drift`
+
+For each drifted row, clear `is_hydrated=1` → `0` and null out `local_mtime`/`local_size`. Next sync treats them as unhydrated remote files (correct semantic). Do NOT propagate as `del-remote` — that's what got us into trouble in UD-256-land.
+
+Add a startup-time warning: if drift > threshold (say 50 rows or 0.1 %), refuse to run bidirectional until either `--repair-hydration-drift` runs or `--ignore-hydration-drift` is passed.
+
+## Acceptance
+
+- New `doctor --hydration-drift` sub-command reports the count and a sample.
+- New `sync --repair-hydration-drift` flow clears the bogus hydration flags without emitting cloud-side mutations.
+- Bidirectional sync refuses to run when drift > threshold without an opt-out.
+- Integration test: seed state.db with 100 hydrated-but-missing rows; `doctor` reports 100; `--repair-hydration-drift` clears them; subsequent sync downloads them as if fresh.
+- Investigation: which UD-### or commit introduced the path that lets `is_hydrated=1` persist across out-of-band local deletes? Likely a missed hook in the local scanner. Document in the ticket body when found.
+
+## Cross-refs
+
+- UD-268 — `unidrive doctor` (this surfaces as one of doctor's checks).
+- Memory: [feedback_jar_hotswap.md](.claude/memory/feedback_jar_hotswap.md) — known cause of mid-write corruption on Windows.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-268
+title: unidrive doctor: one-shot read-only diagnostic for state/disk/cursor/failure drift
+category: core
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-17
+---
+**First-class operator triage tool.** Today, diagnosing a misbehaving profile means: open state.db with sqlite3, write SQL by hand, walk `sync_root` with `Get-ChildItem`/`find`, parse `failures.jsonl` and `audit-*.jsonl` by hand, cross-reference timestamps. The 2026-05-17 session reproduced this end-to-end and took ~40 minutes for a single profile.
+
+## What to build
+
+`unidrive doctor [-p <profile>]` — single read-only subcommand. Bundles the checks an experienced operator would run, one section per check, exit code 0 on clean / 1 on warnings / 2 on errors. Output: short summary by default, `--verbose` for per-row detail, `--json` for scripted consumers.
+
+### Checks
+
+1. **Daemon + lock liveness.** `.lock.pid` PID vs `ps`. Detect stale locks (PID gone or owned by a different process). The 2026-05-17 inspection found a stale `2420` from a previous session.
+2. **Cursor freshness.** `last_full_scan`, `delta_cursor`, `pending_cursor`, `pending_cursor_complete`. Warn if > 7 days stale or `pending_cursor_complete=false`.
+3. **Hydration drift.** Per UD-267: count rows with `is_hydrated=1` but file missing on disk. Sample the worst.
+4. **Local orphans.** Count files on disk that aren't in state.db (90 in the 2026-05-17 sample).
+5. **State vs config drift.** `state.sync_state.sync_root` vs config-resolved `sync_root` (UD-299 already detects this; surface in doctor).
+6. **Quota freshness.** `quota_fetched_at` vs now. Warn if > 7 days. (Live MCP quota showed 681 GB used vs cached 359 GB in state.db — 17-day-stale cache.)
+7. **Effective scope.** Per UD-256: print the persisted `effective_scope` (if any) so the operator sees what bidirectional would reconcile.
+8. **Recent failure spike.** Tally `failures.jsonl` last 7 days by action+truncated-error. Flag top-3 buckets. In the 2026-05-17 sample, `down :: 429 1015` (861 entries) would have been the lead.
+9. **Recent destructive activity.** Tally `audit-*.jsonl` last 7 days by action. Flag if `Delete` > 50 in any single day. This would have surfaced the 2026-05-16 405-delete incident on the next session.
+10. **Credential health.** Reuse the `unidrive_status` credential-health probe.
+11. **JFR-friendly perf snapshot.** Last `last_scan_secs_remote` / `last_scan_count_remote` → items-per-second. Warn if < 10 items/s (likely rate-limited, cf. Cloudflare 1015).
+
+### Out of scope (could be doctor v2)
+
+- Bridge-level corruption detection.
+- Active provider probes (would not be read-only).
+
+## Acceptance
+
+- `unidrive doctor` runs end-to-end on a profile in < 30 s for 200k entries.
+- Read-only — never mutates state.db, sync_root, or remote.
+- Exit code: 0 / 1 / 2 reflects severity.
+- `--json` emits a structured report consumable by scripts.
+- New integration test: seed a profile with each known drift type; doctor flags all of them.
+
+## Cross-refs
+
+- UD-267 — hydration drift (one of doctor's checks).
+- UD-256 — scope persistence (one of doctor's checks).
+- UD-270 — audit `--sync-path` (improves doctor's destructive-activity attribution).
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-256a
+title: Audit log session header: record --sync-path, direction, dry-run, effective_scope per invocation
+category: core
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/SyncEngine.kt
+opened: 2026-05-17
+---
+**Observability gap surfaced by the 2026-05-16 incident post-mortem.** The audit log records per-action rows (`{ts, action, path, result, profile}`) but does not record the invocation that emitted them. To attribute yesterday's 405 `Delete` actions, the post-mortem had to guess which `unidrive sync …` invocation ran at 11:38 based on PID lookups that were already gone.
+
+## What to change
+
+Each `audit-*.jsonl` file should open with a session-header row recording invocation context:
+
+```json
+{"ts":"2026-05-16T11:38:00Z","kind":"session_start","run_id":"<uuid>","cli_args":["sync"],"sync_path":null,"direction":"BIDIRECTIONAL","dry_run":false,"reset":false,"propagate_deletes":false,"effective_scope":["/19notte78","/AfA - Gründungsprozess"],"jar_version":"0.0.1","pid":12345}
+```
+
+Every per-action row in that session embeds `run_id` for cross-referencing. On daemon stop / process exit, write a matching `session_end` row with summary counts.
+
+Why each field:
+
+- `cli_args` — exact invocation, including any `--upload-only` / `--download-only` / `--direction`.
+- `sync_path` — null vs explicit, so post-mortem can attribute "this delete came from a bare bidirectional run" vs "this came from a scoped run".
+- `direction` — surfaces the effective resolved direction (UPLOAD / DOWNLOAD / BIDIRECTIONAL after `--upload-only` etc. flag resolution).
+- `effective_scope` — pairs with UD-256; lets reviewers see what scope the engine *thought* was in effect.
+- `jar_version` + `pid` — disambiguates concurrent profiles / sessions / agents.
+
+## Acceptance
+
+- New `session_start` and `session_end` row types in `audit-*.jsonl`.
+- Every mutation row carries a `run_id` linking back to its session header.
+- `unidrive doctor` (UD-268) uses `run_id` to attribute destructive-activity spikes to specific invocations.
+- Backwards-compatible: rows without `run_id` parse as orphans (existing log content stays readable).
+
+## Cross-refs
+
+- UD-256 — `effective_scope` field consumes the persisted scope.
+- UD-268 — doctor surfaces session-attributed destructive activity.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-256b
+title: Investigate 41 NoSuchMethodError thrown in first minute of sync startup (JFR 2026-05-17)
+category: core
+priority: low
+effort: S
+status: open
+code_refs:
+  - core/gradle/libs.versions.toml
+opened: 2026-05-17
+---
+**JFR profile of `unidrive sync --dry-run` (2026-05-17, `inxt_gernot_krost_posteo`, jar `unidrive-0.0.1.jar`) reports 41 `java.lang.NoSuchMethodError` thrown in the first minute of execution.**
+
+JFR rule output verbatim:
+
+> Rule Id: Errors — The program generated an average of 41 errors per minute during 17.05.2026, 09:27:31.000 – 09:28:31. 41 errors were thrown in total. The most common error was `java.lang.NoSuchMethodError`, which was thrown 41 times.
+
+JFR snapshot kept at `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr` (1.2 MB). Run completed normally (no fatal crash), so the errors are caught and recovery succeeds — but `NoSuchMethodError` at runtime is a strong signal of dependency / classpath drift (a class loaded from one version of a library, a call site compiled against a different version). Easy to ignore until it isn't.
+
+## What to investigate
+
+- Open the JFR in JMC (or via `mcp__jfr-analyzer__getReport` for a summary) and read the stack traces of the `Java Error` event class. 12.2 % of error traces were truncated at `-XX:FlightRecorderOptions=stackdepth=64`; bump to 256 if the first look is inconclusive.
+- Likely candidates: Kotlin stdlib version (libs.versions.toml `kotlin = "2.3.21"`), Ktor / kotlinx-serialization, picocli, sqlite-jdbc. Check `core/gradle/libs.versions.toml` against what's actually packaged into the shadow jar.
+- If reproducible: add a smoke test that fails the build on any `NoSuchMethodError` thrown during a no-op `sync --dry-run` startup.
+
+## Acceptance
+
+- Root cause identified (which call site, which library mismatch).
+- Either the offending dependency version is pinned/aligned, OR the call site is rewritten to use the available API, OR an explicit shading rule fixes the classpath ambiguity.
+- A smoke test guards against regression.
+
+## Cross-refs
+
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+- JFR snapshot: `.claude/worktrees/dazzling-ride-883ff6/inxt-dryrun-snap1.jfr`.
+---
+id: UD-376
+title: Internxt: phantom _XXX path segment in failed down requests (e.g. /_INBOX/_XXX/...)
+category: providers
+priority: medium
+effort: M
+status: open
+code_refs:
+  - core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtProvider.kt
+opened: 2026-05-17
+---
+**Path-encoding artefact observed in [failures.jsonl](C:\Users\gerno\.unidrive\inxt_gernot_krost_posteo\failures.jsonl) for profile `inxt_gernot_krost_posteo`.** Last 1000 lines contained:
+
+```
+19 × down :: Folder not found: _XXX in /_INBOX/_XXX/Pretty petite babe Alexandra C shows her small breasts & her trimmed pussy
+17 × down :: Folder not found: _XXX in /_INBOX/_XXX/KM Popcorn
+```
+
+The `_XXX` segment is suspicious — it does not exist as a folder under `/_INBOX/` on disk (`C:\Users\gerno\InternxtDrive\_INBOX\` contains only `KM Popcorn`, `Pretty petite babe Alexandra C…`, etc., NO `_XXX`). It also does not appear at top level in state.db's path distribution. The provider is constructing a request path that includes a segment which doesn't correspond to a real cloud folder.
+
+Hypotheses:
+
+1. **Path-encoding bug** — some intermediate transformation injects `_XXX` (perhaps a sanitiser substituting for a chars-it-can't-handle parent name).
+2. **Stale operation queue** — `/_INBOX/_XXX/…` was a real path historically, got renamed to `/_INBOX/…` (parent dropped), but pending download ops still reference the old form.
+3. **Cursor-replay artefact** — the delta cursor returned a moved-folder event the engine partially applied and then forgot.
+4. **String concat with a placeholder constant** — `_XXX` looks like a literal sentinel (e.g. anonymisation marker for a sanitised log) that leaked into actual request paths.
+
+(4) is worth checking first — grep for `_XXX` in the Internxt provider sources. If found in a `replace` / `format` call, it's a code bug. If absent, it's runtime data.
+
+## What to investigate
+
+- `grep -R "_XXX" core/providers/internxt/` and the engine's path-construction helpers (UD-405 normaliser, `resolveFolder`, `pathSegments`).
+- Reproduce: try `unidrive get /_INBOX/_XXX/KM Popcorn/<any-file>` with the daemon stopped. Inspect what request URL the provider builds.
+- Inspect the affected rows in state.db: `SELECT path FROM sync_entries WHERE path LIKE '%/_XXX/%' OR path LIKE '/_XXX/%'`. If state.db rows exist with that prefix, the bug is upstream (enumeration / encoding). If absent, the bug is downstream (request construction).
+
+## Acceptance
+
+- Root cause identified.
+- Fix: either reject `_XXX` as a literal in request construction (if it's a leaked sentinel), or invalidate the stale operation queue entries (if it's a rename artefact), or fix the path-encoding round-trip.
+- Regression test exercises the failing path against a mock Internxt API.
+
+## Cross-refs
+
+- UD-303 (open) — Internxt tie-break delta walk to defeat pagination drift. Adjacent.
+- UD-360 / UD-361 — partial gather issues, possibly the upstream cause if (2) holds.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+---
+id: UD-718
+title: unidrive.cmd and unidrive-jfr.cmd reference stale unidrive-0.0.0-greenfield.jar on Windows
+category: tooling
+priority: low
+effort: XS
+status: open
+opened: 2026-05-17
+---
+**Stale jar reference in launcher scripts under `%LOCALAPPDATA%\unidrive\` on Windows.**
+
+Both `unidrive.cmd` and `unidrive-jfr.cmd` reference `unidrive-0.0.0-greenfield.jar`, which does not exist — the current shipped jar is `unidrive-0.0.1.jar`:
+
+```
+%LOCALAPPDATA%\unidrive\
+  unidrive-0.0.1.jar        (42 MB, 2026-05-16)
+  unidrive-mcp-0.0.1.jar    (42 MB, 2026-05-16)
+  unidrive.cmd              → java -jar "%~dp0unidrive-0.0.0-greenfield.jar" %*       BROKEN
+  unidrive-jfr.cmd          → java -XX:StartFlightRecording=... -jar "%~dp0unidrive-0.0.0-greenfield.jar" %*   BROKEN
+  unidrive.ps1              → java -jar 'C:\Users\gerno\AppData\Local\unidrive\unidrive-0.0.1.jar' @args   OK
+  unidrive-watch.cmd        → java ... -jar "C:\Users\gerno\AppData\Local\unidrive\unidrive-0.0.1.jar" sync --watch   OK
+```
+
+The user has been calling `unidrive.ps1` directly, masking the rot in the `.cmd` wrappers. The 2026-05-17 JFR session sidestepped `unidrive-jfr.cmd` and built the `java` command inline for the same reason.
+
+## What to change
+
+- Update `unidrive.cmd` and `unidrive-jfr.cmd` to reference `unidrive-0.0.1.jar`.
+- Better: rewrite both to glob `unidrive-*.jar` and use the newest match (mimic the `unidrive.ps1` approach minus the hard-coded version), so the next version bump doesn't re-break them.
+- Even better: ship a single canonical launcher and document which one to use; the current four-script proliferation invites drift.
+
+Windows support is community best-effort per ADR-0012, but these launchers exist and don't work today, which leaves a confused user (anyone who calls `unidrive` from cmd.exe rather than PowerShell) thinking the install is broken.
+
+## Acceptance
+
+- `unidrive.cmd` and `unidrive-jfr.cmd` work against the current jar on a fresh Windows install.
+- Either jar reference is version-agnostic OR the install script writes the launchers from a template at install time using the actual jar name.
+- A short README in `%LOCALAPPDATA%\unidrive\` (or the install instructions) clarifies which launcher to use for which scenario.
+
+## Cross-refs
+
+- ADR-0012 — Linux-MVP scope; Windows is community best-effort. This is a low-effort improvement within that scope.
+- 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
