@@ -12472,3 +12472,71 @@ The dry-run-side-effect-leak fixed by `0fcd1f1` (PR #45's Codex P1 review) would
 - UD-256b (sibling) — NoSuchMethodError startup investigation.
 - UD-813 (open) — broader test-audit using the `challenge-test-assertion` rubric. This ticket is a narrow application of UD-813 to UD-256's test set; fold or coordinate as appropriate.
 - Validator report: `validation-report-2026-05-17.md` in worktree `agent-a0070d9f00a4c1415` (uncommitted).
+---
+id: UD-267b
+title: Hydration-drift remediation: three-cohort split (supersedes UD-267a)
+category: core
+priority: medium
+effort: S
+status: open
+opened: 2026-05-17
+---
+**Successor to UD-267a after two independent validators (2026-05-17) refuted UD-267a's "block on UD-377+UD-378" premise.**
+
+The 669 ghost-hydrated rows in `inxt_gernot_krost_posteo`'s state.db split into **three cohorts with different remediations**. No single fix works for all of them, and UD-377+UD-378 only touch one cohort (and even there can't always resolve correctly).
+
+Validator reports (uncommitted, in worktree dirs):
+- `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`
+- `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`
+
+Both validators agree on the breakdown, computed with different toolchains (V1: Python `sqlite3` + `os.walk` + `jq`; V2: sqlite3 CLI + SQL self-joins + `find`).
+
+## The three cohorts
+
+### Cohort A — Unique `remote_id`, no twin (425 rows / 63.5 %)
+
+State.db has exactly one row for this `remote_id`. The row is flagged `is_hydrated=1` with a `local_mtime` set, but the file is missing on disk. `last_synced` predominantly 2026-05-03/05 (the post-full-scan cohort).
+
+**Most likely cause:** file was downloaded by unidrive, then deleted out-of-band locally (Explorer, `rm`, an app that cleaned up its cache, jar-hotswap corruption per `memory/feedback_jar_hotswap.md`, etc.). Unidrive didn't see the delete because a local scan hasn't visited that path since.
+
+**Remediation:** detect, then clear `is_hydrated`, null `local_mtime` and `local_size`. The next sync treats the row as "remote file, not yet downloaded" → downloads it fresh. Pure self-heal.
+
+### Cohort B — NULL `remote_id`, epoch-zero `last_synced` (92 rows / 13.8 %)
+
+Rows where `remote_id IS NULL` AND `last_synced = '1970-01-01T00:00:00Z'`. These are failed-stub artifacts from interrupted operations (e.g. a download started before the remote metadata was confirmed, then crashed).
+
+**Remediation:** just `DELETE` them. There's nothing to recover; they're tombstones from a crash that never re-converged. Safe to drop unconditionally.
+
+### Cohort C — `remote_id` set, sibling row(s) exist, ALL siblings also missing (152 rows / 22.7 %)
+
+Both the ghost AND its UD-376 root-collapse twin point at files that aren't on disk. The file is genuinely gone — neither the canonical deep path NOR the phantom shallow path has it.
+
+**Remediation:** drop the entire cluster (both/all rows for that `remote_id`). The next full scan re-discovers the file from the cloud as a fresh entry. UD-378 alone is insufficient — its "drop duplicates, keep the survivor with the live local file" rule has no survivor here.
+
+UD-378's logic needs an extra clause for this cohort: when ALL siblings of a duplicate cluster are missing from disk, drop them all (don't try to pick a winner).
+
+## Why UD-267a was wrong
+
+UD-267a hypothesised that the 669 ghosts were largely the deep-path side of UD-376 root-collapse pairs whose root-collapsed twin was on disk (i.e. file moved with the rename, deep-path row was the stale one). Both validators independently found **0/669 ghosts have a sibling whose file is on disk** — the hypothesis required this to be the dominant case; instead it's the empty case.
+
+Additional clincher (V2 Q1d): every one of the 669 ghosts has `last_synced` ≤ 2026-05-12 — they ALL predate the 2026-05-16 incident that produced the 84k duplicate rows. The 669 are an independent legacy phenomenon, not collateral from the incident.
+
+## Acceptance
+
+- New detector subcommand or doctor-check segregates the 669 (or future equivalent set) into the three cohorts and reports counts + samples.
+- A `unidrive repair --hydration-drift` (or similar) applies the cohort-specific remediation:
+  - Cohort A: clear `is_hydrated`, null local fields. Audit log per-row.
+  - Cohort B: delete rows. Audit log per-row.
+  - Cohort C: drop the whole cluster (sibling rows too). Audit log per-cluster.
+- `--dry-run` mode reports what would happen without mutation.
+- Integration test seeds a state.db with the three cohorts, repair drops/clears the right counts.
+
+## Cross-refs
+
+- UD-267 (parent, open) — the original hydration-drift ticket. After UD-267b lands the implementation, UD-267 can close.
+- UD-267a (open → close as superseded by this ticket).
+- UD-377 — Internxt delta-path fix. Independent of UD-267b.
+- UD-378 — duplicate-remote_id reconciliation. **Needs amendment**: its "drop dup, keep the live-file one" rule must add a clause "if no sibling has a live file, drop them all" — that's the cohort-C path. Worth updating UD-378's body or filing UD-378a after this ticket lands.
+- UD-268 (`unidrive doctor`) — the detector half of this naturally extends doctor's hydration-drift check.
+- Validator 1: `agent-a0070d9f00a4c1415/validation-report-2026-05-17.md`.
+- Validator 2: `agent-a4e72b4fa42abc63b/validator2-report-2026-05-17.md`.
