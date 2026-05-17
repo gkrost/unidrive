@@ -2960,4 +2960,57 @@ Windows support is community best-effort per ADR-0012, but these launchers exist
 ## Cross-refs
 
 - ADR-0012 — Linux-MVP scope; Windows is community best-effort. This is a low-effort improvement within that scope.
+
+---
+id: UD-268
+title: unidrive doctor: one-shot read-only diagnostic for state/disk/cursor/failure drift
+category: core
+priority: medium
+effort: M
+status: closed
+closed: 2026-05-17
+resolved_by: commit 8232429. Landed v1 with 7 of 11 checks: lock-liveness, cursor-freshness, hydration-drift, local-orphans, effective-scope, quota-freshness, recent-destructive. Deferred 4 (state-vs-config drift, recent failure spike, credential health, JFR perf) — documented inline in DoctorCommand.kt for the v2 follow-up. Exit 0/1/2 reflects worst severity; --json structured output; --full opts into full-disk-walk/full-table scans (default samples 5000 rows/files to hold the 30s budget on 200k-entry profiles).
+code_refs:
+  - core/app/cli/src/main/kotlin/org/krost/unidrive/cli
+  - core/app/sync/src/main/kotlin/org/krost/unidrive/sync/StateDatabase.kt
+opened: 2026-05-17
+---
+**First-class operator triage tool.** Today, diagnosing a misbehaving profile means: open state.db with sqlite3, write SQL by hand, walk `sync_root` with `Get-ChildItem`/`find`, parse `failures.jsonl` and `audit-*.jsonl` by hand, cross-reference timestamps. The 2026-05-17 session reproduced this end-to-end and took ~40 minutes for a single profile.
+
+## What to build
+
+`unidrive doctor [-p <profile>]` — single read-only subcommand. Bundles the checks an experienced operator would run, one section per check, exit code 0 on clean / 1 on warnings / 2 on errors. Output: short summary by default, `--verbose` for per-row detail, `--json` for scripted consumers.
+
+### Checks
+
+1. **Daemon + lock liveness.** `.lock.pid` PID vs `ps`. Detect stale locks (PID gone or owned by a different process). The 2026-05-17 inspection found a stale `2420` from a previous session.
+2. **Cursor freshness.** `last_full_scan`, `delta_cursor`, `pending_cursor`, `pending_cursor_complete`. Warn if > 7 days stale or `pending_cursor_complete=false`.
+3. **Hydration drift.** Per UD-267: count rows with `is_hydrated=1` but file missing on disk. Sample the worst.
+4. **Local orphans.** Count files on disk that aren't in state.db (90 in the 2026-05-17 sample).
+5. **State vs config drift.** `state.sync_state.sync_root` vs config-resolved `sync_root` (UD-299 already detects this; surface in doctor).
+6. **Quota freshness.** `quota_fetched_at` vs now. Warn if > 7 days. (Live MCP quota showed 681 GB used vs cached 359 GB in state.db — 17-day-stale cache.)
+7. **Effective scope.** Per UD-256: print the persisted `effective_scope` (if any) so the operator sees what bidirectional would reconcile.
+8. **Recent failure spike.** Tally `failures.jsonl` last 7 days by action+truncated-error. Flag top-3 buckets. In the 2026-05-17 sample, `down :: 429 1015` (861 entries) would have been the lead.
+9. **Recent destructive activity.** Tally `audit-*.jsonl` last 7 days by action. Flag if `Delete` > 50 in any single day. This would have surfaced the 2026-05-16 405-delete incident on the next session.
+10. **Credential health.** Reuse the `unidrive_status` credential-health probe.
+11. **JFR-friendly perf snapshot.** Last `last_scan_secs_remote` / `last_scan_count_remote` → items-per-second. Warn if < 10 items/s (likely rate-limited, cf. Cloudflare 1015).
+
+### Out of scope (could be doctor v2)
+
+- Bridge-level corruption detection.
+- Active provider probes (would not be read-only).
+
+## Acceptance
+
+- `unidrive doctor` runs end-to-end on a profile in < 30 s for 200k entries.
+- Read-only — never mutates state.db, sync_root, or remote.
+- Exit code: 0 / 1 / 2 reflects severity.
+- `--json` emits a structured report consumable by scripts.
+- New integration test: seed a profile with each known drift type; doctor flags all of them.
+
+## Cross-refs
+
+- UD-267 — hydration drift (one of doctor's checks).
+- UD-256 — scope persistence (one of doctor's checks).
+- UD-270 — audit `--sync-path` (improves doctor's destructive-activity attribution).
 - 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
