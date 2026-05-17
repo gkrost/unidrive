@@ -7,6 +7,12 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
 import org.krost.unidrive.BeginAuthResult
 import org.krost.unidrive.CompleteAuthResult
 import java.nio.file.Files
@@ -207,15 +213,64 @@ class OneDriveInteractiveAuthContractTest {
             val result: BeginAuthResult = factory.beginInteractiveAuth(tmpProfileDir)
 
             assertTrue(result.continuationHandle.isNotEmpty())
-            assertEquals("https://microsoft.com/devicelogin", result.fields["verification_uri"])
-            assertEquals("USR-456", result.fields["user_code"])
-            assertEquals("5", result.fields["interval_seconds"])
-            assertEquals("900", result.fields["expires_in"])
-            assertNotNull(result.fields["message"])
+            // UD-375: fields carry typed JsonElement values. Strings stay
+            // string-typed; interval_seconds + expires_in are JSON numbers
+            // (Long-backed JsonPrimitive) so MCP clients can parse them
+            // numerically.
+            assertEquals(
+                "https://microsoft.com/devicelogin",
+                result.fields["verification_uri"]?.jsonPrimitive?.contentOrNull,
+            )
+            assertEquals("USR-456", result.fields["user_code"]?.jsonPrimitive?.contentOrNull)
+            assertEquals(5L, result.fields["interval_seconds"]?.jsonPrimitive?.long)
+            assertEquals(900L, result.fields["expires_in"]?.jsonPrimitive?.long)
+            assertNotNull(result.fields["message"]?.jsonPrimitive?.contentOrNull)
+            // Numeric fields must be JSON numbers (un-quoted on the wire),
+            // not JSON strings — guards UD-375 regression.
+            assertEquals(false, (result.fields["interval_seconds"] as JsonPrimitive).isString)
+            assertEquals(false, (result.fields["expires_in"] as JsonPrimitive).isString)
             assertTrue(result.expiresAt.isAfter(java.time.Instant.now()))
             assertEquals(5L, result.retryAfterSeconds)
 
             // Cleanup so the next test starts with an empty registry.
+            factory.cancelInteractiveAuth(result.continuationHandle)
+        }
+
+    @Test
+    fun begin_wire_format_keeps_numerics_unquoted_after_mcp_jsonbuilder() =
+        runBlocking {
+            // UD-375 regression test. Mirrors `AuthTool.handleAuthBegin`'s
+            // JSON-building exactly (same kotlinx.serialization JsonObjectBuilder
+            // pattern, same `for ((k, v) in result.fields) put(k, v)` loop).
+            // If a future refactor reverts BeginAuthResult.fields to
+            // Map<String, String> OR adds a `.toString()` call on values, the
+            // wire numerics would re-acquire quotes and break MCP clients
+            // parsing them as JSON numbers.
+            val factory = factoryWithEngine(deviceCodeOnlyEngine())
+            val result = factory.beginInteractiveAuth(tmpProfileDir)
+
+            val wirePayload =
+                buildJsonObject {
+                    put("profile", "test")
+                    put("continuation_handle", result.continuationHandle)
+                    for ((k, v) in result.fields) put(k, v)
+                }.toString()
+
+            // Numerics: unquoted (JSON numbers).
+            assertTrue(
+                wirePayload.contains("\"interval_seconds\":5"),
+                "interval_seconds must serialize as a JSON number, got: $wirePayload",
+            )
+            assertTrue(
+                wirePayload.contains("\"expires_in\":900"),
+                "expires_in must serialize as a JSON number, got: $wirePayload",
+            )
+            // Strings: quoted.
+            assertTrue(
+                wirePayload.contains("\"user_code\":\"USR-456\""),
+                "user_code must serialize as a JSON string, got: $wirePayload",
+            )
+
             factory.cancelInteractiveAuth(result.continuationHandle)
         }
 
