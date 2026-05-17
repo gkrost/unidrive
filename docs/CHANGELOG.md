@@ -65,6 +65,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calls, works correctly as HashMap key}`. Per UD-813 audit.
 
 ### Fixed
+- UD-375: OneDrive MCP `unidrive_auth_begin` now emits `interval_seconds`
+  and `expires_in` as JSON numbers (not strings). Pre-fix the post-UD-014
+  refactor stringified them via `.toString()` when packing into
+  `BeginAuthResult.fields: Map<String, String>`, breaking the documented
+  wire-format contract (OAuth device-code RFC: both are numeric). External
+  MCP clients parsing those fields numerically would see `"5"` instead of
+  `5` and either fail or need string-coercion special-casing. Fix: lift
+  `BeginAuthResult.fields` to `Map<String, JsonElement>` so each provider
+  emits the right `JsonPrimitive(Long/String/etc.)` and the MCP
+  serializer preserves types end-to-end. New regression test
+  `OneDriveInteractiveAuthContractTest.begin_wire_format_keeps_numerics_unquoted_after_mcp_jsonbuilder`
+  mirrors `AuthTool`'s JsonObjectBuilder logic and pins
+  `"interval_seconds":5` (unquoted) on the wire.
 - UD-283: SPECS.md §2.2 was stale on MCP `profile` tool-arg semantics
   — claimed the field was "silently ignored", but `ProfileArgValidator`
   (UD-283 implementation) actually short-circuits with a structured
