@@ -233,4 +233,20 @@ class SyncCommandTest {
             "error should mention both flags, got: $stderr",
         )
     }
+
+    @Test
+    fun `UD-256 sync command has --full-tree flag`() {
+        val syncCmd = cmd.subcommands["sync"]!!
+        val options = syncCmd.commandSpec.options().map { it.longestName() }
+        assertTrue("--full-tree" in options)
+    }
+
+    @Test
+    fun `UD-256 --full-tree and --sync-path are mutually exclusive at parse time`() {
+        val stderr = runAndExpectExit2("--full-tree", "--sync-path", "/Documents")
+        assertTrue(
+            stderr.contains("--full-tree") && stderr.contains("--sync-path"),
+            "error should mention both flags, got: $stderr",
+        )
+    }
 }
