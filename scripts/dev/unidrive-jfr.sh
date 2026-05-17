@@ -64,26 +64,39 @@ done
 APP_ARGS=("$@")
 
 # ── Resolve jar ────────────────────────────────────────────────────────────
+# UD-718: glob the newest matching jar (by mtime) instead of pinning a
+# version. The pre-fix form hard-coded 'unidrive-0.0.1.jar' /
+# 'unidrive-mcp-0.0.1.jar' which silently rots every version bump.
 if [[ "$MCP" -eq 1 ]]; then
-  JAR_NAME="unidrive-mcp-0.0.1.jar"
+  JAR_GLOB="unidrive-mcp-*.jar"
   KIND="mcp"
 else
-  JAR_NAME="unidrive-0.0.1.jar"
+  JAR_GLOB="unidrive-*.jar"
   KIND="cli"
+fi
+
+if [[ -n "${LOCALAPPDATA:-}" ]]; then
+  LIB_DIR="$LOCALAPPDATA/unidrive"          # Git Bash on Windows
+else
+  LIB_DIR="$HOME/.local/lib/unidrive"       # match deployLinux() target dir
 fi
 
 if [[ -n "$JAR_OVERRIDE" ]]; then
   JAR="$JAR_OVERRIDE"
-elif [[ -n "${LOCALAPPDATA:-}" ]]; then
-  # Git Bash on Windows
-  JAR="$LOCALAPPDATA/unidrive/$JAR_NAME"
 else
-  # Linux / macOS — match the deployLinux() target dir.
-  JAR="$HOME/.local/lib/unidrive/$JAR_NAME"
+  # ls -t is newest-first by mtime; filter out the MCP sibling so the CLI
+  # glob 'unidrive-*.jar' doesn't accidentally match 'unidrive-mcp-*.jar'.
+  if [[ "$MCP" -eq 1 ]]; then
+    # shellcheck disable=SC2012  # filenames are project-controlled
+    JAR=$(ls -t "$LIB_DIR"/$JAR_GLOB 2>/dev/null | head -n 1)
+  else
+    # shellcheck disable=SC2012
+    JAR=$(ls -t "$LIB_DIR"/$JAR_GLOB 2>/dev/null | grep -v "/unidrive-mcp-" | head -n 1)
+  fi
 fi
 
-if [[ ! -f "$JAR" ]]; then
-  echo "jar not found: $JAR" >&2
+if [[ -z "$JAR" || ! -f "$JAR" ]]; then
+  echo "jar not found in $LIB_DIR matching $JAR_GLOB" >&2
   echo "Run \`./gradlew :app:cli:deploy :app:mcp:deploy\` from core/ first." >&2
   exit 1
 fi

@@ -45,10 +45,25 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ── Resolve jar ────────────────────────────────────────────────────────────
-$jarName = if ($Mcp) { 'unidrive-mcp-0.0.1.jar' } else { 'unidrive-0.0.1.jar' }
-$jar = if ($JarOverride) { $JarOverride } else { Join-Path $env:LOCALAPPDATA "unidrive\$jarName" }
-if (-not (Test-Path $jar)) {
-    Write-Error "jar not found: $jar`nRun `./gradlew :app:cli:deploy :app:mcp:deploy` from core/ first."
+# UD-718: glob the newest matching jar (by LastWriteTime) instead of pinning
+# a version. The pre-fix form hard-coded 'unidrive-0.0.1.jar' /
+# 'unidrive-mcp-0.0.1.jar' which silently rots every version bump.
+$libDir = Join-Path $env:LOCALAPPDATA 'unidrive'
+$jarGlob = if ($Mcp) { 'unidrive-mcp-*.jar' } else { 'unidrive-*.jar' }
+if ($JarOverride) {
+    $jar = $JarOverride
+} else {
+    $candidates = Get-ChildItem -Path $libDir -Filter $jarGlob -ErrorAction SilentlyContinue
+    if (-not $Mcp) {
+        # The CLI glob 'unidrive-*.jar' also matches 'unidrive-mcp-*.jar';
+        # filter the MCP sibling out so we don't accidentally launch the
+        # wrong main class.
+        $candidates = $candidates | Where-Object { $_.Name -notmatch '^unidrive-mcp-' }
+    }
+    $jar = ($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+}
+if (-not $jar -or -not (Test-Path $jar)) {
+    Write-Error "jar not found under $libDir matching $jarGlob`nRun `./gradlew :app:cli:deploy :app:mcp:deploy` from core/ first."
     exit 1
 }
 
