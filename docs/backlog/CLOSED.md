@@ -3014,3 +3014,48 @@ opened: 2026-05-17
 - UD-256 — scope persistence (one of doctor's checks).
 - UD-270 — audit `--sync-path` (improves doctor's destructive-activity attribution).
 - 2026-05-17 session report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md).
+
+---
+id: UD-267a
+title: Reconsider UD-267 hydration drift in light of UD-376 findings (block on UD-377 + UD-378)
+category: core
+priority: medium
+effort: XS
+status: closed
+closed: 2026-05-17
+resolved_by: commit d2a38f3. superseded by UD-267b after 2026-05-17 validator findings refuted the 'block on UD-377+UD-378' premise. See UD-267b for the three-cohort breakdown and validator reports.
+opened: 2026-05-17
+---
+**Reconsideration of UD-267 in light of UD-376's findings.** This ticket exists to block UD-267 implementation until the root cause is understood and the duplicate-row situation is cleaned up.
+
+## What changed
+
+The 2026-05-17 audit reported 669 state.db rows with `is_hydrated=1` but no file on disk — framed as "hydration drift, probably out-of-band local deletes or jar-hotswap corruption". UD-267 was filed to detect + self-heal by clearing the hydration flag.
+
+UD-376's investigation (`docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md`) discovered that **the same profile has ~84,000 duplicate-remote_id rows in state.db** — pairs of deep-path + root-collapsed-path entries for the same Internxt UUID, produced by a path-resolution bug in `InternxtProvider.buildFolderPath`. The deep-path side of each pair is exactly the shape that registers as "ghost-hydrated":
+
+- Deep path written at full-scan, `is_hydrated=1` after the file downloads.
+- Later delta re-emits the SAME UUID at a collapsed path. New row `is_hydrated=0`.
+- Engine downloads against the new path; the deep-path row is now an orphan, still flagged hydrated, still pointing at a file location that doesn't have the file.
+
+The 669 count almost certainly **isn't a separate state-drift bug** — it's downstream of UD-376. Validating this before implementing UD-267's self-heal flow matters: clearing the hydration flag on the deep-path row would mask the fact that the row is a UD-376 ghost and should be DROPPED entirely (per UD-378's migration), not retained-with-cleared-flag.
+
+## What to do
+
+1. **Block UD-267 implementation on UD-377 + UD-378 landing first.** Once the delta-path fix is in and the duplicate-remote_id reconciliation has run on the affected profile, re-measure the ghost-hydrated count.
+2. If post-cleanup the count is ≈ 0, UD-267's design needs no detector — UD-377/UD-378 absorbed the failure mode. Close UD-267 as resolved-by-UD-377-and-UD-378.
+3. If post-cleanup the count is still meaningfully > 0, UD-267 proceeds as originally designed (detector + self-heal-by-clearing-hydration-flag) for the actually-orthogonal cases (out-of-band local deletes, jar-hotswap corruption, partial-rescan).
+
+## Acceptance
+
+- UD-267 stays in `status: open` but its body gains a "Blocked by UD-377, UD-378" note.
+- A short measurement script — `scripts/dev/check-hydration-drift.sh` or similar — exists so the post-UD-378 re-measure is one command.
+- Decision recorded in CHANGELOG.md or session-notes once the measurement is taken.
+
+## Cross-refs
+
+- UD-267 (open) — the parent ticket whose design this reconsiders.
+- UD-376 (open) — investigation that surfaced the systemic root-collapse.
+- UD-377 — structural delta-path fix.
+- UD-378 — duplicate-remote_id reconciliation migration.
+- 2026-05-17 audit report: [.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md](.claude/worktrees/dazzling-ride-883ff6/inxt-audit-2026-05-17.md) — original 669-count claim with correction footnote.
