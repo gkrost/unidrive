@@ -1451,4 +1451,51 @@ class SyncEngineTest {
             engineForScope(syncPath = "/Documents").syncOnce()
             engineForScope(syncDirection = SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
         }
+
+    // PR #45 Codex P1 regressions: dry-run must NEVER mutate effective_scope.
+    // Previously --full-tree --dry-run permanently cleared the guard; --sync-path
+    // X --dry-run silently committed a new scope. Both are now read-only in
+    // dry-run.
+
+    @Test
+    fun `UD-256 PR45-Codex --full-tree --dry-run does NOT clear persisted scope`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val before = db.getSyncState("effective_scope")
+            engineForScope(allowFullTreeReconciliation = true).syncOnce(dryRun = true)
+            val after = db.getSyncState("effective_scope")
+            assertEquals(
+                before,
+                after,
+                "dry-run --full-tree must not mutate effective_scope; before=$before after=$after",
+            )
+        }
+
+    @Test
+    fun `UD-256 PR45-Codex --sync-path --dry-run does NOT extend persisted scope`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val before = db.getSyncState("effective_scope")
+            engineForScope(syncPath = "/Photos").syncOnce(dryRun = true)
+            val after = db.getSyncState("effective_scope")
+            assertEquals(
+                before,
+                after,
+                "dry-run --sync-path must not mutate effective_scope; before=$before after=$after",
+            )
+        }
+
+    @Test
+    fun `UD-256 PR45-Codex first --sync-path --dry-run on fresh profile does NOT persist anything`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce(dryRun = true)
+            assertEquals(
+                null,
+                db.getSyncState("effective_scope"),
+                "first --sync-path run in dry-run must not seed effective_scope",
+            )
+        }
 }

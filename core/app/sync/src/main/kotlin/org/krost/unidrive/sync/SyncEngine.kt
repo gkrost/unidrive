@@ -188,24 +188,46 @@ class SyncEngine(
         //  - Upload-only and download-only are not refused — UD-737 already
         //    blocks delete propagation in those modes, so the catastrophe
         //    pattern can't trigger from the directions alone.
+        //
+        // UD-256 / PR #45 review (Codex P1): **never mutate effective_scope
+        // in dry-run.** Dry-run is contractually side-effect-free (see
+        // UD-738's in-memory-shadow handling of `--reset --dry-run`). Earlier
+        // versions of this block wrote to sync_state unconditionally — so a
+        // `--full-tree --dry-run` preview would permanently clear the guard,
+        // and a subsequent bare bidirectional apply on the same partial local
+        // tree would no longer be refused. Same hazard applied to
+        // `--sync-path X --dry-run`: previewing a scope addition silently
+        // committed it. Both writes are now gated on `!dryRun`. The refusal
+        // / warning branches are pure reads and stay structured as before.
         val priorScope = loadEffectiveScope()
         if (allowFullTreeReconciliation) {
-            if (priorScope.isNotEmpty()) {
+            if (priorScope.isNotEmpty() && !dryRun) {
                 log.info(
                     "UD-256: --full-tree clears persisted effective_scope ({} entries)",
                     priorScope.size,
                 )
                 db.setSyncState("effective_scope", "")
+            } else if (priorScope.isNotEmpty() && dryRun) {
+                log.info(
+                    "UD-256: --full-tree --dry-run previewing whole-cloud reconciliation; persisted effective_scope ({} entries) left untouched",
+                    priorScope.size,
+                )
             }
         } else if (syncPath != null) {
             val unioned = (priorScope + syncPath).distinct()
-            if (unioned.size != priorScope.size) {
+            if (unioned.size != priorScope.size && !dryRun) {
                 log.info(
                     "UD-256: persisting effective_scope += '{}' (now {} entry/entries)",
                     syncPath,
                     unioned.size,
                 )
                 db.setSyncState("effective_scope", unioned.joinToString("\t"))
+            } else if (unioned.size != priorScope.size && dryRun) {
+                log.info(
+                    "UD-256: --dry-run with new --sync-path '{}' — would extend effective_scope to {} entries (not persisted)",
+                    syncPath,
+                    unioned.size,
+                )
             }
         } else if (priorScope.isNotEmpty() && syncDirection == SyncDirection.BIDIRECTIONAL) {
             val msg =
