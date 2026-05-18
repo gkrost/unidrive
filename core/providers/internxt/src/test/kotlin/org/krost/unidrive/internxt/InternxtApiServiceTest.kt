@@ -1,5 +1,6 @@
 package org.krost.unidrive.internxt
 
+import io.ktor.client.engine.mock.respond
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -108,12 +109,15 @@ class InternxtApiServiceTest {
     // UD-335: tactical retry helpers (parseRetryAfter + retryOnTransient).
 
     private fun mkService(): InternxtApiService =
-        InternxtApiService(InternxtConfig()) {
-            // Tests don't actually call any HTTP method that needs creds —
-            // they exercise the retry/parse helpers directly. Surface a
-            // sentinel so any accidental real call fails loudly.
-            error("test fixture: credentialsProvider must not be called")
-        }
+        InternxtApiService(
+            InternxtConfig(),
+            credentialsProvider = {
+                // Tests don't actually call any HTTP method that needs creds —
+                // they exercise the retry/parse helpers directly. Surface a
+                // sentinel so any accidental real call fails loudly.
+                error("test fixture: credentialsProvider must not be called")
+            },
+        )
 
     @Test
     fun `UD-335 parseRetryAfter pulls seconds from Cloudflare-style body and returns ms`() {
@@ -408,6 +412,63 @@ class InternxtApiServiceTest {
                 payload
             }
             assertEquals(2, loaderInvocations.get())
+        }
+
+    @Test
+    fun `driveBudget records a throttle when a wrapped call surfaces 503`() =
+        kotlinx.coroutines.test.runTest {
+            // Wire a budget with an injectable clock; after a 503 surfaces from
+            // createFolder (Drive REST surface), the budget must observe
+            // currentSpacingMs() > 0 i.e. it transitioned out of the steady-state
+            // no-throttle fast path. This pins the per-attempt
+            // budget.recordThrottle hook on the Drive REST path.
+            var virtualMs = 1_000L
+            val budget =
+                org.krost.unidrive.http.HttpRetryBudget(
+                    maxConcurrency = 2,
+                    minSpacingMs = 500,
+                    stormSpacingMs = 1_000,
+                    clock = { virtualMs },
+                )
+            val service =
+                InternxtApiService(
+                    InternxtConfig(),
+                    {
+                        org.krost.unidrive.internxt.model.InternxtCredentials(
+                            jwt = "test-jwt",
+                            mnemonic = "test-mnemonic",
+                            rootFolderId = "test-root",
+                            email = "test@example.invalid",
+                        )
+                    },
+                    driveBudget = budget,
+                )
+            // Swap the httpClient with a MockEngine that always returns 503.
+            val engine =
+                io.ktor.client.engine.mock.MockEngine {
+                    respond(
+                        content = """{"detail":"service unavailable"}""",
+                        status = io.ktor.http.HttpStatusCode.ServiceUnavailable,
+                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                    )
+                }
+            val field = InternxtApiService::class.java.getDeclaredField("httpClient")
+            field.isAccessible = true
+            (field.get(service) as? io.ktor.client.HttpClient)?.close()
+            field.set(service, io.ktor.client.HttpClient(engine))
+
+            assertEquals(0L, budget.currentSpacingMs(), "pre-call: steady-state fast path")
+            try {
+                service.createFolder("parent-uuid", "name", "encrypted-name")
+                kotlin.test.fail("expected InternxtApiException 503")
+            } catch (e: InternxtApiException) {
+                assertEquals(503, e.statusCode)
+            }
+            kotlin.test.assertTrue(
+                budget.currentSpacingMs() > 0L,
+                "post-503: budget should observe the throttle and exit the fast path",
+            )
+            service.close()
         }
 
     @Test

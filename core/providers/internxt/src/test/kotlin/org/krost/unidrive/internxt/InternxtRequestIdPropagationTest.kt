@@ -45,14 +45,17 @@ class InternxtRequestIdPropagationTest {
     }
 
     private fun newService(): InternxtApiService =
-        InternxtApiService(InternxtConfig()) {
-            InternxtCredentials(
-                jwt = "test-jwt",
-                mnemonic = "test-mnemonic",
-                rootFolderId = "test-root",
-                email = "test@example.invalid",
-            )
-        }
+        InternxtApiService(
+            InternxtConfig(),
+            credentialsProvider = {
+                InternxtCredentials(
+                    jwt = "test-jwt",
+                    mnemonic = "test-mnemonic",
+                    rootFolderId = "test-root",
+                    email = "test@example.invalid",
+                )
+            },
+        )
 
     @Test
     fun `401 carries x-request-id on AuthenticationException`() =

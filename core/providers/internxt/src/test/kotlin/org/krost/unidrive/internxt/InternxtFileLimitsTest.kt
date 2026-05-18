@@ -38,14 +38,17 @@ class InternxtFileLimitsTest {
     }
 
     private fun newService(): InternxtApiService =
-        InternxtApiService(InternxtConfig()) {
-            InternxtCredentials(
-                jwt = "test-jwt",
-                mnemonic = "test-mnemonic",
-                rootFolderId = "test-root",
-                email = "test@example.invalid",
-            )
-        }
+        InternxtApiService(
+            InternxtConfig(),
+            credentialsProvider = {
+                InternxtCredentials(
+                    jwt = "test-jwt",
+                    mnemonic = "test-mnemonic",
+                    rootFolderId = "test-root",
+                    email = "test@example.invalid",
+                )
+            },
+        )
 
     /**
      * Build a provider whose underlying AuthService is pre-populated with
