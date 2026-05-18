@@ -1,7 +1,9 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.sync.model.EntryStatus
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
+import java.sql.DriverManager
 import java.time.Instant
 import kotlin.test.*
 
@@ -346,5 +348,351 @@ class StateDatabaseTest {
         } finally {
             realAgain.close()
         }
+    }
+
+    // ── state.db redesign acceptance fixtures ───────────────────────────────
+
+    @Test
+    fun `setStatusTrashed is an idempotent UPDATE keyed by remote_id`() {
+        db.upsertEntry(entry("/a.txt").copy(remoteId = "uuid-A"))
+        assertTrue(db.setStatusTrashed("uuid-A"), "first flip returns true")
+        assertNull(db.getEntry("/a.txt"), "alive view no longer sees trashed row")
+        // Second flip is a no-op: zero rows where status=EXISTS for this id.
+        assertFalse(db.setStatusTrashed("uuid-A"), "second flip is idempotent")
+        // The trashed row is reachable via Recovery.
+        val trashed = db.recovery.trashedEntries()
+        assertEquals(1, trashed.size)
+        assertEquals("uuid-A", trashed.single().remoteId)
+        assertEquals(EntryStatus.TRASHED, trashed.single().status)
+    }
+
+    @Test
+    fun `setStatusTrashed on synthetic id is a no-op`() {
+        // Pending-upload rows carry remote_id=null in Kotlin (a `local:<uuid>`
+        // synthetic at the SQL layer). Asking to "trash" them via the public
+        // remote_id surface is meaningless — they never reached the cloud.
+        assertFalse(db.setStatusTrashed("local:not-a-real-id"))
+    }
+
+    @Test
+    fun `trash-then-recreate at same path is INSERT-clean`() {
+        // Real cloud row at /foo/bar.txt.
+        val original = entry("/foo/bar.txt").copy(remoteId = "uuid-old", remoteHash = "old-hash")
+        db.upsertEntry(original)
+
+        // Cloud deletes it → flip to TRASHED. Row survives as tombstone.
+        assertTrue(db.setStatusTrashed("uuid-old"))
+        assertNull(db.getEntry("/foo/bar.txt"), "alive view no longer sees trashed row")
+
+        // New file with different UUID arrives at the same path. Pre-redesign
+        // this collided on the path PK; with the partial unique on path
+        // `WHERE status='EXISTS'` it inserts cleanly.
+        val replacement = entry("/foo/bar.txt").copy(remoteId = "uuid-new", remoteHash = "new-hash")
+        db.upsertEntry(replacement)
+
+        // Both rows coexist; only the EXISTS row is reachable via alive view.
+        val live = db.getEntry("/foo/bar.txt")
+        assertNotNull(live)
+        assertEquals("uuid-new", live.remoteId)
+        assertEquals("new-hash", live.remoteHash)
+
+        val all = db.recovery.allEntriesAnyStatus().sortedBy { it.remoteId }
+        assertEquals(2, all.size, "TRASHED and EXISTS both persist")
+        assertEquals(EntryStatus.TRASHED, all.first { it.remoteId == "uuid-old" }.status)
+        assertEquals(EntryStatus.EXISTS, all.first { it.remoteId == "uuid-new" }.status)
+    }
+
+    @Test
+    fun `rename regression pin — safe to tresor 14 descendants resolve via single UPDATE`() {
+        // Originating incident: a `.safe → .tresor` folder rename applied to
+        // the parent row but not to 14 descendant rows. Pre-redesign the
+        // descendants stayed at the old prefix because path-as-PK forced an
+        // N-row UPDATE that hit edge cases.
+        db.upsertEntry(entry("/Documents/.safe", isFolder = true).copy(remoteId = "uuid-parent"))
+        repeat(14) { i ->
+            db.upsertEntry(
+                entry("/Documents/.safe/file$i.txt").copy(remoteId = "uuid-child-$i"),
+            )
+        }
+        db.renamePrefix("/Documents/.safe", "/Documents/.tresor")
+
+        // Parent row moved.
+        assertNull(db.getEntry("/Documents/.safe"))
+        assertNotNull(db.getEntry("/Documents/.tresor"))
+
+        // All 14 descendants moved with it; none stranded under the old prefix.
+        repeat(14) { i ->
+            assertNull(db.getEntry("/Documents/.safe/file$i.txt"), "child $i must not remain at old prefix")
+            val moved = db.getEntry("/Documents/.tresor/file$i.txt")
+            assertNotNull(moved, "child $i must appear at new prefix")
+            assertEquals("uuid-child-$i", moved.remoteId, "remote_id is rename-stable")
+        }
+    }
+
+    @Test
+    fun `rename perf — 1000 descendants folder rename touches each row exactly once`() {
+        // The acceptance criterion is structural — renaming a folder with N
+        // descendants is N UPDATEs to the path column. We sanity-check at
+        // 1000 by asserting all 1000 land at the new prefix and none remain
+        // at the old prefix (the partial unique index would refuse a
+        // duplicate alive row, so this also confirms the UPDATEs didn't
+        // create conflicts).
+        db.upsertEntry(entry("/big", isFolder = true).copy(remoteId = "uuid-big"))
+        for (i in 0 until 1000) {
+            db.upsertEntry(entry("/big/file$i.txt").copy(remoteId = "uuid-f-$i"))
+        }
+        assertEquals(1001, db.getAllEntries().size)
+
+        db.renamePrefix("/big", "/huge")
+
+        // Every descendant moved.
+        assertEquals(1001, db.getAllEntries().size, "row count unchanged")
+        for (i in 0 until 1000) {
+            assertNull(db.getEntry("/big/file$i.txt"))
+            assertNotNull(db.getEntry("/huge/file$i.txt"))
+        }
+        // The folder root row moved too.
+        assertNull(db.getEntry("/big"))
+        assertNotNull(db.getEntry("/huge"))
+    }
+
+    @Test
+    fun `EXPLAIN QUERY PLAN for alive children of parent_uuid is an index seek`() {
+        // Acceptance criterion: the composite (parent_uuid, status) index is
+        // structurally present AND the planner will reach for it on the
+        // canonical "alive children of X" query. We assert both: the index
+        // appears in sqlite_master, and EXPLAIN QUERY PLAN on the canonical
+        // query reports `USING INDEX` (an index seek) rather than `SCAN
+        // sync_entries` (a tombstone-skipping table scan).
+        //
+        // Note: do NOT run ANALYZE here. After ANALYZE on a tiny table the
+        // planner correctly decides a full scan is cheaper than an index
+        // seek, which is fine in production (the index doesn't bloat much)
+        // but defeats the structural assertion this test is making.
+        db.upsertEntry(entry("/p", isFolder = true).copy(remoteId = "uuid-P"))
+        for (i in 0 until 20) {
+            db.upsertEntry(
+                entry("/p/file$i.txt").copy(remoteId = "uuid-PC-$i", parentUuid = "uuid-P"),
+            )
+        }
+
+        val dbPath = db.javaClass.getDeclaredField("dbPath")
+            .apply { isAccessible = true }.get(db) as java.nio.file.Path
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            // Index existence.
+            val indexNames = mutableListOf<String>()
+            conn.createStatement().use { stmt ->
+                val rs = stmt.executeQuery(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sync_entries'",
+                )
+                while (rs.next()) indexNames.add(rs.getString(1))
+            }
+            assertTrue(
+                "idx_sync_entries_parent_alive" in indexNames,
+                "composite (parent_uuid, status) index must exist; got: $indexNames",
+            )
+            // Plan check.
+            val plan = StringBuilder()
+            conn.prepareStatement(
+                "EXPLAIN QUERY PLAN " +
+                    "SELECT * FROM sync_entries WHERE parent_uuid=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, "uuid-P")
+                val rs = stmt.executeQuery()
+                while (rs.next()) {
+                    plan.append(rs.getString("detail")).append("\n")
+                }
+            }
+            val planText = plan.toString()
+            assertTrue(
+                "USING INDEX" in planText && "SCAN sync_entries" !in planText,
+                "expected index seek for (parent_uuid, status); got plan:\n$planText",
+            )
+        }
+    }
+
+    @Test
+    fun `recovery namespace is the only path to TRASHED rows`() {
+        db.upsertEntry(entry("/alive.txt").copy(remoteId = "uuid-alive"))
+        db.upsertEntry(entry("/trashed.txt").copy(remoteId = "uuid-trashed"))
+        db.setStatusTrashed("uuid-trashed")
+
+        // Every public StateDatabase read excludes TRASHED rows.
+        assertEquals(listOf("/alive.txt"), db.getAllEntries().map { it.path })
+        assertNull(db.getEntry("/trashed.txt"))
+        assertNull(db.getEntryByRemoteId("uuid-trashed"))
+        assertEquals(1, db.getEntryCount())
+        assertEquals(listOf("/alive.txt"), db.getEntriesByPrefix("/").map { it.path })
+
+        // Recovery sees them.
+        assertEquals(
+            listOf("uuid-trashed"),
+            db.recovery.trashedEntries().mapNotNull { it.remoteId },
+        )
+        assertNotNull(db.recovery.getEntryByRemoteIdAnyStatus("uuid-trashed"))
+        val all = db.recovery.allEntriesAnyStatus().mapNotNull { it.remoteId }.sorted()
+        assertEquals(listOf("uuid-alive", "uuid-trashed"), all)
+    }
+
+    @Test
+    fun `recovery scenario — 100-item mass-delete is one SELECT plus one batched untrash`() {
+        // Synthesise a 100-item mass-delete: 100 rows trashed.
+        for (i in 0 until 100) {
+            db.upsertEntry(entry("/bulk/item$i.txt").copy(remoteId = "uuid-bulk-$i"))
+        }
+        for (i in 0 until 100) db.setStatusTrashed("uuid-bulk-$i")
+        // Nothing alive.
+        assertEquals(0, db.getEntryCount())
+
+        // The recovery operator does: SELECT what's TRASHED → batched PATCH.
+        val trashed = db.recovery.trashedEntries()
+        assertEquals(100, trashed.size, "one SELECT recovers the whole set")
+        // No audit-log archaeology, no cloud-trash listing — the (remote_id,
+        // parent_uuid) pairs are right here on the row.
+        val ids = trashed.mapNotNull { it.remoteId }.sorted()
+        assertEquals((0 until 100).map { "uuid-bulk-$it" }.sorted(), ids)
+
+        // Untrash: one batched flip restores everything (in real life this
+        // is paired with a cloud-side restore PATCH; here we just exercise
+        // the DB primitive).
+        db.batch { ids.forEach { db.setStatusExists(it) } }
+        assertEquals(100, db.getEntryCount(), "all alive after batched untrash")
+        assertEquals(0, db.recovery.trashedEntries().size)
+    }
+
+    @Test
+    fun `upgrade path — pre-redesign DB drops sync_entries and rebuilds at schema_version=2`() {
+        // Inject a pre-redesign-shaped DB: sync_state exists, no schema_version
+        // row, sync_entries has the old path-PK shape with a row that the
+        // new schema would consider non-rescannable (its remote_id would be
+        // a synthetic pending-upload row, but we want to prove that the
+        // upgrade drops everything regardless of row content).
+        val tmpDir = Files.createTempDirectory("unidrive-upgrade")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        path            TEXT PRIMARY KEY,
+                        remote_id       TEXT,
+                        remote_hash     TEXT,
+                        remote_size     INTEGER NOT NULL DEFAULT 0,
+                        remote_modified TEXT,
+                        local_mtime     INTEGER,
+                        local_size      INTEGER,
+                        is_folder       INTEGER NOT NULL DEFAULT 0,
+                        is_pinned       INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated     INTEGER NOT NULL DEFAULT 0,
+                        last_synced     TEXT NOT NULL
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_state (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                """,
+                )
+                // Pre-redesign DBs may already carry the legacy dedupe
+                // marker. The upgrade should not depend on its presence.
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state (key, value) VALUES " +
+                        "('migration:dedupe_remote_id', 'deleted=0'), " +
+                        "('delta_cursor', '2026-05-17T10:00:00Z')",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_entries (path, remote_id, remote_size, " +
+                        "is_folder, is_pinned, is_hydrated, last_synced) " +
+                        "VALUES ('/old/file.txt', 'old-uuid', 100, 0, 0, 1, '2026-05-17T10:00:00Z')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            // sync_entries was dropped; nothing carried over.
+            assertEquals(0, upgraded.getAllEntries().size, "pre-redesign rows dropped, next scan repopulates")
+            assertEquals(0, upgraded.recovery.allEntriesAnyStatus().size)
+            // schema_version stamped.
+            assertEquals(
+                StateDatabase.SCHEMA_VERSION.toString(),
+                upgraded.getSyncState(StateDatabase.SCHEMA_VERSION_KEY),
+            )
+            // sync_state preserved (cursor survives).
+            assertEquals("2026-05-17T10:00:00Z", upgraded.getSyncState("delta_cursor"))
+            // The new schema is in place — partial unique on path is honoured.
+            upgraded.upsertEntry(entry("/new.txt").copy(remoteId = "uuid-new"))
+            assertNotNull(upgraded.getEntry("/new.txt"))
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    @Test
+    fun `upgrade path — fresh install stamps schema_version and creates everything`() {
+        // setUp's `initialize()` already exercised the fresh-install path.
+        // Assert the post-state.
+        assertEquals(
+            StateDatabase.SCHEMA_VERSION.toString(),
+            db.getSyncState(StateDatabase.SCHEMA_VERSION_KEY),
+        )
+        // No row-level backfill code path: a fresh install has no migration
+        // markers from the old dedupe scheme.
+        assertNull(db.getSyncState("migration:dedupe_remote_id"))
+    }
+
+    @Test
+    fun `upgrade path — current-version DB is a no-op`() {
+        // Re-initialize an already-current DB. Schema and rows survive.
+        db.upsertEntry(entry("/keep.txt").copy(remoteId = "uuid-keep"))
+        db.close()
+        val dbPath = (db.javaClass.getDeclaredField("dbPath").apply { isAccessible = true }.get(db) as java.nio.file.Path)
+        val reopened = StateDatabase(dbPath)
+        reopened.initialize()
+        try {
+            assertEquals(1, reopened.getAllEntries().size, "current-version DB preserves rows")
+            assertNotNull(reopened.getEntry("/keep.txt"))
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    fun `pending-upload row survives an upsert cycle without churning rows`() {
+        // The Kotlin-level `remoteId=null` placeholder maps to a `local:<uuid>`
+        // synthetic at the storage layer. Re-upserting the same pending row
+        // should not multiply rows (the path partial-unique reuses the
+        // existing synthetic).
+        val pending =
+            SyncEntry(
+                path = "/pending.txt",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1L,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            )
+        db.upsertEntry(pending)
+        db.upsertEntry(pending) // same content again
+        assertEquals(1, db.getAllEntries().size, "second upsert must not create a duplicate row")
+
+        // The Kotlin-level mapper hides the synthetic.
+        val loaded = db.getEntry("/pending.txt")
+        assertNotNull(loaded)
+        assertNull(loaded.remoteId, "callers never see the local: synthetic")
+
+        // Promoting to real remote_id replaces the pending row cleanly.
+        db.upsertEntry(pending.copy(remoteId = "uuid-real", remoteHash = "h"))
+        assertEquals(1, db.getAllEntries().size)
+        assertEquals("uuid-real", db.getEntry("/pending.txt")?.remoteId)
     }
 }

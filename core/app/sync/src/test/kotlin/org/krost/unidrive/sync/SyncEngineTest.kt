@@ -1852,4 +1852,57 @@ class SyncEngineTest {
                 "first --sync-path run in dry-run must not seed effective_scope",
             )
         }
+
+    // ── Cloud-delete status flips (acceptance: both flip sites covered) ─────
+
+    @Test
+    fun `cloud-delete flip site 1 — applyDeleteRemote flips status to TRASHED`() =
+        runTest {
+            // Seed an alive row that the engine will propagate-delete to the
+            // cloud (local file vanished while cloud was unchanged → engine
+            // emits DeleteRemote → provider.delete + status flip).
+            provider.deltaItems = listOf(cloudItem("/will-trash.txt", size = 100))
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/will-trash.txt"))
+
+            // Local delete; remote unchanged; reconciler emits DeleteRemote;
+            // engine calls provider.delete + setStatusTrashed.
+            Files.delete(syncRoot.resolve("will-trash.txt"))
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            engine.syncOnce()
+
+            // Provider saw the delete.
+            assertTrue(provider.deletedPaths.contains("/will-trash.txt"))
+            // Alive view no longer has it.
+            assertNull(db.getEntry("/will-trash.txt"))
+            // But the row survives as TRASHED — answerable via Recovery.
+            val trashed = db.recovery.trashedEntries()
+            assertEquals(1, trashed.size, "row must survive as TRASHED tombstone; got $trashed")
+            assertEquals("/will-trash.txt", trashed.single().path)
+            assertEquals("id-/will-trash.txt", trashed.single().remoteId)
+        }
+
+    @Test
+    fun `cloud-delete flip site 2 — applyDeleteLocal flips status to TRASHED on remote-reports-deleted`() =
+        runTest {
+            // Establish the alive row first.
+            provider.deltaItems = listOf(cloudItem("/will-vanish.txt", size = 100))
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/will-vanish.txt"))
+
+            // Cloud reports the item deleted; local cascades and flips status.
+            provider.deltaItems = listOf(cloudItem("/will-vanish.txt", deleted = true))
+            provider.deltaCursor = "cursor-2"
+            engine.syncOnce()
+
+            // Local file gone.
+            assertFalse(Files.exists(syncRoot.resolve("will-vanish.txt")))
+            // Alive view no longer has it.
+            assertNull(db.getEntry("/will-vanish.txt"))
+            // Row survives as TRASHED.
+            val trashed = db.recovery.trashedEntries()
+            assertEquals(1, trashed.size)
+            assertEquals("/will-vanish.txt", trashed.single().path)
+        }
 }

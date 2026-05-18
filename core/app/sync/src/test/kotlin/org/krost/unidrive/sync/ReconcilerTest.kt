@@ -1354,4 +1354,105 @@ class ReconcilerTest {
             "synthesis loop must skip pending rows with no on-disk bytes; got $actions",
         )
     }
+
+    // ── Restore-from-trash (un-trash on scan) ───────────────────────────────
+
+    @Test
+    fun `restore from trash — local copy gone schedules re-download`() {
+        // A previously-EXISTS row got trashed (cloud delete). Local file is
+        // also gone. The cloud now reports the item alive again — the
+        // reconciler must flip status back to EXISTS and schedule
+        // DownloadContent for the missing local copy.
+        db.upsertEntry(dbEntry("/restore.txt"))
+        assertTrue(db.setStatusTrashed("id-/restore.txt"))
+        assertNull(db.getEntry("/restore.txt"), "trashed row is not in alive view pre-restore")
+        // syncRoot does NOT contain the local file (default tearDown state).
+
+        val remoteChanges = mapOf("/restore.txt" to cloudItem("/restore.txt"))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        // Status flipped back to EXISTS.
+        assertNotNull(db.getEntry("/restore.txt"), "row is back in alive view post-restore")
+        // Re-download scheduled.
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DownloadContent>(actions[0])
+        assertEquals("/restore.txt", actions[0].path)
+    }
+
+    @Test
+    fun `restore from trash — local copy present hash matches is no-op`() {
+        // Pre-redesign incident shape: trashed row, but the local copy
+        // survived (user never deleted it locally; only the cloud copy was
+        // trashed). When the cloud reports the item alive again, the
+        // reconciler flips status but emits NO action — local + cloud
+        // already match.
+        db.upsertEntry(dbEntry("/keep.txt", isHydrated = true))
+        assertTrue(db.setStatusTrashed("id-/keep.txt"))
+        // Create the local file with matching size (100 bytes — dbEntry default).
+        val localPath = syncRoot.resolve("keep.txt")
+        Files.write(localPath, ByteArray(100))
+
+        val remoteChanges = mapOf("/keep.txt" to cloudItem("/keep.txt"))
+        // LocalScanner would have reported localState=NEW here (the alive
+        // view didn't have the row pre-flip, so the scanner had no
+        // dbEntry hit). The reconciler must NOT translate that NEW into
+        // an Upload — the resurrected-path skip prevents the "Local only
+        // changes" branch from running on the flipped row.
+        val actions = reconciler.reconcile(remoteChanges, mapOf("/keep.txt" to ChangeState.NEW))
+
+        // Row is alive.
+        assertNotNull(db.getEntry("/keep.txt"))
+        // No action.
+        assertTrue(
+            actions.isEmpty(),
+            "local matches cloud — un-trash must be a no-op; got $actions",
+        )
+    }
+
+    @Test
+    fun `restore from trash — folder flip is metadata only, no DownloadContent`() {
+        // Folders never download content; the alive flip is sufficient.
+        val folder =
+            SyncEntry(
+                path = "/folder",
+                remoteId = "id-/folder",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            )
+        db.upsertEntry(folder)
+        assertTrue(db.setStatusTrashed("id-/folder"))
+
+        val remoteChanges = mapOf(
+            "/folder" to cloudItem("/folder", isFolder = true, hash = null),
+        )
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        // Row alive again, no DownloadContent emitted for a folder.
+        assertNotNull(db.getEntry("/folder"))
+        assertTrue(
+            actions.none { it is SyncAction.DownloadContent },
+            "folder restore must not schedule a DownloadContent; got $actions",
+        )
+    }
+
+    @Test
+    fun `cloud-reports-deleted on alive row still emits DeleteLocal (engine flips status)`() {
+        // Reconciler's behaviour: a previously-EXISTS row that the cloud
+        // now reports as deleted (no local-side change) emits DeleteLocal.
+        // The status flip happens at applyDeleteLocal in SyncEngine — this
+        // test pins the reconciler half (it must NOT skip the path just
+        // because the new schema added tombstones).
+        db.upsertEntry(dbEntry("/gone.txt"))
+        val remoteChanges = mapOf("/gone.txt" to cloudItem("/gone.txt", deleted = true))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DeleteLocal>(actions[0])
+    }
 }
