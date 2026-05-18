@@ -23,7 +23,7 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 
 | Title | Scope |
 |---|---|
-| Replace test suite with smoke tests | 12 tests total: 2 sync, 5 internxt, 5 onedrive. Auth/upload/download/delete/delta reconciles. |
+| Reach the 5+5+2 smoke target | Current live-integration surface is 4 onedrive (`LiveGraphIntegrationTest`, `OneDriveIntegrationTest`, `OneDriveDeltaIntegrationTest`, `DeltaDiagnosticTest`), 1 internxt (`InternxtIntegrationTest`), 0 sync, plus `CliSmokeTest`. Target: 5 onedrive, 5 internxt, 2 sync (auth/upload/download/delete/delta-reconciles per provider; two end-to-end sync round-trips). Each gated by `UNIDRIVE_INTEGRATION_TESTS=true`. Reducing the existing unit-test surface (≈120 files) is a separate per-test review: don't sweep wholesale, lift the smoke set up to the target first. |
 | Internxt `HttpRetryBudget` wiring | Budget class exists in `:app:core` but `InternxtApiService` doesn't consume it; observed 6-wide parallelism under storm. SDK enforces 1 conc / 1000 ms global + 2 conc / 500 ms on Drive — match that. |
 | OneDrive 410 Gone resync handling | Honor `resyncChangesApplyDifferences` / `resyncChangesUploadDifferences` with `Location` restart on the delta loop. |
 | OneDrive webhook lifecycle events + validation endpoint | Handle `reauthorizationRequired`, `subscriptionRemoved`, `missed`; add an in-repo HTTP endpoint that echoes `validationToken` within 10 s. |
