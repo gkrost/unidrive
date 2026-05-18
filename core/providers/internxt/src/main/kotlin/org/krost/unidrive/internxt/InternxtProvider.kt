@@ -23,6 +23,7 @@ class InternxtProvider(
     private val crypto = InternxtCrypto()
     private val authService = AuthService(config)
     private val api = InternxtApiService(config) { authService.getValidCredentials() }
+    private val secureRandom = java.security.SecureRandom()
 
     // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
     // folder lookups. Populated on createFolder success (the API returns the
@@ -208,7 +209,7 @@ class InternxtProvider(
         onProgress?.invoke(0L, fileSize)
 
         // 2. Generate random 32-byte index; derive key + iv
-        val indexBytes = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        val indexBytes = ByteArray(32).also { secureRandom.nextBytes(it) }
         val iv = indexBytes.copyOfRange(0, 16)
         val creds = authService.getValidCredentials()
 
