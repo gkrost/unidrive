@@ -33,3 +33,7 @@ Things that were done before this branch started. Append new entries when items 
 - Co-locate provider docs with provider modules (`core/providers/{internxt,onedrive}/README.md`, `core/app/core/README.md`).
 - Trim surviving ADRs (capability contract, Linux-only, shipping surface) and drop the seven obsolete ones.
 - Rewrite `README.md` as the Linux-power-user marketing front.
+
+## Drained from BACKLOG
+
+- Internxt delta path-collapse (phantom folders). `buildFolderPath` now returns `String?`; null on missing non-root ancestor propagates through `toDeltaCloudItem` (also nullable) into `delta()`, which filters dropped items via `filterNotNull`, counts them, logs the count, and returns `DeltaPage(complete=false)` so the engine skips `detectMissingAfterFullSync` and leaves the cursor un-advanced. Regression test flipped from pinned-buggy to pinned-correct.

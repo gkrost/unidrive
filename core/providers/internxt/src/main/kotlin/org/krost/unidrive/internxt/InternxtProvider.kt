@@ -534,21 +534,21 @@ class InternxtProvider(
 
         val creds = authService.getValidCredentials()
         val folderMap = allFolders.associateBy { it.uuid }
-        // Folders last so that path collisions in gatherRemoteChanges resolve in favour of folders
-        val items =
-            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) } +
-                allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) }
+        // Folders last so that path collisions in gatherRemoteChanges resolve in favour of folders.
+        // toDeltaCloudItem returns null when an ancestor uuid is absent from folderMap
+        // (typical when /folders delta returned a changed leaf without its unchanged
+        // ancestors). Dropped items are counted so `complete` reflects the gap and
+        // the engine skips detectMissingAfterFullSync + leaves the cursor un-advanced.
+        val rawFiles = allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) }
+        val rawFolders = allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) }
+        val filesDropped = rawFiles.count { it == null }
+        val foldersDropped = rawFolders.count { it == null }
+        val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
 
         val latestUpdatedAt =
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull() ?: cursor ?: Instant.now().toString()
 
-        // UD-360: signal partial gather to the engine instead of throwing.
-        // Replaces the UD-361 fail-loud ProviderException — the engine now
-        // honours `complete=false` by skipping detectMissingAfterFullSync,
-        // so we no longer need to abort the run to prevent spurious
-        // del-local. Sync continues with whatever was successfully gathered;
-        // the missing subtree is picked up on the next run.
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
             log.warn(
@@ -557,12 +557,24 @@ class InternxtProvider(
                 skipped,
             )
         }
+        val ancestorDrops = filesDropped + foldersDropped
+        if (ancestorDrops > 0) {
+            log.warn(
+                "Internxt delta gather dropped {} item(s) ({} file(s), {} folder(s)) " +
+                    "whose ancestor uuid was missing from this page's folderMap; " +
+                    "returning DeltaPage(complete=false). Cursor will not advance — " +
+                    "items recover on the next run when their ancestors change or via --reset.",
+                ancestorDrops,
+                filesDropped,
+                foldersDropped,
+            )
+        }
 
         return DeltaPage(
             items = items,
             cursor = latestUpdatedAt,
             hasMore = false,
-            complete = skipped == 0,
+            complete = skipped == 0 && ancestorDrops == 0,
         )
     }
 
@@ -570,7 +582,7 @@ class InternxtProvider(
         uuid: String,
         folderMap: Map<String, InternxtFolder>,
         rootUuid: String,
-    ): String = Companion.buildFolderPath(uuid, folderMap, rootUuid)
+    ): String? = Companion.buildFolderPath(uuid, folderMap, rootUuid)
 
     override suspend fun quota(): QuotaInfo = api.getQuota()
 
@@ -638,16 +650,24 @@ class InternxtProvider(
     private fun InternxtFile.toDeltaCloudItem(
         folderMap: Map<String, InternxtFolder>,
         rootUuid: String,
-    ): CloudItem {
-        val parentPath = folderUuid?.let { buildFolderPath(it, folderMap, rootUuid) } ?: ""
+    ): CloudItem? {
+        val parentPath =
+            when (val fUuid = folderUuid) {
+                null -> ""
+                else -> buildFolderPath(fUuid, folderMap, rootUuid) ?: return null
+            }
         return fileToDeltaCloudItem(this, parentPath)
     }
 
     private fun InternxtFolder.toDeltaCloudItem(
         folderMap: Map<String, InternxtFolder>,
         rootUuid: String,
-    ): CloudItem {
-        val parentPath = parentUuid?.let { buildFolderPath(it, folderMap, rootUuid) } ?: ""
+    ): CloudItem? {
+        val parentPath =
+            when (val pUuid = parentUuid) {
+                null -> ""
+                else -> buildFolderPath(pUuid, folderMap, rootUuid) ?: return null
+            }
         return folderToDeltaCloudItem(this, parentPath)
     }
 
@@ -827,29 +847,32 @@ class InternxtProvider(
         }
 
         /**
-         * UD-376: testable seam for the delta path-resolution walk.
+         * Resolves the absolute path of a folder uuid by walking ancestors
+         * through [folderMap]. Returns the empty string for [rootUuid]
+         * (parentPath sentinel) and `null` when any non-root ancestor is
+         * absent from [folderMap].
          *
-         * WARNING — current behaviour is buggy on incomplete folderMaps.
-         * When `folderMap` is missing a non-root ancestor (typical
-         * outcome of a /folders delta page that only returned the
-         * changed leaves), this function silently returns `""`, which
-         * propagates into `(File|Folder).toDeltaCloudItem` as an empty
-         * `parentPath` and ends up rooting the item at `/`. The
-         * `InternxtProvider_DeltaPathResolutionTest` "missing
-         * ancestor" case pins this behaviour as a regression target;
-         * flipping the assertion is part of the structural fix
-         * (see docs/audits/internxt-xxx-phantom-investigation-2026-05-17.md
-         * for the three candidate strategies).
+         * A null return signals that the caller cannot safely construct a
+         * full path for an item under this uuid — typically because the
+         * /folders delta page returned a changed leaf without its
+         * unchanged ancestors. Callers must drop the item and signal
+         * `complete = false` upstream rather than silently rooting it at
+         * `/` (the prior silent-empty fallback produced ~84k duplicate
+         * `remote_id` rows in user state.db). See
+         * docs/audits/internxt-phantom-investigation.md.
          */
         internal fun buildFolderPath(
             uuid: String,
             folderMap: Map<String, InternxtFolder>,
             rootUuid: String,
-        ): String {
+        ): String? {
             if (uuid == rootUuid) return ""
-            val folder = folderMap[uuid] ?: return ""
-            val parentPath = folder.parentUuid?.let { buildFolderPath(it, folderMap, rootUuid) } ?: ""
-            // UD-317: sanitise name returned by createFolder API.
+            val folder = folderMap[uuid] ?: return null
+            val parentPath: String =
+                when (val parentUuid = folder.parentUuid) {
+                    null -> ""
+                    else -> buildFolderPath(parentUuid, folderMap, rootUuid) ?: return null
+                }
             val name = sanitizeName(folder.plainName ?: folder.name ?: "")
             return "$parentPath/$name"
         }
