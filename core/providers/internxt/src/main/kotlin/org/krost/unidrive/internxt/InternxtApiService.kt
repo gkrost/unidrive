@@ -713,11 +713,12 @@ class InternxtApiService(
                 "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
                 statusCode = response.status.value,
                 requestId = extractRequestId(response),
+                retryAfterMs = parseRetryAfterHeader(response.headers["Retry-After"]),
             )
         }
     }
 
-   
+
     internal suspend fun <T> retryOnTransient(
         maxAttempts: Int = 3,
         op: suspend () -> T,
@@ -730,8 +731,14 @@ class InternxtApiService(
                 if (e.statusCode !in TRANSIENT_STATUSES) throw e
                 attempt++
                 if (attempt >= maxAttempts) throw e
+                // Precedence: Retry-After HTTP header (captured at checkResponse
+                // time, see InternxtApiException.retryAfterMs) > JSON-body
+                // `retry_after` hint (parsed back out of the exception message)
+                // > exponential backoff. Header wins per RFC 7231 §7.1.3, which
+                // is the canonical place for the server to put this signal.
                 val retryAfterMs =
-                    parseRetryAfter(e.message)
+                    e.retryAfterMs
+                        ?: parseRetryAfter(e.message)
                         ?: (1000L shl (attempt - 1))
                 val cappedMs = retryAfterMs.coerceIn(500L, 60_000L)
                 log.warn(
@@ -746,11 +753,40 @@ class InternxtApiService(
         }
     }
 
-   
+
     internal fun parseRetryAfter(message: String?): Long? {
         if (message == null) return null
         val match = RETRY_AFTER_REGEX.find(message) ?: return null
         return match.groupValues[1].toLongOrNull()?.times(1000)
+    }
+
+    // Parse the RFC 7231 §7.1.3 `Retry-After` HTTP header. Accepts either
+    // a non-negative decimal integer of delta-seconds or an HTTP-date
+    // (IMF-fixdate / RFC 1123 form — the only one current servers emit;
+    // the obsolete RFC 850 + asctime forms aren't observed in practice
+    // and Internxt's gateway never returns them). Returns the wait in
+    // milliseconds relative to "now", or null if the header is absent,
+    // malformed, or the date is in the past.
+    internal fun parseRetryAfterHeader(headerValue: String?): Long? {
+        val raw = headerValue?.trim()?.takeUnless { it.isEmpty() } ?: return null
+        // Delta-seconds path: a bare integer.
+        raw.toLongOrNull()?.let { seconds ->
+            if (seconds < 0) return null
+            return seconds * 1000
+        }
+        // HTTP-date path: parse as RFC 1123 and diff against now. Negative
+        // diffs (date already in the past) return null so the caller falls
+        // through to the next precedence step.
+        return try {
+            val target =
+                java.time.ZonedDateTime
+                    .parse(raw, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant()
+            val deltaMs = target.toEpochMilli() - System.currentTimeMillis()
+            deltaMs.takeIf { it > 0 }
+        } catch (_: java.time.format.DateTimeParseException) {
+            null
+        }
     }
 
 
@@ -785,4 +821,5 @@ class InternxtApiException(
     message: String,
     val statusCode: Int = 0,
     requestId: String? = null,
+    val retryAfterMs: Long? = null,
 ) : ProviderException(message, requestId = requestId)
