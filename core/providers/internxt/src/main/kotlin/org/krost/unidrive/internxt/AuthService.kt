@@ -239,35 +239,35 @@ open class AuthService(
         if (passwordChars.isEmpty()) throw AuthenticationException("No password provided")
         val password = String(passwordChars)
 
+        // passwordChars stays populated during the readLine prompts between
+        // retries. The outer finally guarantees zeroing on any exit (success,
+        // BadCredentialsException, TfaInvalid exhaustion, or unexpected
+        // throw). `password` (the immutable String above) is GC's problem
+        // regardless; the CLI tool is short-lived enough that this is
+        // acceptable. A longer-running daemon would route through
+        // SecureCredentialStore.
         try {
-            return authenticate(email, password, tfaCode = null)
-                .also { passwordChars.fill('\u0000') }
-        } catch (_: TfaRequiredException) {
-            // First attempt told us 2FA is required; prompt and retry up to 3 times.
-        }
-
-        // Note: passwordChars stays populated during the readLine prompts
-        // between retries. Best-effort zeroing on exit; `password` (the
-        // immutable String built on line 530) is GC's problem regardless.
-        // The CLI tool is short-lived enough that this is acceptable; a
-        // longer-running daemon would route through SecureCredentialStore.
-        var attempts = 0
-        while (attempts < 3) {
-            val tfaCode = readLine("2FA code: ")
             try {
-                return authenticate(email, password, tfaCode = tfaCode)
-                    .also { passwordChars.fill('\u0000') }
-            } catch (_: TfaInvalidException) {
-                attempts++
-                if (attempts >= 3) {
-                    passwordChars.fill('\u0000')
-                    throw AuthenticationException("Too many invalid 2FA attempts")
-                }
-                System.err.println("Invalid 2FA code, please try again.")
+                return authenticate(email, password, tfaCode = null)
+            } catch (_: TfaRequiredException) {
+                // First attempt told us 2FA is required; prompt and retry up to 3 times.
             }
+
+            var attempts = 0
+            while (attempts < 3) {
+                val tfaCode = readLine("2FA code: ")
+                try {
+                    return authenticate(email, password, tfaCode = tfaCode)
+                } catch (_: TfaInvalidException) {
+                    attempts++
+                    if (attempts >= 3) throw AuthenticationException("Too many invalid 2FA attempts")
+                    System.err.println("Invalid 2FA code, please try again.")
+                }
+            }
+            throw AuthenticationException("Too many invalid 2FA attempts")
+        } finally {
+            passwordChars.fill('\u0000')
         }
-        passwordChars.fill('\u0000')
-        throw AuthenticationException("Too many invalid 2FA attempts")
     }
 
     /**
