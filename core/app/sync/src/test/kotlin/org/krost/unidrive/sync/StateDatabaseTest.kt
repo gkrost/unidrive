@@ -1,9 +1,11 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.CloudItem
 import org.krost.unidrive.sync.model.EntryStatus
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.sql.DriverManager
+import java.time.Duration
 import java.time.Instant
 import kotlin.test.*
 
@@ -694,5 +696,250 @@ class StateDatabaseTest {
         db.upsertEntry(pending.copy(remoteId = "uuid-real", remoteHash = "h"))
         assertEquals(1, db.getAllEntries().size)
         assertEquals("uuid-real", db.getEntry("/pending.txt")?.remoteId)
+    }
+
+    // ---- Resumable-scan staging slice ----
+
+    private fun staged(
+        id: String,
+        path: String,
+        size: Long = 100,
+        isFolder: Boolean = false,
+    ) = CloudItem(
+        id = id,
+        name = path.substringAfterLast('/'),
+        path = path,
+        size = size,
+        isFolder = isFolder,
+        modified = Instant.parse("2026-03-28T12:00:00Z"),
+        created = null,
+        hash = "hash-$id",
+        mimeType = null,
+        parentId = null,
+    )
+
+    @Test
+    fun `staging — staged rows are orthogonal to sync_entries readers`() {
+        // The staging slice lives in its own table; the alive view and the
+        // recovery namespace both only ever see real `sync_entries` rows.
+        db.upsertEntry(entry("/foo.txt").copy(remoteId = "live-uuid"))
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged(id = "staged-uuid", path = "/foo.txt")), marker = "page1")
+
+        val alive = db.getEntry("/foo.txt")
+        assertNotNull(alive)
+        assertEquals("live-uuid", alive.remoteId)
+        assertEquals(1, db.getAllEntries().size, "staging table must not appear in the alive view")
+        assertEquals(1, db.recovery.allEntriesAnyStatus().size, "recovery is sync_entries-only too")
+        // Staged rows are loadable through the dedicated reader.
+        assertEquals(1, db.loadStagedItems(scanId).size)
+    }
+
+    @Test
+    fun `staging — beginScan persists checkpoint state`() {
+        val scanId = db.beginScan(initialMarker = "2026-05-18T10:00:00Z|offset=0,0")
+        assertEquals(scanId, db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        assertEquals(
+            "2026-05-18T10:00:00Z|offset=0,0",
+            db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
+        )
+        assertNotNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT))
+    }
+
+    @Test
+    fun `staging — persistScanPage advances the checkpoint marker per page`() {
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u1", "/a.txt"), staged("u2", "/b.txt")),
+            marker = "marker=page1",
+        )
+        assertEquals("marker=page1", db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u3", "/c.txt")),
+            marker = "marker=page2",
+        )
+        assertEquals("marker=page2", db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+
+        val rows = db.loadStagedItems(scanId)
+        assertEquals(3, rows.size, "all three pages worth of rows must persist")
+    }
+
+    @Test
+    fun `staging — completeScan deletes staged rows and clears checkpoint`() {
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged("u1", "/a.txt")), marker = "m1")
+        assertEquals(1, db.loadStagedItems(scanId).size)
+
+        db.completeScan(scanId)
+
+        assertEquals(0, db.loadStagedItems(scanId).size)
+        assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+        assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT))
+    }
+
+    @Test
+    fun `staging — getActiveScan returns the live scan when fresh`() {
+        db.beginScan(initialMarker = "resume-marker")
+        val active = db.getActiveScan(staleThreshold = Duration.ofHours(6))
+        assertNotNull(active)
+        assertEquals("resume-marker", active.marker)
+    }
+
+    @Test
+    fun `staging — getActiveScan clears + returns null on stale checkpoint`() {
+        val scanId = db.beginScan(initialMarker = "stale-marker")
+        db.persistScanPage(scanId, listOf(staged("u1", "/old.txt")), marker = "stale-marker")
+        // Backdate the started_at so the stale-detection threshold trips.
+        db.setSyncState(
+            StateDatabase.SCAN_IN_PROGRESS_STARTED_AT,
+            Instant.now().minus(Duration.ofDays(1)).toString(),
+        )
+
+        val active = db.getActiveScan(staleThreshold = Duration.ofHours(6))
+
+        assertNull(active, "stale checkpoint must surface as no active scan")
+        assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID), "stale state cleared")
+        assertEquals(0, db.loadStagedItems(scanId).size, "stale staged rows discarded")
+    }
+
+    @Test
+    fun `staging — persistScanPage is atomic across rows and the marker`() {
+        // Same remote_id appearing twice in one page (re-emitted on retry):
+        // the INSERT OR REPLACE keyed on (scan_id, remote_id) coalesces the
+        // two writes into one row, the marker advances exactly once, and the
+        // sync_entries side is untouched.
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u1", "/first.txt", size = 100), staged("u1", "/first.txt", size = 200)),
+            marker = "after-collision",
+        )
+        val rows = db.loadStagedItems(scanId)
+        assertEquals(1, rows.size, "(scan_id, remote_id) PK collapses retries")
+        assertEquals(200L, rows.single().size, "later write wins via INSERT OR REPLACE")
+        assertEquals("after-collision", db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+    }
+
+    @Test
+    fun `staging — live + staged rows are independent across the two tables`() {
+        // Cloud and staged rows for the same path can coexist trivially —
+        // they live in different tables. No INSERT failure either way.
+        db.upsertEntry(entry("/shared.txt").copy(remoteId = "live-uuid"))
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged("staged-uuid", "/shared.txt")), marker = "m")
+        assertEquals(1, db.loadStagedItems(scanId).size)
+        assertEquals("live-uuid", db.getEntry("/shared.txt")?.remoteId)
+    }
+
+    @Test
+    fun `staging — loadStagedItems preserves cloud identity for path re-resolution`() {
+        // The staged row carries the cloud-identity fields (id, parentId,
+        // name, isFolder, size, modified, hash) but not the path — the
+        // provider re-resolves the path on resume from the rebuilt folder
+        // graph. loadStagedItems returns a placeholder path so the CloudItem
+        // shape stays uniform; the provider is responsible for overwriting it.
+        val scanId = db.beginScan(initialMarker = null)
+        val original =
+            staged(id = "u1", path = "/dir/file.txt", size = 4096, isFolder = false)
+                .copy(parentId = "parent-uuid")
+        db.persistScanPage(scanId, listOf(original), marker = "m")
+
+        val loaded = db.loadStagedItems(scanId).single()
+        assertEquals("u1", loaded.id)
+        assertEquals("file.txt", loaded.name)
+        assertEquals("parent-uuid", loaded.parentId, "parent_uuid drives folder-graph reconstruction")
+        assertEquals(4096L, loaded.size)
+        assertEquals(false, loaded.isFolder)
+        assertEquals("hash-u1", loaded.hash)
+        assertEquals(original.modified, loaded.modified)
+    }
+
+    @Test
+    fun `staging — completeScan does not touch live rows written outside the scan`() {
+        db.upsertEntry(entry("/live.txt").copy(remoteId = "live-uuid"))
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged("staged-uuid", "/other.txt")), marker = "m")
+
+        db.completeScan(scanId)
+
+        // Live row remains exactly as written; the engine's updateRemoteEntries
+        // call site, not completeScan, is responsible for materialising the
+        // staging slice into live rows.
+        assertNotNull(db.getEntry("/live.txt"))
+        assertEquals("live-uuid", db.getEntry("/live.txt")?.remoteId)
+        assertEquals(1, db.getAllEntries().size, "completed scan removes only staged rows")
+    }
+
+    @Test
+    fun `staging — scan_staging is added in-place to an existing v2 DB without disturbing rows`() {
+        // Simulate a v2 DB created before the resumable-scan slice landed:
+        // sync_entries + alive_entries + indexes are present, schema_version
+        // is 2, scan_staging is absent. The next initialize() must add
+        // scan_staging without touching the existing live rows.
+        val tmpDir = Files.createTempDirectory("unidrive-staging-migration")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        remote_id       TEXT PRIMARY KEY,
+                        parent_uuid     TEXT,
+                        path            TEXT NOT NULL,
+                        remote_hash     TEXT,
+                        remote_size     INTEGER NOT NULL DEFAULT 0,
+                        remote_modified TEXT,
+                        local_mtime     INTEGER,
+                        local_size      INTEGER,
+                        is_folder       INTEGER NOT NULL DEFAULT 0,
+                        is_pinned       INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated     INTEGER NOT NULL DEFAULT 0,
+                        last_synced     TEXT NOT NULL,
+                        status          TEXT NOT NULL DEFAULT 'EXISTS'
+                                        CHECK (status IN ('EXISTS','TRASHED','DELETED'))
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "CREATE UNIQUE INDEX idx_sync_entries_path_alive " +
+                        "ON sync_entries(path) WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE VIEW alive_entries AS SELECT * FROM sync_entries WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state VALUES ('${StateDatabase.SCHEMA_VERSION_KEY}', " +
+                        "'${StateDatabase.SCHEMA_VERSION}')",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_entries (remote_id, path, remote_size, " +
+                        "is_folder, is_pinned, is_hydrated, last_synced) " +
+                        "VALUES ('keep-uuid', '/keep.txt', 100, 0, 0, 1, '2026-05-17T10:00:00Z')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            // Live row survived — additive migration does not touch sync_entries.
+            assertEquals(1, upgraded.getAllEntries().size)
+            assertNotNull(upgraded.getEntry("/keep.txt"))
+            // The new staging primitives operate cleanly on the migrated DB.
+            val scanId = upgraded.beginScan(initialMarker = "m0")
+            upgraded.persistScanPage(scanId, listOf(staged("new-uuid", "/new.txt")), marker = "m1")
+            assertEquals(1, upgraded.loadStagedItems(scanId).size)
+            // The staging slice is fully orthogonal — alive view unchanged.
+            assertEquals(1, upgraded.getAllEntries().size)
+        } finally {
+            upgraded.close()
+        }
     }
 }

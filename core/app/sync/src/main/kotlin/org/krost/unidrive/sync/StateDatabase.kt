@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.CloudItem
 import org.krost.unidrive.sync.model.EntryStatus
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
@@ -7,6 +8,7 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.ResultSet
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -173,6 +175,37 @@ class StateDatabase(
                     pattern TEXT NOT NULL UNIQUE,
                     pinned  INTEGER NOT NULL
                 )
+            """,
+            )
+            // Resumable-scan staging slice. Lives in a dedicated table rather
+            // than under `sync_entries` because the staged-row content is
+            // partial-path-resolution-at-stage-time (Internxt's `delta()`
+            // builds the folder graph from ALL fetched pages, so a file
+            // staged mid-scan may not have a resolvable path yet) — storing
+            // raw uuid + parent_uuid + name lets the next launch's `delta()`
+            // resume fetching from the checkpoint, rebuild the full folder
+            // graph from staged + new pages, and resolve every path correctly
+            // before returning to the reconciler. The alive_entries view is
+            // therefore untouched by the staging layer.
+            stmt.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS scan_staging (
+                    scan_id     TEXT NOT NULL,
+                    remote_id   TEXT NOT NULL,
+                    parent_uuid TEXT,
+                    plain_name  TEXT NOT NULL,
+                    is_folder   INTEGER NOT NULL DEFAULT 0,
+                    size        INTEGER NOT NULL DEFAULT 0,
+                    modified    TEXT,
+                    remote_hash TEXT,
+                    PRIMARY KEY (scan_id, remote_id)
+                )
+            """,
+            )
+            stmt.executeUpdate(
+                """
+                CREATE INDEX IF NOT EXISTS idx_scan_staging_scan_id
+                    ON scan_staging(scan_id)
             """,
             )
         }
@@ -577,6 +610,187 @@ class StateDatabase(
         }
     }
 
+    /**
+     * Resumable-scan staging slice + checkpoint primitives.
+     *
+     * The scan model: the engine generates a scan id, writes pages to the
+     * dedicated `scan_staging` table as they arrive, and clears both the
+     * staging slice and the checkpoint when the reconciler has consumed
+     * the full inventory. A daemon crash mid-scan leaves both in place;
+     * the next launch resumes from the stored marker rather than
+     * re-fetching every page from offset 0.
+     *
+     * Storage layout:
+     * - Staged rows live in `scan_staging`, keyed by `(scan_id, remote_id)`.
+     *   The table holds raw cloud identity (uuid, parent_uuid, name, etc.)
+     *   so the provider can rebuild its folder graph on resume and
+     *   re-resolve paths — Internxt's `delta()` only knows the full path
+     *   of a file once every folder page has arrived, so per-page staging
+     *   must store the raw uuid graph, not the partially-resolved path.
+     * - The view + path partial-unique on `sync_entries` are untouched —
+     *   staging is fully orthogonal to the live alive set.
+     * - Checkpoint state lives in `sync_state` under the `scan_in_progress_*`
+     *   keys so it survives daemon restarts without a separate table.
+     */
+    @Synchronized
+    fun beginScan(initialMarker: String?): String {
+        val scanId = UUID.randomUUID().toString()
+        batch {
+            setSyncState(SCAN_IN_PROGRESS_ID, scanId)
+            setSyncState(SCAN_IN_PROGRESS_STARTED_AT, Instant.now().toString())
+            if (initialMarker != null) {
+                setSyncState(SCAN_IN_PROGRESS_MARKER, initialMarker)
+            } else {
+                clearSyncState(SCAN_IN_PROGRESS_MARKER)
+            }
+        }
+        return scanId
+    }
+
+    /**
+     * Returns the active scan checkpoint when one exists and is fresher
+     * than [staleThreshold]. A stale checkpoint is cleared in-place
+     * (staging slice deleted + sync_state keys cleared) so the caller can
+     * treat a null return as "start from scratch".
+     */
+    @Synchronized
+    fun getActiveScan(staleThreshold: Duration): ActiveScan? {
+        val scanId = getSyncState(SCAN_IN_PROGRESS_ID) ?: return null
+        val startedAtRaw = getSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+        val startedAt = startedAtRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        if (startedAt == null || Instant.now().isAfter(startedAt.plus(staleThreshold))) {
+            clearScan(scanId)
+            return null
+        }
+        return ActiveScan(
+            scanId = scanId,
+            marker = getSyncState(SCAN_IN_PROGRESS_MARKER),
+            startedAt = startedAt,
+        )
+    }
+
+    /**
+     * Persist one page of scan items atomically: stage the rows + advance the
+     * checkpoint marker in a single transaction. SQLite's WAL rollback leaves
+     * neither half-applied on crash. Items are upserted (so a re-issued page
+     * after a transient error does not duplicate rows).
+     *
+     * The staged-row content is the *cloud identity* of each item — uuid,
+     * parent uuid, plainname, isFolder, size, modified, hash — extracted
+     * from [CloudItem]. Path is intentionally NOT stored: per-page-built
+     * paths are partially resolved (folders that arrive in later pages
+     * leave child files unanchored) and the provider re-resolves
+     * everything from the rebuilt folder graph on resume.
+     */
+    @Synchronized
+    fun persistScanPage(
+        scanId: String,
+        items: List<CloudItem>,
+        marker: String,
+    ) {
+        batch {
+            for (item in items) {
+                upsertStagedItem(scanId, item)
+            }
+            setSyncState(SCAN_IN_PROGRESS_MARKER, marker)
+        }
+    }
+
+    /**
+     * Rehydrate the staged rows of an in-progress scan back into CloudItem
+     * shape so the provider can feed them into its delta merge alongside the
+     * freshly-fetched pages. Returns rows in stable id order so resumes are
+     * deterministic. The returned items carry only the cloud-identity fields
+     * (name, parentId, isFolder, size, modified, hash); the `path` field is
+     * set to `"/" + plainName` as a placeholder — the provider re-resolves
+     * the real path using the rebuilt folder graph before returning to the
+     * engine.
+     */
+    @Synchronized
+    fun loadStagedItems(scanId: String): List<CloudItem> {
+        conn.prepareStatement(
+            "SELECT remote_id, parent_uuid, plain_name, is_folder, size, modified, remote_hash " +
+                "FROM scan_staging WHERE scan_id = ? ORDER BY remote_id",
+        ).use { stmt ->
+            stmt.setString(1, scanId)
+            val rs = stmt.executeQuery()
+            val items = mutableListOf<CloudItem>()
+            while (rs.next()) {
+                val name = rs.getString("plain_name")
+                items.add(
+                    CloudItem(
+                        id = rs.getString("remote_id"),
+                        name = name,
+                        // Placeholder path — the provider rewrites this once it
+                        // has the full folder graph. See KDoc.
+                        path = "/$name",
+                        size = rs.getLong("size"),
+                        isFolder = rs.getInt("is_folder") == 1,
+                        modified = rs.getString("modified")?.let { Instant.parse(it) },
+                        created = null,
+                        hash = rs.getString("remote_hash"),
+                        mimeType = null,
+                        parentId = rs.getString("parent_uuid"),
+                    ),
+                )
+            }
+            return items
+        }
+    }
+
+    /**
+     * Clear a completed scan's checkpoint and staged rows. Idempotent — calling
+     * with an unknown scan id is a no-op. The live `sync_entries` rows written
+     * via [upsertEntry] by the engine remain in place; only the per-scan
+     * staging slice is removed.
+     */
+    @Synchronized
+    fun completeScan(scanId: String) {
+        clearScan(scanId)
+    }
+
+    private fun upsertStagedItem(
+        scanId: String,
+        item: CloudItem,
+    ) {
+        conn.prepareStatement(
+            """
+            INSERT OR REPLACE INTO scan_staging
+                (scan_id, remote_id, parent_uuid, plain_name, is_folder, size, modified, remote_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+        ).use { stmt ->
+            stmt.setString(1, scanId)
+            stmt.setString(2, item.id)
+            stmt.setString(3, item.parentId)
+            stmt.setString(4, item.name)
+            stmt.setInt(5, if (item.isFolder) 1 else 0)
+            stmt.setLong(6, item.size)
+            stmt.setString(7, item.modified?.toString())
+            stmt.setString(8, item.hash)
+            stmt.executeUpdate()
+        }
+    }
+
+    private fun clearScan(scanId: String) {
+        batch {
+            conn.prepareStatement("DELETE FROM scan_staging WHERE scan_id=?").use { stmt ->
+                stmt.setString(1, scanId)
+                stmt.executeUpdate()
+            }
+            clearSyncState(SCAN_IN_PROGRESS_ID)
+            clearSyncState(SCAN_IN_PROGRESS_MARKER)
+            clearSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+        }
+    }
+
+    private fun clearSyncState(key: String) {
+        conn.prepareStatement("DELETE FROM sync_state WHERE key=?").use { stmt ->
+            stmt.setString(1, key)
+            stmt.executeUpdate()
+        }
+    }
+
     private fun escapeLike(value: String): String = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     private fun ResultSet.toSyncEntry(): SyncEntry {
@@ -646,7 +860,27 @@ class StateDatabase(
     companion object {
         // Bumped to 2 by the redesign: 1 == pre-redesign (path-PK, no
         // tombstones), 2 == remote_id-PK with status + parent_uuid + alive view.
+        // The resumable-scan slice lives in a new `scan_staging` table created
+        // via `CREATE TABLE IF NOT EXISTS`, so adding it to existing v2 DBs is
+        // idempotent and doesn't justify a version bump.
         internal const val SCHEMA_VERSION: Int = 2
         internal const val SCHEMA_VERSION_KEY: String = "schema_version"
+
+        // sync_state keys used by the resumable-scan checkpoint. Public so
+        // tests can inject + assert directly without grepping the .kt source.
+        const val SCAN_IN_PROGRESS_ID: String = "scan_in_progress_id"
+        const val SCAN_IN_PROGRESS_MARKER: String = "scan_in_progress_marker"
+        const val SCAN_IN_PROGRESS_STARTED_AT: String = "scan_in_progress_started_at"
     }
 }
+
+/**
+ * Snapshot of an in-progress remote scan: enough to decide between resume
+ * and start-from-scratch on the next sync pass. [marker] is opaque to the
+ * engine — the provider parsed it into its native pagination cursor.
+ */
+data class ActiveScan(
+    val scanId: String,
+    val marker: String?,
+    val startedAt: Instant,
+)
