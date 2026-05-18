@@ -90,7 +90,7 @@ class InternxtProvider(
                 fileLimitsResolved = true
                 fileLimitsCached
             } catch (e: Exception) {
-                log.warn("UD-364: GET /files/limits failed ({}); maxFileSizeBytes()=null, will retry next call", e.message)
+                log.warn("GET /files/limits failed; maxFileSizeBytes()=null, will retry next call", e)
                 null
             }
         }
@@ -697,7 +697,7 @@ class InternxtProvider(
                     getContents(folderUuid)
                 } catch (e: InternxtApiException) {
                     if (e.statusCode in listOf(500, 503)) {
-                        log.warn("Skipping folder {} ({}): {}", folderUuid, e.statusCode, e.message)
+                        log.warn("Skipping folder {} ({})", folderUuid, e.statusCode, e)
                         skipped.incrementAndGet()
                         return
                     }
