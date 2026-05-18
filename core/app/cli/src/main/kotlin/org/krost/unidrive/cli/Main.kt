@@ -28,7 +28,6 @@ import java.nio.file.Paths
     subcommands = [
         AuthCommand::class,
         BackupCommand::class,
-        BenchmarkCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
         // Git-style three-verb split — refresh = sync without byte

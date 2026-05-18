@@ -46,8 +46,8 @@ class CliServicesImplTest {
             dir.resolve("config.toml"),
             """
             [providers.myprofile]
-            type = "localfs"
-            local_root = "/tmp/nowhere"
+            type = "onedrive"
+            client_id = "test"
             """.trimIndent(),
         )
         val services = CliServicesImpl(freshMain(dir))
@@ -68,12 +68,12 @@ class CliServicesImplTest {
             dir.resolve("config.toml"),
             """
             [providers.alpha]
-            type = "localfs"
-            local_root = "/tmp/alpha"
+            type = "onedrive"
+            client_id = "alpha-client"
 
             [providers.beta]
-            type = "localfs"
-            local_root = "/tmp/beta"
+            type = "onedrive"
+            client_id = "beta-client"
             """.trimIndent(),
         )
         val services = CliServicesImpl(freshMain(dir))

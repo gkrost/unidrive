@@ -1,13 +1,11 @@
 package org.krost.unidrive
 
 import kotlinx.coroutines.runBlocking
-import org.krost.unidrive.localfs.LocalFsProviderFactory
 import java.nio.file.Files
 import java.util.ServiceLoader
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -59,19 +57,4 @@ class InteractiveAuthSpiContractTest {
         }
     }
 
-    @Test
-    fun non_oauth_factory_uses_default_throwing_sentinels() {
-        val localfs = LocalFsProviderFactory()
-        assertFalse(
-            localfs.supportsInteractiveAuth(),
-            "LocalFsProviderFactory must not declare interactive-auth support",
-        )
-
-        try {
-            runBlocking { localfs.beginInteractiveAuth(tmpProfileDir) }
-            fail("LocalFsProviderFactory.beginInteractiveAuth should throw UnsupportedOperationException by default")
-        } catch (e: UnsupportedOperationException) {
-            assertTrue(e.message?.contains("no interactive auth flow") == true)
-        }
-    }
 }

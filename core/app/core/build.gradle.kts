@@ -25,11 +25,6 @@ dependencies {
     testImplementation(libs.ktor.client.mock)
     testImplementation(libs.kotlinx.coroutines.test)
 
-    // UD-014: InteractiveAuthSpiContractTest needs the two factories to
-    // assert capability/override agreement (OneDrive) and throwing-default
-    // sentinels (LocalFs). Test-only — production code in :app:core does
-    // not depend on any provider module.
-    testImplementation(project(":providers:localfs"))
     testImplementation(project(":providers:onedrive"))
 }
 

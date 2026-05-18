@@ -493,35 +493,6 @@ class SyncConfigTest {
         assertNull(raw.providers["my-webdav"]?.trust_all_certs)
     }
 
-    @Test
-    fun `parses xtra_encryption config`() {
-        val toml =
-            """
-            [general]
-            [providers.my-provider]
-            type = "s3"
-            xtra_encryption = true
-            """.trimIndent()
-        val configFile = tmpDir.resolve("config.toml")
-        Files.writeString(configFile, toml)
-        val raw = SyncConfig.parseRaw(Files.readString(configFile))
-        assertTrue(raw.providers["my-provider"]?.xtra_encryption == true)
-    }
-
-    @Test
-    fun `xtra_encryption defaults to null`() {
-        val toml =
-            """
-            [general]
-            [providers.my-provider]
-            type = "s3"
-            """.trimIndent()
-        val configFile = tmpDir.resolve("config.toml")
-        Files.writeString(configFile, toml)
-        val raw = SyncConfig.parseRaw(Files.readString(configFile))
-        assertNull(raw.providers["my-provider"]?.xtra_encryption)
-    }
-
     // ── Sync direction tests ─────────────────────────────────────────────────
 
     @Test

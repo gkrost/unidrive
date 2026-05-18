@@ -221,8 +221,6 @@ data class RawProvider(
     val webhook: Boolean? = null,
     val webhook_port: Int? = null,
     val webhook_url: String? = null,
-    // X-tra encryption
-    val xtra_encryption: Boolean? = null,
     // TLS
     val trust_all_certs: Boolean? = null,
     // Rclone

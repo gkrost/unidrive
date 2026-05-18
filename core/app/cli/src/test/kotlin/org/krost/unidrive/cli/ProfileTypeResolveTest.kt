@@ -84,16 +84,16 @@ class ProfileTypeResolveTest {
     fun `auto-resolve infers type from profile name when type field is omitted`() {
         // SyncConfig.resolveProfile defaults the type to the profile name when the
         // [providers.<name>] section omits `type = "..."`. profilesOfType mirrors
-        // that, so a profile literally named "sftp" counts as one of type "sftp".
+        // that, so a profile literally named "onedrive" counts as one of type "onedrive".
         val raw =
             parse(
                 """
-                |[providers.sftp]
-                |host = "example.com"
+                |[providers.onedrive]
+                |client_id = "test"
                 """.trimMargin(),
             )
-        val resolved = tryResolveByType("sftp", raw)
-        assertEquals("sftp", resolved?.name)
+        val resolved = tryResolveByType("onedrive", raw)
+        assertEquals("onedrive", resolved?.name)
     }
 
     // ── zero matches: type known, no profiles of that type ────────────────────

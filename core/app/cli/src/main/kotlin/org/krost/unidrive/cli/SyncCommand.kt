@@ -22,8 +22,6 @@ import org.krost.unidrive.sync.ThrottledProvider
 import org.krost.unidrive.sync.TrashManager
 import org.krost.unidrive.sync.computePollInterval
 import org.krost.unidrive.sync.pollStateName
-import org.krost.unidrive.xtra.XtraEncryptedProvider
-import org.krost.unidrive.xtra.XtraKeyManager
 import org.slf4j.LoggerFactory
 import picocli.CommandLine
 import picocli.CommandLine.ArgGroup
@@ -220,39 +218,6 @@ open class SyncCommand : Runnable {
                 ?.let { ThrottledProvider(rawProvider, it.toLong() * 1024) }
                 ?: rawProvider
 
-        val xtraProvider =
-            if (profile.rawProvider?.xtra_encryption == true) {
-                val keyDir = parent.providerConfigDir().resolve("xtra")
-                val keyManager = XtraKeyManager(keyDir.resolve("key"))
-                if (!Files.exists(keyDir.resolve("key"))) {
-                    System.err.println("Error: xtra_encryption enabled but no keys found.")
-                    System.err.println("Run: unidrive -p ${profile.name} vault xtra-init")
-                    System.exit(1)
-                }
-                val envXtraPass = System.getenv("UNIDRIVE_XTRA_PASS")
-                val xtraPass =
-                    if (envXtraPass != null) {
-                        envXtraPass.toCharArray()
-                    } else {
-                        val console = System.console()
-                        if (console == null) {
-                            System.err.println("Error: interactive terminal required for xtra decryption.")
-                            System.err.println("Set UNIDRIVE_XTRA_PASS env var for non-interactive xtra access.")
-                            System.exit(1)
-                            throw IllegalStateException("unreachable")
-                        }
-                        console.readPassword("Xtra encryption passphrase: ")
-                            ?: run {
-                                System.err.println("Error: could not read passphrase.")
-                                System.exit(1)
-                                throw IllegalStateException("unreachable")
-                            }
-                    }
-                keyManager.load(xtraPass)
-                XtraEncryptedProvider(provider, keyManager)
-            } else {
-                null
-            }
         val dbPath = parent.providerConfigDir().resolve("state.db")
 
         // UD-738: virtual-reset mode. With `--reset --dry-run`, plan against a
@@ -381,7 +346,7 @@ open class SyncCommand : Runnable {
 
         val engine =
             SyncEngine(
-                provider = xtraProvider ?: provider,
+                provider = provider,
                 db = db,
                 syncRoot = config.syncRoot,
                 conflictPolicy = config.conflictPolicy,

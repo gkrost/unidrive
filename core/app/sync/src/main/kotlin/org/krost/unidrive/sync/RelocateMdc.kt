@@ -14,9 +14,7 @@ import java.util.UUID
  * `[<sha>] [*] [-------]` (132 k unfilterable lines on the 2026-04-29 baseline,
  * see `docs/dev/log-feedback-loop-proposal.md`).
  *
- * Used by:
- *  - `org.krost.unidrive.cli.RelocateCommand.run()`
- *  - `org.krost.unidrive.mcp.RelocateTool.handleRelocate()`
+ * Used by `org.krost.unidrive.cli.RelocateCommand.run()`.
  *
  * Mirrors the put-with-restore pattern of [SyncEngine]'s `runScan`
  * (sync.SyncEngine.kt:80) so nested relocates inside a sync don't clobber

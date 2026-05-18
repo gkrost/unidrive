@@ -190,10 +190,8 @@ fun deployWindows(
             .allProcesses()
             .filter { ph ->
                 val cmd = ph.info().commandLine().orElse("")
-                // Match the CLI shadow-jar specifically, not the MCP
-                // sibling (which is killed by :app:mcp:deploy) and not
-                // gradle's own daemon, which always has gradle on its
-                // command line.
+                // Match the CLI shadow-jar specifically, not gradle's own
+                // daemon (which always has "gradle-" on its command line).
                 cmd.contains(targetJarName) && !cmd.contains("gradle-")
             }.toList()
     killed.forEach { ph ->
@@ -360,17 +358,10 @@ fun deployLinux(
 }
 
 dependencies {
-    implementation(project(":app:benchmark"))
     implementation(project(":app:core"))
     implementation(project(":providers:internxt"))
-    implementation(project(":providers:localfs"))
     implementation(project(":providers:onedrive"))
-    implementation(project(":providers:rclone"))
-    implementation(project(":providers:s3"))
-    implementation(project(":providers:sftp"))
-    implementation(project(":providers:webdav"))
     implementation(project(":app:sync"))
-    implementation(project(":app:xtra"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.slf4j) // UD-212: MDCContext for profile MDC propagation

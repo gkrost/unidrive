@@ -3,7 +3,6 @@ package org.krost.unidrive.cli
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.Vault
 import org.krost.unidrive.sync.escapeTomlValue
-import org.krost.unidrive.xtra.XtraKeyManager
 import picocli.CommandLine.Command
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
@@ -17,8 +16,6 @@ import java.nio.file.Files
         VaultEncryptCommand::class,
         VaultDecryptCommand::class,
         VaultChangePassphraseCommand::class,
-        VaultXtraInitCommand::class,
-        VaultXtraStatusCommand::class,
     ],
 )
 class VaultCommand : Runnable {
@@ -252,70 +249,6 @@ class VaultChangePassphraseCommand : Runnable {
 
         vault.write(newPass1, data)
         println("Vault passphrase changed.")
-    }
-}
-
-// ── vault xtra init ──────────────────────────────────────────────────────────
-
-@Command(name = "xtra-init", description = ["Initialize Xtra encryption keys for E2EE"], mixinStandardHelpOptions = true)
-class VaultXtraInitCommand : Runnable {
-    @ParentCommand
-    lateinit var vaultCmd: VaultCommand
-
-    override fun run() {
-        val keyDir = vaultCmd.parent.providerConfigDir().resolve("xtra")
-        val keyPath = keyDir.resolve("key")
-
-        if (Files.exists(keyPath)) {
-            System.err.println("Xtra keys already exist. Use 'vault xtra-status' to view.")
-            System.err.println("To re-key, move ${keyDir.resolve("key")} and re-run.")
-            System.exit(1)
-        }
-
-        val console = System.console()
-        if (console == null) {
-            System.err.println("Error: interactive terminal required.")
-            System.exit(1)
-        }
-
-        println("Xtra Encryption - End-to-End Encryption for your files")
-        println("Your data is encrypted locally before upload. Only you can decrypt it.")
-        println()
-
-        val pass = console.readPassword("Set encryption passphrase (min 8 chars): ")
-        if (pass.size < 8) {
-            System.err.println("Passphrase must be at least 8 characters.")
-            System.exit(1)
-        }
-
-        val manager = XtraKeyManager(keyPath)
-        Files.createDirectories(keyDir)
-        manager.generate(pass)
-        println()
-        println("Xtra keys initialized at $keyPath")
-        println("IMPORTANT: Back up this file. Loss = data loss.")
-    }
-}
-
-// ── vault xtra status ──────────────────────────────────────────────────────────
-
-@Command(name = "xtra-status", description = ["Show Xtra encryption key status"], mixinStandardHelpOptions = true)
-class VaultXtraStatusCommand : Runnable {
-    @ParentCommand
-    lateinit var vaultCmd: VaultCommand
-
-    override fun run() {
-        val keyDir = vaultCmd.parent.providerConfigDir().resolve("xtra")
-        val keyPath = keyDir.resolve("key")
-
-        if (!Files.exists(keyPath)) {
-            println("Xtra: Not initialized")
-            println("Run 'unidrive vault xtra-init' to enable E2EE")
-            return
-        }
-
-        println("Xtra: Initialized")
-        println("Key file: $keyPath")
     }
 }
 
