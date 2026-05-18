@@ -190,7 +190,7 @@ open class AuthService(
         }
         val response = httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login") {
             contentType(ContentType.Application.Json)
-            applyInternxtHeaders()
+            applyInternxtHeaders(config)
             setBody(json.encodeToString(JsonObject.serializer(), body))
         }
         if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
@@ -214,7 +214,7 @@ open class AuthService(
     ): String {
         val response = httpClient.post("${InternxtConfig.API_BASE_URL}/auth/login/access") {
             contentType(ContentType.Application.Json)
-            applyInternxtHeaders()
+            applyInternxtHeaders(config)
             setBody(json.encodeToString(JsonObject.serializer(), body))
         }
         if (!response.status.isSuccess()) {
@@ -309,7 +309,7 @@ open class AuthService(
         val response =
             httpClient.get("${InternxtConfig.API_BASE_URL}/users/refresh") {
                 bearerAuth(currentJwt)
-                applyInternxtHeaders()
+                applyInternxtHeaders(config)
             }
         if (!response.status.isSuccess()) {
             throw AuthenticationException("Token refresh failed: ${response.bodyAsText()}")

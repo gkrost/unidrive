@@ -51,7 +51,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `malware` facet skip on download | One-line guard. |
 | OneDrive `fileSize` precheck → early 507 | Avoid wasted upload attempts. |
 | Internxt destructive-overwrite warning | Opt-in rename-and-keep mode given no server versioning. |
-| Internxt hard-coded client-header values | `internxt-client` / `internxt-version` / `x-internxt-desktop-header` literals risk allowlist tightening. Make a config override. |
 | Internxt `encryptVersion` legacy support | Hard-coded `03-aes`; legacy `02-rsa` buckets unreadable. |
 
 ## Cross-cutting

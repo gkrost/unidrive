@@ -690,7 +690,7 @@ class InternxtApiService(
 
     private fun HttpRequestBuilder.applyAuth(creds: InternxtCredentials) {
         bearerAuth(creds.jwt)
-        applyInternxtHeaders()
+        applyInternxtHeaders(config)
     }
 
     /**

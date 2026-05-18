@@ -5,6 +5,13 @@ import java.nio.file.Path
 
 data class InternxtConfig(
     val tokenPath: Path = defaultTokenPath("internxt"),
+    // The three client-identification headers the Internxt gateway echoes into
+    // its allow-list checks. Defaults preserve the current wire shape; env-var
+    // overrides let an operator rotate them without rebuilding when (not if)
+    // upstream tightens the allowlist. Mirrors the CRYPTO_KEY override pattern.
+    val clientName: String = System.getenv("INTERNXT_CLIENT_NAME") ?: CLIENT_NAME,
+    val clientVersion: String = System.getenv("INTERNXT_CLIENT_VERSION") ?: CLIENT_VERSION,
+    val desktopHeader: String = System.getenv("INTERNXT_DESKTOP_HEADER") ?: DESKTOP_HEADER,
 ) {
     companion object {
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
