@@ -1,6 +1,9 @@
 package org.krost.unidrive.internxt
 
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
@@ -12,6 +15,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class InternxtProvider(
     private val config: InternxtConfig = InternxtConfig(),
@@ -503,35 +507,53 @@ class InternxtProvider(
         // wall-clock during the gather.
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
-        // Paginate files (may be unavailable — 503)
-        try {
-            var offset = 0
-            while (true) {
-                val batch = api.listFiles(adjustedCursor, limit, offset)
-                allFiles.addAll(batch)
-                log.debug("Scanning files: {}", allFiles.size)
-                heartbeat?.tick(allFiles.size + allFolders.size)
-                if (batch.size < limit) break
-                offset += limit
-            }
-        } catch (e: InternxtApiException) {
-            if (e.statusCode in SERVER_UNAVAILABLE_STATUSES) {
-                log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
-                collectFilesFromFolders(authService.getValidCredentials().rootFolderId, allFiles, 0)
-            } else {
-                throw e
-            }
-        }
+        // Parallel listing pagination. Files and folders streams run concurrently;
+        // inside each stream up to 2 page fetches stay in flight at a time (matches
+        // the Drive HttpRetryBudget concurrency cap). Under 28-52s per-page gateway
+        // latency, this roughly halves scan wall-clock vs the prior sequential loop.
+        // Running counts via AtomicInteger so the heartbeat reports monotonically
+        // non-decreasing totals as pages arrive on either stream.
+        val filesCount = AtomicInteger(0)
+        val foldersCount = AtomicInteger(0)
 
-        // Paginate folders
-        var offset = 0
-        while (true) {
-            val batch = api.listFolders(adjustedCursor, limit, offset)
-            allFolders.addAll(batch)
-            log.debug("Scanning folders: {}", allFolders.size)
-            heartbeat?.tick(allFiles.size + allFolders.size)
-            if (batch.size < limit) break
-            offset += limit
+        val combinedTotal: () -> Int = { filesCount.get() + foldersCount.get() }
+
+        coroutineScope {
+            val foldersDeferred =
+                async {
+                    speculativeFetchPages(
+                        limit = limit,
+                        runningCount = foldersCount,
+                        heartbeat = heartbeat,
+                        combinedTotal = combinedTotal,
+                        label = "folders",
+                        fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset) },
+                    )
+                }
+            // Files stream owns its own 500/503 fallback to the folder walk — the
+            // /folders endpoint has no equivalent fallback, so a folders failure
+            // propagates and cancels the files stream via structured concurrency.
+            val filesResult: List<InternxtFile> =
+                try {
+                    speculativeFetchPages(
+                        limit = limit,
+                        runningCount = filesCount,
+                        heartbeat = heartbeat,
+                        combinedTotal = combinedTotal,
+                        label = "files",
+                        fetchPage = { offset -> api.listFiles(adjustedCursor, limit, offset) },
+                    )
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
+                    log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
+                    val fallback = mutableListOf<InternxtFile>()
+                    collectFilesFromFolders(authService.getValidCredentials().rootFolderId, fallback, 0)
+                    filesCount.set(fallback.size)
+                    heartbeat?.tick(combinedTotal())
+                    fallback
+                }
+            allFiles.addAll(filesResult)
+            allFolders.addAll(foldersDeferred.await())
         }
 
         val creds = authService.getValidCredentials()
@@ -579,6 +601,55 @@ class InternxtProvider(
             complete = skipped == 0 && ancestorDrops == 0,
         )
     }
+
+    /**
+     * Two-wide speculative page fetcher used by [delta]. Keeps up to 2 in-flight
+     * [fetchPage] calls; when a page comes back with `size < limit` (the last
+     * page), any speculative siblings are cancelled rather than waited on — under
+     * the live 28-52s per-page latency, one wasted fetch is much cheaper than
+     * one extra round-trip's worth of wall-clock. Pages are appended in offset
+     * order so the resulting list matches the sequential walk.
+     *
+     * [runningCount] is incremented as pages arrive; [combinedTotal] reads it
+     * alongside the sibling stream's counter so the heartbeat fires with a
+     * monotonic file+folder total without cross-coroutine list synchronization
+     * on the merge path.
+     */
+    private suspend fun <T> speculativeFetchPages(
+        limit: Int,
+        runningCount: AtomicInteger,
+        heartbeat: ScanHeartbeat?,
+        combinedTotal: () -> Int,
+        label: String,
+        fetchPage: suspend (offset: Int) -> List<T>,
+    ): List<T> =
+        coroutineScope {
+            val accumulated = mutableListOf<T>()
+            val pipeline: ArrayDeque<Deferred<List<T>>> = ArrayDeque()
+            var nextOffset = 0
+            // Seed the pipeline with up to 2 in-flight page fetches.
+            repeat(2) {
+                pipeline.addLast(async { fetchPage(nextOffset) })
+                nextOffset += limit
+            }
+            while (pipeline.isNotEmpty()) {
+                val batch = pipeline.removeFirst().await()
+                accumulated.addAll(batch)
+                runningCount.addAndGet(batch.size)
+                log.debug("Scanning {}: {}", label, runningCount.get())
+                heartbeat?.tick(combinedTotal())
+                if (batch.size < limit) {
+                    // Last page: cancel any speculative siblings still in flight.
+                    pipeline.forEach { it.cancel() }
+                    pipeline.clear()
+                    break
+                }
+                // Top up: keep two in flight.
+                pipeline.addLast(async { fetchPage(nextOffset) })
+                nextOffset += limit
+            }
+            accumulated
+        }
 
     private fun buildFolderPath(
         uuid: String,
