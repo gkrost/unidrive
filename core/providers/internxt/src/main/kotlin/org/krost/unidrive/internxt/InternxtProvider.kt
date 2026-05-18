@@ -515,7 +515,7 @@ class InternxtProvider(
                 offset += limit
             }
         } catch (e: InternxtApiException) {
-            if (e.statusCode in listOf(500, 503)) {
+            if (e.statusCode in SERVER_UNAVAILABLE_STATUSES) {
                 log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
                 collectFilesFromFolders(authService.getValidCredentials().rootFolderId, allFiles, 0)
             } else {
@@ -674,6 +674,13 @@ class InternxtProvider(
     }
 
     companion object {
+        // Server-unavailable status codes that trigger the slower fallback
+        // walk over the folder tree (line 518) or skip-this-folder (line 699).
+        // Narrower than TRANSIENT_STATUSES: 429 (rate-limited) and 502/504
+        // (gateway timing issues) should not trigger fallback — they should
+        // honour Retry-After and retry the same call.
+        private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
+
         /**
          * UD-361: testable recursion driver. Walks the folder tree rooted at
          * [folderUuid], accumulating files into [accumulator]. On 500/503
@@ -696,7 +703,7 @@ class InternxtProvider(
                 try {
                     getContents(folderUuid)
                 } catch (e: InternxtApiException) {
-                    if (e.statusCode in listOf(500, 503)) {
+                    if (e.statusCode in SERVER_UNAVAILABLE_STATUSES) {
                         log.warn("Skipping folder {} ({})", folderUuid, e.statusCode, e)
                         skipped.incrementAndGet()
                         return
