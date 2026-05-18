@@ -13,6 +13,7 @@ bouncycastle = "1.84"
 eddsa = "0.3.0"
 playwright = "1.59.0"
 ktlint-gradle = "14.2.0"
+socket-io-client = "2.1.2"
 
 [libraries]
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
@@ -41,6 +42,7 @@ bcpkix-jdk18on = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bo
 bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 eddsa = { module = "net.i2p.crypto:eddsa", version.ref = "eddsa" }
 playwright = { module = "com.microsoft.playwright:playwright", version.ref = "playwright" }
+socket-io-client = { module = "io.socket:socket.io-client", version.ref = "socket-io-client" }
 
 [bundles]
 ktor-client = ["ktor-client-core", "ktor-client-cio", "ktor-client-content-negotiation", "ktor-serialization-kotlinx-json", "ktor-client-logging"]

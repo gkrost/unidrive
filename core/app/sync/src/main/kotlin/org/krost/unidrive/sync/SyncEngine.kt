@@ -94,6 +94,50 @@ class SyncEngine(
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
     private val reconciler = Reconciler(db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns)
 
+    // Debounce state for remote-change wake hints (Internxt notifications WS).
+    // The provider may emit many frames per second during a folder-tree
+    // mutation; we coalesce them into one wake by cancelling-and-restarting
+    // a single delay job per hint and firing the listener only after the
+    // quiet window elapses.
+    @Volatile
+    private var remoteWakeDebounceJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Wire the provider's server-pushed change feed (Internxt's socket.io
+     * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
+     * raw hint per observed remote mutation; this method debounces a
+     * burst into a single [listener] invocation after a quiet window
+     * ([REMOTE_WAKE_DEBOUNCE_MS]) so 50 frame arrivals from one folder-
+     * tree change wake the poll loop ONCE instead of 50 times.
+     *
+     * [scope] owns the debounce coroutine. When [scope] is cancelled
+     * (daemon shutdown) any pending debounced fire is dropped.
+     *
+     * Providers without a push channel inherit the [CloudProvider.onRemoteChangeHint]
+     * default no-op; this call is then a registration into a black hole,
+     * which is fine.
+     */
+    fun registerRemoteWakeListener(
+        scope: kotlinx.coroutines.CoroutineScope,
+        listener: () -> Unit,
+    ) {
+        provider.onRemoteChangeHint {
+            // Cancel any pending debounce and restart. The current hint
+            // resets the quiet-window clock; only when the quiet window
+            // elapses without a fresh hint do we fire the listener.
+            remoteWakeDebounceJob?.cancel()
+            remoteWakeDebounceJob =
+                scope.launch {
+                    kotlinx.coroutines.delay(REMOTE_WAKE_DEBOUNCE_MS)
+                    try {
+                        listener()
+                    } catch (e: Exception) {
+                        log.warn("Remote-wake listener threw", e)
+                    }
+                }
+        }
+    }
+
     /** Suppress watcher events for [path] during [block], then unsuppress. */
     private inline fun <T> withEchoSuppression(
         path: String,
@@ -1933,6 +1977,17 @@ class SyncEngine(
          * currently user-configurable.
          */
         const val SCAN_CHECKPOINT_STALE_HOURS: Long = 6L
+
+        /**
+         * Quiet-window for the remote-change wake debounce. A burst of 50
+         * notification frames from a single folder-tree mutation should
+         * trigger ONE delta walk, not 50. The window has to be long enough
+         * to swallow a burst but short enough that the latency-vs-batch
+         * trade-off still favours latency (the whole point of the WS feed
+         * vs the multi-minute poll cadence). 5 s is the spec's lower
+         * bound; pick it.
+         */
+        const val REMOTE_WAKE_DEBOUNCE_MS: Long = 5_000L
 
         /**
          * UD-264 / PR #46 Codex P2: format a `skipped-ops.jsonl` row using

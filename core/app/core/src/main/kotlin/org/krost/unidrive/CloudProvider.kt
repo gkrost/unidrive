@@ -208,6 +208,24 @@ interface CloudProvider {
     suspend fun handleWebhookCallback(notification: ByteArray): CapabilityResult<Unit> =
         CapabilityResult.Unsupported(Capability.Webhook, "Provider does not support webhook callbacks")
 
+    /**
+     * Register a coarse-grained wake-signal callback. Providers that have a
+     * server-pushed change feed (Internxt's socket.io `NOTIFICATIONS_URL`)
+     * invoke [callback] once per observed remote mutation that did NOT
+     * originate from this client. The callback is a "something changed,
+     * walk the delta" hint — not authoritative payload — so the receiver
+     * is expected to debounce and then trigger the normal [delta] walk.
+     *
+     * Default implementation is a no-op; providers without a push channel
+     * (or with one wired through a different surface, e.g. OneDrive's
+     * webhook handled via [handleWebhookCallback]) inherit it.
+     *
+     * Called at most once per provider lifetime; the second call REPLACES
+     * the first. Pass `{}` to detach. Implementations may invoke the
+     * callback on any thread.
+     */
+    fun onRemoteChangeHint(callback: () -> Unit) { /* default: no-op */ }
+
     fun close() {}
 
     /**

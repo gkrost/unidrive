@@ -1,7 +1,10 @@
 package org.krost.unidrive.cli
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.selects.select
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
@@ -440,6 +443,18 @@ open class SyncCommand : Runnable {
                     println("Starting continuous sync to ${config.syncRoot}")
                     watcher!!.start()
 
+                    // Coalesced channel for provider-emitted remote-change wake
+                    // hints (Internxt notifications WS). The engine debounces
+                    // raw frames; on the debounced fire we trySend onto this
+                    // channel and the poll-wait below selects between the
+                    // local watcher and this channel so a remote mutation
+                    // wakes the loop early without waiting out the adaptive
+                    // interval. Conflated → at most one pending hint.
+                    val remoteWakeChannel = Channel<Unit>(Channel.CONFLATED)
+                    engine.registerRemoteWakeListener(this) {
+                        remoteWakeChannel.trySend(Unit)
+                    }
+
                     Runtime.getRuntime().addShutdownHook(
                         Thread {
                             println("\nShutting down...")
@@ -507,8 +522,24 @@ open class SyncCommand : Runnable {
                             lastState = currentState
                         }
 
-                        val hasLocalChange = watcher.awaitChange(intervalSeconds.toLong().seconds)
-                        if (hasLocalChange) idleCycles = 0
+                        // Wait for either a local watcher event OR a debounced
+                        // remote-wake hint from the provider's push channel —
+                        // whichever fires first wakes the next sync pass early.
+                        // Falls through on timeout (next adaptive poll tick).
+                        val localWaiter = async { watcher.awaitChange(intervalSeconds.toLong().seconds) }
+                        val remoteWaiter = async { remoteWakeChannel.receive() }
+                        val wokeEarly =
+                            select<Boolean> {
+                                localWaiter.onAwait { fired ->
+                                    remoteWaiter.cancel()
+                                    fired
+                                }
+                                remoteWaiter.onAwait {
+                                    localWaiter.cancel()
+                                    true
+                                }
+                            }
+                        if (wokeEarly) idleCycles = 0
 
                         watcher.drainChanges()
                     }

@@ -12,12 +12,19 @@ data class InternxtConfig(
     val clientName: String = System.getenv("INTERNXT_CLIENT_NAME") ?: CLIENT_NAME,
     val clientVersion: String = System.getenv("INTERNXT_CLIENT_VERSION") ?: CLIENT_VERSION,
     val desktopHeader: String = System.getenv("INTERNXT_DESKTOP_HEADER") ?: DESKTOP_HEADER,
+    // Socket.io endpoint for the Internxt change feed. Default is the best-guess
+    // hostname per Internxt's naming convention for sibling envvars (BRIDGE_URL,
+    // DRIVE_URL, PAYMENTS_URL); the actual production value is supplied at
+    // build time by drive-desktop's CI pipeline and isn't in the public repo.
+    // Override via INTERNXT_NOTIFICATIONS_URL once confirmed via mitmproxy.
+    val notificationsUrl: String = System.getenv("INTERNXT_NOTIFICATIONS_URL") ?: NOTIFICATIONS_URL,
 ) {
     companion object {
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
         const val CLIENT_NAME = "unidrive"
         const val CLIENT_VERSION = "0.0.1"
         const val DESKTOP_HEADER = "internxt-desktop-dev-header"
+        const val NOTIFICATIONS_URL = "https://notifications.internxt.com"
 
         // Public encryption salt from Internxt's open-source desktop client (not a secret).
         // Used in password hashing during auth. Override via env var for custom deployments.

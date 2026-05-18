@@ -1623,6 +1623,66 @@ class SyncEngineTest {
             assertEquals(1, db.loadStagedItems(scanIdAfter).size)
         }
 
+    // ---- Remote-change wake-hint debounce (Internxt notifications WS) ----
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `remote wake debounce coalesces a burst into a single listener call`() =
+        runTest {
+            val hits = java.util.concurrent.atomic.AtomicInteger(0)
+            engine.registerRemoteWakeListener(this) { hits.incrementAndGet() }
+            val raw = provider.registeredRemoteChangeCallback
+            assertNotNull(raw, "engine must wire its debounced wrapper through provider.onRemoteChangeHint")
+
+            // 50 raw frame arrivals in tight succession (no virtual-time advance
+            // between them).
+            repeat(50) { raw() }
+
+            // Within the quiet window — nothing has fired yet.
+            assertEquals(0, hits.get(), "no listener fire before the debounce window elapses")
+
+            // Advance just past the debounce window — exactly one fire.
+            testScheduler.advanceTimeBy(SyncEngine.REMOTE_WAKE_DEBOUNCE_MS + 100)
+            testScheduler.runCurrent()
+            assertEquals(1, hits.get(), "50-frame burst must coalesce into exactly one listener invocation")
+        }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `remote wake debounce rearms on every fresh hint`() =
+        runTest {
+            val hits = java.util.concurrent.atomic.AtomicInteger(0)
+            engine.registerRemoteWakeListener(this) { hits.incrementAndGet() }
+            val raw = provider.registeredRemoteChangeCallback!!
+
+            // Hit, advance to nearly-fire, hit again — the second hit must
+            // restart the clock so we don't fire prematurely.
+            raw()
+            testScheduler.advanceTimeBy(SyncEngine.REMOTE_WAKE_DEBOUNCE_MS - 1000)
+            testScheduler.runCurrent()
+            assertEquals(0, hits.get(), "must not fire before the window elapses")
+
+            raw() // resets the clock
+            testScheduler.advanceTimeBy(SyncEngine.REMOTE_WAKE_DEBOUNCE_MS - 1000)
+            testScheduler.runCurrent()
+            assertEquals(0, hits.get(), "second hit must reset the clock so we don't fire on the old schedule")
+
+            testScheduler.advanceTimeBy(2_000)
+            testScheduler.runCurrent()
+            assertEquals(1, hits.get(), "exactly one fire after the final quiet window elapses")
+        }
+
+    @Test
+    fun `remote wake debounce wires through provider hook`() =
+        runTest {
+            engine.registerRemoteWakeListener(this) { /* listener body irrelevant */ }
+            assertNotNull(
+                provider.registeredRemoteChangeCallback,
+                "engine must register a callback with the provider — that's the only way " +
+                    "the provider can ever signal remote change",
+            )
+        }
+
     // -- Fake provider for testing --
 
     private fun cloudItem(
@@ -1850,6 +1910,14 @@ class SyncEngineTest {
         override suspend fun verifyItemExists(remoteId: String): org.krost.unidrive.CapabilityResult<Boolean> =
             org.krost.unidrive.CapabilityResult
                 .Success(remoteIdExists[remoteId] ?: true)
+
+        // Captured callback from registerRemoteWakeListener — tests fire it
+        // directly to simulate the provider observing remote events.
+        var registeredRemoteChangeCallback: (() -> Unit)? = null
+
+        override fun onRemoteChangeHint(callback: () -> Unit) {
+            registeredRemoteChangeCallback = callback
+        }
     }
 
     // UD-256 — persist --sync-path scope across runs; refuse bare bidirectional

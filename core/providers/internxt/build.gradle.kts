@@ -20,6 +20,10 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.client.logging)
 
+    // socket.io client for the Internxt NOTIFICATIONS_URL change-feed (real-time
+    // wake-signal). Transitive: engine.io-client + okhttp3 + org.json. MIT.
+    implementation(libs.socket.io.client)
+
     implementation(libs.logback.classic)
 
     testImplementation(kotlin("test"))

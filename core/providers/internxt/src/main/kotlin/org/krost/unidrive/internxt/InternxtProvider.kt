@@ -29,6 +29,17 @@ class InternxtProvider(
     private val api = InternxtApiService(config, credentialsProvider = { forceRefresh -> authService.getValidCredentials(forceRefresh) })
     private val secureRandom = java.security.SecureRandom()
 
+    // Internxt notifications (socket.io). Constructed lazily on the first
+    // authenticate() success so we have a JWT to hand to the WS handshake;
+    // disposed in close() / logout(). The current remote-change callback is
+    // stashed in a volatile reference so onRemoteChangeHint() called BEFORE
+    // authenticate() still wires through once the socket comes up.
+    @Volatile
+    private var notificationsClient: NotificationsClient? = null
+
+    @Volatile
+    private var remoteChangeCallback: () -> Unit = {}
+
     // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
     // folder lookups. Populated on createFolder success (the API returns the
     // new folder's UUID — without this the next resolveFolder call races
@@ -105,13 +116,47 @@ class InternxtProvider(
         if (!authService.isAuthenticated || authService.isJwtExpired()) {
             authService.authenticateInteractive()
         }
+        // Bring up the notifications WS now that we have a JWT. Failures are
+        // logged inside NotificationsClient; the periodic poll is the safety
+        // net so a WS that won't connect mustn't fail the authenticate path.
+        ensureNotificationsClient()
     }
 
-    override suspend fun logout() = authService.logout()
+    override suspend fun logout() {
+        notificationsClient?.disconnect()
+        notificationsClient = null
+        authService.logout()
+    }
 
     override fun close() {
+        notificationsClient?.disconnect()
+        notificationsClient = null
         authService.close()
         api.close()
+    }
+
+    override fun onRemoteChangeHint(callback: () -> Unit) {
+        remoteChangeCallback = callback
+    }
+
+    private suspend fun ensureNotificationsClient() {
+        if (notificationsClient != null) return
+        val creds =
+            try {
+                authService.getValidCredentials()
+            } catch (e: Exception) {
+                log.debug("ensureNotificationsClient: no credentials yet ({}), deferring", e.message)
+                return
+            }
+        val client =
+            NotificationsClient(
+                notificationsUrl = config.notificationsUrl,
+                ownClientName = config.clientName,
+                tokenSupplier = { forceRefresh -> authService.getValidCredentials(forceRefresh).jwt },
+                onRemoteChange = { remoteChangeCallback() },
+            )
+        notificationsClient = client
+        client.connect(creds.jwt)
     }
 
     override suspend fun listChildren(path: String): List<CloudItem> {
