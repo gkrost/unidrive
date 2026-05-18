@@ -73,6 +73,42 @@ class Reconciler(
         // overhead on Windows dominated wall time; the silent reconcile pass that
         // motivated this ticket was 90% I/O syscalls, not query plan.
         //
+        // Un-trash pre-pass. A delta-reported alive item whose `remote_id`
+        // matches a TRASHED row flips status back to EXISTS — the reconciler
+        // then treats it as either a re-download (local copy gone) or a
+        // no-op (local copy present and hash matches cloud). Local-modified-
+        // while-TRASHED is explicitly out of scope (v1 last-write-wins).
+        //
+        // Done BEFORE loading alive entries so the main loop sees the row as
+        // alive and doesn't double-process. `resurrectedPaths` tracks the
+        // paths so the main loop can skip them after we've already emitted
+        // (or deliberately not emitted) the right action.
+        val trashedByRemoteId =
+            db.recovery.trashedEntries()
+                .mapNotNull { e -> e.remoteId?.let { it to e } }
+                .toMap()
+        val resurrectedPaths = mutableSetOf<String>()
+        val resurrectedActions = mutableListOf<SyncAction>()
+        if (trashedByRemoteId.isNotEmpty()) {
+            for ((path, item) in remoteChanges) {
+                if (item.deleted) continue
+                trashedByRemoteId[item.id] ?: continue
+                if (!db.setStatusExists(item.id)) continue
+                resurrectedPaths.add(path)
+                // Check local presence at the cloud's CURRENT path (the
+                // trashed row's stored path may differ in a rename-during-
+                // trash edge case; v1 is last-write-wins so the cloud path
+                // wins). Folders never need re-download — the metadata flip
+                // is enough.
+                val localPath = resolveLocal(path)
+                if (!item.isFolder && !Files.isRegularFile(localPath)) {
+                    resurrectedActions.add(SyncAction.DownloadContent(path, item))
+                }
+                // Local copy present + hash matches → no-op (main loop's
+                // UNCHANGED+UNCHANGED branch handles the absence of action).
+            }
+        }
+
         // entryByLcPath replaces db.getEntryCaseInsensitive (SQLite COLLATE NOCASE
         // is ASCII-only; lowercase(Locale.ROOT) folds Unicode too — a slight
         // behavioural improvement on case-insensitive filesystems with non-ASCII
@@ -83,6 +119,7 @@ class Reconciler(
         val entryByRemoteId = allDbEntries.mapNotNull { e -> e.remoteId?.let { it to e } }.toMap()
 
         val actions = mutableListOf<SyncAction>()
+        actions.addAll(resurrectedActions)
         val allPaths =
             (remoteChanges.keys + localChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
@@ -99,6 +136,11 @@ class Reconciler(
         var processed = 0
 
         for (path in allPaths) {
+            // Skip paths the un-trash pre-pass already handled; otherwise a
+            // LocalScanner-reported NEW (file present, was not in alive view
+            // pre-flip) would trip the "Local only changes" branch and emit
+            // an Upload for an already-synced file.
+            if (path in resurrectedPaths) continue
             val remoteItem = remoteChanges[path]
             val localState = localChanges[path] ?: ChangeState.UNCHANGED
             val entry = entryByPath[path]

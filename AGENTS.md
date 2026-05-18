@@ -14,6 +14,11 @@ This file is the rulebook for everyone touching the repo — human contributors 
 - **No CI policing.** `./gradlew check` is the gate. No semgrep, gitleaks, codecov, trivy, ktlint baselines, version-drift jobs.
 - **Never hot-swap a `.jar` on a running JVM.** The classloader corrupts mid-execution. Stop the daemon (`systemctl --user stop unidrive.service`), then copy.
 
+## Output token management
+
+- **Write long outputs to disk.** For long analysis or ticketing sessions, write outputs (tickets, summaries, audits) to files rather than emitting them inline to chat.
+- **Keep chat updates concise.** Offload verbose content (logs, full ticket bodies, large diffs) to disk and reference their paths.
+
 ## How to work
 
 1. Read the top of `BACKLOG.md`. Pick the first item that isn't blocked.
@@ -22,6 +27,11 @@ This file is the rulebook for everyone touching the repo — human contributors 
 4. Make the change. Run `./gradlew check`. Iterate.
 5. Move the item from `BACKLOG.md` to `CLOSED.md` in the same commit that lands the work. One commit, one item.
 6. If you discover a new piece of work, append it to `BACKLOG.md` under the matching priority section in one line.
+
+## Verification
+
+- **Do not rely on summaries.** Verify load-bearing claims (labels, gap analyses, file states) with a full pass before reporting.
+- **Re-verify everything on red flags.** If code review flags fabricated configurations or wrong config precedence, treat it as a signal to re-verify the *whole artifact*, not just the called-out line.
 
 ## What lives where
 
@@ -43,17 +53,24 @@ cd core && ./gradlew :app:cli:shadowJar
 bash dist/install.sh           # drops the fat JAR under ~/.local/lib/unidrive/
 systemctl --user enable --now unidrive.service
 journalctl --user -u unidrive.service -f
+
 ```
 
 The daemon log lives at `~/.local/share/unidrive/unidrive.log` (also surfaced via `journalctl --user -u unidrive.service`). For a quick triage pass: `scripts/dev/log-watch.sh --summary`.
 
 Live-integration tests (`UNIDRIVE_INTEGRATION_TESTS=true`) need OAuth credentials. Export `UNIDRIVE_TEST_ACCESS_TOKEN` and run the test; otherwise `assumeTrue` skips cleanly. `LiveGraphIntegrationTest` at `core/providers/onedrive/src/test/kotlin/org/krost/unidrive/onedrive/LiveGraphIntegrationTest.kt` is the template.
 
+## MCP servers
+
+* **Full restarts required.** MCP server config changes only take effect on a true process restart. `/exit` inside a session does not reload the MCP registry. You must fully exit and relaunch.
+* **Mind the environment.** The CLI and desktop app have separate MCP config locations. Confirm which one is running before editing `settings.json`.
+
 ## Commit etiquette
 
-- Conventional Commits style — see recent `git log` for examples.
-- One BACKLOG item per commit. The BACKLOG → CLOSED move lands in the same commit as the code change.
-- No `UD-###` references in new commits, file names, or document body — the slim branch describes work, not tickets.
+* Conventional Commits style — see recent `git log` for examples.
+* One BACKLOG item per commit. The BACKLOG → CLOSED move lands in the same commit as the code change.
+* No `UD-###` references in new commits, file names, or document body — the slim branch describes work, not tickets.
+* **Split commits cleanly.** Stage hunks explicitly (`git add -p`) rather than `git add .` when working across mixed concerns (e.g., docs vs. code vs. deletions).
 
 ## Design constraints (not tickets)
 
@@ -61,12 +78,12 @@ Some constraints bind only when future work happens — they have no current act
 
 ## What not to do
 
-- Don't reintroduce removed providers, modules, scripts, or workflows.
-- Don't write planning documents (`plans/`, `specs/`, `adr/` beyond what already exists).
-- Don't rename files to add or restore dates / IDs / versions.
-- Don't add docstrings, KDoc, or block comments where the existing code has none. The code is the spec.
-- Don't open PRs that combine slim-branch work with feature work; keep this branch focused.
-- **Ask before deleting things you don't recognize.** Unfamiliar files, scripts, branches, or config sections may be in-progress work or load-bearing in a way that isn't obvious. Investigate or ask; don't sweep.
+* Don't reintroduce removed providers, modules, scripts, or workflows.
+* Don't write planning documents (`plans/`, `specs/`, `adr/` beyond what already exists).
+* Don't rename files to add or restore dates / IDs / versions.
+* Don't add docstrings, KDoc, or block comments where the existing code has none. The code is the spec.
+* Don't open PRs that combine slim-branch work with feature work; keep this branch focused.
+* **Ask before deleting things you don't recognize.** Unfamiliar files, scripts, branches, or config sections may be in-progress work or load-bearing in a way that isn't obvious. Investigate or ask; don't sweep.
 
 ## Backlog discipline in one line
 

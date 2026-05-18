@@ -609,7 +609,7 @@ class SyncEngine(
                             applyConflict(action)
                             conflicts.incrementAndGet()
                         }
-                        is SyncAction.RemoveEntry -> db.deleteEntry(action.path)
+                        is SyncAction.RemoveEntry -> applyRemoveEntry(action)
                         else -> {}
                     }
                     consecutiveFailures = 0
@@ -1363,7 +1363,17 @@ class SyncEngine(
                 placeholder.deleteLocal(action.path)
             }
         }
-        db.deleteEntry(action.path)
+        // The cloud cascaded a delete to us; flip the DB row to TRASHED rather
+        // than hard-delete so recovery can answer "what was recently deleted?"
+        // with one SELECT. Pre-redesign rows without a real remote_id fall
+        // back to hard delete (nothing to tombstone).
+        val priorEntry = db.getEntry(action.path)
+        val remoteId = priorEntry?.remoteId
+        if (remoteId != null) {
+            db.setStatusTrashed(remoteId)
+        } else {
+            db.deleteEntry(action.path)
+        }
     }
 
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
@@ -1387,7 +1397,19 @@ class SyncEngine(
             )
             throw e
         }
-        db.deleteEntry(action.path)
+        // Provider-initiated cloud delete — flip to TRASHED so the row survives
+        // as a queryable tombstone. Internxt's `delete` routes through the
+        // recycle bin (`POST /storage/trash/add`); a recovery SELECT on TRASHED
+        // rows + a batched untrash PATCH is the documented restore path.
+        val remoteId = priorEntry?.remoteId
+        if (remoteId != null) {
+            db.setStatusTrashed(remoteId)
+        } else {
+            // No remote_id on file (pre-redesign synthetic, or stale row that
+            // never carried one). Nothing to tombstone — fall through to
+            // hard delete so the path doesn't dangle.
+            db.deleteEntry(action.path)
+        }
         auditLog?.emit(
             action = "Delete",
             path = action.path,
@@ -1395,6 +1417,23 @@ class SyncEngine(
             oldHash = priorEntry?.remoteHash,
             result = auditResult,
         )
+    }
+
+    /**
+     * Two flavours, distinguished by the alive row's `remoteId`:
+     *  - pending-upload row that vanished before reaching the cloud
+     *    (`remoteId == null`) → hard delete (nothing to tombstone).
+     *  - real cloud row that's already gone on the remote side
+     *    (`remoteId != null`, "both deleted" cascade) → flip to TRASHED.
+     */
+    private fun applyRemoveEntry(action: SyncAction.RemoveEntry) {
+        val entry = db.getEntry(action.path)
+        val remoteId = entry?.remoteId
+        if (remoteId != null) {
+            db.setStatusTrashed(remoteId)
+        } else {
+            db.deleteEntry(action.path)
+        }
     }
 
     private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
