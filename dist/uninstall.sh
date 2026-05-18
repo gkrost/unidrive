@@ -4,7 +4,6 @@
 #
 # Removes:
 #   ~/.local/bin/unidrive
-#   ~/.local/bin/unidrive-mcp           (if present)
 #   ~/.local/lib/unidrive/               (JARs)
 #   ~/.config/systemd/user/unidrive.service
 #
@@ -31,7 +30,6 @@ fi
 # Remove files
 rm -f "${HOME}/.config/systemd/user/unidrive.service"
 rm -f "${HOME}/.local/bin/unidrive"
-rm -f "${HOME}/.local/bin/unidrive-mcp"
 rm -rf "${HOME}/.local/lib/unidrive"
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -41,7 +39,6 @@ fi
 echo ""
 echo "Removed:"
 echo "  ~/.local/bin/unidrive"
-echo "  ~/.local/bin/unidrive-mcp (if present)"
 echo "  ~/.local/lib/unidrive/"
 echo "  ~/.config/systemd/user/unidrive.service"
 echo ""

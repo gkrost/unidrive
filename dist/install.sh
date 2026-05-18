@@ -4,14 +4,12 @@
 #
 # Installs:
 #   ~/.local/lib/unidrive/unidrive-<ver>.jar       (fat shadowJar, CLI)
-#   ~/.local/lib/unidrive/unidrive-mcp-<ver>.jar   (fat shadowJar, MCP, optional)
 #   ~/.local/bin/unidrive                          (wrapper -> CLI)
-#   ~/.local/bin/unidrive-mcp                      (wrapper -> MCP, if MCP JAR present)
 #   ~/.config/systemd/user/unidrive.service        (user-mode systemd unit)
 #   ~/.local/share/unidrive/                       (log dir)
 #
 # Usage:
-#   bash dist/install.sh                # use locally-built JARs from core/app/{cli,mcp}/build/libs
+#   bash dist/install.sh                # use locally-built JAR from core/app/cli/build/libs
 #   bash dist/install.sh <path/to.jar>  # use the given CLI fat JAR (e.g. from a GitHub release)
 #
 # After install:
@@ -29,17 +27,12 @@ LOG_DIR="${HOME}/.local/share/unidrive"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 
 resolve_jar() {
-    # Resolve a fat shadowJar in a build dir, preferring the highest version.
-    # $1: build/libs directory
-    # $2: basename glob prefix (e.g. "unidrive" -> matches "unidrive-*.jar"
-    #     but rejects "unidrive-mcp-*.jar")
     local dir="$1"
     local prefix="$2"
     local found=""
     if [[ -d "${dir}" ]]; then
         # shellcheck disable=SC2012  # ls -1 is fine; filenames are project-controlled
         found="$(ls -1 "${dir}"/${prefix}-*.jar 2>/dev/null \
-            | grep -Ev "/${prefix}-[a-z]+-[0-9].*\.jar$" \
             | sort -V \
             | tail -1)"
     fi
@@ -47,7 +40,6 @@ resolve_jar() {
 }
 
 CLI_JAR=""
-MCP_JAR=""
 
 if [[ $# -ge 1 ]]; then
     CLI_JAR="$1"
@@ -57,7 +49,6 @@ if [[ $# -ge 1 ]]; then
     fi
 else
     CLI_JAR="$(resolve_jar "${REPO_ROOT}/core/app/cli/build/libs" "unidrive")"
-    MCP_JAR="$(resolve_jar "${REPO_ROOT}/core/app/mcp/build/libs" "unidrive-mcp")"
 
     if [[ -z "${CLI_JAR}" ]]; then
         echo "ERROR: unidrive CLI JAR not found in core/app/cli/build/libs/" >&2
@@ -71,16 +62,10 @@ CLI_BASENAME="$(basename "${CLI_JAR}")"
 
 echo "Installing UniDrive..."
 
-# JARs
+# JAR
 mkdir -p "${INSTALL_LIB}"
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
-
-if [[ -n "${MCP_JAR}" && -f "${MCP_JAR}" ]]; then
-    MCP_BASENAME="$(basename "${MCP_JAR}")"
-    cp "${MCP_JAR}" "${INSTALL_LIB}/${MCP_BASENAME}"
-    echo "  ${INSTALL_LIB}/${MCP_BASENAME}"
-fi
 
 # CLI wrapper
 mkdir -p "${INSTALL_BIN}"
@@ -90,16 +75,6 @@ exec java --enable-native-access=ALL-UNNAMED -jar "${INSTALL_LIB}/${CLI_BASENAME
 WRAPPER
 chmod +x "${INSTALL_BIN}/unidrive"
 echo "  ${INSTALL_BIN}/unidrive"
-
-# MCP wrapper (optional)
-if [[ -n "${MCP_JAR}" && -f "${MCP_JAR}" ]]; then
-    cat > "${INSTALL_BIN}/unidrive-mcp" <<WRAPPER
-#!/usr/bin/env bash
-exec java --enable-native-access=ALL-UNNAMED -jar "${INSTALL_LIB}/${MCP_BASENAME}" "\$@"
-WRAPPER
-    chmod +x "${INSTALL_BIN}/unidrive-mcp"
-    echo "  ${INSTALL_BIN}/unidrive-mcp"
-fi
 
 # Log directory
 mkdir -p "${LOG_DIR}"
