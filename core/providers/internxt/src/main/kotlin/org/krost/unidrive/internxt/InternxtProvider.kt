@@ -746,6 +746,12 @@ class InternxtProvider(
          */
         fun sanitizeName(raw: String): String = raw.trim()
 
+        private fun InternxtFile.isTombstoned(): Boolean =
+            status == "TRASHED" || status == "DELETED" || removed || deleted
+
+        private fun InternxtFolder.isTombstoned(): Boolean =
+            status == "TRASHED" || status == "DELETED" || removed || deleted
+
         /** UD-317: pure converter for `listChildren` / `getMetadata` file entries. */
         internal fun fileToCloudItem(
             file: InternxtFile,
@@ -783,7 +789,7 @@ class InternxtProvider(
                 mimeType = null,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
-                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
+                deleted = file.isTombstoned(),
             )
         }
 
@@ -804,7 +810,7 @@ class InternxtProvider(
                 created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
-                deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
+                deleted = folder.isTombstoned(),
             )
         }
 
@@ -844,7 +850,7 @@ class InternxtProvider(
                 mimeType = null,
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
-                deleted = file.status == "TRASHED" || file.status == "DELETED" || file.removed || file.deleted,
+                deleted = file.isTombstoned(),
             )
         }
 
@@ -895,7 +901,7 @@ class InternxtProvider(
                 created = folder.creationInstant,
                 hash = null,
                 mimeType = null,
-                deleted = folder.status == "TRASHED" || folder.status == "DELETED" || folder.removed || folder.deleted,
+                deleted = folder.isTombstoned(),
             )
         }
 
