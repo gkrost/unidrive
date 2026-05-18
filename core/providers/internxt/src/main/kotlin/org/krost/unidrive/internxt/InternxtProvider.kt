@@ -133,8 +133,9 @@ class InternxtProvider(
 
         val file =
             content.files.find { file ->
-                val baseName = file.plainName ?: file.name ?: ""
-                val fullName = if (!file.type.isNullOrEmpty() && !baseName.endsWith(".${file.type}")) "$baseName.${file.type}" else baseName
+                val baseName = sanitizeName(file.plainName ?: file.name ?: "")
+                val cleanType = file.type?.let { sanitizeName(it) }
+                val fullName = if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) "$baseName.$cleanType" else baseName
                 fullName == name || baseName == name
             }
         if (file != null) return file.toCloudItem(parentPath)
