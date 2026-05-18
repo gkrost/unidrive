@@ -1,17 +1,17 @@
 package org.krost.unidrive.internxt
 
-import kotlinx.serialization.json.Json
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
+import org.krost.unidrive.UnidriveJson
 import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.nio.file.Files
 import java.nio.file.Path
 
 class InternxtProviderFactory : ProviderFactory {
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = UnidriveJson
 
     override val id = "internxt"
 

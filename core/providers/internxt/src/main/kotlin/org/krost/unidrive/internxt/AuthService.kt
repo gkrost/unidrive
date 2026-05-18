@@ -5,9 +5,9 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
-import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
+import org.krost.unidrive.UnidriveJson
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.auth.RefreshableTokenLatch
@@ -23,7 +23,7 @@ open class AuthService(
     private val crypto: InternxtCrypto = InternxtCrypto(),
 ) : AutoCloseable {
     private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = UnidriveJson
     // UD-204: install HttpTimeout so a slow-loris auth endpoint (the named
     // vector from the source ticket — internxt/sdk axios setup omits the
     // timeout) can't hang the whole sync indefinitely. Uses the same
