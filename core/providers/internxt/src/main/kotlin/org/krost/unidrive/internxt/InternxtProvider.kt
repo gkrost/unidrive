@@ -491,13 +491,30 @@ class InternxtProvider(
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        scanContext: org.krost.unidrive.ScanContext?,
     ): DeltaPage {
         foldersScanned.set(0)
         foldersSkipped.set(0)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
+        val limit = InternxtConfig.LISTING_PAGE_SIZE
+
+        // Resume support: a non-null scanContext means the engine is tracking
+        // staged pages in state.db. On a resumed scan the previously-fetched
+        // rows arrive via scanContext.resumedItems and the per-stream offsets
+        // are encoded in resumeMarker. A fresh scan starts both offsets at 0
+        // with an empty resumedItems list.
+        val resume = parseResumeOffsets(scanContext?.resumeMarker)
+        val resumedFolders = scanContext?.resumedItems.orEmpty().filter { it.isFolder }
+        val resumedFiles = scanContext?.resumedItems.orEmpty().filter { !it.isFolder }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
-        val limit = InternxtConfig.LISTING_PAGE_SIZE
+        // Resumed items rejoin the gather as Internxt model objects so the
+        // post-loop folder-graph reconstruction sees the full union. Their
+        // updatedAt is unknown (the engine stripped it during staging), so
+        // they're absent from the cursor-advance computation below — the
+        // freshly-fetched pages dominate that anyway.
+        resumedFolders.mapTo(allFolders) { it.toResumedFolder() }
+        resumedFiles.mapTo(allFiles) { it.toResumedFile() }
 
         // UD-352: this delta() loops internally over both /files and /folders
         // pagination, accumulating *all* pages before returning a single
@@ -512,11 +529,29 @@ class InternxtProvider(
         // the Drive HttpRetryBudget concurrency cap). Under 28-52s per-page gateway
         // latency, this roughly halves scan wall-clock vs the prior sequential loop.
         // Running counts via AtomicInteger so the heartbeat reports monotonically
-        // non-decreasing totals as pages arrive on either stream.
-        val filesCount = AtomicInteger(0)
-        val foldersCount = AtomicInteger(0)
+        // non-decreasing totals as pages arrive on either stream. The resumed-row
+        // contribution is baked in up front so the heartbeat total is monotonic
+        // across the seam.
+        val filesCount = AtomicInteger(allFiles.size)
+        val foldersCount = AtomicInteger(allFolders.size)
 
         val combinedTotal: () -> Int = { filesCount.get() + foldersCount.get() }
+
+        // Per-page persistence is gated behind the scanContext + the
+        // PageBoundaryPersister helper, which coalesces files+folders page
+        // arrivals into a single sync_state marker write per page (the engine
+        // doesn't care which stream the page came from; only that the
+        // checkpoint advances atomically). On a snapshot/no-scanContext
+        // delta() this collapses to a no-op.
+        val persister =
+            scanContext?.let { ctx ->
+                PageBoundaryPersister(
+                    persistPage = ctx.persistPage,
+                    creds = authService.getValidCredentials(),
+                    nextFilesOffset = resume.filesOffset,
+                    nextFoldersOffset = resume.foldersOffset,
+                )
+            }
 
         coroutineScope {
             val foldersDeferred =
@@ -527,7 +562,11 @@ class InternxtProvider(
                         heartbeat = heartbeat,
                         combinedTotal = combinedTotal,
                         label = "folders",
+                        startOffset = resume.foldersOffset,
                         fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset) },
+                        onPage = { page, nextOffset ->
+                            persister?.notifyFoldersPage(page, nextOffset)
+                        },
                     )
                 }
             // Files stream owns its own 500/503 fallback to the folder walk — the
@@ -541,14 +580,18 @@ class InternxtProvider(
                         heartbeat = heartbeat,
                         combinedTotal = combinedTotal,
                         label = "files",
+                        startOffset = resume.filesOffset,
                         fetchPage = { offset -> api.listFiles(adjustedCursor, limit, offset) },
+                        onPage = { page, nextOffset ->
+                            persister?.notifyFilesPage(page, nextOffset)
+                        },
                     )
                 } catch (e: InternxtApiException) {
                     if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
                     log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
                     val fallback = mutableListOf<InternxtFile>()
                     collectFilesFromFolders(authService.getValidCredentials().rootFolderId, fallback, 0)
-                    filesCount.set(fallback.size)
+                    filesCount.set(allFiles.size + fallback.size)
                     heartbeat?.tick(combinedTotal())
                     fallback
                 }
@@ -603,12 +646,76 @@ class InternxtProvider(
     }
 
     /**
+     * Coalesces files + folders page arrivals into a single [persistPage] call
+     * per page boundary so the checkpoint marker advances atomically and the
+     * staged-row INSERTs ride a single SQLite transaction. Stream offsets are
+     * tracked independently so a resume from the persisted marker lands each
+     * stream at the right position.
+     *
+     * The class is stateful and the two notify methods are called from
+     * concurrent coroutines, so writes go through a [kotlinx.coroutines.sync.Mutex]
+     * to serialise the SQL transactions — concurrent persistPage calls on the
+     * same DB connection would deadlock SQLite's per-connection serialised
+     * write model.
+     */
+    private class PageBoundaryPersister(
+        private val persistPage: suspend (items: List<org.krost.unidrive.CloudItem>, marker: String) -> Unit,
+        private val creds: org.krost.unidrive.internxt.model.InternxtCredentials,
+        nextFilesOffset: Int,
+        nextFoldersOffset: Int,
+    ) {
+        private val mutex = kotlinx.coroutines.sync.Mutex()
+
+        @Volatile
+        private var filesOffset: Int = nextFilesOffset
+
+        @Volatile
+        private var foldersOffset: Int = nextFoldersOffset
+
+        suspend fun notifyFilesPage(
+            page: List<InternxtFile>,
+            newOffset: Int,
+        ) {
+            mutex.lock()
+            try {
+                filesOffset = newOffset
+                val items = page.map { it.toStagedCloudItem(creds.rootFolderId) }
+                persistPage(items, buildMarker(filesOffset, foldersOffset))
+            } finally {
+                mutex.unlock()
+            }
+        }
+
+        suspend fun notifyFoldersPage(
+            page: List<InternxtFolder>,
+            newOffset: Int,
+        ) {
+            mutex.lock()
+            try {
+                foldersOffset = newOffset
+                val items = page.map { it.toStagedCloudItem(creds.rootFolderId) }
+                persistPage(items, buildMarker(filesOffset, foldersOffset))
+            } finally {
+                mutex.unlock()
+            }
+        }
+    }
+
+    /**
      * Two-wide speculative page fetcher used by [delta]. Keeps up to 2 in-flight
      * [fetchPage] calls; when a page comes back with `size < limit` (the last
      * page), any speculative siblings are cancelled rather than waited on — under
      * the live 28-52s per-page latency, one wasted fetch is much cheaper than
      * one extra round-trip's worth of wall-clock. Pages are appended in offset
      * order so the resulting list matches the sequential walk.
+     *
+     * [startOffset] supports the resumable-scan handshake: a resumed scan
+     * begins paginating from the persisted boundary rather than offset 0.
+     *
+     * [onPage], when supplied, fires once per successfully-fetched page with
+     * the page contents and the offset the NEXT page would start at. Resumable-
+     * scan staging hooks here so each page is durably persisted before the
+     * pipeline tops up.
      *
      * [runningCount] is incremented as pages arrive; [combinedTotal] reads it
      * alongside the sibling stream's counter so the heartbeat fires with a
@@ -621,31 +728,41 @@ class InternxtProvider(
         heartbeat: ScanHeartbeat?,
         combinedTotal: () -> Int,
         label: String,
+        startOffset: Int = 0,
         fetchPage: suspend (offset: Int) -> List<T>,
+        onPage: (suspend (page: List<T>, nextOffset: Int) -> Unit)? = null,
     ): List<T> =
         coroutineScope {
             val accumulated = mutableListOf<T>()
-            val pipeline: ArrayDeque<Deferred<List<T>>> = ArrayDeque()
-            var nextOffset = 0
+            val pipeline: ArrayDeque<Pair<Int, Deferred<List<T>>>> = ArrayDeque()
+            var nextOffset = startOffset
             // Seed the pipeline with up to 2 in-flight page fetches.
             repeat(2) {
-                pipeline.addLast(async { fetchPage(nextOffset) })
+                val offset = nextOffset
+                pipeline.addLast(offset to async { fetchPage(offset) })
                 nextOffset += limit
             }
             while (pipeline.isNotEmpty()) {
-                val batch = pipeline.removeFirst().await()
+                val (pageOffset, deferred) = pipeline.removeFirst()
+                val batch = deferred.await()
                 accumulated.addAll(batch)
                 runningCount.addAndGet(batch.size)
                 log.debug("Scanning {}: {}", label, runningCount.get())
                 heartbeat?.tick(combinedTotal())
+                // Per-page persistence runs after we have a known-good batch but
+                // before we top up the pipeline, so a transient failure on the
+                // staging write rolls the page back without losing the offset
+                // we'd otherwise have queued ahead.
+                onPage?.invoke(batch, pageOffset + batch.size)
                 if (batch.size < limit) {
                     // Last page: cancel any speculative siblings still in flight.
-                    pipeline.forEach { it.cancel() }
+                    pipeline.forEach { it.second.cancel() }
                     pipeline.clear()
                     break
                 }
                 // Top up: keep two in flight.
-                pipeline.addLast(async { fetchPage(nextOffset) })
+                val offset = nextOffset
+                pipeline.addLast(offset to async { fetchPage(offset) })
                 nextOffset += limit
             }
             accumulated
@@ -992,5 +1109,115 @@ class InternxtProvider(
             )
         }
 
+        // ---- Resumable-scan helpers ----
+
+        /**
+         * Marker format used by the page-boundary persister. Two non-negative
+         * integers separated by `|`: files offset first, folders offset
+         * second. Stored verbatim in `sync_state.scan_in_progress_marker` and
+         * parsed back via [parseResumeOffsets] on resume.
+         */
+        internal fun buildMarker(
+            filesOffset: Int,
+            foldersOffset: Int,
+        ): String = "$filesOffset|$foldersOffset"
+
+        internal fun parseResumeOffsets(marker: String?): ResumeOffsets {
+            if (marker.isNullOrEmpty()) return ResumeOffsets(0, 0)
+            val parts = marker.split('|')
+            if (parts.size != 2) return ResumeOffsets(0, 0)
+            // Both tokens must parse to a non-negative integer; a half-corrupt
+            // marker (one token good, one bad) is treated as a fresh start so
+            // a corrupted persistence write doesn't silently skip a range.
+            val filesOffset = parts[0].toIntOrNull() ?: return ResumeOffsets(0, 0)
+            val foldersOffset = parts[1].toIntOrNull() ?: return ResumeOffsets(0, 0)
+            if (filesOffset < 0 || foldersOffset < 0) return ResumeOffsets(0, 0)
+            return ResumeOffsets(filesOffset, foldersOffset)
+        }
+
+        internal data class ResumeOffsets(val filesOffset: Int, val foldersOffset: Int)
+
+        /**
+         * Convert a freshly-fetched [InternxtFile] into the [CloudItem] shape
+         * that the staging slice persists. The `path` field is left empty
+         * because the folder graph isn't complete mid-scan — the resume path
+         * re-resolves it from `parentId` against the rebuilt graph.
+         */
+        internal fun InternxtFile.toStagedCloudItem(rootUuid: String): CloudItem {
+            val baseName = sanitizeName(plainName ?: name ?: "")
+            val cleanType = type?.let { sanitizeName(it) }
+            val resolvedName =
+                if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) {
+                    "$baseName.$cleanType"
+                } else {
+                    baseName
+                }
+            // Root-level files have folderUuid == null; collapse to null
+            // parentId so the staged row mirrors what a fully-resolved
+            // CloudItem from this file would carry. Items whose parent is
+            // the bucket root surface as parentId=null too.
+            val pid = folderUuid?.takeIf { it != rootUuid }
+            return CloudItem(
+                id = uuid,
+                name = resolvedName,
+                path = "/$resolvedName",
+                size = size.toLongOrNull() ?: 0,
+                isFolder = false,
+                modified = modificationInstant,
+                created = creationInstant,
+                hash = null,
+                mimeType = null,
+                parentId = pid,
+            )
+        }
+
+        /** Folder equivalent of [toStagedCloudItem]. */
+        internal fun InternxtFolder.toStagedCloudItem(rootUuid: String): CloudItem {
+            val resolvedName = sanitizeName(plainName ?: name ?: "")
+            val pid = parentUuid?.takeIf { it != rootUuid }
+            return CloudItem(
+                id = uuid,
+                name = resolvedName,
+                path = "/$resolvedName",
+                size = 0,
+                isFolder = true,
+                modified = modificationInstant,
+                created = creationInstant,
+                hash = null,
+                mimeType = null,
+                parentId = pid,
+            )
+        }
+
+        /**
+         * Re-inflate a resumed-from-staging [CloudItem] back into the
+         * Internxt model object that the gather loop consumes. The staged
+         * row preserves cloud identity (uuid, plainName, parentUuid,
+         * size, modified, hash) — everything the folder-graph reconstruction
+         * needs. `updatedAt` is unknown post-staging (the engine strips it),
+         * which is fine: the cursor-advance computation in delta() looks at
+         * the freshly-fetched pages, which set the high-water mark.
+         */
+        internal fun CloudItem.toResumedFile(): InternxtFile =
+            InternxtFile(
+                uuid = id,
+                plainName = name.substringBeforeLast('.', name),
+                name = name.substringBeforeLast('.', name),
+                type = name.substringAfterLast('.', ""),
+                folderUuid = parentId,
+                size = size.toString(),
+                modificationTime = modified?.toString(),
+                updatedAt = null,
+            )
+
+        internal fun CloudItem.toResumedFolder(): InternxtFolder =
+            InternxtFolder(
+                uuid = id,
+                plainName = name,
+                name = name,
+                parentUuid = parentId,
+                modificationTime = modified?.toString(),
+                updatedAt = null,
+            )
     }
 }

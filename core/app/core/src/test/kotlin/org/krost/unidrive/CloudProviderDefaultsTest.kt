@@ -79,6 +79,7 @@ class CloudProviderDefaultsTest {
             override suspend fun delta(
                 cursor: String?,
                 onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+                scanContext: ScanContext?,
             ) = DeltaPage(emptyList(), "cursor1", false)
 
             override suspend fun quota() = QuotaInfo(100, 50, 50)

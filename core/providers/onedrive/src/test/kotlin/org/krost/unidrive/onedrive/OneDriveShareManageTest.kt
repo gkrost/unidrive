@@ -77,6 +77,7 @@ class OneDriveShareManageTest {
                     override suspend fun delta(
                         cursor: String?,
                         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+                        scanContext: org.krost.unidrive.ScanContext?,
                     ) = throw UnsupportedOperationException()
 
                     override suspend fun quota() = throw UnsupportedOperationException()
@@ -129,6 +130,7 @@ class OneDriveShareManageTest {
                     override suspend fun delta(
                         cursor: String?,
                         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+                        scanContext: org.krost.unidrive.ScanContext?,
                     ) = throw UnsupportedOperationException()
 
                     override suspend fun quota() = throw UnsupportedOperationException()

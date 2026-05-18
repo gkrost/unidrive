@@ -117,10 +117,21 @@ interface CloudProvider {
      * HiDrive's recursive endpoint) may legitimately leave this null — the
      * engine still emits a final-count tick once `delta()` returns. Default
      * argument keeps existing call sites and test stubs source-compatible.
+     *
+     * [scanContext], when supplied, switches the provider into resumable
+     * mode: each successfully-fetched page is persisted via the context's
+     * [ScanContext.persistPage] callback before the next is issued, and
+     * [ScanContext.resumeMarker] (if non-null) tells the provider where
+     * the previous interrupted scan left off. Providers without a resume
+     * story may ignore it; the SPI default mirrors the existing
+     * "accumulate in memory" behaviour. The engine clears the staged
+     * inventory on a successful complete scan; partial scans leave it in
+     * place for the next launch to resume from.
      */
     suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)? = null,
+        scanContext: ScanContext? = null,
     ): DeltaPage
 
     /**

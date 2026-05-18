@@ -36,6 +36,7 @@ class ThrottledProviderTest {
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
         ) = DeltaPage(emptyList(), "", false)
 
         override suspend fun quota() = QuotaInfo(0, 0, 0)

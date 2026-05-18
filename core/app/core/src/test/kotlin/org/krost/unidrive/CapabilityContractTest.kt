@@ -74,6 +74,7 @@ class CapabilityContractTest {
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+            scanContext: ScanContext?,
         ) = DeltaPage(emptyList(), "", false)
 
         override suspend fun quota() = QuotaInfo(0, 0, 0)

@@ -1486,6 +1486,143 @@ class SyncEngineTest {
             assertNotNull(db.getEntry("/test.txt"))
         }
 
+    // -- Resumable-scan integration tests --
+
+    @Test
+    fun `gather provisions a fresh ScanContext when no checkpoint exists`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/a.txt", size = 10))
+            provider.deltaCursor = "fresh-cursor"
+
+            engine.syncOnce()
+
+            val ctx = provider.lastScanContext
+            assertNotNull(ctx, "engine must thread a ScanContext through delta()")
+            assertNull(ctx.resumeMarker, "fresh scan has no resume marker")
+            assertTrue(ctx.resumedItems.isEmpty(), "fresh scan has no resumed items")
+            // Successful gather clears the staging slice + checkpoint.
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        }
+
+    @Test
+    fun `gather resumes from an existing checkpoint and surfaces staged items`() =
+        runTest {
+            // Pre-seed an in-progress scan: simulate a daemon that staged one
+            // page and crashed before the next page or the completion sweep.
+            val scanId = db.beginScan(initialMarker = "200|100")
+            val stagedItem =
+                CloudItem(
+                    id = "prev-uuid",
+                    name = "prev.txt",
+                    path = "/prev.txt",
+                    size = 50,
+                    isFolder = false,
+                    modified = Instant.parse("2026-05-17T10:00:00Z"),
+                    created = null,
+                    hash = "prev-hash",
+                    mimeType = null,
+                    parentId = null,
+                )
+            db.persistScanPage(scanId, listOf(stagedItem), marker = "200|100")
+
+            provider.deltaItems = listOf(cloudItem("/new.txt", size = 20))
+            provider.deltaCursor = "post-resume-cursor"
+            provider.files["/new.txt"] = ByteArray(20)
+
+            engine.syncOnce()
+
+            val ctx = provider.lastScanContext
+            assertNotNull(ctx, "engine must thread a ScanContext on resume too")
+            assertEquals("200|100", ctx.resumeMarker, "resume marker must be the persisted boundary")
+            assertEquals(1, ctx.resumedItems.size, "previously-staged rows must rehydrate")
+            assertEquals("prev-uuid", ctx.resumedItems.single().id)
+            // Successful gather clears the staging slice + checkpoint.
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        }
+
+    @Test
+    fun `gather discards a stale checkpoint and starts fresh`() =
+        runTest {
+            // Pre-seed a checkpoint older than the staleness threshold so the
+            // engine treats the persisted state as untrustworthy. The next
+            // delta() call must see a null resumeMarker + empty resumedItems.
+            val scanId = db.beginScan(initialMarker = "999|999")
+            db.persistScanPage(
+                scanId,
+                listOf(cloudItem("/stale.txt", size = 1)),
+                marker = "999|999",
+            )
+            db.setSyncState(
+                StateDatabase.SCAN_IN_PROGRESS_STARTED_AT,
+                Instant.now().minus(java.time.Duration.ofDays(1)).toString(),
+            )
+
+            provider.deltaItems = listOf(cloudItem("/fresh.txt", size = 5))
+            provider.deltaCursor = "fresh-after-stale"
+            provider.files["/fresh.txt"] = ByteArray(5)
+
+            engine.syncOnce()
+
+            val ctx = provider.lastScanContext
+            assertNotNull(ctx)
+            assertNull(ctx.resumeMarker, "stale checkpoint must be ignored")
+            assertTrue(ctx.resumedItems.isEmpty(), "stale staged rows must not resurface")
+            // Fresh scan id was minted; staging cleared after successful gather.
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        }
+
+    @Test
+    fun `gather completes the scan checkpoint after a successful delta`() =
+        runTest {
+            // The fake drives 3 simulated pages through the staging callback
+            // BEFORE returning its DeltaPage. After the gather completes the
+            // engine clears the staging slice — even though the persistPage
+            // calls landed rows, the post-gather completeScan() wipes them.
+            provider.stagedPages =
+                listOf(
+                    listOf(cloudItem("/p1-a.txt", size = 1), cloudItem("/p1-b.txt", size = 2)) to "0|50",
+                    listOf(cloudItem("/p2-a.txt", size = 3)) to "100|50",
+                    listOf(cloudItem("/p3-a.txt", size = 4)) to "150|50",
+                )
+            provider.deltaItems = listOf(cloudItem("/final.txt", size = 99))
+            provider.deltaCursor = "final-cursor"
+            provider.files["/final.txt"] = ByteArray(99)
+
+            engine.syncOnce()
+
+            assertNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID),
+                "checkpoint cleared after successful complete delta",
+            )
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT))
+        }
+
+    @Test
+    fun `gather leaves staging in place when delta throws mid-scan`() =
+        runTest {
+            // Simulate a crash mid-pagination by setting the fake to persist a
+            // page through the staging callback and THEN throw. The engine
+            // surfaces the exception; staging + checkpoint persist so the
+            // next launch can resume.
+            provider.persistThenFail = true
+            provider.stagedPages =
+                listOf(
+                    listOf(cloudItem("/p1.txt", size = 100)) to "50|0",
+                )
+            provider.deltaItems = emptyList()
+
+            assertFailsWith<ProviderException> {
+                engine.syncOnce()
+            }
+
+            // Checkpoint + staged row survive — next launch resumes.
+            val scanIdAfter = db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)
+            assertNotNull(scanIdAfter, "crash mid-scan must leave the checkpoint in place")
+            assertEquals("50|0", db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+            assertEquals(1, db.loadStagedItems(scanIdAfter).size)
+        }
+
     // -- Fake provider for testing --
 
     private fun cloudItem(
@@ -1661,14 +1798,42 @@ class SyncEngineTest {
         // tests can exercise the engine's partial-gather suppression path.
         var deltaComplete = true
 
+        // Resumable-scan instrumentation: captures the ScanContext the engine
+        // passed in (resume_marker, # of resumedItems) so tests can verify
+        // start-from-scratch vs resume behavior.
+        var lastScanContext: org.krost.unidrive.ScanContext? = null
+            private set
+
+        // Optional per-page persistence simulation: if set, delta() pushes
+        // each "page" through the staging callback before returning, so a
+        // test can assert what landed in the staging slice.
+        var stagedPages: List<Pair<List<CloudItem>, String>> = emptyList()
+
+        // Mid-scan-crash simulator: run the stagedPages persistPage loop,
+        // THEN throw, mimicking a daemon that persisted partial pages before
+        // the next API call failed.
+        var persistThenFail: Boolean = false
+
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage {
             deltaCalls++
+            lastScanContext = scanContext
             if (deltaFailCount > 0) {
                 deltaFailCount--
                 throw ProviderException("Network timeout on delta")
+            }
+            // Drive the engine's persistPage callback so a test can pin that
+            // staged rows land in scan_staging.
+            if (scanContext != null) {
+                for ((page, marker) in stagedPages) {
+                    scanContext.persistPage(page, marker)
+                }
+            }
+            if (persistThenFail) {
+                throw ProviderException("Simulated mid-scan crash after partial persistence")
             }
             return DeltaPage(
                 items = deltaItems,

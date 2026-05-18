@@ -145,7 +145,13 @@ class OneDriveProvider(
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        scanContext: org.krost.unidrive.ScanContext?,
     ): DeltaPage {
+        // OneDrive's Graph delta endpoint pages via opaque @odata.nextLink
+        // tokens that already encode a resumable cursor; the engine-side
+        // staging slice is therefore redundant here and the parameter is
+        // intentionally unused. Left in the signature so the SPI shape is
+        // uniform across providers — see CloudProvider.kt for the contract.
         val result = graphApi.getDelta(cursor)
         val items =
             result.items

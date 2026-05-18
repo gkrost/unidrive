@@ -926,15 +926,42 @@ class SyncEngine(
         // DeleteLocal actions for every file under that subtree.
         var allComplete = true
 
+        // Resumable-scan lifecycle: a non-null activeScanId means this gather
+        // pass either resumes a prior daemon's interrupted scan or has just
+        // started a fresh one. The scanContext threads the engine's staging
+        // hooks into provider.delta(); on a successful return the staging
+        // slice is cleared. A throw mid-scan leaves both the slice and the
+        // checkpoint intact so the next launch can pick up from there.
+        val activeScan = db.getActiveScan(staleThreshold = java.time.Duration.ofHours(SCAN_CHECKPOINT_STALE_HOURS))
+        val resumedItems: List<CloudItem> =
+            if (activeScan != null) db.loadStagedItems(activeScan.scanId) else emptyList()
+        val scanId =
+            activeScan?.scanId
+                ?: db.beginScan(initialMarker = null)
+        if (activeScan != null) {
+            log.info(
+                "Resuming Internxt-style scan id={} marker={} ({} previously-staged items)",
+                scanId,
+                activeScan.marker,
+                resumedItems.size,
+            )
+        }
+        val scanContext =
+            org.krost.unidrive.ScanContext(
+                resumeMarker = activeScan?.marker,
+                resumedItems = resumedItems,
+                persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+            )
+
         suspend fun nextPage(c: String?): DeltaPage {
             val page =
                 if (useShared) {
                     when (val r = provider.deltaWithShared(c)) {
                         is CapabilityResult.Success -> r.value
-                        is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress)
+                        is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress, scanContext)
                     }
                 } else {
-                    provider.delta(c, onPageProgress)
+                    provider.delta(c, onPageProgress, scanContext)
                 }
             // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
             // of the five providers that used to emit the same data per-page.
@@ -980,6 +1007,14 @@ class SyncEngine(
             persistPendingCursor(page.cursor)
             reporter.onScanProgress("remote", changes.size)
         }
+
+        // Staged inventory has been consumed by this gather pass — the live
+        // sync_entries write happens downstream via updateRemoteEntries — so
+        // the per-page durability slice can be cleared. A daemon crash now,
+        // or on any subsequent step, will retry from the freshly-persisted
+        // delta_cursor (or pending_cursor if no transfers ran), not from the
+        // staged offsets.
+        db.completeScan(scanId)
 
         if (isFullSync && allComplete) {
             detectMissingAfterFullSync(changes)
@@ -1887,6 +1922,17 @@ class SyncEngine(
          * outage and stop the pass so the watch loop can back off.
          */
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+
+        /**
+         * Age at which a resumable-scan checkpoint is considered stale and
+         * discarded. Internxt's `updatedAt` cursor filter is a low-resolution
+         * "what changed since X" query, so a six-hour gap is the rough
+         * upstream change-detection window — past that, items that mutated
+         * after the prior scan's cursor were captured then would silently
+         * vanish from a resume. Default matches the BACKLOG entry; not
+         * currently user-configurable.
+         */
+        const val SCAN_CHECKPOINT_STALE_HOURS: Long = 6L
 
         /**
          * UD-264 / PR #46 Codex P2: format a `skipped-ops.jsonl` row using
