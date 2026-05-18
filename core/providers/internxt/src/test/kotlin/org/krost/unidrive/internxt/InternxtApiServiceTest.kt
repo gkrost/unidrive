@@ -111,7 +111,7 @@ class InternxtApiServiceTest {
     private fun mkService(): InternxtApiService =
         InternxtApiService(
             InternxtConfig(),
-            credentialsProvider = {
+            credentialsProvider = { _ ->
                 // Tests don't actually call any HTTP method that needs creds —
                 // they exercise the retry/parse helpers directly. Surface a
                 // sentinel so any accidental real call fails loudly.
@@ -433,7 +433,7 @@ class InternxtApiServiceTest {
             val service =
                 InternxtApiService(
                     InternxtConfig(),
-                    {
+                    { _ ->
                         org.krost.unidrive.internxt.model.InternxtCredentials(
                             jwt = "test-jwt",
                             mnemonic = "test-mnemonic",
@@ -484,4 +484,72 @@ class InternxtApiServiceTest {
             )
         assertEquals(600_000L, timeoutMs)
     }
+
+    /**
+     * 401 → automatic refresh-and-replay contract: a Drive REST call that
+     * returns 401 once must replay exactly once after a forced refresh and
+     * succeed on the second attempt. Asserts:
+     *  - exactly two HTTP requests fire (original + post-refresh replay),
+     *    not three (no second refresh on the 200 response),
+     *  - the credentialsProvider is invoked twice: once with
+     *    `forceRefresh = false` (pre-call), once with `forceRefresh = true`
+     *    (post-401 forced refresh).
+     *
+     * Pairs with `InternxtAuthServiceTest`'s
+     * "forceRefresh refreshes even when stored jwt is still fresh" — that
+     * test pins the AuthService side of the seam; this pins the
+     * InternxtApiService side. A regression on either drops the
+     * mid-session-401-recovery guarantee.
+     */
+    @Test
+    fun `401 then 200 replays exactly once after a forced refresh`() =
+        kotlinx.coroutines.test.runTest {
+            val httpCallCount = AtomicInteger(0)
+            val forcedRefreshCount = AtomicInteger(0)
+            val nonForcedCallCount = AtomicInteger(0)
+
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { _ ->
+                    val n = httpCallCount.incrementAndGet()
+                    if (n == 1) {
+                        respond(
+                            content = """{"error":"unauthorized"}""",
+                            status = io.ktor.http.HttpStatusCode.Unauthorized,
+                            headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                        )
+                    } else {
+                        respond(
+                            content = """{"uuid":"folder-uuid","plainName":"name"}""",
+                            status = io.ktor.http.HttpStatusCode.OK,
+                            headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                        )
+                    }
+                }
+            val service =
+                InternxtApiService(
+                    InternxtConfig(),
+                    { forceRefresh ->
+                        if (forceRefresh) forcedRefreshCount.incrementAndGet()
+                        else nonForcedCallCount.incrementAndGet()
+                        org.krost.unidrive.internxt.model.InternxtCredentials(
+                            jwt = if (forceRefresh) "fresh-jwt" else "stale-jwt",
+                            mnemonic = "test-mnemonic",
+                            rootFolderId = "test-root",
+                            email = "test@example.invalid",
+                        )
+                    },
+                )
+            val field = InternxtApiService::class.java.getDeclaredField("httpClient")
+            field.isAccessible = true
+            (field.get(service) as? io.ktor.client.HttpClient)?.close()
+            field.set(service, io.ktor.client.HttpClient(engine))
+
+            val folder = service.createFolder("parent-uuid", "name", "encrypted-name")
+
+            assertEquals("folder-uuid", folder.uuid, "post-refresh replay returns the 200 payload")
+            assertEquals(2, httpCallCount.get(), "exactly two HTTP attempts: original 401 + replayed 200")
+            assertEquals(1, forcedRefreshCount.get(), "exactly one forced refresh on the 401")
+            assertEquals(1, nonForcedCallCount.get(), "the pre-401 call resolved creds with forceRefresh=false")
+            service.close()
+        }
 }

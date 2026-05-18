@@ -14,7 +14,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive delta soft-vs-hard delete semantics | `OneDriveProvider.kt:267` treats `removed` and `deleted` identically; missed deletions after a long pause. Audit Graph's TTL on the soft-delete marker; warn when the cursor is older than the safe window. |
 | OneDrive `If-Match` / `@odata.etag` on mutating POST + `conflictBehavior` parity | `moveItem`/`updateItem` don't thread eTag → concurrent editors race; `uploadSimple` defaults `fail` while session uploads `replace` → inconsistent overwrite policy by file size. Thread eTag, unify policy. |
 | Internxt 429 on Drive mutations route through retry | `deleteFile`/`deleteFolder` still bypass `retryOnTransient`; on a `createFile` 429 the encrypted bytes are already in the bucket but the Drive row never writes → orphan storage billed but not addressable. The `Retry-After` HTTP header is now parsed and threaded into `InternxtApiException.retryAfterMs` (taking precedence over the JSON-body hint), so the retry primitive will already honour it once the remaining DELETE call sites are wrapped. |
-| Internxt 401 → automatic refresh-and-replay | Mid-session JWT expiry currently throws without retry-with-fresh-token. Mirror OneDrive's mutex-serialised + replay pattern. |
 
 ## High — correctness, required for first release
 

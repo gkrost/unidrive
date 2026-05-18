@@ -237,6 +237,50 @@ class InternxtAuthServiceTest {
         }
 
     /**
+     * Reactive 401 → refresh contract: when the API layer signals
+     * `forceRefresh = true` (it just saw an unexpected 401 mid-call),
+     * `getValidCredentials` MUST consult [AuthService.refreshToken] even
+     * if the stored JWT looks fresh. Without this, the replay path would
+     * re-send the same already-rejected token and 401 again immediately.
+     *
+     * Pairs with the api-layer assertion in `InternxtApiServiceTest`'s
+     * "401-then-200 replays once after a forced refresh" test — together
+     * they pin the auth-replay contract that bridges the
+     * AuthService ↔ InternxtApiService seam.
+     */
+    @Test
+    fun `getValidCredentials forceRefresh refreshes even when stored jwt is still fresh`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-force-")
+            try {
+                val futureExp = System.currentTimeMillis() / 1000 + 10L * 24 * 3600
+                val freshJwt = makeJwtWithExp(futureExp)
+                seedCredentials(tmp, jwt = freshJwt)
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                assertFalse(
+                    auth.isJwtNearExpiry(AuthService.JWT_REFRESH_MARGIN_MS),
+                    "Test setup: seeded JWT should be well outside the pre-expiry margin",
+                )
+
+                val creds = auth.getValidCredentials(forceRefresh = true)
+
+                assertEquals(
+                    1,
+                    auth.callCount.get(),
+                    "forceRefresh = true must trigger exactly one refresh roundtrip even when the JWT is fresh",
+                )
+                assertTrue(
+                    creds.jwt.startsWith("refreshed-jwt-#"),
+                    "Expected refreshed jwt, got: ${creds.jwt}",
+                )
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    /**
      * UD-308 follow-up (PR #23 Codex P2 regression guard).
      *
      * `isJwtExpired()` must decode payloads at every reachable base64-url

@@ -47,7 +47,7 @@ class InternxtRequestIdPropagationTest {
     private fun newService(): InternxtApiService =
         InternxtApiService(
             InternxtConfig(),
-            credentialsProvider = {
+            credentialsProvider = { _ ->
                 InternxtCredentials(
                     jwt = "test-jwt",
                     mnemonic = "test-mnemonic",

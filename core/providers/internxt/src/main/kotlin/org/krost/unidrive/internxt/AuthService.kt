@@ -282,6 +282,15 @@ open class AuthService(
      * margin extends the same logic to long-running syncs: a token with five
      * minutes left should be rotated *now* rather than mid-stream.
      *
+     * [forceRefresh] is the reactive 401-replay knob mirroring OneDrive's
+     * `TokenManager.getValidToken(forceRefresh)`. When the API layer sees an
+     * unexpected 401 mid-request (the server rotated the token earlier than
+     * our pre-expiry margin predicted, e.g. tenant policy change), it replays
+     * the call after asking for `forceRefresh = true`. Concurrent forced
+     * callers still coalesce inside [refreshToken]'s [RefreshableTokenLatch],
+     * so the second-and-Nth replay observe the post-refresh value without
+     * issuing redundant HTTP refreshes.
+     *
      * Refresh goes through [refreshToken], which serialises concurrent callers via
      * [RefreshableTokenLatch] (UD-338) — we deliberately do not duplicate any of
      * that machinery here.
@@ -289,14 +298,14 @@ open class AuthService(
      * Absent credentials (never authenticated) still throw [AuthenticationException]
      * — the contract for that case is unchanged.
      */
-    suspend fun getValidCredentials(): InternxtCredentials {
+    suspend fun getValidCredentials(forceRefresh: Boolean = false): InternxtCredentials {
         val current = credentials ?: throw AuthenticationException("Not authenticated")
         // Refresh both for already-expired tokens (UD-308 cold-start fast path)
         // and for tokens within JWT_REFRESH_MARGIN_MS of expiry. The margin
         // prevents the case where a long-running sync starts with a 5-minute-
         // remaining token, then trips the un-replayed 401 path mid-stream and
         // surfaces an interactive re-auth prompt to the user.
-        return if (isJwtNearExpiry(JWT_REFRESH_MARGIN_MS)) refreshToken() else current
+        return if (forceRefresh || isJwtNearExpiry(JWT_REFRESH_MARGIN_MS)) refreshToken() else current
     }
 
     /**

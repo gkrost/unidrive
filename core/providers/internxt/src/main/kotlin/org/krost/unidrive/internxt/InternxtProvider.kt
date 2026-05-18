@@ -26,7 +26,7 @@ class InternxtProvider(
     private val log = org.slf4j.LoggerFactory.getLogger(InternxtProvider::class.java)
     private val crypto = InternxtCrypto()
     private val authService = AuthService(config)
-    private val api = InternxtApiService(config, credentialsProvider = { authService.getValidCredentials() })
+    private val api = InternxtApiService(config, credentialsProvider = { forceRefresh -> authService.getValidCredentials(forceRefresh) })
     private val secureRandom = java.security.SecureRandom()
 
     // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
