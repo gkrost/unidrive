@@ -27,7 +27,7 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `file.hashes` in local change detector | Remote scanner uses it (`Reconciler.kt:117`); local scanner still mtime+size only (`LocalScanner.kt:100`). Avoids re-uploading on touch-only changes. |
 | OneDrive `If-Match` precondition on `createUploadSession` | Catches concurrent edits before the session URL is handed out. |
 | OneDrive refresh `downloadUrl` on `assertNotHtml` | When the CDN serves an HTML throttle page, re-resolve via `getItemById` instead of failing the download. |
-| Internxt request prioritization + extend dedup | `folderContentsDedup` covers `getFolderContents` only; extend to `getFileMeta`/`listFiles`/`listFolders`. |
+| Internxt request prioritization | Folder-walk and metadata reads compete on equal footing today; under storm the engine can spend the global concurrency budget on speculative metadata while user-facing downloads queue behind them. Priority lanes (foreground vs background) would mirror the OneDrive `HttpRetryBudget` shape without copying it. Dedup is now in place across `getFolderContents` / `getFileMeta` / `listFiles` / `listFolders`, so a priority overlay can layer on top without re-fetching the same payload twice. |
 
 ## Medium — efficiency
 

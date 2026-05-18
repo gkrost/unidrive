@@ -74,13 +74,16 @@ class InternxtApiService(
     private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
-    // UD-205: read-heavy folder-listing calls are a known dedup target.
+    // UD-205: read-heavy provider operations are a known dedup target.
     // Concurrent sync-engine coroutines descending overlapping subtrees can
-    // legitimately ask for the same folder UUID at the same time; the dedup
+    // legitimately ask for the same metadata at the same time; the dedup
     // collapses those into one HTTP round-trip without changing call-site
-    // semantics. Other read-heavy call sites (getFileMeta, getValidCredentials)
-    // are tracked under follow-up tickets — this is the proof-of-concept wiring.
+    // semantics. One InFlightDedup per call site (per `InFlightDedup` KDoc
+    // key-design guidance), mirroring the original folderContentsDedup wiring.
     internal val folderContentsDedup = InFlightDedup<String, FolderContentResponse>()
+    internal val fileMetaDedup = InFlightDedup<String, InternxtFile>()
+    internal val listFilesDedup = InFlightDedup<String, List<InternxtFile>>()
+    internal val listFoldersDedup = InFlightDedup<String, List<InternxtFolder>>()
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
         folderContentsDedup.load(folderUuid) {
@@ -93,25 +96,28 @@ class InternxtApiService(
         limit: Int = 50,
         offset: Int = 0,
         status: String = "ALL",
-    ): List<InternxtFile> {
-        val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status))
-        return json.decodeFromString<List<InternxtFile>>(body)
-    }
+    ): List<InternxtFile> =
+        listFilesDedup.load("$updatedAt|$limit|$offset|$status") {
+            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status))
+            json.decodeFromString<List<InternxtFile>>(body)
+        }
 
     suspend fun listFolders(
         updatedAt: String? = null,
         limit: Int = 50,
         offset: Int = 0,
         status: String = "ALL",
-    ): List<InternxtFolder> {
-        val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status))
-        return json.decodeFromString<List<InternxtFolder>>(body)
-    }
+    ): List<InternxtFolder> =
+        listFoldersDedup.load("$updatedAt|$limit|$offset|$status") {
+            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status))
+            json.decodeFromString<List<InternxtFolder>>(body)
+        }
 
-    suspend fun getFileMeta(uuid: String): InternxtFile {
-        val body = authenticatedGet("$baseUrl/files/$uuid/meta")
-        return json.decodeFromString<InternxtFile>(body)
-    }
+    suspend fun getFileMeta(uuid: String): InternxtFile =
+        fileMetaDedup.load(uuid) {
+            val body = authenticatedGet("$baseUrl/files/$uuid/meta")
+            json.decodeFromString<InternxtFile>(body)
+        }
 
     suspend fun createFile(
         bucket: String,
