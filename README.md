@@ -1,45 +1,47 @@
-# UniDrive
+# unidrive
 
-**One CLI and one MCP server for multiple cloud-storage providers — Linux-first, auditable, Apache-2.0.**
+One Linux daemon that syncs **Internxt Drive** and **OneDrive** through a single config, a single CLI, and a single SQLite state DB per profile. No telemetry, no hidden control plane. Apache-2.0.
 
-[![Build](https://github.com/gkrost/unidrive/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/gkrost/unidrive/actions/workflows/build.yml?query=branch%3Amain)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-
-**Why** — your data lives across multiple clouds and no two vendors agree on what "sync" means. UniDrive is one Kotlin daemon that knows about all of them: one config, one CLI, one MCP server an LLM can drive, one SQLite state DB per profile, structured sync events over a Unix-domain socket. No telemetry, no hidden control plane.
-
-**What** — a Kotlin/JVM monorepo at [`core/`](core/) with provider plugins discovered via SPI (`META-INF/services/org.krost.unidrive.ProviderFactory`). Adapters in tree: localfs, s3, sftp, onedrive, webdav, rclone, internxt. The reconciler ([`Reconciler.kt`](core/app/sync/src/main/kotlin/org/krost/unidrive/sync/Reconciler.kt)) is provider-agnostic; adapters supply truth via `/delta` where the API exposes one, `walk + mtime/size/etag` snapshots where it doesn't. Capability matrix at [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-**How** — build from source:
+## Quickstart
 
 ```bash
 git clone https://github.com/gkrost/unidrive
-cd unidrive/core
-./gradlew build test
-./scripts/smoke.sh                  # localfs round-trip, no network
-./gradlew :app:cli:deploy :app:mcp:deploy
+cd unidrive/core && ./gradlew :app:cli:shadowJar
+bash dist/install.sh
 ```
 
-Config is a single TOML at `~/.config/unidrive/config.toml` (Linux). Annotated example: [`docs/config-schema/config.example.toml`](docs/config-schema/config.example.toml). The MCP server (shadow jar at `core/app/mcp/build/libs/`) wires into any [Model Context Protocol](https://modelcontextprotocol.io/) client over stdio.
+Drops the fat JAR into `~/.local/lib/unidrive/`, a wrapper into `~/.local/bin/unidrive`, and a systemd-user unit. Then:
 
-## Status
+```bash
+unidrive auth --provider onedrive my-onedrive
+unidrive auth --provider internxt my-internxt
+unidrive -p my-onedrive sync --watch
+systemctl --user enable --now unidrive.service     # auto-start on login
+journalctl --user -u unidrive.service -f           # follow logs
+```
 
-Early public preview. Linux is the MVP target; macOS and Windows are out of scope for v0.1.0 ([ADR-0012](docs/adr/0012-linux-mvp-protocol-removal.md), [docs/NON-GOALS.md](docs/NON-GOALS.md)) and not exercised in CI. Public API, IPC contract, and on-disk layout are still moving. No prebuilt binaries — build from source. Where the project is going: [docs/ROADMAP.md](docs/ROADMAP.md). What it deliberately is NOT trying to be: [docs/NON-GOALS.md](docs/NON-GOALS.md). Detailed gates: [docs/CHANGELOG.md](docs/CHANGELOG.md), [docs/backlog/BACKLOG.md](docs/backlog/BACKLOG.md).
+Config lives at `~/.config/unidrive/config.toml`. Per-profile state (SQLite, OAuth tokens, conflict log) lives at `~/.config/unidrive/<profile>/`. The daemon advertises sync progress over a Unix-domain socket per profile.
 
-## Trust
+## Requirements
 
-- **Threat model** — [docs/SECURITY.md](docs/SECURITY.md) (STRIDE, file:line-anchored).
-- **ADR trail** — [docs/adr/](docs/adr/).
-- **Spec-vs-code intent catalog** — [docs/SPECS.md](docs/SPECS.md).
-- **Per-verb mutation / cancel / rollback semantics** — [docs/user-guide/consequences.md](docs/user-guide/consequences.md).
-- **Reporting security issues** — [`SECURITY.md`](SECURITY.md), `unidrive@krost.org`, subject `[SECURITY] …`.
+- Linux. x86_64 or aarch64. Windows and macOS are out of scope (see [docs/adr/linux-only.md](docs/adr/linux-only.md)).
+- Java 21+ runtime on `$PATH`. JRE is enough; JDK only required to build.
+- systemd-user instance (standard on Ubuntu, Fedora, Arch, Debian; absent on minimal containers).
 
-## Extending
+## Uninstall
 
-- **Architecture overview** — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-- **CLI extension SPI** — [docs/EXTENSIONS.md](docs/EXTENSIONS.md) (`org.krost.unidrive.cli.ext.CliExtension` via `META-INF/services`).
+```bash
+bash dist/uninstall.sh
+```
 
-## License & contributing
+Removes the binary, wrapper, JAR, and systemd unit. Keeps `~/.config/unidrive/` (profiles + tokens) and `~/.local/share/unidrive/` (logs) — delete them manually for a full wipe.
 
-Apache-2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), [NAMING.md](NAMING.md). Contributor contract in [CONTRIBUTING.md](CONTRIBUTING.md): discuss first for non-trivial work, sign commits (`git commit -s`), reference a `UD-###` backlog ID. Backlog mutations go through `python scripts/dev/backlog.py`, never hand-edited.
+## Hacking on it / running an agent against it
 
-Maintainer: Gernot Krost · <unidrive@krost.org>
+Read [AGENTS.md](AGENTS.md). It is the rulebook for every change to this repo — human or LLM.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE). The author also builds a non-OSS Android app on top of this codebase; Apache 2.0's permissive grant explicitly allows that, and any contributor patches are licensed permissively under the same grant.
+
+Maintainer: Gernot Krost — `unidrive@krost.org`.
