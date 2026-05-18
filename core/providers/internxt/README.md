@@ -52,6 +52,21 @@ Upload (`InternxtProvider.kt`) runs in five stages:
 
 Mixing stages 1–3 (old IV) with stages 4–5 (new IV) is **silent corruption** — the bridge accepts the ciphertext but downloads decrypt against the new IV and produce garbage. There is no retry today; the moment one is added, this constraint binds. A unit test should freeze the IV across a forced retry.
 
+## Planned robustness work
+
+Five items spec'd for the slim release, in landing order. Each tracks a BACKLOG entry — this section is the design summary, not a parallel todo list.
+
+1. **401 → refresh-and-replay** (mirror OneDrive's `GraphApiService` pattern). Add `forceRefresh: Boolean` to `AuthService.getValidCredentials`; introduce a `withAuthRetry` helper in `InternxtApiService` and wrap every authenticated method body. Replay once on 401; throw on the second. Composition order from outermost in: `retryOnTransient { withAuthRetry { budget.awaitSlot(); call(); budget.recordSuccess() } }`. Dedup fold is innermost. Lands first because items 4/1/5 wrap with `withAuthRetry`.
+2. **`HttpRetryBudget` wiring.** Two budgets: Drive `maxConcurrency=2, minSpacing=500ms`, Bridge `maxConcurrency=1, minSpacing=1000ms` (mirrors official SDK's Bottleneck config; the Drive/Bridge split is the spec's recommendation pending vendor confirmation). Budget acquisition is per HTTP attempt (innermost), so backoff sleeps don't starve other coroutines. `recordThrottle(retryAfterMs)` fires from the same site that already reads the body hint.
+3. **`Retry-After` on Drive mutations.** Thread the response header through `checkResponse` → `InternxtApiException.retryAfterMs` → `retryOnTransient`, header taking precedence over the JSON-body hint. Caps stay (500 ms floor, 60 s ceiling) so a long server hint can't make the engine appear hung. Closes the `createFile` 429-orphan window: encrypted bytes already on OVH but Drive row never wrote.
+4. **`finishUpload` idempotency.** On transient failure mid-finish, do **not** blind-retry — probe the Bridge `/buckets/{bucket}/files/{shardUuid}/info` endpoint first. Probe-200 with a `fileId` shape ⇒ the prior commit landed; synthesize the `BucketEntry` from the probe. Probe-404 ⇒ safe to re-finish. Probe-transient ⇒ one more probe, then propagate (never duplicate-commit). Caps probe at 2 attempts.
+5. **Retry coverage on remaining mutating verbs** (`deleteFile`/`deleteFolder`/`putEncryptedShardFromFile`/`downloadFileStreaming`). The upload-pipeline retry lives at the **provider** layer (`InternxtProvider.kt:260-265`), not the API service, because that's where `indexBytes` lives — choose (a) **retry stages 4–5 only** with stable temp file + `indexHex`. Download retry re-resolves the OVH URL (presigned, ~15 min) and constructs a fresh `Cipher` per attempt. `putEncryptedShard` (in-memory variant) appears unused; verify before deletion. **Mandated exception to the no-new-tests rule**: an `indexBytes`-stability unit test under `InternxtApiServiceTest`-sibling that asserts identical bytes across a forced retry.
+
+### Investigation gates
+
+- **Item 4 — Drive/Bridge budget split.** BACKLOG quotes "1 conc / 1000 ms global + 2 conc / 500 ms on Drive" from drive-desktop's Bottleneck config. Whether that's one shared budget or two per-host budgets matters for orphan-window behavior. Read drive-desktop's actual config before wiring; default to two if ambiguous.
+- **Item 4 — `finishUpload` probe response shape.** The spec assumes `GET /buckets/{bucket}/files/{shardUuid}/info` returns 404 pre-commit and 200-with-`fileId` post-commit. Reverse-engineering pass against a live Bridge needed before relying on probe semantics for de-duplication.
+
 ## Quirks
 
 - **`encryptVersion` hard-coded** to `"03-aes"`. Vendor SDK supports `02-rsa` for legacy buckets; we don't.
