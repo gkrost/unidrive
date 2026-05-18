@@ -26,7 +26,7 @@ jobs:
       ANDROID_PAT: ${{ secrets.UNIDRIVE_ANDROID_PAT }}
     steps:
       - name: Checkout core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: unidrive
 
@@ -37,7 +37,7 @@ jobs:
 
       - name: Checkout unidrive-android sibling
         if: ${{ env.ANDROID_PAT != '' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: gkrost/unidrive-android
           path: unidrive-android
