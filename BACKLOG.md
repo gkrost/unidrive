@@ -28,7 +28,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `file.hashes` in local change detector | Remote scanner uses it (`Reconciler.kt:117`); local scanner still mtime+size only (`LocalScanner.kt:100`). Avoids re-uploading on touch-only changes. |
 | OneDrive `If-Match` precondition on `createUploadSession` | Catches concurrent edits before the session URL is handed out. |
 | OneDrive refresh `downloadUrl` on `assertNotHtml` | When the CDN serves an HTML throttle page, re-resolve via `getItemById` instead of failing the download. |
-| Internxt JWT pre-expiry refresh margin | Today fires only after `isJwtExpired()` returns true; add a day-of margin so users don't see an interactive re-auth prompt mid-sync. |
 | Internxt request prioritization + extend dedup | `folderContentsDedup` covers `getFolderContents` only; extend to `getFileMeta`/`listFiles`/`listFolders`. |
 
 ## Medium — efficiency

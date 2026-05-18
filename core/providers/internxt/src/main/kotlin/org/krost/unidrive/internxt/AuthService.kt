@@ -46,6 +46,15 @@ open class AuthService(
 
     companion object {
         private const val CREDENTIALS_FILE = "credentials.json"
+
+        // One-day pre-expiry refresh margin. Picked so that a sync running for
+        // many hours never trips an interactive re-auth prompt: even on a JWT
+        // with a 7-day lifetime, we have 6 days of clean operation followed by
+        // 24 h during which any API call silently rotates the token. The
+        // tighter OneDrive 5-minute margin doesn't translate — Internxt's
+        // refresh path is reactive-401 today (no automatic replay), so a
+        // missed pre-expiry refresh would surface as a hard failure mid-sync.
+        const val JWT_REFRESH_MARGIN_MS: Long = 24L * 60 * 60 * 1000
     }
 
     val isAuthenticated: Boolean get() = credentials != null
@@ -61,6 +70,18 @@ open class AuthService(
         // unparseable / missing-exp as expired — same policy as before.
         val exp = JwtExtractor.extractExp(jwt) ?: return true
         return System.currentTimeMillis() / 1000 > exp
+    }
+
+    /**
+     * Check whether the stored JWT will expire within [thresholdMs] of "now".
+     * Returns true for absent / unparseable / missing-exp tokens (same
+     * policy as [isJwtExpired]); returns true for already-expired tokens
+     * too, so callers can treat this as a strict superset of [isJwtExpired].
+     */
+    fun isJwtNearExpiry(thresholdMs: Long): Boolean {
+        val jwt = credentials?.jwt ?: return true
+        val exp = JwtExtractor.extractExp(jwt) ?: return true
+        return System.currentTimeMillis() + thresholdMs >= exp * 1000
     }
 
     suspend fun initialize() {
@@ -250,13 +271,16 @@ open class AuthService(
     }
 
     /**
-     * Returns the stored credentials, proactively refreshing the JWT if it has expired.
+     * Returns the stored credentials, proactively refreshing the JWT if it has
+     * expired or is within [JWT_REFRESH_MARGIN_MS] of expiry.
      *
      * UD-308: pre-UD-308 this just returned `credentials` or threw, leaving the
      * refresh to happen reactively when a downstream request came back 401. That
      * cost every cold-start-after-long-idle call an extra HTTP round-trip
-     * (request → 401 → refresh → retry). Checking [isJwtExpired] up front lets us
-     * refresh once and skip the doomed request entirely.
+     * (request → 401 → refresh → retry). Checking [isJwtNearExpiry] up front
+     * lets us refresh once and skip the doomed request entirely. The day-of
+     * margin extends the same logic to long-running syncs: a token with five
+     * minutes left should be rotated *now* rather than mid-stream.
      *
      * Refresh goes through [refreshToken], which serialises concurrent callers via
      * [RefreshableTokenLatch] (UD-338) — we deliberately do not duplicate any of
@@ -267,7 +291,12 @@ open class AuthService(
      */
     suspend fun getValidCredentials(): InternxtCredentials {
         val current = credentials ?: throw AuthenticationException("Not authenticated")
-        return if (isJwtExpired()) refreshToken() else current
+        // Refresh both for already-expired tokens (UD-308 cold-start fast path)
+        // and for tokens within JWT_REFRESH_MARGIN_MS of expiry. The margin
+        // prevents the case where a long-running sync starts with a 5-minute-
+        // remaining token, then trips the un-replayed 401 path mid-stream and
+        // surfaces an interactive re-auth prompt to the user.
+        return if (isJwtNearExpiry(JWT_REFRESH_MARGIN_MS)) refreshToken() else current
     }
 
     /**

@@ -185,14 +185,20 @@ class InternxtAuthServiceTest {
         runBlocking {
             val tmp = Files.createTempDirectory("internxt-auth-valid-")
             try {
-                // exp = now + 1 hour → not expired.
-                val futureExp = System.currentTimeMillis() / 1000 + 3600
+                // exp = now + 10 days → well past the 1-day pre-expiry refresh
+                // margin (JWT_REFRESH_MARGIN_MS), so getValidCredentials must
+                // not trigger a refresh.
+                val futureExp = System.currentTimeMillis() / 1000 + 10L * 24 * 3600
                 val freshJwt = makeJwtWithExp(futureExp)
                 seedCredentials(tmp, jwt = freshJwt)
                 val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
                 auth.initialize()
 
                 assertFalse(auth.isJwtExpired(), "Test setup: seeded JWT should not be expired")
+                assertFalse(
+                    auth.isJwtNearExpiry(AuthService.JWT_REFRESH_MARGIN_MS),
+                    "Test setup: seeded JWT should be outside the pre-expiry refresh margin",
+                )
 
                 val creds = auth.getValidCredentials()
 
