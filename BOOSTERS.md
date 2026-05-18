@@ -100,11 +100,11 @@ Labels verified against `core/providers/{onedrive,internxt}/` source plus the `d
 |---|---|---|
 | Two-layer: metadata via drive-server, blobs via network bridge | used | `InternxtApiService.kt:498-576`; AES-256-GCM per-file key |
 | Multipart at ≥100 MiB threshold | gap | constants exist in `InternxtConfig.kt:19-26` (50 MiB chunk, 6 concurrent) but `InternxtProvider.kt:189` notes "not yet consumed" — single-shard uploads only |
-| File size cap | partial | `InternxtApiService.kt:644` `getFileLimits()` queries server cap dynamically (UD-364) |
+| File size cap | partial | `InternxtApiService.kt:644` `getFileLimits()` queries server cap dynamically |
 | Resumable upload protocol | API gap | no tus-style offset resumption upstream |
 | Hash-based dedup | API gap | upstream backend does not expose content hashes |
 | mtime on replaceFile | partial | `InternxtApiService.kt:166-168` sends `modificationTime` on replace path; create path still doesn't |
-| In-flight de-dup of duplicate concurrent requests | partial | `InternxtApiService.kt:82-88` `folderContentsDedup` (UD-205) covers `getFolderContents` only; `getFileMeta`/`listFiles`/`listFolders` uncovered |
+| In-flight de-dup of duplicate concurrent requests | partial | `InternxtApiService.kt:82-88` `folderContentsDedup` covers `getFolderContents` only; `getFileMeta`/`listFiles`/`listFolders` uncovered |
 | Bottleneck throttle (1–2 concurrent, 500–1000 ms, priorities) | gap | `HttpRetryBudget` exists in `:app:core` but is not wired into `InternxtApiService` |
 
 ### Download
@@ -118,7 +118,7 @@ Labels verified against `core/providers/{onedrive,internxt}/` source plus the `d
 |---|---|---|
 | Trash via `POST /storage/trash/add` | used | `InternxtApiService.kt:399-432` |
 | Versioning history | API gap | no server-side version history |
-| In-place uuid-preserving overwrite | partial | `InternxtApiService.kt:154-178` `replaceFile` preserves uuid (UD-366) — softer than no versioning |
+| In-place uuid-preserving overwrite | partial | `InternxtApiService.kt:154-178` `replaceFile` preserves uuid — softer than no versioning |
 | Private + public sharings; VIEWER/EDITOR/ADMIN/OWNER; password + optional expiry | partial | document MVP-supported subset |
 
 ### Quota / events
@@ -130,14 +130,14 @@ Labels verified against `core/providers/{onedrive,internxt}/` source plus the `d
 ### Rate limits
 | Capability | Status | Notes |
 |---|---|---|
-| JSON-body `retry_after` honored | used | `InternxtApiService.kt:40` `RETRY_AFTER_REGEX` (UD-335) |
+| JSON-body `retry_after` honored | used | `InternxtApiService.kt:40` `RETRY_AFTER_REGEX` |
 | `Retry-After` HTTP header honored | gap | only body-side hint currently consulted |
 
 ### Production bugs (from `internxt-robustness.md`, verified)
 | Item | Status | Notes |
 |---|---|---|
 | HTML-body guard on streaming crypto | used | `InternxtApiService.kt:470` `assertNotHtml` — already closed |
-| `NonCancellable` wrap on auth refresh under Pass-2 cancellation | used | `RefreshableTokenLatch.withRefresh` (`AuthService.kt:305-318`, UD-338) — already closed |
+| `NonCancellable` wrap on auth refresh under Pass-2 cancellation | used | `RefreshableTokenLatch.withRefresh` (`AuthService.kt:305-318`) — already closed |
 | `buildFolderPath` silent-empty → ~84k duplicate `remote_id` rows | gap | `InternxtProvider.kt:850` still returns `""`; phantom-folder root cause not fixed |
 | State.db duplicate-`remote_id` migration / `unidrive repair` | gap | one-shot cleanup to drop the duplicate rows already produced |
 | 401 → automatic refresh-and-replay (mid-session expiry race) | gap | currently throws without retry-with-fresh-token |
