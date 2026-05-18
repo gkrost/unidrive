@@ -43,10 +43,11 @@ class InternxtApiService(
             updatedAt: String?,
             limit: Int,
             offset: Int,
+            status: String = "ALL",
         ): Map<String, String> {
             val params =
                 mutableMapOf(
-                    "status" to "ALL",
+                    "status" to status,
                     "limit" to limit.toString(),
                     "offset" to offset.toString(),
                     "sort" to "uuid",
@@ -91,8 +92,9 @@ class InternxtApiService(
         updatedAt: String? = null,
         limit: Int = 50,
         offset: Int = 0,
+        status: String = "ALL",
     ): List<InternxtFile> {
-        val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset))
+        val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status))
         return json.decodeFromString<List<InternxtFile>>(body)
     }
 
@@ -100,8 +102,9 @@ class InternxtApiService(
         updatedAt: String? = null,
         limit: Int = 50,
         offset: Int = 0,
+        status: String = "ALL",
     ): List<InternxtFolder> {
-        val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset))
+        val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status))
         return json.decodeFromString<List<InternxtFolder>>(body)
     }
 
