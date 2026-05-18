@@ -23,6 +23,9 @@ data class InternxtConfig(
         // Used in password hashing during auth. Override via env var for custom deployments.
         val CRYPTO_KEY: String = System.getenv("INTERNXT_CRYPTO_KEY") ?: "6KYQBP847D4ATSFA"
 
+        /** Default page size for /files and /folders pagination (no public maximum documented). */
+        const val LISTING_PAGE_SIZE: Int = 50
+
         /** UD-304: swift-core parity — files at/above this size use multipart upload. */
         const val MULTIPART_MIN_SIZE_BYTES: Long = 100L * 1024L * 1024L // 100 MB
 

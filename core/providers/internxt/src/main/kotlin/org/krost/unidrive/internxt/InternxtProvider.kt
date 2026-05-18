@@ -493,7 +493,7 @@ class InternxtProvider(
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
-        val limit = 50
+        val limit = InternxtConfig.LISTING_PAGE_SIZE
 
         // UD-352: this delta() loops internally over both /files and /folders
         // pagination, accumulating *all* pages before returning a single

@@ -93,7 +93,7 @@ class InternxtApiService(
 
     suspend fun listFiles(
         updatedAt: String? = null,
-        limit: Int = 50,
+        limit: Int = InternxtConfig.LISTING_PAGE_SIZE,
         offset: Int = 0,
         status: String = "ALL",
     ): List<InternxtFile> =
@@ -104,7 +104,7 @@ class InternxtApiService(
 
     suspend fun listFolders(
         updatedAt: String? = null,
-        limit: Int = 50,
+        limit: Int = InternxtConfig.LISTING_PAGE_SIZE,
         offset: Int = 0,
         status: String = "ALL",
     ): List<InternxtFolder> =
