@@ -14,4 +14,8 @@ data class CloudItem(
     val mimeType: String?,
     val deleted: Boolean = false,
     val hydrated: Boolean = true,
+    // Parent's provider UUID. Internxt populates from folderUuid/parentUuid so
+    // state.db can index alive children of a folder via (parent_uuid, status).
+    // Null = drive root (or provider doesn't expose parent identity).
+    val parentId: String? = null,
 )

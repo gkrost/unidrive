@@ -868,6 +868,12 @@ class InternxtProvider(
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
                 deleted = file.isTombstoned(),
+                // Parent's folder UUID — populated so state.db can index alive
+                // children of a folder via (parent_uuid, status). Internxt's
+                // `folderUuid` is null only for items directly under the root
+                // bucket; we collapse that to CloudItem.parentId=null too so
+                // root rows store parent_uuid=NULL.
+                parentId = file.folderUuid,
             )
         }
 
@@ -889,6 +895,7 @@ class InternxtProvider(
                 hash = null,
                 mimeType = null,
                 deleted = folder.isTombstoned(),
+                parentId = folder.parentUuid,
             )
         }
 
@@ -929,6 +936,7 @@ class InternxtProvider(
                 // UD-359: surface `removed`/`deleted` boolean flags alongside
                 // the `status` enum. Mirrors the folder helper at line ~562.
                 deleted = file.isTombstoned(),
+                parentId = file.folderUuid,
             )
         }
 
@@ -980,6 +988,7 @@ class InternxtProvider(
                 hash = null,
                 mimeType = null,
                 deleted = folder.isTombstoned(),
+                parentId = folder.parentUuid,
             )
         }
 

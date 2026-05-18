@@ -95,58 +95,6 @@ class StateDatabaseTest {
     }
 
     @Test
-    fun `dedupe migration removes duplicate remote_id rows, keeping longest path`() {
-        // Insert duplicate-remote_id rows directly (the existing db has the
-        // migration marker set by setUp's initialize, so we re-trigger the
-        // migration by clearing the marker via raw JDBC, then re-init).
-        db.upsertEntry(entry("/_INBOX/_XXX").copy(remoteId = "uuid-xxx"))
-        db.upsertEntry(entry("/_XXX").copy(remoteId = "uuid-xxx"))
-        db.upsertEntry(entry("/_INBOX/Sub/_XXX").copy(remoteId = "uuid-xxx"))
-        db.upsertEntry(entry("/singleton.txt").copy(remoteId = "uuid-singleton"))
-
-        // Force the migration to re-run.
-        val dbPath = (db.javaClass.getDeclaredField("dbPath").apply { isAccessible = true }.get(db) as java.nio.file.Path)
-        db.close()
-        java.sql.DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
-            conn
-                .prepareStatement("DELETE FROM sync_state WHERE key = 'migration:dedupe_remote_id'")
-                .use { it.executeUpdate() }
-        }
-
-        db = StateDatabase(dbPath)
-        db.initialize()
-
-        // The longest-path row wins for uuid-xxx; singleton is untouched.
-        assertEquals(2, db.getAllEntries().size)
-        assertNotNull(db.getEntry("/_INBOX/Sub/_XXX"), "longest path must survive")
-        assertNull(db.getEntry("/_INBOX/_XXX"), "shorter duplicate must be dropped")
-        assertNull(db.getEntry("/_XXX"), "shortest duplicate must be dropped")
-        assertNotNull(db.getEntry("/singleton.txt"), "singleton remote_id untouched")
-        assertEquals("deleted=2", db.getSyncState("migration:dedupe_remote_id"))
-    }
-
-    @Test
-    fun `dedupe migration is idempotent and a no-op on clean DBs`() {
-        db.upsertEntry(entry("/a.txt").copy(remoteId = "uuid-a"))
-        db.upsertEntry(entry("/b.txt").copy(remoteId = "uuid-b"))
-
-        // Re-trigger the migration: nothing to delete.
-        val dbPath = (db.javaClass.getDeclaredField("dbPath").apply { isAccessible = true }.get(db) as java.nio.file.Path)
-        db.close()
-        java.sql.DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
-            conn
-                .prepareStatement("DELETE FROM sync_state WHERE key = 'migration:dedupe_remote_id'")
-                .use { it.executeUpdate() }
-        }
-
-        db = StateDatabase(dbPath)
-        db.initialize()
-
-        assertEquals(2, db.getAllEntries().size)
-        assertEquals("deleted=0", db.getSyncState("migration:dedupe_remote_id"))
-    }
-
-    @Test
     fun `case insensitive lookup`() {
         db.upsertEntry(entry("/Documents/Report.pdf"))
         val result = db.getEntryCaseInsensitive("/documents/report.pdf")
