@@ -662,7 +662,7 @@ class InternxtApiService(
         val creds = credentialsProvider()
         var lastException: InternxtApiException? = null
         val delays = listOf(2_000L, 4_000L, 8_000L)
-        for (delay in delays) {
+        for ((index, delay) in delays.withIndex()) {
             try {
                 val response =
                     httpClient.get(url) {
@@ -672,15 +672,15 @@ class InternxtApiService(
                 checkResponse(response)
                 return response.bodyAsText()
             } catch (e: InternxtApiException) {
-                if (e.statusCode in listOf(500, 503)) {
+                if (e.statusCode in TRANSIENT_STATUSES) {
                     lastException = e
-                    kotlinx.coroutines.delay(delay)
+                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
                 } else {
                     throw e
                 }
             } catch (e: java.io.EOFException) {
                 lastException = InternxtApiException("Server closed connection for GET $url: ${e.message}", 503, cause = e)
-                kotlinx.coroutines.delay(delay)
+                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
             } catch (e: java.io.IOException) {
                 throw InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
             }
