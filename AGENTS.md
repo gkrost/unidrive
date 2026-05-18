@@ -7,7 +7,7 @@ This file is the rulebook for everyone touching the repo — human contributors 
 ## Hard rules
 
 - **No new providers.** Two only.
-- **No new tests beyond smoke.** Smoke = "auth works, upload works, download works, delete works, delta reconciles" — 12 tests total (2 sync, 5 internxt, 5 onedrive). Add a smoke test when an existing one no longer covers a path; do not add unit tests speculatively.
+- **No new non-smoke tests.** The smoke set is 12 tests (2 sync, 5 internxt, 5 onedrive) covering auth / upload / download / delete / delta reconciles. Add a smoke test when an existing one no longer covers a path; do not add unit tests speculatively. Existing unit tests stay until a smoke test replaces them — pruning is per-test, not a sweep (the *Ask before deleting* rule applies).
 - **No new docs at repo or `docs/` level.** Per-module `README.md` files inside `core/providers/<name>/` and `core/app/<module>/` are permitted; they document that module only. The shared doc surface is this file, `README.md`, `BACKLOG.md`, `CLOSED.md`, `BOOSTERS.md`, plus the existing ADRs under `docs/adr/` and audits under `docs/audits/`.
 - **No IDs, dates, or version numbers** in commit messages, file names, or document content. Describe what a thing is, not when it was filed or which release ships it.
 - **No new abstractions.** Two implementations of the provider SPI is not enough to justify another layer. If a refactor is needed, do it inside the existing SPI shape.
@@ -18,9 +18,10 @@ This file is the rulebook for everyone touching the repo — human contributors 
 
 1. Read the top of `BACKLOG.md`. Pick the first item that isn't blocked.
 2. Read three nearby source files before writing. The existing patterns are the style guide.
-3. Make the change. Run `./gradlew check`. Iterate.
-4. Move the item from `BACKLOG.md` to `CLOSED.md` in the same commit that lands the work. One commit, one item.
-5. If you discover a new piece of work, append it to `BACKLOG.md` under the matching priority section in one line.
+3. **Pre-execution sanity check.** If the work goes beyond the BACKLOG item itself — scope expansion, deletion of a user-facing feature, rewrite of a stable file in the same session as adjacent prunes — surface it and pause for confirmation before executing. Plan approval doesn't cover sideband cuts.
+4. Make the change. Run `./gradlew check`. Iterate.
+5. Move the item from `BACKLOG.md` to `CLOSED.md` in the same commit that lands the work. One commit, one item.
+6. If you discover a new piece of work, append it to `BACKLOG.md` under the matching priority section in one line.
 
 ## What lives where
 
@@ -53,6 +54,10 @@ Live-integration tests (`UNIDRIVE_INTEGRATION_TESTS=true`) need OAuth credential
 - Conventional Commits style — see recent `git log` for examples.
 - One BACKLOG item per commit. The BACKLOG → CLOSED move lands in the same commit as the code change.
 - No `UD-###` references in new commits, file names, or document body — the slim branch describes work, not tickets.
+
+## Design constraints (not tickets)
+
+Some constraints bind only when future work happens — they have no current actionable item, but they must not be silently forgotten. File them in the *Design constraints* section near the bottom of `BACKLOG.md`, one per constraint: the rule, the file:line anchor it binds, and the trigger condition. Don't put them in the main BACKLOG tables — work-down readers shouldn't encounter them as tickets.
 
 ## What not to do
 
