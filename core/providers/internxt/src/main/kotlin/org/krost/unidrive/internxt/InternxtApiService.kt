@@ -679,10 +679,10 @@ class InternxtApiService(
                     throw e
                 }
             } catch (e: java.io.EOFException) {
-                lastException = InternxtApiException("Server closed connection for GET $url: ${e.message}", 503)
+                lastException = InternxtApiException("Server closed connection for GET $url: ${e.message}", 503, cause = e)
                 kotlinx.coroutines.delay(delay)
             } catch (e: java.io.IOException) {
-                throw InternxtApiException("Connection error for GET $url: ${e.message}", 0)
+                throw InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
             }
         }
         throw lastException!!
@@ -828,4 +828,5 @@ class InternxtApiException(
     val statusCode: Int = 0,
     requestId: String? = null,
     val retryAfterMs: Long? = null,
-) : ProviderException(message, requestId = requestId)
+    cause: Throwable? = null,
+) : ProviderException(message, cause = cause, requestId = requestId)
