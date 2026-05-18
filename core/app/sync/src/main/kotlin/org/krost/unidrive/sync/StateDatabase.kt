@@ -99,6 +99,57 @@ class StateDatabase(
             """,
             )
         }
+        dedupeRemoteIdsOnce()
+    }
+
+    /**
+     * One-shot cleanup of duplicate `remote_id` rows produced by the
+     * Internxt phantom-folder bug (path-collapse on missing ancestor —
+     * see docs/audits/internxt-phantom-investigation.md). For each
+     * `remote_id` appearing on more than one row, keep the row with the
+     * longest path and delete the others; the bug shallowed paths (it
+     * never deepened them), so the longest path is the pre-bug truth.
+     *
+     * Idempotent: gated by a marker in `sync_state` so the scan only
+     * runs once per profile. Fresh databases set the marker immediately
+     * with zero rows touched.
+     */
+    @Synchronized
+    private fun dedupeRemoteIdsOnce() {
+        val markerKey = "migration:dedupe_remote_id"
+        conn.prepareStatement("SELECT value FROM sync_state WHERE key = ?").use { stmt ->
+            stmt.setString(1, markerKey)
+            if (stmt.executeQuery().next()) return
+        }
+        val deleted =
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    DELETE FROM sync_entries WHERE rowid IN (
+                        SELECT rowid FROM (
+                            SELECT rowid,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY remote_id
+                                       ORDER BY LENGTH(path) DESC, rowid ASC
+                                   ) AS rn
+                            FROM sync_entries
+                            WHERE remote_id IS NOT NULL
+                        )
+                        WHERE rn > 1
+                    )
+                """,
+                )
+            }
+        conn.prepareStatement("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)").use { stmt ->
+            stmt.setString(1, markerKey)
+            stmt.setString(2, "deleted=$deleted")
+            stmt.executeUpdate()
+        }
+        if (deleted > 0) {
+            // No log dependency in this module — call sites observe via
+            // sync_state marker (`migration:dedupe_remote_id` value carries
+            // the count). One-shot at first initialize after upgrade.
+        }
     }
 
     /**

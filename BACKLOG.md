@@ -8,7 +8,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 
 | Title | Scope |
 |---|---|
-| Internxt state-db duplicate-`remote_id` cleanup | One-shot migration to drop the duplicate rows produced by the (now-fixed) phantom-folder bug. For each `remote_id` with >1 row, keep the row with the longest path (the pre-bug truth — the bug shallowed paths, never deepened them) and drop the others. Triggered by a schema-version bump in `StateDatabase.initialize`. |
 | OneDrive `fileSystemInfo` round-trip | Preserve mtime/ctime on upload and download. Parsed today in `DriveItem.kt:91-94` but not threaded to `CloudItem.modified` or upload payload. Linux users notice broken timestamps immediately. |
 | Internxt `finishUpload` idempotency | A network drop after server-side commit but before client reads the response causes a re-finish; the bridge issues a second `fileId` and the first becomes orphan storage that is billed but unreachable. Fix: pin a client request id (or reuse `descriptor.uuid` from `startUpload`) and have the server return the cached `fileId` on retry, or query session status before retrying. |
 | OneDrive upload-session expiry validation | `UploadSessionStore` trusts the stored `expiresAt`; a daemon running for 24+ h hits stale URLs with cryptic 404/410. Fix: prune expired sessions before use or query session status on get. |
