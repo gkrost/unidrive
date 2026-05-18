@@ -19,10 +19,6 @@ object ProviderConfigResolver {
         name: String,
         usageBlock: String,
     ): String =
-        System.getenv(name) ?: run {
-            System.err.println("Missing required environment variable: $name\n")
-            System.err.println(usageBlock)
-            System.exit(1)
-            throw IllegalStateException("unreachable")
-        }
+        System.getenv(name)
+            ?: throw IllegalStateException("Missing required environment variable: $name\n\n$usageBlock")
 }
