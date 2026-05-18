@@ -4,20 +4,25 @@ One Linux daemon that syncs **Internxt Drive** and **OneDrive** through a single
 
 ## Quickstart
 
+Build the fat JAR and install:
+
 ```bash
 git clone https://github.com/gkrost/unidrive
-cd unidrive/core && ./gradlew :app:cli:shadowJar
+cd unidrive
+( cd core && ./gradlew :app:cli:shadowJar )
 bash dist/install.sh
 ```
 
-Drops the fat JAR into `~/.local/lib/unidrive/`, a wrapper into `~/.local/bin/unidrive`, and a systemd-user unit. Then:
+Drops the fat JAR into `~/.local/lib/unidrive/`, a wrapper into `~/.local/bin/unidrive`, and a systemd-user unit.
+
+Create a profile (interactive wizard prompts for provider type, credentials), authenticate, sync:
 
 ```bash
-unidrive auth --provider onedrive my-onedrive
-unidrive auth --provider internxt my-internxt
-unidrive -p my-onedrive sync --watch
-systemctl --user enable --now unidrive.service     # auto-start on login
-journalctl --user -u unidrive.service -f           # follow logs
+unidrive profile add                                # wizard: pick onedrive or internxt
+unidrive -p <profile-name> auth                     # OAuth (browser) or JWT (Internxt)
+unidrive -p <profile-name> sync --watch             # one-shot foreground sync
+systemctl --user enable --now unidrive.service      # auto-start on login (background)
+journalctl --user -u unidrive.service -f            # follow logs
 ```
 
 Config lives at `~/.config/unidrive/config.toml`. Per-profile state (SQLite, OAuth tokens, conflict log) lives at `~/.config/unidrive/<profile>/`. The daemon advertises sync progress over a Unix-domain socket per profile.
