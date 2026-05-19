@@ -198,6 +198,7 @@ class StateDatabase(
                     size        INTEGER NOT NULL DEFAULT 0,
                     modified    TEXT,
                     remote_hash TEXT,
+                    reconciled  INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (scan_id, remote_id)
                 )
             """,
@@ -208,6 +209,42 @@ class StateDatabase(
                     ON scan_staging(scan_id)
             """,
             )
+            // Streaming-reconciliation per-row state machine. STAGED rows
+            // (reconciled=0) are the resumable-scan default — a daemon
+            // restart resumes by re-reconciling them. RECONCILED rows
+            // (reconciled=1) have already been dispatched as safe-now
+            // actions and upserted into sync_entries, so the next resume
+            // must skip them in the per-page reconciler slice (the
+            // deferred deletion-bearing flush still considers them via the
+            // union of safe-fired + deferred paths). The ADD COLUMN below
+            // is the idempotent path for an existing scan_staging table
+            // that pre-dates the streaming work; the CREATE TABLE above
+            // already includes `reconciled` for fresh installs. No
+            // schema_version bump — additive column.
+            if (!columnExists("scan_staging", "reconciled")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE scan_staging ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+    }
+
+    /**
+     * PRAGMA-driven column-presence probe. The idempotency guard for the
+     * additive `scan_staging.reconciled` migration: CREATE TABLE IF NOT
+     * EXISTS does not pick up new columns on an existing table, so the
+     * ADD COLUMN runs only when the column is missing. Matches SQLite's
+     * `IF NOT EXISTS` semantic for ALTER TABLE, which the SQLite version
+     * we ship doesn't expose natively.
+     */
+    private fun columnExists(
+        table: String,
+        column: String,
+    ): Boolean {
+        conn.prepareStatement("SELECT 1 FROM pragma_table_info(?) WHERE name=?").use { stmt ->
+            stmt.setString(1, table)
+            stmt.setString(2, column)
+            return stmt.executeQuery().next()
         }
     }
 
@@ -705,6 +742,12 @@ class StateDatabase(
      * set to `"/" + plainName` as a placeholder — the provider re-resolves
      * the real path using the rebuilt folder graph before returning to the
      * engine.
+     *
+     * Returns BOTH STAGED (reconciled=0) and RECONCILED (reconciled=1) rows
+     * — the provider needs the full folder graph on resume regardless of
+     * reconciliation state. Use [loadStagedItemsByReconciled] when a caller
+     * needs the slice that still must be reconciled vs. the slice already
+     * dispatched.
      */
     @Synchronized
     fun loadStagedItems(scanId: String): List<CloudItem> {
@@ -735,6 +778,81 @@ class StateDatabase(
                 )
             }
             return items
+        }
+    }
+
+    /**
+     * Streaming-reconciliation per-row state machine. Returns only the
+     * STAGED rows (reconciled=0) — the slice the post-restart reconciler
+     * must re-process. RECONCILED rows (reconciled=1) were already
+     * dispatched as safe-now actions and upserted into sync_entries by the
+     * previous daemon, so re-reconciling them would either be a no-op
+     * (UNCHANGED+UNCHANGED skip) or, worse, double-fire a download/upload.
+     *
+     * Ordering matches [loadStagedItems] so resumes are deterministic and
+     * crash-resilient: the provider sees the same per-id sequence in both
+     * "load all" and "load STAGED only" modes.
+     */
+    @Synchronized
+    fun loadStagedItemsByReconciled(
+        scanId: String,
+        reconciled: Boolean,
+    ): List<CloudItem> {
+        conn.prepareStatement(
+            "SELECT remote_id, parent_uuid, plain_name, is_folder, size, modified, remote_hash " +
+                "FROM scan_staging WHERE scan_id = ? AND reconciled = ? ORDER BY remote_id",
+        ).use { stmt ->
+            stmt.setString(1, scanId)
+            stmt.setInt(2, if (reconciled) 1 else 0)
+            val rs = stmt.executeQuery()
+            val items = mutableListOf<CloudItem>()
+            while (rs.next()) {
+                val name = rs.getString("plain_name")
+                items.add(
+                    CloudItem(
+                        id = rs.getString("remote_id"),
+                        name = name,
+                        path = "/$name",
+                        size = rs.getLong("size"),
+                        isFolder = rs.getInt("is_folder") == 1,
+                        modified = rs.getString("modified")?.let { Instant.parse(it) },
+                        created = null,
+                        hash = rs.getString("remote_hash"),
+                        mimeType = null,
+                        parentId = rs.getString("parent_uuid"),
+                    ),
+                )
+            }
+            return items
+        }
+    }
+
+    /**
+     * Flip a set of staged rows from STAGED (reconciled=0) to RECONCILED
+     * (reconciled=1). Called by the streaming reconciler after a page's
+     * safe-now actions have been dispatched and the live sync_entries rows
+     * upserted, so a daemon restart resuming the scan will skip them in
+     * the per-page reconciler slice. Idempotent — re-marking an already-
+     * RECONCILED row is a no-op (the UPDATE just rewrites the same value).
+     *
+     * Single batched UPDATE rather than a per-row loop — the per-page set
+     * is bounded by the provider's page size (Internxt 50, OneDrive 200)
+     * so a single statement-with-IN-list is the simplest correct shape.
+     */
+    @Synchronized
+    fun markStagedReconciled(
+        scanId: String,
+        remoteIds: Collection<String>,
+    ) {
+        if (remoteIds.isEmpty()) return
+        val placeholders = remoteIds.joinToString(",") { "?" }
+        conn.prepareStatement(
+            "UPDATE scan_staging SET reconciled = 1 " +
+                "WHERE scan_id = ? AND remote_id IN ($placeholders)",
+        ).use { stmt ->
+            stmt.setString(1, scanId)
+            remoteIds.forEachIndexed { idx, id -> stmt.setString(idx + 2, id) }
+            stmt.executeUpdate()
         }
     }
 

@@ -875,6 +875,153 @@ class StateDatabaseTest {
     }
 
     @Test
+    fun `staging — newly staged rows default reconciled=0 (STAGED)`() {
+        // Streaming reconciliation: every newly persisted page lands as
+        // STAGED. The engine flips rows to RECONCILED via
+        // markStagedReconciled after dispatching the page's safe-now
+        // actions.
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged("u1", "/a.txt")), marker = "m1")
+        assertEquals(1, db.loadStagedItemsByReconciled(scanId, reconciled = false).size)
+        assertEquals(0, db.loadStagedItemsByReconciled(scanId, reconciled = true).size)
+    }
+
+    @Test
+    fun `staging — markStagedReconciled flips rows STAGED to RECONCILED`() {
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u1", "/a.txt"), staged("u2", "/b.txt"), staged("u3", "/c.txt")),
+            marker = "m1",
+        )
+        db.markStagedReconciled(scanId, listOf("u1", "u3"))
+        val stillStaged = db.loadStagedItemsByReconciled(scanId, reconciled = false)
+        val flipped = db.loadStagedItemsByReconciled(scanId, reconciled = true)
+        assertEquals(listOf("u2"), stillStaged.map { it.id })
+        assertEquals(listOf("u1", "u3"), flipped.map { it.id })
+    }
+
+    @Test
+    fun `staging — markStagedReconciled is idempotent on already-RECONCILED rows`() {
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(scanId, listOf(staged("u1", "/a.txt")), marker = "m1")
+        db.markStagedReconciled(scanId, listOf("u1"))
+        // Second flip is a no-op — the UPDATE rewrites the same value.
+        db.markStagedReconciled(scanId, listOf("u1"))
+        assertEquals(0, db.loadStagedItemsByReconciled(scanId, reconciled = false).size)
+        assertEquals(1, db.loadStagedItemsByReconciled(scanId, reconciled = true).size)
+    }
+
+    @Test
+    fun `staging — loadStagedItems returns both STAGED and RECONCILED rows`() {
+        // The provider needs the full folder graph on resume regardless
+        // of reconciliation state; the per-reconciled-state slice is
+        // only consumed by the engine's reconciler call site.
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u1", "/a.txt"), staged("u2", "/b.txt")),
+            marker = "m1",
+        )
+        db.markStagedReconciled(scanId, listOf("u1"))
+        assertEquals(2, db.loadStagedItems(scanId).size)
+    }
+
+    @Test
+    fun `staging — completeScan clears RECONCILED rows alongside STAGED`() {
+        val scanId = db.beginScan(initialMarker = null)
+        db.persistScanPage(
+            scanId,
+            listOf(staged("u1", "/a.txt"), staged("u2", "/b.txt")),
+            marker = "m1",
+        )
+        db.markStagedReconciled(scanId, listOf("u1"))
+        db.completeScan(scanId)
+        assertEquals(0, db.loadStagedItems(scanId).size)
+        assertEquals(0, db.loadStagedItemsByReconciled(scanId, reconciled = true).size)
+    }
+
+    @Test
+    fun `staging — reconciled column ADD COLUMN is idempotent on existing scan_staging`() {
+        // Simulate a v2 DB that had scan_staging without the streaming
+        // `reconciled` column (the pre-streaming variant). The next
+        // initialize() must ADD the column without truncating rows or
+        // bumping schema_version.
+        val tmpDir = Files.createTempDirectory("unidrive-reconciled-migration")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        remote_id       TEXT PRIMARY KEY,
+                        parent_uuid     TEXT,
+                        path            TEXT NOT NULL,
+                        remote_hash     TEXT,
+                        remote_size     INTEGER NOT NULL DEFAULT 0,
+                        remote_modified TEXT,
+                        local_mtime     INTEGER,
+                        local_size      INTEGER,
+                        is_folder       INTEGER NOT NULL DEFAULT 0,
+                        is_pinned       INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated     INTEGER NOT NULL DEFAULT 0,
+                        last_synced     TEXT NOT NULL,
+                        status          TEXT NOT NULL DEFAULT 'EXISTS'
+                                        CHECK (status IN ('EXISTS','TRASHED','DELETED'))
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "CREATE VIEW alive_entries AS SELECT * FROM sync_entries WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state VALUES ('${StateDatabase.SCHEMA_VERSION_KEY}', " +
+                        "'${StateDatabase.SCHEMA_VERSION}')",
+                )
+                // Pre-streaming scan_staging shape — no `reconciled` column.
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE scan_staging (
+                        scan_id     TEXT NOT NULL,
+                        remote_id   TEXT NOT NULL,
+                        parent_uuid TEXT,
+                        plain_name  TEXT NOT NULL,
+                        is_folder   INTEGER NOT NULL DEFAULT 0,
+                        size        INTEGER NOT NULL DEFAULT 0,
+                        modified    TEXT,
+                        remote_hash TEXT,
+                        PRIMARY KEY (scan_id, remote_id)
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO scan_staging (scan_id, remote_id, plain_name) " +
+                        "VALUES ('prior-scan', 'u1', 'a.txt')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            // Existing row survives and defaults to reconciled=0 (STAGED).
+            val staged = upgraded.loadStagedItemsByReconciled("prior-scan", reconciled = false)
+            assertEquals(1, staged.size)
+            assertEquals("u1", staged.single().id)
+            // The full-load surface continues to work.
+            assertEquals(1, upgraded.loadStagedItems("prior-scan").size)
+            // Second initialize() call is also a no-op (idempotent guard).
+            upgraded.initialize()
+            assertEquals(1, upgraded.loadStagedItems("prior-scan").size)
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    @Test
     fun `staging — scan_staging is added in-place to an existing v2 DB without disturbing rows`() {
         // Simulate a v2 DB created before the resumable-scan slice landed:
         // sync_entries + alive_entries + indexes are present, schema_version
