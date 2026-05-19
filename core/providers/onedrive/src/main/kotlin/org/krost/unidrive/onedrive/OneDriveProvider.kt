@@ -2,10 +2,12 @@ package org.krost.unidrive.onedrive
 
 import org.krost.unidrive.*
 import org.krost.unidrive.onedrive.model.DriveItem
+import org.krost.unidrive.onedrive.model.FileSystemInfo
 import org.krost.unidrive.onedrive.model.Subscription
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -91,13 +93,19 @@ class OneDriveProvider(
         @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
-        val fileSize = Files.size(localPath)
+        val attrs = Files.readAttributes(localPath, BasicFileAttributes::class.java)
+        val fileSize = attrs.size()
+        val fsInfo =
+            FileSystemInfo(
+                createdDateTime = attrs.creationTime().toInstant().toString(),
+                lastModifiedDateTime = attrs.lastModifiedTime().toInstant().toString(),
+            )
         return try {
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
-                graphApi.uploadSimple(remotePath, content).toCloudItem()
+                graphApi.uploadSimple(remotePath, content, fsInfo).toCloudItem()
             } else {
-                graphApi.uploadLargeFile(localPath, remotePath, onProgress).toCloudItem()
+                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo).toCloudItem()
             }
         } catch (e: GraphApiException) {
             if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
@@ -199,14 +207,16 @@ class OneDriveProvider(
         val sharedItems =
             graphApi.listSharedWithMe().map { item ->
                 val sharedPath = "/Shared/${item.name ?: "unnamed"}"
+                val modifiedSource = item.fileSystemInfo?.lastModifiedDateTime ?: item.lastModifiedDateTime
+                val createdSource = item.fileSystemInfo?.createdDateTime ?: item.createdDateTime
                 CloudItem(
                     id = "shared:${item.id}",
                     name = item.name ?: "unnamed",
                     path = sharedPath,
                     size = item.size,
                     isFolder = item.isFolder,
-                    modified = item.lastModifiedDateTime?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                    created = item.createdDateTime?.let { runCatching { Instant.parse(it) }.getOrNull() },
+                    modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
+                    created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
                     hash = item.file?.hashes?.sha256Hash,
                     mimeType = item.file?.mimeType,
                 )
@@ -260,14 +270,21 @@ class OneDriveProvider(
                 ?: "/"
         val fullPath = if (parentPath == "/") "/${name ?: ""}" else "$parentPath/${name ?: ""}"
 
+        // Graph's top-level lastModifiedDateTime/createdDateTime are server-stamped on
+        // commit; fileSystemInfo carries the client-supplied local mtime/ctime that
+        // round-trips through the API. Prefer it when present so a fresh download
+        // gives the local file the same mtime it had at upload time.
+        val modifiedSource = fileSystemInfo?.lastModifiedDateTime ?: lastModifiedDateTime
+        val createdSource = fileSystemInfo?.createdDateTime ?: createdDateTime
+
         return CloudItem(
             id = id,
             name = name ?: "",
             path = fullPath,
             size = size,
             isFolder = folder != null,
-            modified = lastModifiedDateTime?.let { Instant.parse(it) },
-            created = createdDateTime?.let { Instant.parse(it) },
+            modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
+            created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
             hash = file?.hashes?.sha256Hash ?: file?.hashes?.quickXorHash,
             mimeType = file?.mimeType,
             deleted = removed != null || this.deleted != null,

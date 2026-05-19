@@ -134,6 +134,72 @@ class OneDriveProviderVaultFilterTest {
         }
 
     @Test
+    fun `listChildren maps fileSystemInfo timestamps in preference to top-level lastModifiedDateTime`() =
+        runTest {
+            // Graph's top-level lastModifiedDateTime is server-stamped on commit and bumps on
+            // permission changes too; the fileSystemInfo facet is the client-supplied local
+            // mtime/ctime that round-trips through the API. Linux users see broken timestamps
+            // immediately if we read the wrong field — this pins the precedence.
+            val body =
+                """
+                {
+                  "value": [
+                    {
+                      "id": "fsi-file",
+                      "name": "round-trip.bin",
+                      "size": 7,
+                      "lastModifiedDateTime": "2030-01-01T00:00:00Z",
+                      "createdDateTime":      "2030-01-01T00:00:00Z",
+                      "fileSystemInfo": {
+                        "createdDateTime":      "2024-06-01T08:00:00Z",
+                        "lastModifiedDateTime": "2024-06-01T09:30:00Z"
+                      },
+                      "file": {"mimeType": "application/octet-stream"},
+                      "parentReference": {"path": "/drive/root:"}
+                    },
+                    {
+                      "id": "no-fsi-file",
+                      "name": "legacy.bin",
+                      "size": 11,
+                      "lastModifiedDateTime": "2025-03-15T12:00:00Z",
+                      "createdDateTime":      "2025-03-10T11:00:00Z",
+                      "file": {"mimeType": "application/octet-stream"},
+                      "parentReference": {"path": "/drive/root:"}
+                    }
+                  ]
+                }
+                """.trimIndent()
+
+            val provider = mockedProvider(body)
+            val children = provider.listChildren("/")
+
+            val fsi = children.single { it.name == "round-trip.bin" }
+            assertEquals(
+                java.time.Instant.parse("2024-06-01T09:30:00Z"),
+                fsi.modified,
+                "modified must come from fileSystemInfo.lastModifiedDateTime when present",
+            )
+            assertEquals(
+                java.time.Instant.parse("2024-06-01T08:00:00Z"),
+                fsi.created,
+                "created must come from fileSystemInfo.createdDateTime when present",
+            )
+
+            val legacy = children.single { it.name == "legacy.bin" }
+            assertEquals(
+                java.time.Instant.parse("2025-03-15T12:00:00Z"),
+                legacy.modified,
+                "legacy items without fileSystemInfo must fall back to top-level lastModifiedDateTime",
+            )
+            assertEquals(
+                java.time.Instant.parse("2025-03-10T11:00:00Z"),
+                legacy.created,
+                "legacy items without fileSystemInfo must fall back to top-level createdDateTime",
+            )
+            provider.close()
+        }
+
+    @Test
     fun `delta filters out Personal Vault alongside root-item filter`() =
         runTest {
             // Delta response includes:

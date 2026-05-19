@@ -305,6 +305,7 @@ class GraphApiService(
     suspend fun uploadSimple(
         remotePath: String,
         content: ByteArray,
+        fileSystemInfo: FileSystemInfo? = null,
     ): DriveItem {
         log.debug("Upload (simple): {} ({} bytes)", remotePath, content.size)
         val cleanPath = remotePath.removePrefix("/")
@@ -328,7 +329,40 @@ class GraphApiService(
         }
 
         val body = response.bodyAsText()
-        return json.decodeFromString<DriveItem>(body)
+        val item = json.decodeFromString<DriveItem>(body)
+        // A content-PUT cannot carry the fileSystemInfo facet inline; round-tripping
+        // local mtime/ctime requires a follow-up PATCH on the just-created item.
+        return if (fileSystemInfo != null) patchFileSystemInfo(item.id, fileSystemInfo) else item
+    }
+
+    private suspend fun patchFileSystemInfo(
+        itemId: String,
+        info: FileSystemInfo,
+    ): DriveItem {
+        val body =
+            buildJsonObject {
+                putJsonObject("fileSystemInfo") {
+                    info.createdDateTime?.let { put("createdDateTime", it) }
+                    info.lastModifiedDateTime?.let { put("lastModifiedDateTime", it) }
+                }
+            }
+        val response =
+            httpClient.request("$baseUrl/me/drive/items/$itemId") {
+                bearerAuth(tokenProvider(false))
+                method = HttpMethod("PATCH")
+                contentType(ContentType.Application.Json)
+                setBody(body.toString())
+            }
+        if (response.status == HttpStatusCode.Unauthorized) {
+            throw AuthenticationException("Authentication failed (401): ${response.bodyAsText()}")
+        }
+        if (!response.status.isSuccess()) {
+            throw GraphApiException(
+                "fileSystemInfo PATCH failed: ${response.status} - ${response.bodyAsText()}",
+                response.status.value,
+            )
+        }
+        return json.decodeFromString<DriveItem>(response.bodyAsText())
     }
 
     suspend fun deleteItem(itemId: String) {
@@ -430,6 +464,7 @@ class GraphApiService(
         localPath: Path,
         remotePath: String,
         onProgress: ((Long, Long) -> Unit)? = null,
+        fileSystemInfo: FileSystemInfo? = null,
     ): DriveItem {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
         log.debug("Upload (chunked): {} ({} bytes)", remotePath, fileSize)
@@ -437,7 +472,7 @@ class GraphApiService(
         val encoded = encodePath(cleanPath)
 
         // Try to resume a persisted session from a previous run.
-        val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded)
+        val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded, fileSystemInfo)
 
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
 
@@ -493,6 +528,7 @@ class GraphApiService(
         remotePath: String,
         cleanPath: String,
         encoded: String,
+        fileSystemInfo: FileSystemInfo? = null,
     ): Pair<String, Long> {
         val stored = sessionStore.get(remotePath)
         if (stored != null) {
@@ -514,12 +550,23 @@ class GraphApiService(
             sessionStore.delete(remotePath)
         }
 
-        // Create a new upload session.
+        val sessionBody =
+            buildJsonObject {
+                putJsonObject("item") {
+                    put("@microsoft.graph.conflictBehavior", "replace")
+                    if (fileSystemInfo != null) {
+                        putJsonObject("fileSystemInfo") {
+                            fileSystemInfo.createdDateTime?.let { put("createdDateTime", it) }
+                            fileSystemInfo.lastModifiedDateTime?.let { put("lastModifiedDateTime", it) }
+                        }
+                    }
+                }
+            }
         val sessionResponse =
             httpClient.post("$baseUrl/me/drive/root:/$encoded:/createUploadSession") {
                 bearerAuth(tokenProvider(false))
                 contentType(ContentType.Application.Json)
-                setBody("""{"item": {"@microsoft.graph.conflictBehavior": "replace"}}""")
+                setBody(sessionBody.toString())
             }
 
         if (sessionResponse.status == HttpStatusCode.Unauthorized) {
