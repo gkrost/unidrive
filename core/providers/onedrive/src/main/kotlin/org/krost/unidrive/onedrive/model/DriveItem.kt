@@ -2,7 +2,6 @@ package org.krost.unidrive.onedrive.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class DriveItem(
@@ -18,8 +17,8 @@ data class DriveItem(
     @SerialName("parentReference") val parentReference: ParentReference? = null,
     @SerialName("fileSystemInfo") val fileSystemInfo: FileSystemInfo? = null,
     @SerialName("remoteItem") val remoteItem: RemoteItem? = null,
-    @SerialName("@microsoft.graph.removed") val removed: JsonObject? = null,
-    @SerialName("deleted") val deleted: JsonObject? = null,
+    @SerialName("@microsoft.graph.removed") val removed: Removed? = null,
+    @SerialName("deleted") val deleted: Deleted? = null,
 ) {
     val isFolder: Boolean get() = folder != null
     val isFile: Boolean get() = file != null
@@ -91,6 +90,31 @@ data class ParentReference(
 data class FileSystemInfo(
     @SerialName("createdDateTime") val createdDateTime: String? = null,
     @SerialName("lastModifiedDateTime") val lastModifiedDateTime: String? = null,
+)
+
+/**
+ * `@microsoft.graph.removed` facet on a delta response item. The `state`
+ * field distinguishes a hard delete (`"deleted"` — item is in the recycle
+ * bin and will be permanently purged after Graph's TTL) from a soft removal
+ * (`"removed"` — the item is no longer accessible to this user, e.g. a
+ * shared-with-me link revoked, or moved out of scope — could come back).
+ * Both still mean "the local copy should go" for sync purposes, but the
+ * distinction matters for diagnostics and for reasoning about whether the
+ * deletion is reversible.
+ */
+@Serializable
+data class Removed(
+    @SerialName("state") val state: String? = null,
+)
+
+/**
+ * `deleted` facet on a delta or item response. Present whenever the item
+ * itself has been deleted; `state` is typically `"deleted"`. Distinct from
+ * `@microsoft.graph.removed` in that it can appear on non-delta endpoints.
+ */
+@Serializable
+data class Deleted(
+    @SerialName("state") val state: String? = null,
 )
 
 @Serializable

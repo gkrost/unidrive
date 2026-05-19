@@ -319,6 +319,90 @@ class ListChildrenPaginationTest {
         }
 
     @Test
+    fun `getDelta warns once when the on-disk delta_last_seen is older than the safe window`() =
+        runTest {
+            val tokenDir = java.nio.file.Files.createTempDirectory("unidrive-delta-safety-old-")
+            // Seed delta_last_seen with a timestamp 60 days old — well past the 30-day floor.
+            val sixtyDaysAgo = java.time.Instant.now().minus(java.time.Duration.ofDays(60))
+            java.nio.file.Files.writeString(tokenDir.resolve("delta_last_seen"), sixtyDaysAgo.toString())
+
+            val deltaBody = """{"value":[],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/me/drive/root/delta?token=NEXT"}"""
+            val engine =
+                MockEngine { _ ->
+                    respond(deltaBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            val graphLogger =
+                org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.onedrive.GraphApiService")
+                    as ch.qos.logback.classic.Logger
+            val appender =
+                ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+            graphLogger.addAppender(appender)
+            val previousLevel = graphLogger.level
+
+            try {
+                val service = newServiceWithStore(tokenDir)
+                installMockClient(service, engine)
+
+                // Two consecutive resume-style calls: the warning must fire exactly once
+                // (per-instance latch), not on every page.
+                service.getDelta(link = "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=PRIOR")
+                service.getDelta(link = "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=PRIOR")
+
+                val warns =
+                    appender.list.filter {
+                        it.level == ch.qos.logback.classic.Level.WARN &&
+                            it.formattedMessage.contains("delta cursor was last advanced")
+                    }
+                assertEquals(1, warns.size, "Cursor-age WARN must fire exactly once per session, was: ${appender.list.map { it.formattedMessage }}")
+                assertTrue(warns[0].formattedMessage.contains("60"), "WARN should name the actual age in days, was: ${warns[0].formattedMessage}")
+                service.close()
+            } finally {
+                graphLogger.detachAppender(appender)
+                graphLogger.level = previousLevel
+                runCatching { java.nio.file.Files.walk(tokenDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+            }
+        }
+
+    @Test
+    fun `getDelta does not warn when delta_last_seen is recent`() =
+        runTest {
+            val tokenDir = java.nio.file.Files.createTempDirectory("unidrive-delta-safety-fresh-")
+            java.nio.file.Files.writeString(
+                tokenDir.resolve("delta_last_seen"),
+                java.time.Instant.now().minus(java.time.Duration.ofDays(3)).toString(),
+            )
+
+            val deltaBody = """{"value":[],"@odata.deltaLink":"https://graph.microsoft.com/v1.0/me/drive/root/delta?token=NEXT"}"""
+            val engine =
+                MockEngine { _ ->
+                    respond(deltaBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            val graphLogger =
+                org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.onedrive.GraphApiService")
+                    as ch.qos.logback.classic.Logger
+            val appender =
+                ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+            graphLogger.addAppender(appender)
+
+            try {
+                val service = newServiceWithStore(tokenDir)
+                installMockClient(service, engine)
+                service.getDelta(link = "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=PRIOR")
+
+                val warns =
+                    appender.list.filter {
+                        it.level == ch.qos.logback.classic.Level.WARN &&
+                            it.formattedMessage.contains("delta cursor was last advanced")
+                    }
+                assertTrue(warns.isEmpty(), "Recent cursor must not produce a WARN, but got: ${warns.map { it.formattedMessage }}")
+                service.close()
+            } finally {
+                graphLogger.detachAppender(appender)
+                runCatching { java.nio.file.Files.walk(tokenDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+            }
+        }
+
+    @Test
     fun `resolveUploadSession refreshes stored expiresAt from probe response`() =
         runTest {
             val storeDir = java.nio.file.Files.createTempDirectory("unidrive-store-refresh-")

@@ -49,6 +49,37 @@ class GraphApiService(
     private val sessionStore = UploadSessionStore(config.tokenPath)
     private val baseUrl = "${OneDriveConfig.GRAPH_BASE_URL}/${OneDriveConfig.GRAPH_VERSION}"
 
+    private val deltaSafetyFile: Path get() = config.tokenPath.resolve("delta_last_seen")
+    private val cursorAgeWarned = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun checkDeltaCursorAge() {
+        if (cursorAgeWarned.get()) return
+        val prior =
+            runCatching { Files.readString(deltaSafetyFile).trim() }
+                .mapCatching { java.time.Instant.parse(it) }
+                .getOrNull() ?: return
+        val ageDays = java.time.Duration.between(prior, java.time.Instant.now()).toDays()
+        if (ageDays >= DELTA_SAFE_WINDOW_DAYS && cursorAgeWarned.compareAndSet(false, true)) {
+            log.warn(
+                "OneDrive delta cursor was last advanced {} days ago. Graph's soft-delete TTL " +
+                    "for delta markers is roughly {} days, so deletions that happened in the " +
+                    "intervening window may have aged out and will not appear as deletions in " +
+                    "future delta responses. A 410 Gone on the next call would force a full " +
+                    "resync; otherwise a manual `unidrive --reset` is the only way to rediscover " +
+                    "missed deletions.",
+                ageDays,
+                DELTA_SAFE_WINDOW_DAYS,
+            )
+        }
+    }
+
+    private fun recordDeltaSeen() {
+        runCatching {
+            Files.createDirectories(config.tokenPath)
+            Files.writeString(deltaSafetyFile, java.time.Instant.now().toString())
+        }
+    }
+
     private fun encodePath(path: String): String =
         path.split("/").joinToString("/") {
             URLEncoder.encode(it, "UTF-8").replace("+", "%20")
@@ -133,6 +164,7 @@ class GraphApiService(
     ): DeltaResult {
         val url = link ?: if (fromLatest) "$baseUrl/me/drive/root/delta?token=latest" else "$baseUrl/me/drive/root/delta"
         log.debug("Delta cursor: {}", link?.takeLast(40) ?: if (fromLatest) "(token=latest bootstrap)" else "(initial)")
+        if (link != null) checkDeltaCursorAge()
 
         var attempt = 0
         val maxAttempts = 3
@@ -141,6 +173,7 @@ class GraphApiService(
                 val response = authenticatedRequest(url)
                 val body = response.bodyAsText()
                 val parsed = json.decodeFromString<DriveItemCollectionResponse>(body)
+                recordDeltaSeen()
                 return DeltaResult(
                     items = parsed.value,
                     nextLink = parsed.nextLink,
@@ -917,6 +950,11 @@ class GraphApiService(
         private const val MAX_TOTAL_THROTTLE_WAIT_MS = 900_000L // 15 min budget per request
         private const val DEFAULT_BACKOFF_START_MS = 2_000L
         private const val MAX_FLAKE_ATTEMPTS = 3
+
+        // Microsoft doesn't publish a hard TTL for the delta soft-delete marker, but
+        // operational experience on personal tenants is ~30 days; business tenants can
+        // be shorter. Treat this as "warn floor", not a guarantee.
+        internal const val DELTA_SAFE_WINDOW_DAYS = 30L
     }
 
     suspend fun createSharingLink(

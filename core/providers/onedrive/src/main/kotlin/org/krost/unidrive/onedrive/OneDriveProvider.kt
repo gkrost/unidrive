@@ -161,17 +161,45 @@ class OneDriveProvider(
         // intentionally unused. Left in the signature so the SPI shape is
         // uniform across providers — see CloudProvider.kt for the contract.
         val result = graphApi.getDelta(cursor)
-        val items =
+        val visibleItems =
             result.items
                 .filterNot { it.isRootItem() }
                 .filterNot { noteAndSkipVault(it) }
-                .map { it.toCloudItem() }
+        logDeletionStateSummary(visibleItems)
+        val items = visibleItems.map { it.toCloudItem() }
 
         return DeltaPage(
             items = items,
             cursor = result.deltaLink ?: result.nextLink ?: "",
             hasMore = result.nextLink != null,
         )
+    }
+
+    private fun logDeletionStateSummary(items: List<DriveItem>) {
+        // Graph's two deletion signals on a delta page mean different things; surface the
+        // distinction at DEBUG so an operator triaging "deleted X items today" can tell
+        // hard deletes (recycle bin) from access-revocations (still extant elsewhere).
+        var hardDelete = 0 // @microsoft.graph.removed state=deleted, or deleted facet present
+        var softRemove = 0 // @microsoft.graph.removed state=removed (permission lost / out of view)
+        var unspecified = 0 // either facet present but no state field (pre-2017 schema fallback)
+        for (item in items) {
+            val removedState = item.removed?.state
+            val deletedPresent = item.deleted != null
+            when {
+                removedState == "removed" -> softRemove++
+                removedState == "deleted" || deletedPresent -> hardDelete++
+                item.removed != null -> unspecified++
+            }
+        }
+        if (hardDelete + softRemove + unspecified > 0) {
+            log.debug(
+                "Delta page deletion mix: hardDelete={} softRemove={} unspecified={} (totalItems={})",
+                hardDelete,
+                softRemove,
+                unspecified,
+                items.size,
+            )
+        }
     }
 
     override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> {

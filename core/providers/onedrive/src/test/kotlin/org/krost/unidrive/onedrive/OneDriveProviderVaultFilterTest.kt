@@ -200,6 +200,67 @@ class OneDriveProviderVaultFilterTest {
         }
 
     @Test
+    fun `delta surfaces both removed and deleted facets as deleted CloudItems with state-aware logging`() =
+        runTest {
+            // Mixed-state delta page: one hard-delete (state=deleted), one soft-remove
+            // (state=removed), one stateless removed marker (pre-2017 schema), and one
+            // top-level `deleted` facet. All four must surface as `CloudItem.deleted = true`,
+            // and the provider's DEBUG log must distinguish hard from soft for diagnostics.
+            // Real-world delta deletion items just carry id + removal marker (no name, no
+            // facets) — anything richer would trip the facet-less zero-size vault filter.
+            val body =
+                """
+                {
+                  "value": [
+                    {"id":"hd","@microsoft.graph.removed":{"state":"deleted"},"parentReference":{"path":"/drive/root:"}},
+                    {"id":"sr","@microsoft.graph.removed":{"state":"removed"},"parentReference":{"path":"/drive/root:"}},
+                    {"id":"un","@microsoft.graph.removed":{},"parentReference":{"path":"/drive/root:"}},
+                    {"id":"de","deleted":{"state":"deleted"},"parentReference":{"path":"/drive/root:"}},
+                    {"id":"al","name":"alive.txt","size":4,"file":{"mimeType":"text/plain"},"parentReference":{"path":"/drive/root:"}}
+                  ],
+                  "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=DONE"
+                }
+                """.trimIndent()
+
+            val providerLogger =
+                org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.onedrive.OneDriveProvider")
+                    as ch.qos.logback.classic.Logger
+            val previousLevel = providerLogger.level
+            providerLogger.level = ch.qos.logback.classic.Level.DEBUG
+            val appender =
+                ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+            providerLogger.addAppender(appender)
+
+            try {
+                val provider = mockedProvider(body)
+                val page = provider.delta(cursor = "old-cursor")
+
+                assertEquals(5, page.items.size, "All five items surface; deleted ones still appear (engine consumes the flag)")
+                assertEquals(4, page.items.count { it.deleted }, "Four deletion signals must all flag deleted=true")
+                assertEquals(1, page.items.count { !it.deleted && it.name == "alive.txt" })
+
+                val debug =
+                    appender.list.firstOrNull {
+                        it.level == ch.qos.logback.classic.Level.DEBUG &&
+                            it.formattedMessage.contains("Delta page deletion mix")
+                    }
+                kotlin.test.assertNotNull(debug, "expected diagnostic DEBUG with deletion-kind counts, got: ${appender.list.map { it.formattedMessage }}")
+                kotlin.test.assertTrue(
+                    debug.formattedMessage.contains("hardDelete=2") &&
+                        debug.formattedMessage.contains("softRemove=1") &&
+                        debug.formattedMessage.contains("unspecified=1"),
+                    "Counts must distinguish hard delete (state=deleted OR deleted-facet) " +
+                        "from soft remove (state=removed) from unspecified (facet present, no state). " +
+                        "Was: ${debug.formattedMessage}",
+                )
+                provider.close()
+            } finally {
+                providerLogger.detachAppender(appender)
+                providerLogger.level = previousLevel
+            }
+        }
+
+    @Test
     fun `delta filters out Personal Vault alongside root-item filter`() =
         runTest {
             // Delta response includes:
