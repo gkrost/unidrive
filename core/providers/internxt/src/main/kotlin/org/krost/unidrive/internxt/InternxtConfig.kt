@@ -18,6 +18,12 @@ data class InternxtConfig(
     // build time by drive-desktop's CI pipeline and isn't in the public repo.
     // Override via INTERNXT_NOTIFICATIONS_URL once confirmed via mitmproxy.
     val notificationsUrl: String = System.getenv("INTERNXT_NOTIFICATIONS_URL") ?: NOTIFICATIONS_URL,
+    // Opt-in destructive-overwrite guard. When true, every `replaceFile`
+    // first renames the prior file to `${plainName}.unidrive-prev-${utcStamp}`
+    // and creates the new content as a fresh file. Pure recovery insurance
+    // because Internxt has no server-side versioning. Default off; storage
+    // cost doubles per edit with no automatic prune.
+    val keepOverwritten: Boolean = false,
 ) {
     companion object {
         const val API_BASE_URL = "https://gateway.internxt.com/drive"

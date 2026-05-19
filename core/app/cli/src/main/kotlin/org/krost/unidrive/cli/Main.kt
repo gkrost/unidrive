@@ -339,6 +339,7 @@ class Main : Runnable {
             "rclone_config" to rp.rclone_config,
             "authority_url" to rp.authority_url,
             "trust_all_certs" to rp.trust_all_certs?.toString(),
+            "keep_overwritten" to rp.keep_overwritten?.toString(),
         )
     }
 

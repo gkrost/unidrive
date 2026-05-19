@@ -44,7 +44,7 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 |---|---|
 | OneDrive `malware` facet skip on download | One-line guard. |
 | OneDrive `fileSize` precheck → early 507 | Avoid wasted upload attempts. |
-| Internxt destructive-overwrite warning | Opt-in rename-and-keep mode given no server versioning. |
+| Internxt keep-overwritten prune | `unidrive prune --backups [--older-than 30d] [--profile NAME]` for `keep_overwritten` archives. Glob on `.unidrive-prev-*` in plainName. |
 | `unidrive status` no-default-profile fallback shows misleading "Local Filesystem" row | When invoked without `--profile` and with no default configured in `config.toml`, `unidrive status` renders a phantom row labeled "Local Filesystem" with a `⚠︎` marker, `[– –]` status code, and all-zero columns — looks like a real but broken entry, isn't. `unidrive status --all` correctly shows the configured providers. Either resolve a default profile up front and show its row, or emit a one-line message ("No default profile configured. Use --all to list, or --profile <name> to select.") and exit zero. The current placeholder is worse than either alternative because it suggests something is broken. |
 
 ## Cross-cutting

@@ -315,6 +315,71 @@ class InternxtProvider(
         }
     }
 
+    /**
+     * Destructive-overwrite guard: rename the file at [existingRemoteId] to
+     * `${plainName}.unidrive-prev-${utcStamp}` so a subsequent createFile
+     * lands the new content as a fresh row without dropping the prior bytes.
+     *
+     * On 409 (collision — two replaces inside one wall-clock second) walks
+     * the counter suffix (`-2`, `-3`, ...) up to [MAX_KEEP_OVERWRITTEN_RETRIES].
+     * Returns true on success, false on any failure (collision-exhausted,
+     * 5xx, IO). On false the caller falls through to the destructive
+     * `replaceFile` rather than stranding the local edit.
+     */
+    private suspend fun tryKeepOverwrittenRename(
+        existingRemoteId: String,
+        plainName: String,
+    ): Boolean {
+        val now = java.time.Instant.now()
+        val meta =
+            try {
+                api.getFileMeta(existingRemoteId)
+            } catch (e: Exception) {
+                log.warn(
+                    "keep_overwritten: getFileMeta({}) failed ({}); falling through to destructive replace",
+                    existingRemoteId,
+                    e.message ?: e.javaClass.simpleName,
+                )
+                return false
+            }
+        val srcPlainName = meta.plainName ?: plainName
+        val type = meta.type
+        for (counter in 1..MAX_KEEP_OVERWRITTEN_RETRIES) {
+            val archiveName = keepOverwrittenArchiveName(srcPlainName, now, counter)
+            try {
+                api.renameFile(existingRemoteId, plainName = archiveName, type = type)
+                return true
+            } catch (e: InternxtApiException) {
+                if (e.statusCode == 409 && counter < MAX_KEEP_OVERWRITTEN_RETRIES) {
+                    // Collision — another replace of the same file landed in
+                    // the same wall-clock second. Bump the counter and retry.
+                    continue
+                }
+                log.warn(
+                    "keep_overwritten: rename of {} to '{}' failed ({}); falling through to destructive replace",
+                    existingRemoteId,
+                    archiveName,
+                    "${e.statusCode} ${e.message ?: ""}",
+                )
+                return false
+            } catch (e: Exception) {
+                log.warn(
+                    "keep_overwritten: rename of {} to '{}' failed ({}); falling through to destructive replace",
+                    existingRemoteId,
+                    archiveName,
+                    e.message ?: e.javaClass.simpleName,
+                )
+                return false
+            }
+        }
+        log.warn(
+            "keep_overwritten: rename of {} hit {} consecutive 409 collisions; falling through to destructive replace",
+            existingRemoteId,
+            MAX_KEEP_OVERWRITTEN_RETRIES,
+        )
+        return false
+    }
+
     // UD-304: multipart constants available in InternxtConfig.MULTIPART_*; not yet consumed (pending UD-307 multipart endpoint impl).
     override suspend fun upload(
         localPath: Path,
@@ -603,14 +668,38 @@ class InternxtProvider(
         // appears when the reconciler thought a path was new but the remote already has it.
         val finalItem: CloudItem
         if (existingRemoteId != null) {
-            val replaced =
-                api.replaceFile(
-                    uuid = existingRemoteId,
-                    size = fileSize,
-                    fileId = bucketEntry.id,
-                    modificationTime = localMtime,
-                )
-            finalItem = replaced.toCloudItem(parentPath)
+            // Destructive-overwrite guard: when `keepOverwritten` is on,
+            // rename the prior cloud content to `${plainName}.unidrive-prev-${utcStamp}`
+            // and create the new content as a fresh file instead of letting
+            // `replaceFile` drop the prior bytes (Internxt has no server-side
+            // versioning). Falls through to the destructive replace if the
+            // rename can't be made unique after `MAX_KEEP_OVERWRITTEN_RETRIES`
+            // collision attempts or the rename itself errors — better to land
+            // the new content than to strand the local edit.
+            val archived = if (config.keepOverwritten) tryKeepOverwrittenRename(existingRemoteId, plainName) else false
+            if (archived) {
+                val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
+                val created =
+                    api.createFile(
+                        bucket = bucket,
+                        folderUuid = parentUuid,
+                        plainName = plainName,
+                        encryptedName = encryptedName,
+                        size = fileSize,
+                        type = ext,
+                        fileId = bucketEntry.id,
+                    )
+                finalItem = created.toCloudItem(parentPath)
+            } else {
+                val replaced =
+                    api.replaceFile(
+                        uuid = existingRemoteId,
+                        size = fileSize,
+                        fileId = bucketEntry.id,
+                        modificationTime = localMtime,
+                    )
+                finalItem = replaced.toCloudItem(parentPath)
+            }
         } else {
             val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
             val created =
@@ -1207,6 +1296,16 @@ class InternxtProvider(
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
 
         /**
+         * Cap on consecutive 409 collisions tolerated when the destructive-
+         * overwrite guard tries to rename the prior cloud file to an archive
+         * name. Two replaces of the same file inside one wall-clock second
+         * collide on the timestamp suffix; the counter (`-2`, `-3`, ...)
+         * disambiguates. After this many failed attempts, fall through to
+         * the destructive `replaceFile` rather than block the local edit.
+         */
+        internal const val MAX_KEEP_OVERWRITTEN_RETRIES: Int = 5
+
+        /**
          * UD-361: testable recursion driver. Walks the folder tree rooted at
          * [folderUuid], accumulating files into [accumulator]. On 500/503
          * from [getContents], increments [skipped] and returns (the subtree
@@ -1259,6 +1358,27 @@ class InternxtProvider(
         }
 
         fun pathSegments(path: String): List<String> = path.removePrefix("/").split("/").filter { it.isNotEmpty() }
+
+        /**
+         * Build the archive plainName for the destructive-overwrite guard.
+         * Returns `${plainName}.unidrive-prev-${yyyy-MM-dd'T'HH-mm-ss}` in UTC
+         * (`-` instead of `:` for NTFS portability). [counter] > 1 appends a
+         * `-N` suffix to break collisions when two replaces of the same file
+         * fall inside the same wall-clock second.
+         */
+        internal fun keepOverwrittenArchiveName(
+            plainName: String,
+            now: java.time.Instant,
+            counter: Int = 1,
+        ): String {
+            val stamp =
+                java.time.format.DateTimeFormatter
+                    .ofPattern("yyyy-MM-dd'T'HH-mm-ss")
+                    .withZone(java.time.ZoneOffset.UTC)
+                    .format(now)
+            val base = "$plainName.unidrive-prev-$stamp"
+            return if (counter <= 1) base else "$base-$counter"
+        }
 
         /** UD-369: split a leaf filename into (plainName, type). Returned type is the bare extension or null. */
         fun stripExtension(filename: String): String =

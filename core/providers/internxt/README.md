@@ -78,6 +78,7 @@ Live `unidrive sync --dry-run` against the gateway has been seeing `GET /drive/f
 - **`DELETE /folders/{uuid}` takes a JSON body** listing items. RFC 7231 allows but discourages; some proxies strip DELETE bodies silently.
 - **`x-api-version: 2` only on Bridge.** Drive endpoints don't accept it. Bridge paths mix `/v2/...` and unversioned: `/v2/buckets/.../start` for upload but `/buckets/.../files/{id}/info` for metadata.
 - **Mnemonic in plaintext on disk.** `chmod 600`, but `cat` exposes every uploaded byte. The credential vault layer is opt-in.
+- **`keep_overwritten` per-profile flag** (default off). When on, every replace renames the prior cloud content to `${plainName}.unidrive-prev-${utcStamp}` before creating the new version. Pure recovery insurance — Internxt has no server-side versioning. Storage cost doubles per edit; no automatic prune. Encrypted `name` field on the archived row stays bound to the original plainName (rename only updates `plainName`). Manual cleanup via the upcoming `unidrive prune --backups` command (separate BACKLOG entry).
 
 ## Delta path-collapse
 

@@ -41,7 +41,11 @@ class InternxtProviderFactory : ProviderFactory {
         properties: Map<String, String?>,
         tokenPath: Path,
     ): CloudProvider {
-        val config = InternxtConfig(tokenPath = tokenPath)
+        // Destructive-overwrite guard: opt-in per profile via
+        // `[providers.<name>] keep_overwritten = true`. ProfileResolver
+        // funnels TOML keys through the properties map.
+        val keepOverwritten = properties["keep_overwritten"]?.toBooleanStrictOrNull() ?: false
+        val config = InternxtConfig(tokenPath = tokenPath, keepOverwritten = keepOverwritten)
         return InternxtProvider(config)
     }
 

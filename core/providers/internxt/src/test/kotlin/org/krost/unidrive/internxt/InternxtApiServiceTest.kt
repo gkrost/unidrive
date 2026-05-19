@@ -2022,4 +2022,385 @@ class InternxtApiServiceTest {
                 tmp.toFile().deleteRecursively()
             }
         }
+
+    // -----------------------------------------------------------------
+    // keep_overwritten destructive-overwrite guard. Same provider-with-
+    // bucket-credentials shape as the tombstone tests; replace branch
+    // routes through rename-then-create when the config opts in.
+    // -----------------------------------------------------------------
+
+    /** Mirror of [newProviderRooted] but with `keepOverwritten = true`. */
+    private fun newKeepOverwrittenProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
+        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath, keepOverwritten = true))
+        val authField = InternxtProvider::class.java.getDeclaredField("authService")
+        authField.isAccessible = true
+        val authService = authField.get(provider)
+        val credsField = authService.javaClass.getDeclaredField("credentials")
+        credsField.isAccessible = true
+        val payload = """{"exp":9999999999}"""
+        val payloadB64 =
+            java.util.Base64
+                .getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(payload.toByteArray())
+        val fakeJwt = "header.$payloadB64.signature"
+        credsField.set(
+            authService,
+            org.krost.unidrive.internxt.model.InternxtCredentials(
+                jwt = fakeJwt,
+                mnemonic =
+                    "abandon abandon abandon abandon abandon abandon " +
+                        "abandon abandon abandon abandon abandon about",
+                rootFolderId = "root-folder-uuid",
+                email = "test@example.invalid",
+                bridgeUser = "bridge-user",
+                bridgeUserId = "bridge-secret",
+                bucket = "6928426c1a2316b856c9ab81",
+            ),
+        )
+        return provider
+    }
+
+    @Test
+    fun `upload modify with keepOverwritten=false calls replaceFile directly`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-kov-off-")
+            // Local source file with a deterministic name so plainName=foo, ext=txt.
+            val local = tmp.resolve("foo.txt").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val renameMetaCalls = AtomicInteger(0)
+                val replaceCalls = AtomicInteger(0)
+                val createCalls = AtomicInteger(0)
+                val engine =
+                    io.ktor.client.engine.mock.MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") ->
+                                respond(
+                                    content = """{"uploads":[{"index":0,"uuid":"shard-uuid-1","url":"https://shard-host.invalid/put"}]}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url == "https://shard-host.invalid/put" ->
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") ->
+                                respond(
+                                    content = """{"id":"bridge-fileId-new","index":"00","bucket":"test-bucket","name":"enc-name"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                renameMetaCalls.incrementAndGet()
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"renamed","type":"txt","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-old"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.endsWith("/drive/files/remote-uuid-existing") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                replaceCalls.incrementAndGet()
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"foo","type":"txt","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-new"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.endsWith("/drive/files") && request.method == io.ktor.http.HttpMethod.Post -> {
+                                createCalls.incrementAndGet()
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            }
+                            else -> error("unexpected URL: $url (${request.method})")
+                        }
+                    }
+                installMockClientOnProvider(provider, engine)
+                provider.upload(local, "/foo.txt", existingRemoteId = "remote-uuid-existing", onProgress = null)
+                assertEquals(0, renameMetaCalls.get(), "keepOverwritten=false MUST NOT rename the prior file")
+                assertEquals(1, replaceCalls.get(), "keepOverwritten=false routes through PUT /files/{uuid}")
+                assertEquals(0, createCalls.get(), "keepOverwritten=false MUST NOT POST a new file")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `upload modify with keepOverwritten=true renames before creating`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-kov-on-")
+            val local = tmp.resolve("foo.txt").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newKeepOverwrittenProviderRooted(tmp)
+                val getMetaCalls = AtomicInteger(0)
+                val renameMetaCalls = AtomicInteger(0)
+                val replaceCalls = AtomicInteger(0)
+                val createCalls = AtomicInteger(0)
+                val capturedRenamePlainName = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val capturedCreatePlainName = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val engine =
+                    io.ktor.client.engine.mock.MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") ->
+                                respond(
+                                    content = """{"uploads":[{"index":0,"uuid":"shard-uuid-1","url":"https://shard-host.invalid/put"}]}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url == "https://shard-host.invalid/put" ->
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") ->
+                                respond(
+                                    content = """{"id":"bridge-fileId-new","index":"00","bucket":"test-bucket","name":"enc-name"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Get -> {
+                                getMetaCalls.incrementAndGet()
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"foo","type":"txt","size":"16","bucket":"test-bucket","fileId":"bridge-fileId-old","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                renameMetaCalls.incrementAndGet()
+                                val text =
+                                    when (val b = request.body) {
+                                        is io.ktor.http.content.TextContent -> b.text
+                                        is io.ktor.http.content.ByteArrayContent -> String(b.bytes(), Charsets.UTF_8)
+                                        else -> error("unexpected rename body: ${b.javaClass}")
+                                    }
+                                val parsed = Json.parseToJsonElement(text).jsonObject
+                                capturedRenamePlainName.add(parsed["plainName"]!!.jsonPrimitive.content)
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"${parsed["plainName"]!!.jsonPrimitive.content}","type":"txt","size":"16","bucket":"test-bucket","fileId":"bridge-fileId-old"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.endsWith("/drive/files/remote-uuid-existing") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                replaceCalls.incrementAndGet()
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            }
+                            url.endsWith("/drive/files") && request.method == io.ktor.http.HttpMethod.Post -> {
+                                createCalls.incrementAndGet()
+                                val text =
+                                    when (val b = request.body) {
+                                        is io.ktor.http.content.TextContent -> b.text
+                                        is io.ktor.http.content.ByteArrayContent -> String(b.bytes(), Charsets.UTF_8)
+                                        else -> error("unexpected create body: ${b.javaClass}")
+                                    }
+                                val parsed = Json.parseToJsonElement(text).jsonObject
+                                capturedCreatePlainName.add(parsed["plainName"]!!.jsonPrimitive.content)
+                                respond(
+                                    content = """{"uuid":"new-file-uuid","plainName":"foo","type":"txt","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-new","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            else -> error("unexpected URL: $url (${request.method})")
+                        }
+                    }
+                installMockClientOnProvider(provider, engine)
+                provider.upload(local, "/foo.txt", existingRemoteId = "remote-uuid-existing", onProgress = null)
+
+                assertEquals(1, getMetaCalls.get(), "must read prior file metadata to learn plainName + type")
+                assertEquals(1, renameMetaCalls.get(), "must rename existing UUID to archive plainName")
+                assertEquals(1, createCalls.get(), "must create the new file under the original plainName")
+                assertEquals(0, replaceCalls.get(), "rename-and-create path MUST NOT call destructive PUT /files/{uuid}")
+
+                val renamed = capturedRenamePlainName.single()
+                val archiveRegex = Regex("""^foo\.unidrive-prev-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$""")
+                kotlin.test.assertTrue(
+                    archiveRegex.matches(renamed),
+                    "archive plainName must match $archiveRegex; got '$renamed'",
+                )
+                assertEquals("foo", capturedCreatePlainName.single(), "createFile must keep the original plainName")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `upload modify with keepOverwritten=true and rename collision appends counter`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-kov-collision-")
+            val local = tmp.resolve("foo.txt").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newKeepOverwrittenProviderRooted(tmp)
+                val renameAttempts = AtomicInteger(0)
+                val capturedRenamePlainName = java.util.Collections.synchronizedList(mutableListOf<String>())
+                val engine =
+                    io.ktor.client.engine.mock.MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") ->
+                                respond(
+                                    content = """{"uploads":[{"index":0,"uuid":"shard-uuid-1","url":"https://shard-host.invalid/put"}]}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url == "https://shard-host.invalid/put" ->
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") ->
+                                respond(
+                                    content = """{"id":"bridge-fileId-new","index":"00","bucket":"test-bucket","name":"enc-name"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Get ->
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"foo","type":"txt","size":"16","bucket":"test-bucket","fileId":"bridge-fileId-old","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                val attempt = renameAttempts.incrementAndGet()
+                                val text =
+                                    when (val b = request.body) {
+                                        is io.ktor.http.content.TextContent -> b.text
+                                        is io.ktor.http.content.ByteArrayContent -> String(b.bytes(), Charsets.UTF_8)
+                                        else -> error("unexpected rename body: ${b.javaClass}")
+                                    }
+                                val parsed = Json.parseToJsonElement(text).jsonObject
+                                capturedRenamePlainName.add(parsed["plainName"]!!.jsonPrimitive.content)
+                                if (attempt == 1) {
+                                    // First rename collides — same wall-clock-second replace.
+                                    respond(
+                                        content = """{"statusCode":409,"message":"plainName already in use"}""",
+                                        status = io.ktor.http.HttpStatusCode.Conflict,
+                                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                    )
+                                } else {
+                                    // Counter-suffixed retry wins.
+                                    respond(
+                                        content = """{"uuid":"remote-uuid-existing","plainName":"${parsed["plainName"]!!.jsonPrimitive.content}","type":"txt","size":"16","bucket":"test-bucket","fileId":"bridge-fileId-old"}""",
+                                        status = io.ktor.http.HttpStatusCode.OK,
+                                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                    )
+                                }
+                            }
+                            url.endsWith("/drive/files") && request.method == io.ktor.http.HttpMethod.Post ->
+                                respond(
+                                    content = """{"uuid":"new-file-uuid","plainName":"foo","type":"txt","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-new","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            else -> error("unexpected URL: $url (${request.method})")
+                        }
+                    }
+                installMockClientOnProvider(provider, engine)
+                provider.upload(local, "/foo.txt", existingRemoteId = "remote-uuid-existing", onProgress = null)
+
+                assertEquals(2, renameAttempts.get(), "expected one collision then a counter-suffixed retry")
+                val secondAttempt = capturedRenamePlainName[1]
+                kotlin.test.assertTrue(
+                    secondAttempt.endsWith("-2"),
+                    "second rename plainName must end with '-2' counter suffix; got '$secondAttempt'",
+                )
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `upload modify with keepOverwritten=true falls through to destructive replace on rename failure`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-kov-fail-")
+            val local = tmp.resolve("foo.txt").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            // Capture the warn log emitted by the fall-through path.
+            val providerLogger =
+                org.slf4j.LoggerFactory.getLogger(InternxtProvider::class.java)
+                    as ch.qos.logback.classic.Logger
+            val appender =
+                ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+            providerLogger.addAppender(appender)
+            try {
+                val provider = newKeepOverwrittenProviderRooted(tmp)
+                val replaceCalls = AtomicInteger(0)
+                val engine =
+                    io.ktor.client.engine.mock.MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") ->
+                                respond(
+                                    content = """{"uploads":[{"index":0,"uuid":"shard-uuid-1","url":"https://shard-host.invalid/put"}]}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url == "https://shard-host.invalid/put" ->
+                                respond("", io.ktor.http.HttpStatusCode.OK)
+                            url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") ->
+                                respond(
+                                    content = """{"id":"bridge-fileId-new","index":"00","bucket":"test-bucket","name":"enc-name"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Get ->
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"foo","type":"txt","size":"16","bucket":"test-bucket","fileId":"bridge-fileId-old","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing/meta") &&
+                                request.method == io.ktor.http.HttpMethod.Put ->
+                                // Permanent 500 — non-transient retries inside renameFile exhaust,
+                                // bubble back to the guard which logs warn + falls through.
+                                respond(
+                                    content = """{"statusCode":500,"message":"boom"}""",
+                                    status = io.ktor.http.HttpStatusCode.InternalServerError,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            url.endsWith("/drive/files/remote-uuid-existing") &&
+                                request.method == io.ktor.http.HttpMethod.Put -> {
+                                replaceCalls.incrementAndGet()
+                                respond(
+                                    content = """{"uuid":"remote-uuid-existing","plainName":"foo","type":"txt","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-new","folderUuid":"root-folder-uuid","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            else -> error("unexpected URL: $url (${request.method})")
+                        }
+                    }
+                installMockClientOnProvider(provider, engine)
+                provider.upload(local, "/foo.txt", existingRemoteId = "remote-uuid-existing", onProgress = null)
+
+                assertEquals(1, replaceCalls.get(),
+                    "rename failure must NOT strand the edit — destructive replace runs as fallback")
+                val warn =
+                    appender.list.firstOrNull {
+                        it.level == ch.qos.logback.classic.Level.WARN &&
+                            it.formattedMessage.contains("keep_overwritten")
+                    }
+                kotlin.test.assertNotNull(
+                    warn,
+                    "expected a WARN-level fall-through message; got: ${appender.list.map { it.formattedMessage }}",
+                )
+            } finally {
+                providerLogger.detachAppender(appender)
+                appender.stop()
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
 }

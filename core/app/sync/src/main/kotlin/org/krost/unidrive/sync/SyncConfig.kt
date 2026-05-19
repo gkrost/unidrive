@@ -245,6 +245,12 @@ data class RawProvider(
     // Persists in config.toml so a user who opts in at profile creation doesn't need
     // to pass `--fast-bootstrap` every time. CLI flag takes precedence.
     val fast_bootstrap: Boolean? = null,
+    // Internxt destructive-overwrite guard. When set per profile, every
+    // `replaceFile` first renames the prior cloud content to
+    // `${plainName}.unidrive-prev-${utcStamp}` before creating the new
+    // version. Opt-in recovery insurance; default off. Threaded into
+    // InternxtConfig.keepOverwritten by InternxtProviderFactory.
+    val keep_overwritten: Boolean? = null,
 )
 
 @Serializable
