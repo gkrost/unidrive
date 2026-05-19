@@ -1071,7 +1071,22 @@ class SyncEngine(
         // or on any subsequent step, will retry from the freshly-persisted
         // delta_cursor (or pending_cursor if no transfers ran), not from the
         // staged offsets.
-        db.completeScan(scanId)
+        //
+        // Cross-session resume: when the gather returned `complete=false`
+        // (e.g. Internxt's 503 subtree skip or a partial ancestor-uuid drop),
+        // the marker + staged rows are deliberately preserved so the NEXT
+        // daemon launch can pick up at the same offset rather than restarting
+        // at 0. Pairs with the best-effort `delta_cursor` advance in
+        // `promotePendingCursor` — the cursor moves forward by `max(updatedAt)`
+        // over completed pages while the offset doesn't regress, so a
+        // throttle-cliff'd account makes monotonic progress across restarts
+        // even if no individual run reaches `complete=true`. The stale-
+        // threshold check inside `getActiveScan` is the safety net against
+        // an indefinitely-preserved marker drifting past Internxt's
+        // change-detection window.
+        if (allComplete) {
+            db.completeScan(scanId)
+        }
 
         if (isFullSync && allComplete) {
             detectMissingAfterFullSync(changes)

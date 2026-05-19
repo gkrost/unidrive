@@ -1626,6 +1626,90 @@ class SyncEngineTest {
             assertEquals(1, db.loadStagedItems(scanIdAfter).size)
         }
 
+    @Test
+    fun `gather preserves the checkpoint when delta returns complete=false`() =
+        runTest {
+            // A clean-exit gather pass that returned complete=false (e.g. the
+            // Internxt 503-subtree-skip or ancestor-uuid-drop path) must NOT
+            // clear the checkpoint — otherwise the next launch restarts at
+            // offset 0 even though offset N was reached and persisted. This
+            // is the cross-session resume seam paired with the best-effort
+            // `delta_cursor` advance in promotePendingCursor.
+            //
+            // stagedPages drive the persistPage callback (per-page durability);
+            // the returned DeltaPage is empty so no transfers fire — the test
+            // pins the checkpoint lifecycle, not the reconciler.
+            provider.stagedPages =
+                listOf(
+                    listOf(cloudItem("/p1.txt", size = 100)) to "150|50",
+                )
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "incomplete-cursor"
+            provider.deltaComplete = false
+
+            engine.syncOnce()
+
+            val scanIdAfter = db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)
+            assertNotNull(scanIdAfter, "incomplete gather must leave the checkpoint in place")
+            assertEquals(
+                "150|50",
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
+                "marker survives so the next session resumes from the same offset",
+            )
+            assertEquals(
+                1,
+                db.loadStagedItems(scanIdAfter).size,
+                "staged rows survive so the next delta() rehydrates them via resumedItems",
+            )
+            assertNotNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT),
+                "started_at survives — the stale-threshold check is the safety net",
+            )
+        }
+
+    @Test
+    fun `cross-session resume clears the checkpoint once delta returns complete=true`() =
+        runTest {
+            // Pre-seed a cross-session checkpoint (prior run exited with
+            // complete=false; marker + staged rows survived). The new
+            // session's delta() honours the resume hint via ScanContext,
+            // returns complete=true, and the engine clears everything so
+            // the third session starts fresh.
+            val priorScanId = db.beginScan(initialMarker = "150|50")
+            val priorStaged =
+                CloudItem(
+                    id = "prev-uuid",
+                    name = "prev.txt",
+                    path = "/prev.txt",
+                    size = 50,
+                    isFolder = false,
+                    modified = Instant.parse("2026-05-17T10:00:00Z"),
+                    created = null,
+                    hash = "prev-hash",
+                    mimeType = null,
+                    parentId = null,
+                )
+            db.persistScanPage(priorScanId, listOf(priorStaged), marker = "150|50")
+
+            provider.deltaItems = listOf(cloudItem("/new.txt", size = 20))
+            provider.deltaCursor = "complete-after-resume"
+            provider.deltaComplete = true
+            provider.files["/new.txt"] = ByteArray(20)
+
+            engine.syncOnce()
+
+            val ctx = provider.lastScanContext
+            assertNotNull(ctx)
+            assertEquals("150|50", ctx.resumeMarker, "engine must surface the prior marker as a resume hint")
+            assertEquals(1, ctx.resumedItems.size, "previously-staged rows feed back as resumedItems")
+            assertNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID),
+                "successful complete=true gather clears the cross-session checkpoint",
+            )
+            assertNull(db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
+            assertEquals(0, db.loadStagedItems(priorScanId).size, "staged rows cleared with the scan id")
+        }
+
     // ---- Remote-change wake-hint debounce (Internxt notifications WS) ----
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
