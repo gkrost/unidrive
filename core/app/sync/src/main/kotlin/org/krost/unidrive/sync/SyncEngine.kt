@@ -1288,40 +1288,96 @@ class SyncEngine(
             db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
         }
 
-        // Per-page reconciliation: build the page slice's remote map,
-        // run resolveSlice against the full local map, then classify.
-        // The state-machine flip happens after classify so a crash
-        // between page persistence and reconciliation will re-reconcile
-        // on resume rather than skip.
-        suspend fun reconcilePage(page: DeltaPage) {
+        // Per-page reconciliation with 1-page rename-coalescing lookahead
+        // (spec §3). Each freshly-arrived page is held in `held` for one
+        // page boundary before reconciling. When the next page lands,
+        // any item id in the next page that also lives in `held` has
+        // its held entry's path replaced with the next page's path
+        // (later page wins) — Internxt's separate /files and /folders
+        // streams can deliver a renamed item's new metadata in a later
+        // page than the rename of its parent, and absorbing that here
+        // saves an emitted DownloadContent-then-MoveLocal pair.
+        //
+        // Three-page renames still cost a wasted download — they fall
+        // through to next-sync's detectRemoteRenames. Acceptable per
+        // spec §3 risks.
+        //
+        // Held-page state: list of (resolved CloudItem, original remoteId)
+        // tuples. Reconciliation processes the held page, NOT the just-
+        // arrived page; the just-arrived page becomes the new held page.
+        // markStagedReconciled fires for the held page on flush.
+        data class HeldItem(val resolved: CloudItem, val originalId: String)
+        var heldItems: MutableMap<String, HeldItem>? = null
+
+        suspend fun flushHeld() {
+            val held = heldItems ?: return
+            if (held.isEmpty()) {
+                heldItems = null
+                return
+            }
             val pageSlice = mutableMapOf<String, CloudItem>()
             val pageRemoteIds = mutableListOf<String>()
-            for (item in page.items) {
-                val resolved = resolveItemPath(item) ?: continue
-                changes[resolved.path] = resolved
-                pageSlice[resolved.path] = resolved
-                pageRemoteIds.add(resolved.id)
+            for ((_, item) in held) {
+                pageSlice[item.resolved.path] = item.resolved
+                pageRemoteIds.add(item.originalId)
+                changes[item.resolved.path] = item.resolved
             }
-            persistPendingCursor(page.cursor)
             reporter.onScanProgress("remote", changes.size)
-
+            heldItems = null
             if (pageSlice.isEmpty()) return
             val pageActions = reconciler.resolveSlice(pageSlice, localChanges, syncPath)
             val safeNow = buffer.classify(pageActions)
             safeAccumulator.addAll(safeNow)
-            // Mark staged rows reconciled — a resume after this point
-            // will load only the still-STAGED slice (spec §5).
             if (pageRemoteIds.isNotEmpty()) {
                 db.markStagedReconciled(scanId, pageRemoteIds)
             }
         }
 
+        suspend fun ingestPage(page: DeltaPage) {
+            persistPendingCursor(page.cursor)
+
+            // Resolve and stage the new page's items keyed by remote id.
+            // resolveItemPath may collapse to null for unreachable deletes;
+            // those entries are dropped from the lookahead (the next sync
+            // will surface them once their context is in the local DB).
+            val newItems = LinkedHashMap<String, HeldItem>()
+            for (item in page.items) {
+                val resolved = resolveItemPath(item) ?: continue
+                newItems[resolved.id] = HeldItem(resolved, resolved.id)
+            }
+
+            // Merge step: any id in newItems that also lives in the held
+            // page gets its held entry's path overridden with the new
+            // page's path. The merged held item is what feeds into the
+            // reconciler when we flush.
+            val held = heldItems
+            if (held != null) {
+                for ((id, item) in newItems) {
+                    val priorHeld = held[id] ?: continue
+                    held[id] = HeldItem(
+                        resolved = priorHeld.resolved.copy(
+                            path = item.resolved.path,
+                            name = item.resolved.name,
+                        ),
+                        originalId = priorHeld.originalId,
+                    )
+                }
+            }
+
+            // Release the held page for reconciliation (now with any
+            // merged paths applied) and replace it with the new page.
+            flushHeld()
+            heldItems = newItems
+        }
+
         var page = nextPage(cursor)
-        reconcilePage(page)
+        ingestPage(page)
         while (page.hasMore) {
             page = nextPage(page.cursor)
-            reconcilePage(page)
+            ingestPage(page)
         }
+        // Final flush of whatever's still held after the last page.
+        flushHeld()
 
         if (allComplete) {
             db.completeScan(scanId)

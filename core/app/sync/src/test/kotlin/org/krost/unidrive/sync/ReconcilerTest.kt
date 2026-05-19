@@ -1645,6 +1645,44 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `resolveSlice on coalesced page sees the latest path for a renamed remote`() {
+        // Spec §3 scenario: the lookahead buffer in gatherStreamingChanges
+        // collapses page-N's /old.txt (id=id-X) with page-N+1's /new.txt
+        // (id=id-X) before reconciliation. The merged page that reaches
+        // resolveSlice carries the new path with the original id; the
+        // reconciler then needs to surface this as a rename — which it
+        // does by emitting a DownloadContent/CreatePlaceholder at the
+        // new path, which finalizeStreaming's detectRemoteRenames then
+        // turns into a MoveLocal against the DB row for the old path.
+        db.upsertEntry(dbEntry("/old.txt").copy(remoteId = "id-X", remoteHash = "h"))
+        // Coalesced slice from the lookahead: id-X now at /new.txt.
+        val coalesced =
+            mapOf(
+                "/new.txt" to
+                    CloudItem(
+                        id = "id-X",
+                        name = "new.txt",
+                        path = "/new.txt",
+                        size = 100,
+                        isFolder = false,
+                        modified = Instant.parse("2026-03-28T12:00:00Z"),
+                        created = null,
+                        hash = "h2",
+                        mimeType = null,
+                    ),
+            )
+        val pageActions = reconciler.resolveSlice(coalesced, emptyMap(), null)
+        val finalized = reconciler.finalizeStreaming(pageActions, coalesced, emptyMap(), null)
+        // After finalize there should be a single MoveLocal, NOT a
+        // DownloadContent for /new.txt plus a DeleteLocal of /old.txt.
+        val moves = finalized.filterIsInstance<SyncAction.MoveLocal>()
+        assertEquals(1, moves.size)
+        assertEquals("/new.txt", moves[0].path)
+        assertEquals("/old.txt", moves[0].fromPath)
+        assertTrue(finalized.none { it is SyncAction.DownloadContent && it.path == "/new.txt" })
+    }
+
+    @Test
     fun `finalizeStreaming runs cross-page move detection on safe-fired creates`() {
         // Page 1 streamed a DeleteRemote(/old.txt); page 2 streamed an
         // Upload(/new.txt) of matching size. Per-page reconcile saw each
