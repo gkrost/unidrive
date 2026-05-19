@@ -38,7 +38,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `createLink` client-side dedupe | Check `listPermissions` for an existing matching link before POSTing. |
 | OneDrive per-tenant concurrency calibration | Personal vs Business vs GCC; flagged in `core/providers/onedrive/README.md`. |
 | OneDrive `HttpRetryBudget` per-provider override | Constants currently global. |
-| Internxt local chunk-tombstone for upload resume | Compensate for missing resumable-upload protocol. |
 
 ## Low — guards and UX
 

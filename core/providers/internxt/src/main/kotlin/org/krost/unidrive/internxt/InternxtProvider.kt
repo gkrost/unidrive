@@ -29,6 +29,14 @@ class InternxtProvider(
     private val api = InternxtApiService(config, credentialsProvider = { forceRefresh -> authService.getValidCredentials(forceRefresh) })
     private val secureRandom = java.security.SecureRandom()
 
+    // Crash-recovery sidecar for in-flight uploads. Located alongside the
+    // per-profile token dir so the tombstone lifetime is automatically scoped
+    // to the same profile that owns the credentials (a stale tombstone from
+    // an old profile can't be misread by a new one). See UploadTombstoneStore
+    // for the full lifecycle and the spec compensating for Internxt's lack
+    // of a resumable-upload protocol.
+    private val tombstoneStore = UploadTombstoneStore(config.tokenPath.resolve("upload-tombstones"))
+
     // Internxt notifications (socket.io). Constructed lazily on the first
     // authenticate() success so we have a JWT to hand to the WS handshake;
     // disposed in close() / logout(). The current remote-change callback is
@@ -322,27 +330,68 @@ class InternxtProvider(
         val plainName = if (ext != null) fileName.substringBeforeLast('.') else fileName
         val parentPath = "/" + segments.dropLast(1).joinToString("/")
 
-        // 1. Get file size + mtime without loading into memory
-        val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        val localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
+        // Inline GC sweep for stale tombstones (missing-local or > RESUME_TTL_MS
+        // old). Bounded by the directory listing size — typical accounts see
+        // single-digit entries. Runs once per upload() call regardless of which
+        // path is being uploaded.
+        withContext(Dispatchers.IO) { tombstoneStore.gc(InternxtConfig.RESUME_TTL_MS) }
+
+        val pathHashStr = UploadTombstoneStore.pathHash(localPath.toAbsolutePath().toString())
+        val tempFile = tombstoneStore.ciphertextPath(pathHashStr)
+
+        // 1. Get file size + mtime without loading into memory. NoSuchFileException
+        // here means the local file vanished between scan and upload; surface
+        // after clearing any prior tombstone for the missing path.
+        val fileSize: Long
+        val localMtime: java.time.Instant
+        try {
+            fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
+            localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
+        } catch (e: java.nio.file.NoSuchFileException) {
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+            throw e
+        }
         onProgress?.invoke(0L, fileSize)
-        // Captured for the finishUpload-idempotency reconcile window: a slow retry that
-        // takes minutes to surface a 409 still finds its committed file.
-        val uploadStartedAt = Instant.now()
 
-        // 2. Generate random 32-byte index; derive key + iv. These MUST stay
-        // stable across stages 5-7 retries — the server stores `indexHex` in
-        // finishUpload, and ciphertext encrypted with an old index alongside a
-        // new index on the metadata side is silent corruption on download.
-        // The retry boundary below holds indexBytes / iv / fileKey / hashHex /
-        // tempFile constant by construction (they're computed once, outside
-        // the loop). See BACKLOG history "Internxt upload retry must pin
-        // indexBytes" for the constraint that this satisfies.
-        val indexBytes = ByteArray(32).also { secureRandom.nextBytes(it) }
+        // Resume hook. A non-null tomb that still matches the call shape lets us
+        // reuse the prior attempt's indexBytes / ciphertext / hash / shardUuid /
+        // putUrl in whatever combinations are still safe. A mismatch (different
+        // mtime/size/existingRemoteId, expired RESUME_TTL_MS) discards the
+        // sidecar + the .enc and forces a cold restart with fresh indexBytes.
+        val existingTomb =
+            withContext(Dispatchers.IO) { tombstoneStore.read(pathHashStr) }
+        val localMtimeMillis = localMtime.toEpochMilli()
+        val nowMillis = System.currentTimeMillis()
+        val resumeOk =
+            existingTomb != null &&
+                existingTomb.localPath == localPath.toAbsolutePath().toString() &&
+                existingTomb.localMtimeMillis == localMtimeMillis &&
+                existingTomb.localSize == fileSize &&
+                existingTomb.existingRemoteId == existingRemoteId &&
+                (nowMillis - existingTomb.startedAtMillis) <= InternxtConfig.RESUME_TTL_MS
+        val tomb: UploadTombstone?
+        if (existingTomb != null && !resumeOk) {
+            log.info(
+                "discarding stale upload tombstone for {} (mtime/size/existingRemoteId drift or TTL exceeded)",
+                localPath,
+            )
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+            tomb = null
+        } else {
+            tomb = existingTomb
+        }
+
+        // 2. indexBytes — RESUMED from the tombstone when present (the server-
+        //    stored hex MUST match the bytes the ciphertext was encrypted under,
+        //    or downloads decrypt to garbage). Fresh random only when starting
+        //    cold or after a staleness discard.
+        val indexBytes =
+            tomb?.let { InternxtCrypto.hexToBytes(it.indexBytesHex) }
+                ?: ByteArray(32).also { secureRandom.nextBytes(it) }
         val iv = indexBytes.copyOfRange(0, 16)
-        val creds = authService.getValidCredentials()
+        val indexHex = indexBytes.joinToString("") { "%02x".format(it) }
 
-        // 3. Resolve parent folder and get bucket from credentials
+        val creds = authService.getValidCredentials()
         val parentUuid = resolveFolder(parentPath)
         val bucket =
             creds.bucket.ifEmpty {
@@ -353,83 +402,206 @@ class InternxtProvider(
         val bucketKey = crypto.deriveBucketKey(seed, bucket)
         val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
-        // 4. Stream encrypted file to temp file (avoids OOM on large files)
-        val encCipher = crypto.createContentEncryptCipher(fileKey, iv)
-        val tempFile = withContext(Dispatchers.IO) { Files.createTempFile("unidrive-enc-", ".tmp") }
+        // Tombstone-canonical startedAt: when resuming we carry the ORIGINAL
+        // attempt's start instant through to commitWithRetry so the 409-reconcile
+        // window floors below the original finishUpload (a resume that runs
+        // hours later mustn't pin its window to "now" and miss the prior commit).
+        val uploadStartedAtMillis = tomb?.startedAtMillis ?: nowMillis
+        val uploadStartedAt = Instant.ofEpochMilli(uploadStartedAtMillis)
+
+        // Stage 1 entry: persist the initial tombstone BEFORE we touch the
+        // ciphertext. A kill mid-encrypt resumes with the same indexBytes and
+        // re-encrypts to the same deterministic temp path.
+        var currentTomb =
+            tomb ?: UploadTombstone(
+                localPath = localPath.toAbsolutePath().toString(),
+                localMtimeMillis = localMtimeMillis,
+                localSize = fileSize,
+                bucket = bucket,
+                folderUuid = parentUuid,
+                plainName = plainName,
+                ext = ext,
+                indexBytesHex = indexHex,
+                existingRemoteId = existingRemoteId,
+                stage = UploadTombstone.Stage.ENCRYPTING,
+                startedAtMillis = uploadStartedAtMillis,
+                tombstoneWrittenAtMillis = nowMillis,
+            )
+        if (tomb == null) {
+            withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
+        }
+
+        // Stage 3-4 — encrypt to deterministic .enc temp file. Skipped on
+        // resume from PUT_PENDING or later (the ciphertext + hash + size are
+        // already pinned in the tombstone, and the .enc on disk must round-
+        // trip the recorded encryptedSize or we re-encrypt as a safety net).
+        val needsEncrypt =
+            currentTomb.stage == UploadTombstone.Stage.ENCRYPTING ||
+                currentTomb.encryptedSize == null ||
+                currentTomb.hashHex == null ||
+                !withContext(Dispatchers.IO) { Files.exists(tempFile) } ||
+                withContext(Dispatchers.IO) { Files.size(tempFile) } != currentTomb.encryptedSize
         val encryptedSize: Long
         val hashHex: String
-        try {
-            // Encrypt to temp file + compute SHA-256 in a single pass
+        if (needsEncrypt) {
+            // Re-derive a fresh Cipher per encrypt pass (javax.crypto.Cipher is
+            // single-use after doFinal). The fileKey/iv stay byte-identical to
+            // whatever the tombstone pinned, which is the IV-pinning guarantee.
+            val encCipher = crypto.createContentEncryptCipher(fileKey, iv)
             val digest = java.security.MessageDigest.getInstance("SHA-256")
-            withContext(Dispatchers.IO) {
-                javax.crypto.CipherInputStream(Files.newInputStream(localPath), encCipher).use { cipherIn ->
-                    Files.newOutputStream(tempFile).use { out ->
-                        val buf = ByteArray(8192)
-                        var n: Int
-                        while (cipherIn.read(buf).also { n = it } != -1) {
-                            out.write(buf, 0, n)
-                            digest.update(buf, 0, n)
+            try {
+                withContext(Dispatchers.IO) {
+                    Files.createDirectories(tempFile.parent)
+                    javax.crypto.CipherInputStream(Files.newInputStream(localPath), encCipher).use { cipherIn ->
+                        Files.newOutputStream(tempFile).use { out ->
+                            val buf = ByteArray(8192)
+                            var n: Int
+                            while (cipherIn.read(buf).also { n = it } != -1) {
+                                out.write(buf, 0, n)
+                                digest.update(buf, 0, n)
+                            }
                         }
                     }
                 }
+                encryptedSize = withContext(Dispatchers.IO) { Files.size(tempFile) }
+                hashHex = digest.digest().joinToString("") { "%02x".format(it) }
+            } catch (e: java.nio.file.NoSuchFileException) {
+                // Mid-upload delete — local file vanished after we sized it.
+                withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+                throw e
+            } catch (e: Exception) {
+                // Keep the tombstone in place so the next attempt can resume
+                // (the .enc may be partial — encryptedSize mismatch on the
+                // resume path will trigger re-encrypt anyway).
+                throw e
             }
-            encryptedSize = Files.size(tempFile)
-            hashHex = digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            withContext(Dispatchers.IO) { Files.deleteIfExists(tempFile) }
-            throw e
+            currentTomb = currentTomb.copy(
+                stage = UploadTombstone.Stage.PUT_PENDING,
+                encryptedSize = encryptedSize,
+                hashHex = hashHex,
+                tombstoneWrittenAtMillis = System.currentTimeMillis(),
+            )
+            withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
+        } else {
+            encryptedSize = currentTomb.encryptedSize
+            hashHex = currentTomb.hashHex
         }
-        val indexHex = indexBytes.joinToString("") { "%02x".format(it) }
 
         // Temp file deletion brackets stages 5-7 (plus the retry loop wrapping
-        // them) so a finishUpload-409 reconcile that needs the ciphertext for
-        // any future fresh-indexBytes re-attempt at the caller layer doesn't
-        // get its inputs deleted out from under it.
+        // them); on success it's removed by tombstoneStore.discard at the
+        // bottom of the method. The finally below only fires on a thrown
+        // exception that wasn't already handled by the tombstone discard path
+        // — in that case we leave the .enc alone so the next upload() call
+        // can resume cleanly.
         val bucketEntry =
-            try {
-                retryShardCommit {
-                    // 5. Start upload → get presigned PUT url + uuid. Re-issued
-                    // per attempt: OVH presigned URLs expire and a stale URL
-                    // returns 403. Fresh startUpload also returns a fresh
-                    // shardUuid; commitWithRetry's finishUpload-409 reconcile
-                    // is keyed on the file's plainName + size + start window,
-                    // not the shardUuid, so the swap is safe.
+            retryShardCommit {
+                // 5. Start upload → fresh PUT URL when the cached one is null
+                //    (cold start), absent, or older than URL_TTL_MS (the OVH
+                //    presigned-URL safety margin). The ciphertext + indexBytes +
+                //    hashHex stay pinned across the URL refresh — only the
+                //    server-allocated shardUuid changes, and commitWithRetry's
+                //    reconcile keys on plainName+size+window, not on shardUuid.
+                val urlAgeMs = System.currentTimeMillis() - currentTomb.tombstoneWrittenAtMillis
+                val urlExpired = urlAgeMs > InternxtConfig.URL_TTL_MS
+                val shardUuid: String
+                val putUrl: String
+                if (currentTomb.stage == UploadTombstone.Stage.PUT_DONE ||
+                    currentTomb.stage == UploadTombstone.Stage.FINISH_DONE
+                ) {
+                    // PUT already landed on a prior attempt — we have a recorded
+                    // shardUuid that finishUpload still needs. Don't re-PUT.
+                    shardUuid = currentTomb.shardUuid!!
+                    putUrl = currentTomb.bridgePutUrl ?: ""
+                } else if (currentTomb.shardUuid == null || currentTomb.bridgePutUrl == null || urlExpired) {
                     val startResp = api.startUpload(bucket, encryptedSize)
                     val descriptor =
                         startResp.uploads.firstOrNull()
                             ?: throw ProviderException("No upload URL returned for $remotePath")
-                    val putUrl =
+                    putUrl =
                         descriptor.url
                             ?: throw ProviderException("Upload descriptor has no URL for $remotePath")
+                    shardUuid = descriptor.uuid
+                    currentTomb = currentTomb.copy(
+                        shardUuid = shardUuid,
+                        bridgePutUrl = putUrl,
+                        stage = UploadTombstone.Stage.PUT_PENDING,
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    )
+                    withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
+                } else {
+                    shardUuid = currentTomb.shardUuid!!
+                    putUrl = currentTomb.bridgePutUrl!!
+                }
 
-                    // 6. PUT encrypted shard from temp file. Single-shot at the
-                    // API layer; retry lives here so indexBytes stays pinned.
+                // 6. PUT encrypted shard from temp file. Skipped on PUT_DONE
+                //    resume (idempotent at the S3 layer but a no-op is cheaper).
+                if (currentTomb.stage == UploadTombstone.Stage.ENCRYPTING ||
+                    currentTomb.stage == UploadTombstone.Stage.PUT_PENDING
+                ) {
                     api.putEncryptedShardFromFile(putUrl, tempFile, encryptedSize)
                     onProgress?.invoke(fileSize, fileSize)
-
-                    // 7-8. Finish upload (with 409-reconcile idempotency) → get bridge fileId
-                    commitWithRetry(
-                        api = api,
-                        bucket = bucket,
-                        folderUuid = parentUuid,
-                        plainName = plainName,
-                        ext = ext,
-                        fileSize = fileSize,
-                        encryptedSize = encryptedSize,
-                        indexHex = indexHex,
-                        hashHex = hashHex,
-                        shardUuid = descriptor.uuid,
-                        startedAt = uploadStartedAt,
+                    currentTomb = currentTomb.copy(
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
                     )
+                    withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
                 }
-            } finally {
-                withContext(Dispatchers.IO) { Files.deleteIfExists(tempFile) }
+
+                // 7-8. Finish upload (with 409-reconcile idempotency) → get
+                //      bridge fileId. Skipped on FINISH_DONE resume (the
+                //      tombstone-carried bucket entry id is already in hand).
+                val entry =
+                    if (currentTomb.stage == UploadTombstone.Stage.FINISH_DONE) {
+                        // We landed here from a crash between finishUpload-OK
+                        // and the createFile/replaceFile call. The bucket entry
+                        // id isn't on the tombstone (we'd have to add a field
+                        // and re-write between PUT_DONE→FINISH_DONE), so call
+                        // finishUpload again — it'll either succeed (idempotent
+                        // at the server's reconcile path) or surface a 409 that
+                        // commitWithRetry resolves via the listing reconcile.
+                        commitWithRetry(
+                            api = api,
+                            bucket = bucket,
+                            folderUuid = parentUuid,
+                            plainName = plainName,
+                            ext = ext,
+                            fileSize = fileSize,
+                            encryptedSize = encryptedSize,
+                            indexHex = indexHex,
+                            hashHex = hashHex,
+                            shardUuid = shardUuid,
+                            startedAt = uploadStartedAt,
+                        )
+                    } else {
+                        val e =
+                            commitWithRetry(
+                                api = api,
+                                bucket = bucket,
+                                folderUuid = parentUuid,
+                                plainName = plainName,
+                                ext = ext,
+                                fileSize = fileSize,
+                                encryptedSize = encryptedSize,
+                                indexHex = indexHex,
+                                hashHex = hashHex,
+                                shardUuid = shardUuid,
+                                startedAt = uploadStartedAt,
+                            )
+                        currentTomb = currentTomb.copy(
+                            stage = UploadTombstone.Stage.FINISH_DONE,
+                            tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                        )
+                        withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
+                        e
+                    }
+                entry
             }
 
         // 9. Register file in drive metadata.
         // UD-366: MODIFIED uploads route through PUT /files/{uuid} (replace-in-place);
         // NEW uploads POST /files (create). Defensive fallback below catches the 409 that
         // appears when the reconciler thought a path was new but the remote already has it.
+        val finalItem: CloudItem
         if (existingRemoteId != null) {
             val replaced =
                 api.replaceFile(
@@ -438,41 +610,50 @@ class InternxtProvider(
                     fileId = bucketEntry.id,
                     modificationTime = localMtime,
                 )
-            return replaced.toCloudItem(parentPath)
+            finalItem = replaced.toCloudItem(parentPath)
+        } else {
+            val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
+            val created =
+                try {
+                    api.createFile(
+                        bucket = bucket,
+                        folderUuid = parentUuid,
+                        plainName = plainName,
+                        encryptedName = encryptedName,
+                        size = fileSize,
+                        type = ext,
+                        fileId = bucketEntry.id,
+                    )
+                } catch (e: InternxtApiException) {
+                    // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
+                    // path that already exists on remote. Re-resolve the UUID and retry as PUT
+                    // rather than stranding the local edit.
+                    if (e.statusCode != 409) throw e
+                    log.warn(
+                        "UD-366: 409 on POST /files for {} despite existingRemoteId=null — " +
+                            "reconciler/DB drift; re-resolving UUID and retrying as PUT /files/{{uuid}}",
+                        remotePath,
+                    )
+                    val existing = getMetadata(remotePath)
+                    if (existing.isFolder) throw e
+                    api.replaceFile(
+                        uuid = existing.id,
+                        size = fileSize,
+                        fileId = bucketEntry.id,
+                        modificationTime = localMtime,
+                    )
+                }
+            finalItem = created.toCloudItem(parentPath)
         }
 
-        val encryptedName = crypto.encryptName(plainName, "${creds.mnemonic}-$parentUuid")
-        val created =
-            try {
-                api.createFile(
-                    bucket = bucket,
-                    folderUuid = parentUuid,
-                    plainName = plainName,
-                    encryptedName = encryptedName,
-                    size = fileSize,
-                    type = ext,
-                    fileId = bucketEntry.id,
-                )
-            } catch (e: InternxtApiException) {
-                // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
-                // path that already exists on remote. Re-resolve the UUID and retry as PUT
-                // rather than stranding the local edit.
-                if (e.statusCode != 409) throw e
-                log.warn(
-                    "UD-366: 409 on POST /files for {} despite existingRemoteId=null — " +
-                        "reconciler/DB drift; re-resolving UUID and retrying as PUT /files/{{uuid}}",
-                    remotePath,
-                )
-                val existing = getMetadata(remotePath)
-                if (existing.isFolder) throw e
-                api.replaceFile(
-                    uuid = existing.id,
-                    size = fileSize,
-                    fileId = bucketEntry.id,
-                    modificationTime = localMtime,
-                )
-            }
-        return created.toCloudItem(parentPath)
+        // Success-path cleanup. Tombstone + .enc only get removed AFTER the
+        // drive metadata write lands so a crash in stages 5-9 leaves us with
+        // the data to resume; a crash AFTER this point falls through to the
+        // existing "create returns 409 because the cloud already has it"
+        // fallback above (existingRemoteId=null on the next call) — that path
+        // is covered by the UD-366 logic without needing a tombstone.
+        withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+        return finalItem
     }
 
     override suspend fun delete(remotePath: String) {

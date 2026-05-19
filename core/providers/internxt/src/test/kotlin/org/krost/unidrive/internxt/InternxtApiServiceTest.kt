@@ -1015,21 +1015,30 @@ class InternxtApiServiceTest {
 
     /**
      * Internxt upload retry must pin `indexBytes`. Force a transient on
-     * the first attempt and on the first finishUpload, then succeed. Captures
+     * the first PUT and on the first finishUpload, then succeed. Captures
      * the PUT ciphertext bodies AND the indexHex passed to finishUpload across
      * attempts; both must be byte-identical to prove that indexBytes / iv /
      * fileKey stayed stable across the retry boundary in `InternxtProvider`.
      *
      * Mocked endpoints (stateful counters):
-     *  - POST /v2/buckets/{bucket}/files/start    → fresh descriptor per attempt
+     *  - POST /v2/buckets/{bucket}/files/start    → fresh descriptor on first call
      *  - PUT  https://shard-host.invalid/put-target → 503 on attempt 1, OK after
-     *  - POST /v2/buckets/{bucket}/files/finish   → 503 on attempt 2, OK on attempt 3
+     *  - POST /v2/buckets/{bucket}/files/finish   → 503 on attempt 1, OK on attempt 2
      *  - POST /drive/files                         → OK (createFile after commit)
      *
-     * Three retry-loop iterations exercise the IV-pinning constraint exactly:
-     * attempt-1 PUT fails, attempt-2 finishUpload fails, attempt-3 succeeds.
-     * Two PUT-OK bodies (attempts 2, 3) plus two finishUpload bodies (also 2, 3)
-     * pin the constraint from both observable angles.
+     * Under the chunk-tombstone resume work, the in-process retry loop now
+     * reuses the tombstone-cached PUT URL across attempts (no per-attempt
+     * `startUpload` re-issue when the URL is still inside `URL_TTL_MS`),
+     * and skips the PUT entirely after `PUT_DONE` (idempotent at S3 but
+     * a no-op is cheaper). What the test pins is therefore:
+     *   - startUpload fires ONCE total (cached for the whole retry window),
+     *   - PUT fires twice (the 503 + the success),
+     *   - finishUpload fires twice (the 503 + the success),
+     *   - indexHex sent to both finishUpload bodies is byte-identical,
+     *   - the failed-PUT and success-PUT ciphertexts are byte-identical
+     *     (proves indexBytes/iv/fileKey stability — the load-bearing
+     *     invariant; if it breaks, every retried upload silently
+     *     corrupts on download).
      */
     @Test
     fun `upload retry pins indexBytes across attempts (IV stability)`() =
@@ -1048,11 +1057,6 @@ class InternxtApiServiceTest {
                     when {
                         url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") -> {
                             val n = startCalls.incrementAndGet()
-                            // Fresh descriptor per attempt — the production
-                            // pipeline re-issues startUpload on each attempt so
-                            // OVH presigned URLs can rotate without breaking
-                            // the wrap. shardUuid changes too (server-allocated),
-                            // which is fine: it's not the IV.
                             respond(
                                 content = """{"uploads":[{"index":0,"uuid":"shard-uuid-$n","url":"$shardUrl"}]}""",
                                 status = io.ktor.http.HttpStatusCode.OK,
@@ -1067,8 +1071,6 @@ class InternxtApiServiceTest {
                             val bodyBytes = drainOutgoingContent(request.body)
                             capturedPutBodies.add(bodyBytes)
                             if (n == 1) {
-                                // Attempt 1 PUT fails with 503 — retryShardCommit
-                                // catches it and re-enters the loop.
                                 respond(
                                     content = "",
                                     status = io.ktor.http.HttpStatusCode.ServiceUnavailable,
@@ -1084,7 +1086,6 @@ class InternxtApiServiceTest {
                         }
                         url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") -> {
                             val n = finishAttempts.incrementAndGet()
-                            // Parse the request body to capture indexHex.
                             val text =
                                 when (val b = request.body) {
                                     is io.ktor.http.content.ByteArrayContent ->
@@ -1092,11 +1093,8 @@ class InternxtApiServiceTest {
                                     is io.ktor.http.content.TextContent -> b.text
                                     else -> error("unexpected finishUpload body type: ${b.javaClass}")
                                 }
-                            // FinishUploadRequest is {"index": "...", "shards": [...]}
                             val parsed = Json.parseToJsonElement(text).jsonObject
-                            capturedFinishIndexHex.add(
-                                parsed["index"]!!.jsonPrimitive.content,
-                            )
+                            capturedFinishIndexHex.add(parsed["index"]!!.jsonPrimitive.content)
                             if (n == 1) {
                                 respond(
                                     content = """{"error":"service unavailable"}""",
@@ -1122,22 +1120,26 @@ class InternxtApiServiceTest {
                     }
                 }
 
-            val provider = newProviderWithBucketCredentials()
+            // Tombstone-isolated tempDir so this test can't trip over a
+            // sidecar from a prior failed run (or leak one to the next).
+            val tmpRoot = java.nio.file.Files.createTempDirectory("ud-iv-pin-")
+            val provider = newProviderRooted(tmpRoot)
             val tempLocal =
                 java.nio.file.Files
-                    .createTempFile("unidrive-iv-pin-test-", ".bin")
+                    .createTempFile(tmpRoot, "iv-pin-test-", ".bin")
                     .also { p ->
-                        // Deterministic, > zero length so encryption produces
-                        // a non-trivial ciphertext.
                         java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
                     }
             try {
                 installMockClientOnProvider(provider, engine)
                 provider.upload(tempLocal, "/iv-pin-test.bin", existingRemoteId = null, onProgress = null)
 
-                assertEquals(3, startCalls.get(), "startUpload re-issued on each retry attempt")
-                assertEquals(3, putAttempts.get(), "PUT retried after the attempt-1 503")
-                assertEquals(2, finishAttempts.get(), "finishUpload retried after the attempt-2 503")
+                assertEquals(1, startCalls.get(),
+                    "startUpload fires once and the URL is cached on the tombstone for the retry window")
+                assertEquals(2, putAttempts.get(),
+                    "PUT retries once after the attempt-1 503; PUT_DONE pins it so no third PUT on the finish-503 retry")
+                assertEquals(2, finishAttempts.get(),
+                    "finishUpload retries once after the attempt-1 503")
                 assertEquals(2, capturedFinishIndexHex.size, "two finishUpload bodies captured")
 
                 // Primary IV-pinning assertion: indexHex equality across the
@@ -1155,24 +1157,19 @@ class InternxtApiServiceTest {
                 )
 
                 // Secondary IV-pinning assertion: the PUT ciphertexts on the
-                // two OK attempts (attempt 2 and attempt 3) must be byte-identical.
-                // Equal ciphertexts under AES-CTR prove indexBytes / iv / fileKey
-                // ALL stayed stable — any drift in any of them changes the keystream
-                // and produces different ciphertext.
-                val putOnAttempt2 = capturedPutBodies[1]
-                val putOnAttempt3 = capturedPutBodies[2]
+                // failed attempt (1) and the succeeding attempt (2) must be
+                // byte-identical. Equal ciphertexts under AES-CTR prove
+                // indexBytes / iv / fileKey ALL stayed stable — any drift in
+                // any of them changes the keystream and produces different
+                // ciphertext.
                 kotlin.test.assertTrue(
-                    putOnAttempt2.contentEquals(putOnAttempt3),
-                    "PUT ciphertext MUST be byte-identical across retry attempts — proves indexBytes/iv/fileKey stability",
-                )
-                // Also pin attempt 1's body — same ciphertext, just discarded by the 503.
-                kotlin.test.assertTrue(
-                    capturedPutBodies[0].contentEquals(putOnAttempt2),
-                    "PUT ciphertext on the failed attempt must equal the succeeding attempts' ciphertext",
+                    capturedPutBodies[0].contentEquals(capturedPutBodies[1]),
+                    "PUT ciphertext on the failed attempt must equal the succeeding attempt's ciphertext",
                 )
             } finally {
                 java.nio.file.Files.deleteIfExists(tempLocal)
                 provider.close()
+                tmpRoot.toFile().deleteRecursively()
             }
         }
 
@@ -1251,5 +1248,778 @@ class InternxtApiServiceTest {
                     bytes
                 }
             else -> error("unexpected OutgoingContent type: ${content.javaClass}")
+        }
+
+    // -----------------------------------------------------------------
+    // Chunk-tombstone resume tests. The store is sidecar-on-disk under
+    // ${config.tokenPath}/upload-tombstones/, so each test gets its own
+    // tempDir-rooted config + provider so tombstones can't leak across
+    // tests or pollute the developer's real ~/.config/unidrive/.
+    // -----------------------------------------------------------------
+
+    /**
+     * Build a provider rooted at [tokenPath] (so the tombstone-store sidecar
+     * dir is test-local), pre-populated with the same credentials shape that
+     * [newProviderWithBucketCredentials] uses.
+     */
+    private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
+        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val authField = InternxtProvider::class.java.getDeclaredField("authService")
+        authField.isAccessible = true
+        val authService = authField.get(provider)
+        val credsField = authService.javaClass.getDeclaredField("credentials")
+        credsField.isAccessible = true
+        val payload = """{"exp":9999999999}"""
+        val payloadB64 =
+            java.util.Base64
+                .getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(payload.toByteArray())
+        val fakeJwt = "header.$payloadB64.signature"
+        credsField.set(
+            authService,
+            org.krost.unidrive.internxt.model.InternxtCredentials(
+                jwt = fakeJwt,
+                mnemonic =
+                    "abandon abandon abandon abandon abandon abandon " +
+                        "abandon abandon abandon abandon abandon about",
+                rootFolderId = "root-folder-uuid",
+                email = "test@example.invalid",
+                bridgeUser = "bridge-user",
+                bridgeUserId = "bridge-secret",
+                bucket = "6928426c1a2316b856c9ab81",
+            ),
+        )
+        return provider
+    }
+
+    /**
+     * Cheap default mock router for tombstone tests: counters per endpoint,
+     * vanilla success responses. Tests that need to inject failures override
+     * the engine inline.
+     */
+    private class TombMockCounters {
+        val startCalls = AtomicInteger(0)
+        val putCalls = AtomicInteger(0)
+        val finishCalls = AtomicInteger(0)
+        val createFileCalls = AtomicInteger(0)
+        val replaceFileCalls = AtomicInteger(0)
+        val listingCalls = AtomicInteger(0)
+        val capturedFinishIndexHex = java.util.Collections.synchronizedList(mutableListOf<String>())
+    }
+
+    private fun tombMockEngine(
+        counters: TombMockCounters,
+        shardUrl: String = "https://shard-host.invalid/put-target",
+        startUuid: String = "shard-uuid-fresh",
+    ): io.ktor.client.engine.mock.MockEngine =
+        io.ktor.client.engine.mock.MockEngine { request ->
+            val url = request.url.toString()
+            when {
+                url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") -> {
+                    counters.startCalls.incrementAndGet()
+                    respond(
+                        content = """{"uploads":[{"index":0,"uuid":"$startUuid","url":"$shardUrl"}]}""",
+                        status = io.ktor.http.HttpStatusCode.OK,
+                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                    )
+                }
+                url == shardUrl -> {
+                    counters.putCalls.incrementAndGet()
+                    respond("", io.ktor.http.HttpStatusCode.OK)
+                }
+                url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") -> {
+                    counters.finishCalls.incrementAndGet()
+                    val text =
+                        when (val b = request.body) {
+                            is io.ktor.http.content.ByteArrayContent -> String(b.bytes(), Charsets.UTF_8)
+                            is io.ktor.http.content.TextContent -> b.text
+                            else -> error("unexpected finishUpload body type: ${b.javaClass}")
+                        }
+                    val parsed = Json.parseToJsonElement(text).jsonObject
+                    counters.capturedFinishIndexHex.add(parsed["index"]!!.jsonPrimitive.content)
+                    respond(
+                        content = """{"id":"bridge-fileId-finish","index":"${parsed["index"]!!.jsonPrimitive.content}","bucket":"test-bucket","name":"enc-name"}""",
+                        status = io.ktor.http.HttpStatusCode.OK,
+                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                    )
+                }
+                url.startsWith("https://gateway.internxt.com/drive/files/") && request.method == io.ktor.http.HttpMethod.Put -> {
+                    counters.replaceFileCalls.incrementAndGet()
+                    respond(
+                        content = """{"uuid":"replaced-uuid","plainName":"resume-test","type":"bin","size":"32","bucket":"test-bucket","fileId":"bridge-fileId","status":"EXISTS"}""",
+                        status = io.ktor.http.HttpStatusCode.OK,
+                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                    )
+                }
+                url.startsWith("https://gateway.internxt.com/drive/files") && request.method == io.ktor.http.HttpMethod.Post -> {
+                    counters.createFileCalls.incrementAndGet()
+                    respond(
+                        content = """{"uuid":"file-uuid","plainName":"resume-test","type":"bin","size":"32","bucket":"test-bucket","fileId":"bridge-fileId","status":"EXISTS"}""",
+                        status = io.ktor.http.HttpStatusCode.OK,
+                        headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                    )
+                }
+                else -> error("unexpected URL hit by tombstone test: $url ($request.method)")
+            }
+        }
+
+    /**
+     * Pre-write a `.enc` ciphertext placeholder for the resume tests that
+     * skip re-encrypt. Content doesn't matter — the production code only
+     * checks Files.size against the tombstone's encryptedSize.
+     */
+    private fun seedEnc(
+        store: UploadTombstoneStore,
+        pathHash: String,
+        sizeBytes: Long,
+    ) {
+        val encPath = store.ciphertextPath(pathHash)
+        java.nio.file.Files.createDirectories(encPath.parent)
+        java.nio.file.Files.write(encPath, ByteArray(sizeBytes.toInt()) { 0x42 })
+    }
+
+    @Test
+    fun `tombstone round-trip writes the JSON sidecar and reads back identical bytes`() {
+        val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-rt-")
+        try {
+            val store = UploadTombstoneStore(tmp)
+            val pathHash = UploadTombstoneStore.pathHash("/some/file.bin")
+            val original =
+                UploadTombstone(
+                    localPath = "/some/file.bin",
+                    localMtimeMillis = 1_700_000_000_000L,
+                    localSize = 1024L,
+                    bucket = "bucket-1",
+                    folderUuid = "folder-uuid-1",
+                    plainName = "file",
+                    ext = "bin",
+                    indexBytesHex = "00".repeat(32),
+                    shardUuid = "shard-uuid-1",
+                    bridgePutUrl = "https://shard-host/put",
+                    encryptedSize = 1040L,
+                    hashHex = "aa".repeat(32),
+                    existingRemoteId = "remote-uuid-existing",
+                    stage = UploadTombstone.Stage.PUT_DONE,
+                    startedAtMillis = 1_700_000_000_500L,
+                    tombstoneWrittenAtMillis = 1_700_000_000_900L,
+                )
+            store.write(pathHash, original)
+            val readBack = store.read(pathHash)
+            assertEquals(original, readBack)
+        } finally {
+            tmp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `resume at ENCRYPTING re-runs the encrypt with the same indexBytes`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-enc-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                // Seed an ENCRYPTING tombstone — no .enc on disk yet, the
+                // resume path will re-encrypt under the SAME indexBytes.
+                val pinnedIndex = "11".repeat(32)
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        stage = UploadTombstone.Stage.ENCRYPTING,
+                        startedAtMillis = System.currentTimeMillis(),
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, counters.startCalls.get(), "fresh startUpload on resume from ENCRYPTING (no cached URL)")
+                assertEquals(1, counters.putCalls.get(), "PUT runs once after encrypt finishes")
+                assertEquals(1, counters.finishCalls.get(), "finishUpload runs once after PUT")
+                assertEquals(1, counters.createFileCalls.get(), "createFile runs once on a new path")
+                assertEquals(pinnedIndex, counters.capturedFinishIndexHex.single(),
+                    "indexHex sent to finishUpload MUST match the tombstone-pinned indexBytes")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `resume at PUT_PENDING with fresh URL re-PUTs cached ciphertext + indexBytes`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-put-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val pinnedIndex = "22".repeat(32)
+                val now = System.currentTimeMillis()
+                // Seed PUT_PENDING with a fresh-enough URL (<URL_TTL_MS old),
+                // shard uuid, and .enc placeholder — code path skips startUpload
+                // and re-PUTs directly with the cached descriptor.
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-pinned",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "bb".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_PENDING,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(0, counters.startCalls.get(), "startUpload SKIPPED — cached URL still within TTL")
+                assertEquals(1, counters.putCalls.get(), "PUT runs once against the cached URL")
+                assertEquals(1, counters.finishCalls.get(), "finishUpload runs once after PUT")
+                assertEquals(pinnedIndex, counters.capturedFinishIndexHex.single(),
+                    "indexHex sent to finishUpload MUST match the tombstone-pinned indexBytes")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `resume at PUT_DONE skips re-PUT and calls finishUpload once`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-putdone-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val pinnedIndex = "33".repeat(32)
+                val now = System.currentTimeMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-already-put",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "cc".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(0, counters.startCalls.get(), "startUpload SKIPPED on PUT_DONE resume")
+                assertEquals(0, counters.putCalls.get(), "PUT SKIPPED on PUT_DONE resume")
+                assertEquals(1, counters.finishCalls.get(), "finishUpload runs once")
+                assertEquals(1, counters.createFileCalls.get(), "createFile registers the bucket entry")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `resume at FINISH_DONE skips bridge calls and only re-finishes`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-finishdone-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val pinnedIndex = "44".repeat(32)
+                val now = System.currentTimeMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-finished",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "dd".repeat(32),
+                        stage = UploadTombstone.Stage.FINISH_DONE,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(0, counters.startCalls.get(), "startUpload SKIPPED on FINISH_DONE resume")
+                assertEquals(0, counters.putCalls.get(), "PUT SKIPPED on FINISH_DONE resume")
+                // Spec note: FINISH_DONE re-call of finishUpload either succeeds
+                // (idempotent at the server's reconcile path) or surfaces 409;
+                // our mock returns OK → the inner code re-derives the bucket
+                // entry id directly from the second finishUpload response, then
+                // proceeds to createFile.
+                assertEquals(1, counters.finishCalls.get(), "finishUpload called once on FINISH_DONE resume")
+                assertEquals(1, counters.createFileCalls.get(), "createFile registers the bucket entry")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `stale-on-mtime-drift discards the tombstone and rotates indexBytes`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-mtime-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val realMtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val staleIndex = "55".repeat(32)
+                // Tombstone says mtime was 1 hour BEFORE the file's actual mtime
+                // — drift trips the staleness check; the tombstone discards and
+                // a fresh indexBytes is generated.
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = realMtimeMillis - 3_600_000L,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = staleIndex,
+                        shardUuid = "shard-uuid-stale",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "ee".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = System.currentTimeMillis(),
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, counters.startCalls.get(), "startUpload re-issued on cold restart")
+                assertEquals(1, counters.putCalls.get(), "PUT runs once on cold restart")
+                assertEquals(1, counters.finishCalls.get(), "finishUpload runs once on cold restart")
+                val freshIndex = counters.capturedFinishIndexHex.single()
+                kotlin.test.assertNotEquals(staleIndex, freshIndex,
+                    "stale tombstone discarded → fresh indexBytes rotated through finishUpload")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `stale-on-size-drift discards the tombstone and rotates indexBytes`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-size-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val staleIndex = "66".repeat(32)
+                // localSize on the tombstone (16) ≠ actual file size (32).
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 16L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = staleIndex,
+                        shardUuid = "shard-uuid-stale",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 32L,
+                        hashHex = "ff".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = System.currentTimeMillis(),
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                val freshIndex = counters.capturedFinishIndexHex.single()
+                kotlin.test.assertNotEquals(staleIndex, freshIndex,
+                    "size drift → tombstone discard → fresh indexBytes")
+                assertEquals(1, counters.startCalls.get())
+                assertEquals(1, counters.putCalls.get())
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    /**
+     * IV-PINNING REGRESSION (case 8). The most load-bearing test in this set.
+     *
+     * Pre-write a PUT_PENDING tombstone with `tombstoneWrittenAtMillis` set
+     * far enough in the past to exceed `URL_TTL_MS`. The resume path MUST
+     * re-issue `startUpload` (to refresh the presigned PUT URL) WITHOUT
+     * touching `indexBytes`. That property is the entire reason this work
+     * exists: the server stores `indexHex` from finishUpload, and ciphertext
+     * encrypted with an old index alongside a new index in metadata is
+     * silent corruption on download.
+     */
+    @Test
+    fun `stale-on-URL-TTL re-issues startUpload but preserves indexBytes (IV-pinning regression)`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-urlttl-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val pinnedIndex = "77".repeat(32)
+                val staleMillis = System.currentTimeMillis() - (InternxtConfig.URL_TTL_MS + 60_000L)
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-expired",
+                        bridgePutUrl = "https://shard-host.invalid/expired-target",
+                        encryptedSize = 48L,
+                        hashHex = "aa".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_PENDING,
+                        startedAtMillis = staleMillis,
+                        tombstoneWrittenAtMillis = staleMillis,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val counters = TombMockCounters()
+                // Mock returns a FRESH startUpload URL — verifies the resume
+                // re-issued startUpload even though shardUuid+URL were on the
+                // tombstone. The OLD URL hostname doesn't appear in routing.
+                installMockClientOnProvider(provider, tombMockEngine(counters, startUuid = "shard-uuid-fresh-after-ttl"))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, counters.startCalls.get(), "URL TTL exceeded → fresh startUpload")
+                assertEquals(1, counters.putCalls.get(), "PUT runs once against the fresh URL")
+                assertEquals(1, counters.finishCalls.get(), "finishUpload runs once after PUT")
+
+                // THE load-bearing assertion: the indexHex sent to finishUpload
+                // — which is what the server records and what the file is
+                // decrypted under on every future download — MUST equal the
+                // pre-staged pinnedIndex byte-for-byte.
+                assertEquals(
+                    pinnedIndex,
+                    counters.capturedFinishIndexHex.single(),
+                    "indexHex MUST stay pinned across a URL-TTL refresh. " +
+                        "If this fails, every resumed upload after URL expiry is silently corrupted: " +
+                        "the bridge stores a fresh indexBytes alongside ciphertext encrypted with the original, " +
+                        "and downloads decrypt to garbage.",
+                )
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `stale-on-existingRemoteId-mismatch discards the tombstone`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-rid-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val staleIndex = "88".repeat(32)
+                // Tombstone was written for a MODIFIED upload; the new call
+                // comes in as NEW (existingRemoteId=null) — sync DB drift, must
+                // not adopt the prior MODIFIED-arc work for a fresh CREATE.
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = staleIndex,
+                        shardUuid = "shard-uuid-stale",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "aa".repeat(32),
+                        existingRemoteId = "remote-uuid-prior",
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = System.currentTimeMillis(),
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                // Pass existingRemoteId=null — mismatch with the tombstone.
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                val freshIndex = counters.capturedFinishIndexHex.single()
+                kotlin.test.assertNotEquals(staleIndex, freshIndex,
+                    "existingRemoteId mismatch → tombstone discard → fresh indexBytes")
+                assertEquals(1, counters.startCalls.get())
+                assertEquals(1, counters.createFileCalls.get(), "NEW call routes through createFile (not replaceFile)")
+                assertEquals(0, counters.replaceFileCalls.get())
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `409-reconcile on resumed finishUpload uses the original startedAt instant`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-409-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                val pinnedIndex = "99".repeat(32)
+                // The tombstone was created 4 minutes ago — well within the
+                // 5-minute reconcile window of commitWithRetry. A resume that
+                // "now" started a NEW startedAt would put now=t+4m and only
+                // accept commits AFTER t+4m-5m = t-1m (which is fine, but the
+                // production code passes the TOMBSTONE startedAt — the
+                // original t — and accepts commits AFTER t-5m. That's the
+                // invariant.). The listing-reconcile returns a creationTime
+                // exactly between t-5m and t (i.e. t-2m); under the wrong
+                // (now-anchored) window this would be REJECTED (NotFoundWithNameMatch),
+                // and the test would surface a 409 surfacing. Under the
+                // correct (tombstone-anchored) window it's ACCEPTED → returns
+                // the reconciled bucket entry.
+                val tombStarted = System.currentTimeMillis() - 4 * 60_000L
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-pre-409",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "bb".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = tombStarted,
+                        tombstoneWrittenAtMillis = tombStarted,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val plain = local.fileName.toString().substringBeforeLast('.')
+                val finishCalls = AtomicInteger(0)
+                val listingCalls = AtomicInteger(0)
+                val createCalls = AtomicInteger(0)
+                // Creation time exactly between tombStarted-5m and tombStarted
+                // (i.e. tombStarted-2m). Within window=tombStarted-5m, OK.
+                val reconciledCreationTime =
+                    java.time.Instant.ofEpochMilli(tombStarted - 2 * 60_000L).toString()
+
+                val engine =
+                    io.ktor.client.engine.mock.MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                                finishCalls.incrementAndGet()
+                                respond(
+                                    content = """{"statusCode":409,"message":"MissingUploadsError","error":"Conflict"}""",
+                                    status = io.ktor.http.HttpStatusCode.Conflict,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.contains("/folders/content/root-folder-uuid") -> {
+                                listingCalls.incrementAndGet()
+                                respond(
+                                    content = """{"children":[],"files":[{
+                                        "uuid":"resolved-uuid",
+                                        "fileId":"bridge-fileId-reconciled",
+                                        "plainName":"$plain",
+                                        "type":"bin",
+                                        "size":"32",
+                                        "bucket":"test-bucket",
+                                        "status":"EXISTS",
+                                        "creationTime":"$reconciledCreationTime"
+                                    }]}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            url.startsWith("https://gateway.internxt.com/drive/files") && request.method == io.ktor.http.HttpMethod.Post -> {
+                                createCalls.incrementAndGet()
+                                respond(
+                                    content = """{"uuid":"file-uuid","plainName":"$plain","type":"bin","size":"32","bucket":"test-bucket","fileId":"bridge-fileId-reconciled","status":"EXISTS"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                            else -> error("unexpected URL: $url ($request.method)")
+                        }
+                    }
+                installMockClientOnProvider(provider, engine)
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, finishCalls.get(), "finishUpload returns 409 once")
+                assertEquals(1, listingCalls.get(),
+                    "reconcile listing fires once and finds the candidate (proves the t-startedAt window was honoured)")
+                assertEquals(1, createCalls.get(),
+                    "after reconcile success, register the bucket entry on drive metadata")
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `missing local path during resume cleans up the tombstone`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-missing-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val mtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = mtimeMillis,
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = "aa".repeat(32),
+                        shardUuid = "shard-uuid-orphan",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "bb".repeat(32),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = System.currentTimeMillis(),
+                        tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+                kotlin.test.assertNotNull(store.read(pathHash))
+
+                // Delete the local file. Upload should fail with NoSuchFileException
+                // and the tombstone (plus its .enc) must be discarded.
+                java.nio.file.Files.delete(local)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                try {
+                    provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+                    kotlin.test.fail("expected NoSuchFileException — local file was deleted")
+                } catch (_: java.nio.file.NoSuchFileException) {
+                    // expected
+                }
+                kotlin.test.assertNull(store.read(pathHash),
+                    "missing local path on a tombstone → discard the sidecar (and .enc)")
+                kotlin.test.assertFalse(
+                    java.nio.file.Files.exists(store.ciphertextPath(pathHash)),
+                    "ciphertext temp file must also be cleaned up",
+                )
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
         }
 }

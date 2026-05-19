@@ -41,5 +41,24 @@ data class InternxtConfig(
 
         /** UD-304: swift-core parity — concurrent part uploads per file. */
         const val MAX_PARALLEL_PARTS: Int = 6
+
+        /**
+         * Overall freshness window for a chunk-tombstone resume. A tombstone
+         * whose `started_at_millis` floor is older than this is discarded
+         * on the next `upload()` call and the upload runs cold (fresh
+         * indexBytes, fresh encrypt). 7 days mirrors what an OS-level
+         * `/tmp` sweep would do to an orphaned ciphertext file.
+         */
+        const val RESUME_TTL_MS: Long = 7L * 24L * 60L * 60L * 1000L
+
+        /**
+         * Freshness window for a cached presigned Bridge PUT URL. The
+         * Internxt README quotes "~15 min" for OVH presigned URLs;
+         * 10 min buys a 5-min safety margin so a resume that races the
+         * TTL re-issues `startUpload` (new shardUuid + URL) rather than
+         * burning the PUT call on a 403. The ciphertext + indexBytes +
+         * hashHex stay pinned across the URL refresh.
+         */
+        const val URL_TTL_MS: Long = 10L * 60L * 1000L
     }
 }
