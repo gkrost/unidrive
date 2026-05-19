@@ -31,6 +31,14 @@ class UploadSessionStore(
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    init {
+        // GC sessions whose local hint has lapsed before the store gets used.
+        // get() self-prunes only the queried path; this catches strays whose
+        // local file disappeared between daemon runs and would otherwise sit
+        // in the JSON forever.
+        runCatching { pruneExpired() }
+    }
+
     /** Returns a valid (non-expired) upload URL for [remotePath], or null if none. */
     @Synchronized
     fun get(remotePath: String): String? {

@@ -63,6 +63,12 @@ class ListChildrenPaginationTest {
         )
     }
 
+    private fun newServiceWithStore(tokenPath: java.nio.file.Path): GraphApiService =
+        GraphApiService(
+            config = OneDriveConfig(tokenPath = tokenPath),
+            tokenProvider = { _ -> "test-token" },
+        )
+
     @Test
     fun `listChildren follows nextLink across three pages`() =
         runTest {
@@ -310,6 +316,145 @@ class ListChildrenPaginationTest {
             assertFalse(body.contains("fileSystemInfo"), "createUploadSession body must omit fileSystemInfo when caller didn't supply one, was: $body")
             service.close()
             java.nio.file.Files.deleteIfExists(tempFile)
+        }
+
+    @Test
+    fun `resolveUploadSession refreshes stored expiresAt from probe response`() =
+        runTest {
+            val storeDir = java.nio.file.Files.createTempDirectory("unidrive-store-refresh-")
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-refresh-", ".bin")
+            java.nio.file.Files.write(tempFile, "y".toByteArray())
+            val staleExpiresAt = java.time.Instant.now().plusSeconds(60) // close to expiry
+            val freshExpiresAt = java.time.Instant.parse("2030-06-15T12:00:00Z") // server bumped
+            val storedUrl = "https://upload.example.com/session/refresh"
+            UploadSessionStore(storeDir).put("/refresh.bin", storedUrl, staleExpiresAt)
+
+            val storeFile = storeDir.resolve("upload_sessions.json")
+            var storeAfterProbe: String? = null
+            val driveItemBody = """{"id":"item-5","name":"refresh.bin","size":1}"""
+            val probeBody = """{"uploadUrl":"$storedUrl","expirationDateTime":"$freshExpiresAt","nextExpectedRanges":["0-"]}"""
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url == storedUrl && request.method == HttpMethod.Get ->
+                            respond(probeBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        url == storedUrl && request.method == HttpMethod.Put -> {
+                            // Snapshot the on-disk store between probe and PUT; the refresh
+                            // write must have already happened, while the post-success delete
+                            // has not.
+                            storeAfterProbe = runCatching { java.nio.file.Files.readString(storeFile) }.getOrNull()
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        else -> error("Unexpected: ${request.method} $url")
+                    }
+                }
+            val service = newServiceWithStore(storeDir)
+            installMockClient(service, engine)
+
+            service.uploadLargeFile(localPath = tempFile, remotePath = "/refresh.bin", onProgress = null, fileSystemInfo = null)
+
+            val snapshot = checkNotNull(storeAfterProbe) { "Store file was not observable between probe and PUT" }
+            assertTrue(
+                snapshot.contains(freshExpiresAt.toString()),
+                "Stored expiresAt must have been refreshed to the server's expirationDateTime, snapshot was: $snapshot",
+            )
+            assertFalse(
+                snapshot.contains(staleExpiresAt.toString()),
+                "Stale expiresAt must have been overwritten, snapshot was: $snapshot",
+            )
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+            runCatching { java.nio.file.Files.walk(storeDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+        }
+
+    @Test
+    fun `uploadLargeFile retries once with a fresh session on chunk-level 410`() =
+        runTest {
+            val storeDir = java.nio.file.Files.createTempDirectory("unidrive-store-retry-")
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-retry-", ".bin")
+            java.nio.file.Files.write(tempFile, "z".toByteArray())
+            val driveItemBody = """{"id":"item-6","name":"retry.bin","size":1}"""
+            val sessionBodyA = """{"uploadUrl":"https://upload.example.com/session/A","expirationDateTime":"2030-01-01T00:00:00Z"}"""
+            val sessionBodyB = """{"uploadUrl":"https://upload.example.com/session/B","expirationDateTime":"2030-01-01T00:00:00Z"}"""
+            var createCount = 0
+            var putA = 0
+            var putB = 0
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") -> {
+                            val body = if (createCount++ == 0) sessionBodyA else sessionBodyB
+                            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        url == "https://upload.example.com/session/A" -> {
+                            putA++
+                            respond("session gone", HttpStatusCode.Gone)
+                        }
+                        url == "https://upload.example.com/session/B" -> {
+                            putB++
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        else -> error("Unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithStore(storeDir)
+            installMockClient(service, engine)
+
+            val result =
+                service.uploadLargeFile(localPath = tempFile, remotePath = "/retry.bin", onProgress = null, fileSystemInfo = null)
+
+            assertEquals("item-6", result.id)
+            assertEquals(2, createCount, "Expected two createUploadSession calls (initial + retry after 410)")
+            assertEquals(1, putA, "First session's PUT must have been attempted once")
+            assertEquals(1, putB, "Second session's PUT must have succeeded")
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+            runCatching { java.nio.file.Files.walk(storeDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+        }
+
+    @Test
+    fun `resolveUploadSession tolerates a probe network failure by creating a new session`() =
+        runTest {
+            val storeDir = java.nio.file.Files.createTempDirectory("unidrive-store-probe-")
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-probe-", ".bin")
+            java.nio.file.Files.write(tempFile, "p".toByteArray())
+            val deadUrl = "https://upload.example.com/session/dead"
+            UploadSessionStore(storeDir).put("/probe.bin", deadUrl, java.time.Instant.now().plusSeconds(3600))
+
+            val driveItemBody = """{"id":"item-7","name":"probe.bin","size":1}"""
+            val freshSessionBody = """{"uploadUrl":"https://upload.example.com/session/fresh","expirationDateTime":"2030-01-01T00:00:00Z"}"""
+            var createCount = 0
+            var putFresh = 0
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url == deadUrl -> throw java.io.IOException("connection refused")
+                        url.contains("createUploadSession") -> {
+                            createCount++
+                            respond(freshSessionBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        url == "https://upload.example.com/session/fresh" -> {
+                            putFresh++
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        else -> error("Unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithStore(storeDir)
+            installMockClient(service, engine)
+
+            val result =
+                service.uploadLargeFile(localPath = tempFile, remotePath = "/probe.bin", onProgress = null, fileSystemInfo = null)
+
+            assertEquals("item-7", result.id)
+            assertEquals(1, createCount, "Probe failure should fall through to one createUploadSession call")
+            assertEquals(1, putFresh, "Fresh session's PUT must have succeeded")
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+            runCatching { java.nio.file.Files.walk(storeDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
         }
 
     private suspend fun drainOutgoingContent(content: io.ktor.http.content.OutgoingContent): String =

@@ -60,6 +60,16 @@ class UploadSessionStoreTest {
     }
 
     @Test
+    fun `init prunes already-expired entries from an existing store file`() {
+        store.put("/keep.bin", "https://example.com/keep", Instant.now().plusSeconds(3600))
+        store.put("/drop.bin", "https://example.com/drop", Instant.now().minusSeconds(1))
+        // New instance over the same dir runs its init-time prune on construction.
+        val reopened = UploadSessionStore(storeDir)
+        assertNotNull(reopened.get("/keep.bin"))
+        assertNull(reopened.get("/drop.bin"))
+    }
+
+    @Test
     fun `multiple sessions coexist`() {
         val expires = Instant.now().plusSeconds(3600)
         store.put("/a.bin", "https://example.com/a", expires)

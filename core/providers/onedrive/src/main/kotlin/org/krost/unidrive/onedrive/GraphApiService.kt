@@ -471,15 +471,47 @@ class GraphApiService(
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
 
-        // Try to resume a persisted session from a previous run.
+        // Two attempts: the probe-then-PUT race window means a session reported alive at
+        // resolveUploadSession can be gone by the first chunk. A second attempt with a
+        // freshly-minted session closes that race transparently to the caller.
+        var lastSessionGone: GraphApiException? = null
+        repeat(2) { attempt ->
+            try {
+                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo)
+            } catch (e: GraphApiException) {
+                val isSessionGone = e.statusCode == 404 || e.statusCode == 410
+                if (attempt == 0 && isSessionGone) {
+                    log.info(
+                        "OneDrive upload session for {} was gone (status {}); creating a fresh session and retrying once",
+                        remotePath,
+                        e.statusCode,
+                    )
+                    sessionStore.delete(remotePath)
+                    lastSessionGone = e
+                } else {
+                    throw e
+                }
+            }
+        }
+        // Both attempts surfaced session-gone — propagate the last one so the caller sees
+        // a definitive failure rather than a silent loop.
+        throw lastSessionGone ?: GraphApiException("Upload retry loop exited without result")
+    }
+
+    private suspend fun uploadLargeFileOnce(
+        localPath: Path,
+        remotePath: String,
+        cleanPath: String,
+        encoded: String,
+        fileSize: Long,
+        onProgress: ((Long, Long) -> Unit)?,
+        fileSystemInfo: FileSystemInfo?,
+    ): DriveItem {
         val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded, fileSystemInfo)
-
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
-
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
         var result: DriveItem? = null
-
         try {
             while (offset < fileSize) {
                 val currentChunkSize = minOf(chunkSize, fileSize - offset).toInt()
@@ -532,21 +564,38 @@ class GraphApiService(
     ): Pair<String, Long> {
         val stored = sessionStore.get(remotePath)
         if (stored != null) {
-            // Query the stored session to find committed offset.
-            val statusResponse = httpClient.get(stored)
-            if (statusResponse.status.isSuccess()) {
-                val session = json.decodeFromString<UploadSession>(statusResponse.bodyAsText())
+            // Probe the stored URL — Graph extends session lifetime on activity, so our
+            // locally stored expiresAt is an upper-bound hint, not authoritative. A network
+            // hiccup here mustn't kill the upload; treat any probe failure as "fall through
+            // and rebuild the session" rather than propagating.
+            val probe = runCatching { httpClient.get(stored) }
+            val statusResponse = probe.getOrNull()
+            val parsedSession =
+                statusResponse?.takeIf { it.status.isSuccess() }
+                    ?.let { runCatching { json.decodeFromString<UploadSession>(it.bodyAsText()) }.getOrNull() }
+            if (parsedSession != null) {
+                // Refresh local hint from the server-reported expiry; an inactive session
+                // shrinks toward its original expiry, an active one stretches up to 14 d.
+                parsedSession.expirationDateTime
+                    ?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
+                    ?.let { sessionStore.put(remotePath, stored, it) }
                 val committedOffset =
-                    session.nextExpectedRanges
+                    parsedSession.nextExpectedRanges
                         ?.firstOrNull()
                         ?.substringBefore("-")
                         ?.toLongOrNull()
                         ?: 0L
-                log.debug("Upload session resumed: {} at offset {}", remotePath, committedOffset)
+                log.debug(
+                    "Upload session resumed: {} at offset {} (server expiry {})",
+                    remotePath,
+                    committedOffset,
+                    parsedSession.expirationDateTime,
+                )
                 return stored to committedOffset
             }
-            // Session expired on the server — fall through to create a new one.
-            log.debug("Upload session expired for {}, creating new session", remotePath)
+            val probeStatus = statusResponse?.status?.value
+            val probeReason = probe.exceptionOrNull()?.message ?: probeStatus?.toString() ?: "no-response"
+            log.info("Upload session for {} could not be validated ({}); creating new session", remotePath, probeReason)
             sessionStore.delete(remotePath)
         }
 
@@ -627,10 +676,12 @@ class GraphApiService(
             // Success or "more chunks" — return immediately
             if (response.status.value in listOf(200, 201, 202)) return response
 
-            // Session expired or gone — non-recoverable
+            // Session expired or gone — surface as a 404/410 so uploadLargeFile's two-attempt
+            // wrapper recognises it and retries with a fresh session.
             if (response.status.value in listOf(404, 410)) {
                 throw GraphApiException(
-                    "Upload session expired at offset $currentOffset: ${response.status}",
+                    "OneDrive upload session is gone (status ${response.status.value}) at offset $currentOffset; " +
+                        "the server cleaned it up between probe and PUT — a fresh session will be created on retry",
                     response.status.value,
                 )
             }
