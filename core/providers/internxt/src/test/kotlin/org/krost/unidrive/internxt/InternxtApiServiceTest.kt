@@ -979,4 +979,34 @@ class InternxtApiServiceTest {
             assertEquals(1, nonForcedCallCount.get(), "the pre-401 call resolved creds with forceRefresh=false")
             service.close()
         }
+
+    @Test
+    fun `deleteFile retries on 503 and succeeds on the second attempt`() =
+        kotlinx.coroutines.test.runTest {
+            val httpCalls = AtomicInteger(0)
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { _ ->
+                    val n = httpCalls.incrementAndGet()
+                    if (n == 1) {
+                        respond(
+                            content = """{"error":"service unavailable"}""",
+                            status = io.ktor.http.HttpStatusCode.ServiceUnavailable,
+                            headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                        )
+                    } else {
+                        respond(
+                            content = "",
+                            status = io.ktor.http.HttpStatusCode.OK,
+                            headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                        )
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                service.deleteFile("file-uuid")
+                assertEquals(2, httpCalls.get(), "deleteFile must retry the 503 and succeed on attempt 2")
+            } finally {
+                service.close()
+            }
+        }
 }

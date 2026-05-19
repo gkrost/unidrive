@@ -462,20 +462,22 @@ class InternxtApiService(
         }
 
     suspend fun deleteFile(uuid: String) {
-        // No retryOnTransient wrapper yet (tracked in BACKLOG); inline the budget
-        // acquire + throttle-feedback so the storm detector still observes 429/503.
-        withAuthRetry { creds ->
-            driveBudget.awaitSlot()
-            try {
-                val response =
-                    httpClient.delete("$baseUrl/files/$uuid") {
-                        applyAuth(creds)
-                    }
-                if (response.status != HttpStatusCode.NotFound) checkResponse(response)
-                driveBudget.recordSuccess()
-            } catch (e: InternxtApiException) {
-                if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
-                throw e
+        // 404 is treated as already-gone (idempotent delete) — short-circuits
+        // before checkResponse so retryOnTransient never sees it as transient.
+        retryOnTransient {
+            withAuthRetry { creds ->
+                driveBudget.awaitSlot()
+                try {
+                    val response =
+                        httpClient.delete("$baseUrl/files/$uuid") {
+                            applyAuth(creds)
+                        }
+                    if (response.status != HttpStatusCode.NotFound) checkResponse(response)
+                    driveBudget.recordSuccess()
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
+                    throw e
+                }
             }
         }
     }
@@ -538,36 +540,38 @@ class InternxtApiService(
     }
 
     suspend fun deleteFolder(uuid: String) {
-        // No retryOnTransient wrapper yet (tracked in BACKLOG); inline the budget
-        // acquire + throttle-feedback so the storm detector still observes 429/503.
-        withAuthRetry { creds ->
-            driveBudget.awaitSlot()
-            try {
-                val requestBody =
-                    kotlinx.serialization.json.buildJsonObject {
-                        put(
-                            "items",
-                            kotlinx.serialization.json.buildJsonArray {
-                                add(
-                                    kotlinx.serialization.json.buildJsonObject {
-                                        put("uuid", kotlinx.serialization.json.JsonPrimitive(uuid))
-                                        put("type", kotlinx.serialization.json.JsonPrimitive("folder"))
-                                    },
-                                )
-                            },
-                        )
-                    }
-                val response =
-                    httpClient.delete("$baseUrl/folders") {
-                        applyAuth(creds)
-                        contentType(ContentType.Application.Json)
-                        setBody(requestBody.toString())
-                    }
-                if (response.status != HttpStatusCode.NotFound) checkResponse(response)
-                driveBudget.recordSuccess()
-            } catch (e: InternxtApiException) {
-                if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
-                throw e
+        // 404 is treated as already-gone (idempotent delete) — short-circuits
+        // before checkResponse so retryOnTransient never sees it as transient.
+        retryOnTransient {
+            withAuthRetry { creds ->
+                driveBudget.awaitSlot()
+                try {
+                    val requestBody =
+                        kotlinx.serialization.json.buildJsonObject {
+                            put(
+                                "items",
+                                kotlinx.serialization.json.buildJsonArray {
+                                    add(
+                                        kotlinx.serialization.json.buildJsonObject {
+                                            put("uuid", kotlinx.serialization.json.JsonPrimitive(uuid))
+                                            put("type", kotlinx.serialization.json.JsonPrimitive("folder"))
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    val response =
+                        httpClient.delete("$baseUrl/folders") {
+                            applyAuth(creds)
+                            contentType(ContentType.Application.Json)
+                            setBody(requestBody.toString())
+                        }
+                    if (response.status != HttpStatusCode.NotFound) checkResponse(response)
+                    driveBudget.recordSuccess()
+                } catch (e: InternxtApiException) {
+                    if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
+                    throw e
+                }
             }
         }
     }
