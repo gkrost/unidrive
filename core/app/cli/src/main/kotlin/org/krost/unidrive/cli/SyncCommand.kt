@@ -136,6 +136,17 @@ open class SyncCommand : Runnable {
     var cliExcludePatterns: List<String> = emptyList()
 
     @Option(
+        names = ["--streaming-reconciliation"],
+        description = [
+            "Override the streaming-reconciliation mode for this run.",
+            "auto (default): use the TOML key or the persisted sentinel; fall back to off.",
+            "on:  force streaming (per-page reconcile, deferred deletes).",
+            "off: force the legacy single-shot accumulate-then-reconcile path.",
+        ],
+    )
+    var streamingReconciliationCli: String = "auto"
+
+    @Option(
         names = ["--fast-bootstrap"],
         description = [
             "UD-223: skip first-sync enumeration by adopting the remote's current state",
@@ -347,6 +358,28 @@ open class SyncCommand : Runnable {
             org.krost.unidrive.sync.audit
                 .AuditLog(parent.providerConfigDir(), profile.name)
 
+        // Streaming reconciliation: resolve effective mode in precedence
+        // order (CLI > TOML > sync_state sentinel > false). See
+        // [SyncConfig.resolveStreamingReconciliation] doc for the rationale.
+        val streamingCliOverride: Boolean? =
+            when (streamingReconciliationCli.lowercase()) {
+                "on", "true", "yes" -> true
+                "off", "false", "no" -> false
+                "auto", "" -> null
+                else ->
+                    throw IllegalArgumentException(
+                        "--streaming-reconciliation must be one of auto|on|off; got '$streamingReconciliationCli'",
+                    )
+            }
+        val streamingSentinel: Boolean? =
+            db.getSyncState(SyncConfig.STREAMING_RECONCILIATION_SENTINEL_KEY)?.toBooleanStrictOrNull()
+        val effectiveStreaming =
+            SyncConfig.resolveStreamingReconciliation(
+                cliOverride = streamingCliOverride,
+                tomlValue = config.streamingReconciliation,
+                sentinel = streamingSentinel,
+            )
+
         val engine =
             SyncEngine(
                 provider = provider,
@@ -385,6 +418,7 @@ open class SyncCommand : Runnable {
                 // UD-264: opt-out for the top-level-never-hydrated guard.
                 ignoreTopLevelGuard = ignoreTopLevelGuard,
                 skippedOpsLogPath = parent.providerConfigDir().resolve("skipped-ops.jsonl"),
+                streamingReconciliation = effectiveStreaming,
             )
 
         Files.createDirectories(config.syncRoot)

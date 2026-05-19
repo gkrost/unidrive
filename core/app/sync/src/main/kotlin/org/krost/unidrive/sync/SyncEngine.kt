@@ -426,6 +426,19 @@ class SyncEngine(
         db.setSyncState("last_scan_secs_remote", remoteScanSecs.toString())
         db.setSyncState("last_scan_count_remote", remoteChanges.size.toString())
 
+        // Streaming-reconciliation auto-flip: after the first successful
+        // streaming scan, persist the sentinel so subsequent runs default to
+        // streaming without re-opting via CLI/TOML. "Successful" here means
+        // the streaming path ran AND the gather reported all pages complete
+        // (pending_cursor_complete=true, written by the just-completed gather).
+        // CLI/TOML override always wins on the next launch — the sentinel
+        // sits at the lowest tier of [SyncConfig.resolveStreamingReconciliation].
+        if (streamingReconciliation && !skipRemoteGather &&
+            db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) == true
+        ) {
+            db.setSyncState(SyncConfig.STREAMING_RECONCILIATION_SENTINEL_KEY, "true")
+        }
+
         // Local-changes resolution: streaming captured these above so the
         // per-page reconcile could see them; non-streaming runs the scan
         // here on the historical order.

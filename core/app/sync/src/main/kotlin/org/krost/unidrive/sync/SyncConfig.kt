@@ -182,6 +182,18 @@ data class RawGeneral(
     val file_versioning: Boolean? = null,
     val max_versions: Int? = null,
     val version_retention_days: Int? = null,
+    // Streaming reconciliation: process delta pages as they arrive instead
+    // of accumulating the entire remote inventory before reconciling.
+    // Per-page resolveSlice fires safe-now actions (downloads, uploads,
+    // placeholder creates) immediately and defers deletion-bearing actions
+    // to scan-end so the detectMissingAfterFullSync guard still gates them.
+    //
+    // Three-valued: true forces on, false forces off, null leaves it to
+    // the migration default — on for new installs, off for upgrades, with
+    // an auto-flip to on after the first successful streaming scan
+    // (sync_state key `streaming_reconciliation_enabled`). CLI flag wins
+    // over this key.
+    val streaming_reconciliation: Boolean? = null,
 )
 
 @Serializable
@@ -279,6 +291,11 @@ data class SyncConfig(
     val fileVersioning: Boolean = false,
     val maxVersions: Int = 5,
     val versionRetentionDays: Int = 90,
+    // Raw TOML value of `[general] streaming_reconciliation`. Null when the
+    // key is absent. Final resolution (CLI > TOML > sync_state sentinel >
+    // hard default) happens in [resolveStreamingReconciliation] so the CLI
+    // can pass the same constant set without re-implementing the precedence.
+    val streamingReconciliation: Boolean? = null,
     private val providers: Map<String, ProviderConfig>,
 ) {
     fun providerPinIncludes(providerId: String): List<String> = providers[providerId]?.pinIncludes ?: emptyList()
@@ -326,6 +343,29 @@ data class SyncConfig(
          * non-`%APPDATA%` path (or letting `~/.config/unidrive/` win)
          * makes both views converge on the same file.
          */
+        /**
+         * Resolved effective value for streaming reconciliation, in
+         * precedence order: CLI override > TOML key ([SyncConfig.streamingReconciliation])
+         * > sync_state sentinel (`streaming_reconciliation_enabled`, written
+         * by the engine after a successful streaming scan) > hard default
+         * of `false`. The hard default is conservative — upgrades stay on
+         * the established single-shot path until either the user explicitly
+         * opts in (`--streaming-reconciliation=on` or TOML) or has at least
+         * one successful streaming scan (after which the sentinel makes
+         * subsequent runs default-on without re-opting).
+         *
+         * Takes raw inputs rather than a `SyncConfig` + DB pair so it stays
+         * testable as a pure function.
+         */
+        fun resolveStreamingReconciliation(
+            cliOverride: Boolean?,
+            tomlValue: Boolean?,
+            sentinel: Boolean?,
+        ): Boolean = cliOverride ?: tomlValue ?: sentinel ?: false
+
+        /** Sync-state key for the auto-flip sentinel. Written by [SyncEngine] after a successful streaming scan. */
+        const val STREAMING_RECONCILIATION_SENTINEL_KEY: String = "streaming_reconciliation_enabled"
+
         fun defaultConfigDir(explicitOverride: Path? = null): Path =
             resolveConfigDir(
                 explicitOverride = explicitOverride,
@@ -595,6 +635,7 @@ data class SyncConfig(
                 fileVersioning = general.file_versioning ?: false,
                 maxVersions = (general.max_versions ?: 5).coerceAtLeast(1),
                 versionRetentionDays = (general.version_retention_days ?: 90).coerceAtLeast(1),
+                streamingReconciliation = general.streaming_reconciliation,
                 providers = providerConfigs,
             )
         }

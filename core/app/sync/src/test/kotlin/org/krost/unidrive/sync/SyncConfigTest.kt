@@ -1015,4 +1015,27 @@ class SyncConfigTest {
             assertEquals(Paths.get(c.expected), resolved, "case: ${c.name}")
         }
     }
+
+    @Test
+    fun `resolveStreamingReconciliation CLI override wins over TOML and sentinel`() {
+        assertTrue(SyncConfig.resolveStreamingReconciliation(cliOverride = true, tomlValue = false, sentinel = false))
+        assertFalse(SyncConfig.resolveStreamingReconciliation(cliOverride = false, tomlValue = true, sentinel = true))
+    }
+
+    @Test
+    fun `resolveStreamingReconciliation TOML wins over sentinel when CLI absent`() {
+        assertTrue(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = true, sentinel = false))
+        assertFalse(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = false, sentinel = true))
+    }
+
+    @Test
+    fun `resolveStreamingReconciliation sentinel applies when CLI and TOML absent`() {
+        assertTrue(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = null, sentinel = true))
+        assertFalse(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = null, sentinel = false))
+    }
+
+    @Test
+    fun `resolveStreamingReconciliation falls back to false when all inputs absent`() {
+        assertFalse(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = null, sentinel = null))
+    }
 }
