@@ -205,6 +205,18 @@ fun deployWindows(
     }
     if (killed.isEmpty()) println("[deploy] no running CLI process to kill -- proceeding to copy")
 
+    // Sweep legacy / stale jars before the copy. Pre-slim builds shipped
+    // `unidrive-mcp-*.jar` alongside the CLI jar; the MCP module was deleted
+    // but old artifacts linger in %LOCALAPPDATA% from prior deploys and confuse
+    // users about which jar is current. Delete anything matching `unidrive*.jar`
+    // that isn't the one we're about to write.
+    libDir
+        .listFiles { f -> f.isFile && f.name.startsWith("unidrive") && f.name.endsWith(".jar") && f.name != targetJarName }
+        ?.forEach {
+            if (it.delete()) println("[deploy] pruned stale jar ${it.name}")
+            else println("[deploy] could NOT prune stale jar ${it.name} (locked?)")
+        }
+
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
@@ -312,6 +324,16 @@ fun deployLinux(
     systemdDir.mkdirs()
 
     run("systemctl", "--user", "stop", "unidrive", ignoreExit = true)
+
+    // Sweep legacy / stale jars before the copy (mirrors deployWindows).
+    // Pre-slim builds shipped `unidrive-mcp-*.jar`; the MCP module was
+    // deleted but old artifacts linger from prior deploys.
+    libDir
+        .listFiles { f -> f.isFile && f.name.startsWith("unidrive") && f.name.endsWith(".jar") && f.name != jarFile.name }
+        ?.forEach {
+            if (it.delete()) println("[deploy] pruned stale jar ${it.name}")
+            else println("[deploy] could NOT prune stale jar ${it.name}")
+        }
 
     jarFile.copyTo(targetJar, overwrite = true)
 

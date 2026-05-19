@@ -64,6 +64,12 @@ echo "Installing UniDrive..."
 
 # JAR
 mkdir -p "${INSTALL_LIB}"
+# Sweep legacy / stale jars before the copy. Pre-slim builds shipped
+# `unidrive-mcp-*.jar` alongside the CLI jar; the MCP module was deleted
+# but old artifacts linger from prior installs.
+find "${INSTALL_LIB}" -maxdepth 1 -type f -name 'unidrive*.jar' \
+    ! -name "${CLI_BASENAME}" -print -delete 2>/dev/null \
+  | sed 's|^|  pruned stale jar: |'
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 
