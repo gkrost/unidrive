@@ -322,66 +322,69 @@ class SyncEngineTest {
         }
 
     @Test
-    fun `UD-901e incomplete delta gather does NOT promote pending_cursor`() =
+    fun `incomplete delta gather still advances pending_cursor (best-effort)`() =
         runTest {
-            // Codex review (PR #13) caught that the 3 cursor-promotion sites
-            // (empty-action / dry-run / success) unconditionally promoted
-            // pending_cursor → delta_cursor regardless of whether the gather
-            // pass was complete. Internxt's UD-360 subtree-skip path returns
-            // DeltaPage(complete=false) on 500/503, with the new latest
-            // updatedAt as the cursor. Promoting that cursor silently advances
-            // delta_cursor past items in the skipped subtree, so they're never
-            // re-enumerated.
+            // Best-effort cursor advance: when a delta gather returns
+            // complete=false (e.g. Internxt's 500/503 subtree skip path),
+            // pending_cursor and delta_cursor STILL advance to the provider's
+            // max(updatedAt) seen across completed pages.
             //
-            // Invariant under test: after a delta pass where any page returned
-            // complete=false, delta_cursor MUST remain at its previous value,
-            // not advance to the partial gather's new cursor.
+            // The alternative — pinning the cursor at its prior value on
+            // any incomplete sweep — forced a full re-scan from the prior
+            // cursor on every launch whenever any subtree 503'd, which on
+            // a hot account (~190k items) is a 7+ hour scan every launch.
+            // Items in the skipped subtree still recover on their next
+            // mutation (Internxt's updatedAt filter is tombstone-aware) or
+            // via the user-facing --reset escape hatch. The
+            // pending_cursor_complete flag is still recorded so the doctor
+            // surface can warn the user about the incomplete sweep.
             //
-            // First, establish a baseline cursor so we can detect movement.
+            // Establish a baseline cursor.
             provider.deltaItems = listOf(cloudItem("/tracked.txt", size = 50))
-            provider.deltaCursor = "cursor-baseline"
+            provider.deltaCursor = "2026-05-18T10:00:00.000Z"
             provider.deltaComplete = true
             engine.syncOnce()
             assertEquals(
-                "cursor-baseline",
+                "2026-05-18T10:00:00.000Z",
                 db.getSyncState("delta_cursor"),
                 "delta_cursor must advance on a complete gather",
             )
 
-            // Second pass: provider returns complete=false with a new cursor
-            // (mimicking Internxt's "I skipped a folder on 503; here's the
-            // new latest-updatedAt I saw before the skip"). delta_cursor
-            // must NOT advance to this new value.
+            // Second pass: complete=false but with a fresher cursor.
+            // delta_cursor MUST still advance, and the flag captures the
+            // incompleteness for downstream UX (doctor warning).
             provider.deltaItems = emptyList()
-            provider.deltaCursor = "cursor-partial"
+            provider.deltaCursor = "2026-05-18T17:20:30.000Z"
             provider.deltaComplete = false
 
             engine.syncOnce()
 
             assertEquals(
-                "cursor-baseline",
+                "2026-05-18T17:20:30.000Z",
                 db.getSyncState("delta_cursor"),
-                "delta_cursor must NOT advance when the gather was incomplete — " +
-                    "promoting cursor-partial would skip items in the failed subtree on next run",
+                "delta_cursor must advance even on an incomplete gather — pinning the " +
+                    "cursor at its prior value forces a full re-scan every launch",
             )
-            // Sanity: the pending cursor is still written (so a follow-up
-            // complete gather can promote it), and the completeness flag
-            // reflects the partial state.
-            assertEquals("cursor-partial", db.getSyncState("pending_cursor"))
-            assertEquals("false", db.getSyncState("pending_cursor_complete"))
+            assertEquals("2026-05-18T17:20:30.000Z", db.getSyncState("pending_cursor"))
+            assertEquals(
+                "false",
+                db.getSyncState("pending_cursor_complete"),
+                "completeness flag still recorded so doctor surface can warn",
+            )
 
-            // Third pass: provider recovers, complete=true. The freshly
-            // complete cursor IS promoted.
-            provider.deltaCursor = "cursor-recovered"
+            // Third pass: provider recovers, complete=true. Cursor advances
+            // and the completeness flag flips back to true.
+            provider.deltaCursor = "2026-05-18T18:00:00.000Z"
             provider.deltaComplete = true
             engine.syncOnce()
             assertEquals(
-                "cursor-recovered",
+                "2026-05-18T18:00:00.000Z",
                 db.getSyncState("delta_cursor"),
-                "delta_cursor must advance once a complete gather lands",
+                "delta_cursor must advance on a recovered complete gather",
             )
             assertEquals("true", db.getSyncState("pending_cursor_complete"))
         }
+
 
     @Test
     fun `remote modification re-downloads local file`() =

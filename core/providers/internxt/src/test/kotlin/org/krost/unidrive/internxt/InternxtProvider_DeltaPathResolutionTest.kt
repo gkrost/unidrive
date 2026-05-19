@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Path resolution for Internxt's delta page. The /folders endpoint returns
@@ -77,6 +78,73 @@ class InternxtProvider_DeltaPathResolutionTest {
     }
 
     // ---- Resumable-scan helpers ----
+
+    @Test
+    fun `advanceCursor picks the larger of seenMax and requestCursor`() {
+        // Hot account: fetched items, freshest updatedAt is newer than the
+        // last cursor → advance to seenMax.
+        assertEquals(
+            "2026-05-18T17:20:30.000Z",
+            InternxtProvider.advanceCursor(
+                seenMax = "2026-05-18T17:20:30.000Z",
+                requestCursor = "2026-05-18T10:00:00.000Z",
+            ),
+        )
+    }
+
+    @Test
+    fun `advanceCursor floors at requestCursor when no items were seen`() {
+        // Empty page-set (incomplete sweep where every folder hit the 503
+        // fallback) — without a floor the cursor would regress to
+        // Instant.now() and we'd skip past items modified between the prior
+        // cursor and now.
+        assertEquals(
+            "2026-05-18T15:00:00.000Z",
+            InternxtProvider.advanceCursor(
+                seenMax = null,
+                requestCursor = "2026-05-18T15:00:00.000Z",
+            ),
+        )
+    }
+
+    @Test
+    fun `advanceCursor floors at requestCursor when seenMax is older (stale page)`() {
+        // Pathological: the gather saw only items older than the prior
+        // cursor. The cursor must not regress.
+        assertEquals(
+            "2026-05-18T15:00:00.000Z",
+            InternxtProvider.advanceCursor(
+                seenMax = "2026-05-17T10:00:00.000Z",
+                requestCursor = "2026-05-18T15:00:00.000Z",
+            ),
+        )
+    }
+
+    @Test
+    fun `advanceCursor returns seenMax on first scan (no prior cursor)`() {
+        assertEquals(
+            "2026-05-18T17:20:30.000Z",
+            InternxtProvider.advanceCursor(
+                seenMax = "2026-05-18T17:20:30.000Z",
+                requestCursor = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `advanceCursor falls back to Instant_now on first scan with empty results`() {
+        // Both null: no prior cursor AND no items seen. Falling back to
+        // Instant.now() means the next launch asks the gateway for "items
+        // modified since just-now" rather than "since epoch" — saves a
+        // pointless full re-scan on a first-launch / freshly-reset state.db
+        // against an account that happens to have zero items.
+        val result = InternxtProvider.advanceCursor(seenMax = null, requestCursor = null)
+        // Sanity: parses as an instant and is within the last 5 seconds.
+        val parsed = java.time.Instant.parse(result)
+        val now = java.time.Instant.now()
+        assertTrue(parsed.isBefore(now.plusSeconds(1)))
+        assertTrue(parsed.isAfter(now.minusSeconds(5)))
+    }
 
     @Test
     fun `buildMarker and parseResumeOffsets round-trip`() {

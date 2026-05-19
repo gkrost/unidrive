@@ -493,9 +493,9 @@ class SyncEngine(
         reporter.onActionCount(actions.size, allActions.size, filterReason)
 
         if (actions.isEmpty()) {
-            // UD-260 / UD-901e: promote pending cursor only if the gather pass
-            // that wrote it was complete (see promotePendingCursorIfComplete).
-            promotePendingCursorIfComplete()
+            // UD-260: promote pending cursor (see promotePendingCursor for the
+            // best-effort cursor-advance semantic on incomplete gathers).
+            promotePendingCursor()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(0, 0, 0, duration)
             return
@@ -598,9 +598,9 @@ class SyncEngine(
                     else -> {}
                 }
             }
-            // UD-260 / UD-901e: promote pending cursor only if the gather pass
-            // that wrote it was complete (see promotePendingCursorIfComplete).
-            promotePendingCursorIfComplete()
+            // UD-260: promote pending cursor (see promotePendingCursor for the
+            // best-effort cursor-advance semantic on incomplete gathers).
+            promotePendingCursor()
             val duration = System.currentTimeMillis() - startTime
             reporter.onSyncComplete(downloaded.get(), uploaded.get(), conflicts.get(), duration, counts)
             return
@@ -880,10 +880,10 @@ class SyncEngine(
         // syncs would not re-see it as "new". Failed items keep pending_cursor → next sync redoes
         // the delta from the previous promoted cursor.
         //
-        // UD-901e additionally gates promotion on the gather pass being complete
-        // (see promotePendingCursorIfComplete).
+        // promotePendingCursor advances even on incomplete gathers — the trade is
+        // documented at its definition site.
         if (transferFailures.get() == 0) {
-            promotePendingCursorIfComplete()
+            promotePendingCursor()
         }
 
         val duration = System.currentTimeMillis() - startTime
@@ -1025,15 +1025,19 @@ class SyncEngine(
             return page
         }
 
-        // UD-901e: persist the running completeness flag alongside the cursor.
-        // The 3 cursor-promotion sites (apply / dry-run / empty-action) check
-        // `pending_cursor_complete` and refuse to promote when any page in the
-        // gather pass returned complete=false — otherwise a transient subtree
-        // 500/503 would bake the incomplete sweep's cursor into delta_cursor,
-        // and the next sync would resume from a point past items it never
-        // enumerated. Stored as the string "true"/"false"; absent is treated
-        // as "true" by the promotion guards for backwards-compat with state.db
-        // files that predate this flag.
+        // Persist the running completeness flag alongside the cursor.
+        // Promotion now happens unconditionally (see promotePendingCursor):
+        // pinning the cursor at its prior value on an incomplete sweep
+        // forced a full re-scan every launch on a hot account whenever any
+        // subtree returned 500/503. The flag is still recorded so the doctor
+        // surface and warnings can tell the user the last scan was incomplete
+        // and recommend `--reset` if the skipped subtree matters.
+        //
+        // The monotonicity floor (cursor never regresses below the prior
+        // value) lives inside each provider's delta() — only providers know
+        // whether their cursor is timestamp-comparable (Internxt) or opaque
+        // (OneDrive's @odata.nextLink URLs), and only providers can do the
+        // comparison correctly.
         fun persistPendingCursor(cursor: String) {
             db.setSyncState("pending_cursor", cursor)
             db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
@@ -1083,30 +1087,36 @@ class SyncEngine(
     }
 
     /**
-     * UD-901e: promote `pending_cursor` to `delta_cursor` only when the gather
-     * pass that produced it was complete. A `pending_cursor_complete` value
-     * of "false" means at least one delta page returned `complete=false`
-     * (currently: Internxt subtree 500/503 skip path), and promoting that
-     * cursor would silently skip items in the failed subtree on the next run.
-     * Absent flag is treated as complete=true so the gate is backwards-compat
-     * with state.db files written before this flag landed.
+     * Promote `pending_cursor` to `delta_cursor` unconditionally — even when
+     * the gather pass returned `complete=false`. Providers compute
+     * `pending_cursor` as `max(updatedAt) seen across completed pages`, so
+     * advancing here is always safe relative to what the next sync needs to
+     * re-query: items in the skipped subtree are still found on their next
+     * mutation (Internxt's `updatedAt` filter is tombstone-aware) or via the
+     * user-facing `--reset` escape hatch. The alternative — pinning the
+     * cursor at its prior value — forced a full re-scan from the prior
+     * cursor on every launch whenever any subtree 503'd, which on a hot
+     * account is intolerable.
      *
-     * Returns true if promotion happened; false if it was withheld. Callers
-     * use the return value only for `last_full_scan` bookkeeping.
+     * Correctness trade: items modified in the skipped subtree between the
+     * advanced cursor and the moment the skip happened, that didn't change
+     * again afterward, will be missed until they next mutate. No worse than
+     * today's behavior, which already misses the same items AND re-fetches
+     * everything else. The `pending_cursor_complete=false` flag is still
+     * recorded so the doctor surface can warn the user to `--reset` if the
+     * skipped subtree matters.
+     *
+     * `last_full_scan` is only stamped when the sweep was complete — it's
+     * the bookkeeping signal for "we successfully enumerated the entire
+     * tree", which a partial sweep does not satisfy.
      */
-    private fun promotePendingCursorIfComplete(): Boolean {
-        val pendingCursor = db.getSyncState("pending_cursor") ?: return false
-        val complete = db.getSyncState("pending_cursor_complete") ?: "true"
-        if (complete != "true") {
-            log.warn(
-                "UD-901e: withholding pending_cursor promotion — gather pass was incomplete. " +
-                    "delta_cursor stays at its previous value so missed inventory is re-enumerated next run.",
-            )
-            return false
-        }
+    private fun promotePendingCursor() {
+        val pendingCursor = db.getSyncState("pending_cursor") ?: return
         db.setSyncState("delta_cursor", pendingCursor)
-        db.setSyncState("last_full_scan", Instant.now().toString())
-        return true
+        val complete = db.getSyncState("pending_cursor_complete") ?: "true"
+        if (complete == "true") {
+            db.setSyncState("last_full_scan", Instant.now().toString())
+        }
     }
 
     /**

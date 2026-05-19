@@ -657,9 +657,13 @@ class InternxtProvider(
         val foldersDropped = rawFolders.count { it == null }
         val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
 
-        val latestUpdatedAt =
+        // Cursor = max(updatedAt) seen across successfully-fetched pages.
+        // Skipped (500/503 fallback) folders contribute nothing — their items
+        // never made it into allFiles/allFolders.
+        val seenMax =
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
-                .maxOrNull() ?: cursor ?: Instant.now().toString()
+                .maxOrNull()
+        val latestUpdatedAt = advanceCursor(seenMax, cursor)
 
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
@@ -674,8 +678,8 @@ class InternxtProvider(
             log.warn(
                 "Internxt delta gather dropped {} item(s) ({} file(s), {} folder(s)) " +
                     "whose ancestor uuid was missing from this page's folderMap; " +
-                    "returning DeltaPage(complete=false). Cursor will not advance — " +
-                    "items recover on the next run when their ancestors change or via --reset.",
+                    "returning DeltaPage(complete=false). Dropped items recover when " +
+                    "their ancestors next change or via --reset.",
                 ancestorDrops,
                 filesDropped,
                 foldersDropped,
@@ -1155,6 +1159,33 @@ class InternxtProvider(
         }
 
         // ---- Resumable-scan helpers ----
+
+        /**
+         * Compute the cursor to return from a delta gather. Internxt cursors
+         * are ISO-8601 timestamps that the gateway uses as a "items modified
+         * since X" filter. Returns `max(seenMax, requestCursor)` so:
+         *  - A gather that fetched items advances to the freshest updatedAt
+         *    seen across all completed pages.
+         *  - A gather that fetched no items (every page empty, or every
+         *    folder hit the 503 fallback) leaves the cursor where it was
+         *    rather than regressing to `Instant.now()` and skipping past
+         *    items modified before now.
+         *  - Both null (first scan, no items) falls back to `Instant.now()`
+         *    so the next launch doesn't ask the gateway for "since epoch".
+         * Lexicographic comparison is sound because the timestamps are
+         * always ISO-8601 with the same timezone suffix (`Z` from the API).
+         */
+        internal fun advanceCursor(
+            seenMax: String?,
+            requestCursor: String?,
+        ): String =
+            when {
+                seenMax != null && requestCursor != null ->
+                    if (seenMax > requestCursor) seenMax else requestCursor
+                seenMax != null -> seenMax
+                requestCursor != null -> requestCursor
+                else -> Instant.now().toString()
+            }
 
         /**
          * Marker format used by the page-boundary persister. Two non-negative
