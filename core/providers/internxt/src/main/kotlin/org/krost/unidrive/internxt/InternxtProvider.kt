@@ -256,6 +256,9 @@ class InternxtProvider(
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
         val localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
         onProgress?.invoke(0L, fileSize)
+        // Captured for the finishUpload-idempotency reconcile window: a slow retry that
+        // takes minutes to surface a 409 still finds its committed file.
+        val uploadStartedAt = Instant.now()
 
         // 2. Generate random 32-byte index; derive key + iv
         val indexBytes = ByteArray(32).also { secureRandom.nextBytes(it) }
@@ -301,23 +304,41 @@ class InternxtProvider(
         }
         val indexHex = indexBytes.joinToString("") { "%02x".format(it) }
 
-        // 5. Start upload → get presigned PUT url + uuid
-        val startResp = api.startUpload(bucket, encryptedSize)
-        val descriptor =
-            startResp.uploads.firstOrNull()
-                ?: throw ProviderException("No upload URL returned for $remotePath")
-        val putUrl = descriptor.url ?: throw ProviderException("Upload descriptor has no URL for $remotePath")
+        // Temp file deletion brackets stages 6-9 so a finishUpload-409 reconcile that
+        // needs the ciphertext for any future fresh-indexBytes re-attempt at the
+        // caller layer doesn't get its inputs deleted out from under it.
+        val bucketEntry =
+            try {
+                // 5. Start upload → get presigned PUT url + uuid
+                val startResp = api.startUpload(bucket, encryptedSize)
+                val descriptor =
+                    startResp.uploads.firstOrNull()
+                        ?: throw ProviderException("No upload URL returned for $remotePath")
+                val putUrl =
+                    descriptor.url
+                        ?: throw ProviderException("Upload descriptor has no URL for $remotePath")
 
-        // 6. PUT encrypted shard from temp file
-        try {
-            api.putEncryptedShardFromFile(putUrl, tempFile, encryptedSize)
-        } finally {
-            withContext(Dispatchers.IO) { Files.deleteIfExists(tempFile) }
-        }
-        onProgress?.invoke(fileSize, fileSize)
+                // 6. PUT encrypted shard from temp file
+                api.putEncryptedShardFromFile(putUrl, tempFile, encryptedSize)
+                onProgress?.invoke(fileSize, fileSize)
 
-        // 8. Finish upload → get bridge fileId
-        val bucketEntry = api.finishUpload(bucket, indexHex, hashHex, descriptor.uuid)
+                // 7-8. Finish upload (with 409-reconcile idempotency) → get bridge fileId
+                commitWithRetry(
+                    api = api,
+                    bucket = bucket,
+                    folderUuid = parentUuid,
+                    plainName = plainName,
+                    ext = ext,
+                    fileSize = fileSize,
+                    encryptedSize = encryptedSize,
+                    indexHex = indexHex,
+                    hashHex = hashHex,
+                    shardUuid = descriptor.uuid,
+                    startedAt = uploadStartedAt,
+                )
+            } finally {
+                withContext(Dispatchers.IO) { Files.deleteIfExists(tempFile) }
+            }
 
         // 9. Register file in drive metadata.
         // UD-366: MODIFIED uploads route through PUT /files/{uuid} (replace-in-place);
@@ -1297,3 +1318,209 @@ class InternxtProvider(
             )
     }
 }
+
+// Internxt finishUpload idempotency: reconcile after HTTP-409 MissingUploadsError
+// rather than re-finishing blindly. A network drop after server-side commit but
+// before client reads the response will surface as 409 on retry; the original
+// commit landed and a second finish would orphan the first BucketEntry. This
+// helper detects that case, lists the parent folder, and matches by
+// (plainName, type, size, recency) to recover the original fileId.
+//
+// Window is 5 minutes from [startedAt] (the upload's stage-1 timestamp), wide
+// enough to absorb retry ladders without colliding with stale same-name entries.
+// Case-a (no name match) re-attempts finishUpload once (in case the prior
+// commit truly didn't land — the bridge may be eventually consistent with the
+// PUT). A second 409 throws with the original 409 as cause.
+//
+// Provider call site is responsible for fresh-indexBytes pipeline retry on hard
+// failure (the IV-pinning constraint forbids holding stale indexBytes across a
+// re-encrypt). This helper holds the bridge-side identity stable across the
+// reconcile probe — same indexHex/hashHex/shardUuid means the reconciled
+// BucketEntry decrypts with the same key/iv as the original attempt.
+internal sealed class ReconcileResult {
+    data class Found(val bucketEntry: org.krost.unidrive.internxt.model.BucketEntry) : ReconcileResult()
+
+    data class FoundDisambiguated(
+        val bucketEntry: org.krost.unidrive.internxt.model.BucketEntry,
+        val siblingFileIds: List<String>,
+    ) : ReconcileResult()
+
+    data object NotFoundNoNameMatch : ReconcileResult()
+
+    data object NotFoundWithNameMatch : ReconcileResult()
+}
+
+private val finishUploadLog = org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.internxt.FinishUploadIdempotency")
+
+internal const val RECONCILE_WINDOW_MS: Long = 5L * 60 * 1000
+
+internal const val RECONCILE_RELIST_DELAY_MS: Long = 2_000L
+
+internal suspend fun commitWithRetry(
+    api: InternxtApiService,
+    bucket: String,
+    folderUuid: String,
+    plainName: String,
+    ext: String?,
+    fileSize: Long,
+    @Suppress("UNUSED_PARAMETER") encryptedSize: Long,
+    indexHex: String,
+    hashHex: String,
+    shardUuid: String,
+    startedAt: java.time.Instant,
+    clock: () -> java.time.Instant = { java.time.Instant.now() },
+): org.krost.unidrive.internxt.model.BucketEntry {
+    val attemptStart = clock()
+    val first =
+        try {
+            api.finishUpload(bucket, indexHex, hashHex, shardUuid)
+        } catch (e: InternxtApiException) {
+            if (!isMissingUploadsError(e)) throw e
+
+            finishUploadLog.info(
+                "finishUpload returned 409 MissingUploadsError for {} under folder={}; " +
+                    "treating as probable prior commit, reconciling{}",
+                plainName,
+                folderUuid,
+                e.requestId?.let { " requestId=$it" } ?: "",
+            )
+
+            val listing =
+                try {
+                    api.getFolderContents(folderUuid)
+                } catch (listingErr: InternxtApiException) {
+                    finishUploadLog.warn(
+                        "finishUpload-409 reconcile listing failed for {}: {}; propagating original 409{}",
+                        folderUuid,
+                        listingErr.message,
+                        e.requestId?.let { " requestId=$it" } ?: "",
+                    )
+                    throw InternxtApiException(
+                        "finishUpload 409 MissingUploadsError, reconcile listing failed: ${listingErr.message}",
+                        statusCode = 409,
+                        requestId = e.requestId,
+                        cause = listingErr,
+                    )
+                }
+
+            val window = startedAt.minusMillis(RECONCILE_WINDOW_MS)
+            var reconciled = pickReconcileCandidate(listing, plainName, ext, fileSize, window)
+
+            // Case (b): a stale entry exists with the same name but doesn't match
+            // size/window — eventual-consistency window. Wait briefly and re-list once.
+            if (reconciled is ReconcileResult.NotFoundWithNameMatch) {
+                kotlinx.coroutines.delay(RECONCILE_RELIST_DELAY_MS)
+                val relisted =
+                    try {
+                        api.getFolderContents(folderUuid)
+                    } catch (listingErr: InternxtApiException) {
+                        throw InternxtApiException(
+                            "finishUpload 409 MissingUploadsError, reconcile re-list failed: ${listingErr.message}",
+                            statusCode = 409,
+                            requestId = e.requestId,
+                            cause = listingErr,
+                        )
+                    }
+                reconciled = pickReconcileCandidate(relisted, plainName, ext, fileSize, window)
+            }
+
+            when (reconciled) {
+                is ReconcileResult.Found -> {
+                    val elapsedMs = (clock().toEpochMilli() - attemptStart.toEpochMilli()).coerceAtLeast(0L)
+                    finishUploadLog.warn(
+                        "reconciled finishUpload-409 to fileId={} after {}ms (size={}, window=5m){}",
+                        reconciled.bucketEntry.id,
+                        elapsedMs,
+                        fileSize,
+                        e.requestId?.let { " requestId=$it" } ?: "",
+                    )
+                    return reconciled.bucketEntry
+                }
+                is ReconcileResult.FoundDisambiguated -> {
+                    finishUploadLog.warn(
+                        "reconcile matched multiple candidates for {} under {}; selecting youngest fileId={}, others={}{}",
+                        plainName,
+                        folderUuid,
+                        reconciled.bucketEntry.id,
+                        reconciled.siblingFileIds,
+                        e.requestId?.let { " requestId=$it" } ?: "",
+                    )
+                    return reconciled.bucketEntry
+                }
+                ReconcileResult.NotFoundNoNameMatch,
+                ReconcileResult.NotFoundWithNameMatch,
+                -> {
+                    finishUploadLog.warn(
+                        "could not reconcile after finishUpload-409 for {} under {}; " +
+                            "re-attempting finishUpload (orphan shard may result on second failure){}",
+                        plainName,
+                        folderUuid,
+                        e.requestId?.let { " requestId=$it" } ?: "",
+                    )
+                    // case (a) re-attempt: try finishUpload once more, then surface.
+                    try {
+                        return api.finishUpload(bucket, indexHex, hashHex, shardUuid)
+                    } catch (e2: InternxtApiException) {
+                        throw InternxtApiException(
+                            "finishUpload 409 MissingUploadsError persists after reconcile NotFound: ${e2.message}",
+                            statusCode = e2.statusCode,
+                            requestId = e2.requestId ?: e.requestId,
+                            cause = e,
+                        )
+                    }
+                }
+            }
+        }
+    return first
+}
+
+internal fun pickReconcileCandidate(
+    listing: org.krost.unidrive.internxt.model.FolderContentResponse,
+    plainName: String,
+    ext: String?,
+    fileSize: Long,
+    windowLowerBound: java.time.Instant,
+): ReconcileResult {
+    val nameMatches = listing.files.filter { it.plainName == plainName && it.status == "EXISTS" }
+    val candidates =
+        nameMatches.filter { f ->
+            f.type == ext &&
+                f.size.toLongOrNull() == fileSize &&
+                f.creationInstant != null &&
+                !f.creationInstant.isBefore(windowLowerBound) &&
+                f.fileId != null
+        }
+    return when (candidates.size) {
+        0 -> if (nameMatches.isEmpty()) ReconcileResult.NotFoundNoNameMatch else ReconcileResult.NotFoundWithNameMatch
+        1 -> {
+            val match = candidates.single()
+            ReconcileResult.Found(
+                bucketEntry =
+                    org.krost.unidrive.internxt.model.BucketEntry(
+                        id = match.fileId!!,
+                        index = "",
+                        bucket = match.bucket ?: "",
+                        name = match.name ?: "",
+                    ),
+            )
+        }
+        else -> {
+            val youngest = candidates.maxBy { it.creationInstant!! }
+            val siblings = candidates.filter { it !== youngest }.mapNotNull { it.fileId }
+            ReconcileResult.FoundDisambiguated(
+                bucketEntry =
+                    org.krost.unidrive.internxt.model.BucketEntry(
+                        id = youngest.fileId!!,
+                        index = "",
+                        bucket = youngest.bucket ?: "",
+                        name = youngest.name ?: "",
+                    ),
+                siblingFileIds = siblings,
+            )
+        }
+    }
+}
+
+private fun isMissingUploadsError(e: InternxtApiException): Boolean =
+    e.statusCode == 409 &&
+        e.message?.let { it.contains("MissingUploadsError") || it.contains("Missing uploads") } == true

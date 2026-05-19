@@ -501,6 +501,433 @@ class InternxtApiServiceTest {
      * InternxtApiService side. A regression on either drops the
      * mid-session-401-recovery guarantee.
      */
+    // Internxt finishUpload idempotency: 409 MissingUploadsError detection +
+    // folder-listing reconcile. These tests pin the helper's behaviour at the
+    // API-service layer with stateful MockEngines keyed on URL path.
+
+    private fun newServiceWithMock(
+        engine: io.ktor.client.engine.mock.MockEngine,
+    ): InternxtApiService {
+        val service =
+            InternxtApiService(
+                InternxtConfig(),
+                { _ ->
+                    org.krost.unidrive.internxt.model.InternxtCredentials(
+                        jwt = "test-jwt",
+                        mnemonic = "test-mnemonic",
+                        rootFolderId = "test-root",
+                        email = "test@example.invalid",
+                        bridgeUser = "bridge-user",
+                        bridgeUserId = "bridge-secret",
+                        bucket = "test-bucket",
+                    )
+                },
+            )
+        val field = InternxtApiService::class.java.getDeclaredField("httpClient")
+        field.isAccessible = true
+        (field.get(service) as? io.ktor.client.HttpClient)?.close()
+        field.set(service, io.ktor.client.HttpClient(engine))
+        return service
+    }
+
+    private val sampleBucketEntryJson =
+        """{"id":"bridge-fileId-1","index":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","bucket":"test-bucket","name":"enc-name"}"""
+
+    private val missingUploadsBodyShape =
+        """{"statusCode":409,"message":"MissingUploadsError: shard upload missing for finish","error":"Conflict"}"""
+
+    @Test
+    fun `commitWithRetry succeeds on first attempt without reconcile`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val listingCalls = AtomicInteger(0)
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = sampleBucketEntryJson,
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/") -> {
+                            listingCalls.incrementAndGet()
+                            respond(
+                                content = """{"children":[],"files":[]}""",
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+                val result =
+                    commitWithRetry(
+                        api = service,
+                        bucket = "test-bucket",
+                        folderUuid = "folder-uuid-1",
+                        plainName = "report",
+                        ext = "pdf",
+                        fileSize = 1024L,
+                        encryptedSize = 1040L,
+                        indexHex = "00".repeat(32),
+                        hashHex = "aa".repeat(32),
+                        shardUuid = "shard-uuid-1",
+                        startedAt = startedAt,
+                        clock = { startedAt.plusMillis(100) },
+                    )
+                assertEquals("bridge-fileId-1", result.id)
+                assertEquals(1, finishCalls.get(), "exactly one finishUpload call on the happy path")
+                assertEquals(0, listingCalls.get(), "no reconcile listing when finish succeeds")
+            } finally {
+                service.close()
+            }
+        }
+
+    @Test
+    fun `commitWithRetry on 409 MissingUploadsError reconciles via folder listing and returns existing fileId`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val listingCalls = AtomicInteger(0)
+            val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+            val creationTime = startedAt.plusSeconds(2).toString()
+            val listingBody =
+                """{"children":[],"files":[{
+                    "uuid":"file-uuid-1",
+                    "fileId":"bridge-fileId-2",
+                    "plainName":"report",
+                    "type":"pdf",
+                    "size":"1024",
+                    "bucket":"test-bucket",
+                    "status":"EXISTS",
+                    "creationTime":"$creationTime"
+                }]}"""
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = missingUploadsBodyShape,
+                                status = io.ktor.http.HttpStatusCode.Conflict,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/folder-uuid-1") -> {
+                            listingCalls.incrementAndGet()
+                            respond(
+                                content = listingBody,
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val result =
+                    commitWithRetry(
+                        api = service,
+                        bucket = "test-bucket",
+                        folderUuid = "folder-uuid-1",
+                        plainName = "report",
+                        ext = "pdf",
+                        fileSize = 1024L,
+                        encryptedSize = 1040L,
+                        indexHex = "00".repeat(32),
+                        hashHex = "aa".repeat(32),
+                        shardUuid = "shard-uuid-1",
+                        startedAt = startedAt,
+                        clock = { startedAt.plusMillis(500) },
+                    )
+                assertEquals("bridge-fileId-2", result.id, "reconcile returns the listing's fileId")
+                assertEquals(1, finishCalls.get(), "first 409 only — no re-attempt when reconcile succeeds")
+                assertEquals(1, listingCalls.get(), "exactly one reconcile listing call")
+            } finally {
+                service.close()
+            }
+        }
+
+    @Test
+    fun `commitWithRetry on 409 with no matching name re-attempts finishUpload once then throws`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val listingCalls = AtomicInteger(0)
+            val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = missingUploadsBodyShape,
+                                status = io.ktor.http.HttpStatusCode.Conflict,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/") -> {
+                            listingCalls.incrementAndGet()
+                            respond(
+                                content = """{"children":[],"files":[]}""",
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val ex =
+                    kotlin.test.assertFailsWith<InternxtApiException> {
+                        commitWithRetry(
+                            api = service,
+                            bucket = "test-bucket",
+                            folderUuid = "folder-uuid-1",
+                            plainName = "report",
+                            ext = "pdf",
+                            fileSize = 1024L,
+                            encryptedSize = 1040L,
+                            indexHex = "00".repeat(32),
+                            hashHex = "aa".repeat(32),
+                            shardUuid = "shard-uuid-1",
+                            startedAt = startedAt,
+                            clock = { startedAt.plusMillis(500) },
+                        )
+                    }
+                assertEquals(409, ex.statusCode)
+                kotlin.test.assertTrue(
+                    ex.message?.contains("MissingUploadsError") == true,
+                    "thrown message must reference the marker substring, got: ${ex.message}",
+                )
+                kotlin.test.assertNotNull(ex.cause, "cause must be the original 409 exception")
+                kotlin.test.assertTrue(
+                    (ex.cause as? InternxtApiException)?.statusCode == 409,
+                    "cause must carry the original 409 statusCode",
+                )
+                assertEquals(2, finishCalls.get(), "case (a): one initial 409 + one re-attempt that also 409s")
+                assertEquals(1, listingCalls.get(), "one reconcile listing before the re-attempt")
+            } finally {
+                service.close()
+            }
+        }
+
+    @Test
+    fun `commitWithRetry on 409 with multiple size-matching candidates picks the youngest`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+            val olderCreation = startedAt.plusSeconds(60).toString() // 1 minute after start
+            val youngerCreation = startedAt.plusSeconds(240).toString() // 4 minutes after start
+            val listingBody =
+                """{"children":[],"files":[
+                    {"uuid":"file-uuid-old","fileId":"bridge-fileId-OLD","plainName":"report","type":"pdf","size":"1024","bucket":"test-bucket","status":"EXISTS","creationTime":"$olderCreation"},
+                    {"uuid":"file-uuid-new","fileId":"bridge-fileId-NEW","plainName":"report","type":"pdf","size":"1024","bucket":"test-bucket","status":"EXISTS","creationTime":"$youngerCreation"}
+                ]}"""
+
+            // Attach a list appender to capture the WARN log emitted on disambiguation.
+            val disambiguationLogger =
+                org.slf4j.LoggerFactory.getLogger("org.krost.unidrive.internxt.FinishUploadIdempotency")
+                    as ch.qos.logback.classic.Logger
+            val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().also { it.start() }
+            disambiguationLogger.addAppender(appender)
+
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = missingUploadsBodyShape,
+                                status = io.ktor.http.HttpStatusCode.Conflict,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/") -> {
+                            respond(
+                                content = listingBody,
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val result =
+                    commitWithRetry(
+                        api = service,
+                        bucket = "test-bucket",
+                        folderUuid = "folder-uuid-1",
+                        plainName = "report",
+                        ext = "pdf",
+                        fileSize = 1024L,
+                        encryptedSize = 1040L,
+                        indexHex = "00".repeat(32),
+                        hashHex = "aa".repeat(32),
+                        shardUuid = "shard-uuid-1",
+                        startedAt = startedAt,
+                        clock = { startedAt.plusMillis(500) },
+                    )
+                assertEquals("bridge-fileId-NEW", result.id, "youngest creationTime wins the disambiguation")
+                assertEquals(1, finishCalls.get(), "first 409 only — no re-attempt when reconcile succeeds")
+                val warn =
+                    appender.list.firstOrNull {
+                        it.level == ch.qos.logback.classic.Level.WARN &&
+                            it.formattedMessage.contains("reconcile matched")
+                    }
+                kotlin.test.assertNotNull(warn, "expected disambiguation WARN, got: ${appender.list.map { it.formattedMessage }}")
+                kotlin.test.assertTrue(
+                    warn.formattedMessage.contains("bridge-fileId-NEW"),
+                    "WARN must name the chosen youngest fileId, got: ${warn.formattedMessage}",
+                )
+                kotlin.test.assertTrue(
+                    warn.formattedMessage.contains("bridge-fileId-OLD"),
+                    "WARN must list the rejected sibling fileId, got: ${warn.formattedMessage}",
+                )
+            } finally {
+                disambiguationLogger.detachAppender(appender)
+                appender.stop()
+                service.close()
+            }
+        }
+
+    @Test
+    fun `commitWithRetry reconcile listing failure wraps the listing error as cause`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val listingCalls = AtomicInteger(0)
+            val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = missingUploadsBodyShape,
+                                status = io.ktor.http.HttpStatusCode.Conflict,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/") -> {
+                            listingCalls.incrementAndGet()
+                            // Internal Server Error — a transient that bubbles up before retry exhaustion.
+                            respond(
+                                content = """{"error":"internal server error"}""",
+                                status = io.ktor.http.HttpStatusCode.InternalServerError,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val ex =
+                    kotlin.test.assertFailsWith<InternxtApiException> {
+                        commitWithRetry(
+                            api = service,
+                            bucket = "test-bucket",
+                            folderUuid = "folder-uuid-1",
+                            plainName = "report",
+                            ext = "pdf",
+                            fileSize = 1024L,
+                            encryptedSize = 1040L,
+                            indexHex = "00".repeat(32),
+                            hashHex = "aa".repeat(32),
+                            shardUuid = "shard-uuid-1",
+                            startedAt = startedAt,
+                            clock = { startedAt.plusMillis(500) },
+                        )
+                    }
+                assertEquals(409, ex.statusCode, "wrapped exception keeps the 409 statusCode")
+                kotlin.test.assertTrue(
+                    ex.message?.contains("MissingUploadsError") == true,
+                    "wrapped exception preserves the marker substring, got: ${ex.message}",
+                )
+                kotlin.test.assertNotNull(ex.cause, "cause must be the listing exception")
+                kotlin.test.assertTrue(
+                    (ex.cause as? InternxtApiException)?.statusCode == 500,
+                    "cause must carry the listing's statusCode (500), got: ${(ex.cause as? InternxtApiException)?.statusCode}",
+                )
+                assertEquals(1, finishCalls.get(), "no re-attempt when listing fails")
+            } finally {
+                service.close()
+            }
+        }
+
+    @Test
+    fun `commitWithRetry propagates non-MissingUploads 409 without reconcile`() =
+        kotlinx.coroutines.test.runTest {
+            val finishCalls = AtomicInteger(0)
+            val listingCalls = AtomicInteger(0)
+            val startedAt = java.time.Instant.parse("2026-05-18T10:00:00Z")
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/v2/buckets/") && url.endsWith("/files/finish") -> {
+                            finishCalls.incrementAndGet()
+                            respond(
+                                content = """{"statusCode":409,"message":"Some other conflict","error":"Conflict"}""",
+                                status = io.ktor.http.HttpStatusCode.Conflict,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url.contains("/folders/content/") -> {
+                            listingCalls.incrementAndGet()
+                            respond(
+                                content = """{"children":[],"files":[]}""",
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+            val service = newServiceWithMock(engine)
+            try {
+                val ex =
+                    kotlin.test.assertFailsWith<InternxtApiException> {
+                        commitWithRetry(
+                            api = service,
+                            bucket = "test-bucket",
+                            folderUuid = "folder-uuid-1",
+                            plainName = "report",
+                            ext = "pdf",
+                            fileSize = 1024L,
+                            encryptedSize = 1040L,
+                            indexHex = "00".repeat(32),
+                            hashHex = "aa".repeat(32),
+                            shardUuid = "shard-uuid-1",
+                            startedAt = startedAt,
+                            clock = { startedAt.plusMillis(500) },
+                        )
+                    }
+                assertEquals(409, ex.statusCode)
+                kotlin.test.assertTrue(
+                    ex.message?.contains("Some other conflict") == true,
+                    "non-MissingUploads 409 propagates unchanged",
+                )
+                assertEquals(1, finishCalls.get(), "no retry when 409 isn't MissingUploadsError")
+                assertEquals(0, listingCalls.get(), "no reconcile listing for non-MissingUploads 409")
+            } finally {
+                service.close()
+            }
+        }
+
     @Test
     fun `401 then 200 replays exactly once after a forced refresh`() =
         kotlinx.coroutines.test.runTest {
