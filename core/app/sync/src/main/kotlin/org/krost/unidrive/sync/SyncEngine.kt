@@ -85,6 +85,17 @@ class SyncEngine(
     // line: {"ts":"...","action":"del-remote","path":"...","reason":"..."}.
     // Null in tests that don't care about audit output.
     private val skippedOpsLogPath: Path? = null,
+    // Streaming reconciliation: when true, the engine runs the local scan
+    // first, then drives provider.delta() page-by-page, reconciling each
+    // page against the full local map via Reconciler.resolveSlice. Safe-now
+    // actions (DownloadContent, Upload, Create*, explicit Move) accumulate
+    // into the action list as each page lands; deletion-bearing actions
+    // (DeleteLocal, DeleteRemote, RemoveEntry, Conflict×DELETED) buffer
+    // until scan-end so detectMissingAfterFullSync still gates them. The
+    // executor pipeline (Pass 1 / Pass 2) remains the existing single-list
+    // shape — the channel + executor coroutine wiring lands separately.
+    // Default false; flipped by the CLI flag + TOML key.
+    private val streamingReconciliation: Boolean = false,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -347,16 +358,60 @@ class SyncEngine(
         )
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
-        // UD-236: skipRemoteGather (apply mode) bypasses provider.delta() entirely.
-        // The recovery loops in Reconciler.reconcile pick up any pending UD-225/UD-901
-        // rows from a prior refresh and emit DownloadContent / Upload actions for them.
-        val allRemoteChanges =
-            if (skipRemoteGather) {
-                log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
-                emptyMap()
-            } else {
-                gatherRemoteChanges()
+        // Streaming reconciliation reorders the phases: local scan first,
+        // then per-page remote gather reconciles each page against the
+        // full local map (spec §1 decision 1 — "Local scan completes
+        // before streaming remote loop starts"). The non-streaming path
+        // keeps the historical remote-then-local order so a flag flip
+        // doesn't change the timing for tests + telemetry baselines.
+        val localChangesForStreaming: Map<String, ChangeState>?
+        val streamingActions: List<SyncAction>?
+        val allRemoteChanges: Map<String, CloudItem>
+        if (streamingReconciliation && !skipRemoteGather) {
+            db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
+                reporter.onScanHistoricalHint("local", it)
             }
+            db.getSyncState("last_scan_count_local")?.toIntOrNull()?.let {
+                reporter.onScanCountHint("local", it)
+            }
+            val localPhaseStart = System.currentTimeMillis()
+            reporter.onScanProgress("local", 0)
+            val allLocalChangesPre =
+                scanner.scan { count ->
+                    reporter.onScanProgress("local", count)
+                }
+            val localChangesPre =
+                if (syncPath != null) {
+                    val ancestors = syncPathAncestors(syncPath)
+                    allLocalChangesPre.filterKeys {
+                        it.startsWith(syncPath) || it == syncPath || it in ancestors
+                    }
+                } else {
+                    allLocalChangesPre
+                }
+            reporter.onScanProgress("local", localChangesPre.size)
+            val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
+            db.setSyncState("last_scan_secs_local", localScanSecs.toString())
+            db.setSyncState("last_scan_count_local", localChangesPre.size.toString())
+            localChangesForStreaming = localChangesPre
+
+            val (remoteMap, actions) = gatherStreamingChanges(localChangesPre)
+            allRemoteChanges = remoteMap
+            streamingActions = actions
+        } else {
+            localChangesForStreaming = null
+            streamingActions = null
+            // UD-236: skipRemoteGather (apply mode) bypasses provider.delta() entirely.
+            // The recovery loops in Reconciler.reconcile pick up any pending UD-225/UD-901
+            // rows from a prior refresh and emit DownloadContent / Upload actions for them.
+            allRemoteChanges =
+                if (skipRemoteGather) {
+                    log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
+                    emptyMap()
+                } else {
+                    gatherRemoteChanges()
+                }
+        }
 
         val remoteChanges =
             if (syncPath != null) {
@@ -371,30 +426,38 @@ class SyncEngine(
         db.setSyncState("last_scan_secs_remote", remoteScanSecs.toString())
         db.setSyncState("last_scan_count_remote", remoteChanges.size.toString())
 
-        db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
-            reporter.onScanHistoricalHint("local", it)
-        }
-        db.getSyncState("last_scan_count_local")?.toIntOrNull()?.let {
-            reporter.onScanCountHint("local", it)
-        }
-        val localPhaseStart = System.currentTimeMillis()
-        reporter.onScanProgress("local", 0)
-        val allLocalChanges =
-            scanner.scan { count ->
-                // UD-742: scanner emits this every 5k items / 10s during long walks.
-                reporter.onScanProgress("local", count)
+        // Local-changes resolution: streaming captured these above so the
+        // per-page reconcile could see them; non-streaming runs the scan
+        // here on the historical order.
+        val localChanges: Map<String, ChangeState>
+        if (localChangesForStreaming != null) {
+            localChanges = localChangesForStreaming
+        } else {
+            db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
+                reporter.onScanHistoricalHint("local", it)
             }
-        val localChanges =
-            if (syncPath != null) {
-                val ancestors = syncPathAncestors(syncPath)
-                allLocalChanges.filterKeys { it.startsWith(syncPath) || it == syncPath || it in ancestors }
-            } else {
-                allLocalChanges
+            db.getSyncState("last_scan_count_local")?.toIntOrNull()?.let {
+                reporter.onScanCountHint("local", it)
             }
-        reporter.onScanProgress("local", localChanges.size)
-        val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
-        db.setSyncState("last_scan_secs_local", localScanSecs.toString())
-        db.setSyncState("last_scan_count_local", localChanges.size.toString())
+            val localPhaseStart = System.currentTimeMillis()
+            reporter.onScanProgress("local", 0)
+            val allLocalChanges =
+                scanner.scan { count ->
+                    // UD-742: scanner emits this every 5k items / 10s during long walks.
+                    reporter.onScanProgress("local", count)
+                }
+            localChanges =
+                if (syncPath != null) {
+                    val ancestors = syncPathAncestors(syncPath)
+                    allLocalChanges.filterKeys { it.startsWith(syncPath) || it == syncPath || it in ancestors }
+                } else {
+                    allLocalChanges
+                }
+            reporter.onScanProgress("local", localChanges.size)
+            val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
+            db.setSyncState("last_scan_secs_local", localScanSecs.toString())
+            db.setSyncState("last_scan_count_local", localChanges.size.toString())
+        }
 
         // UD-297: empty-local + populated-DB sanity check. Catches the
         // wrong-sync_root case (user pointed at an empty directory while
@@ -419,7 +482,18 @@ class SyncEngine(
         // heartbeat instead of going silent for many seconds on big first-syncs;
         // UD-901a: pass syncPath so the recovery loops respect scope and don't
         // resurrect orphans outside the user's requested subtree).
-        val reconciledActions = reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
+        //
+        // Streaming reconciliation already ran resolveSlice per page and
+        // accumulated through StreamingReconcileBuffer; finalize against
+        // the union of streamed safe-now + deferred-drained actions here
+        // so the recovery loops, case-collision detection, move detection,
+        // and final sort run exactly once against the full action set.
+        val reconciledActions =
+            if (streamingActions != null) {
+                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath)
+            } else {
+                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
+            }
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
@@ -1099,6 +1173,173 @@ class SyncEngine(
             reporter.onWarning(msg)
         }
         return changes
+    }
+
+    /**
+     * Streaming-reconciliation gather. Mirrors [gatherRemoteChanges] but
+     * runs [Reconciler.resolveSlice] on each page as it lands, routing
+     * the verdict through [StreamingReconcileBuffer] to split safe-now
+     * from deferred. Returns the accumulated remote map (kept for
+     * downstream `updateRemoteEntries` + scope-filter consumers) plus
+     * the combined safe-now-followed-by-deferred action list — the
+     * engine's [Reconciler.finalizeStreaming] sees the union, runs the
+     * recovery loops, and produces the final sort.
+     *
+     * Page-by-page state-machine flip on [scan_staging]: after a page's
+     * safe-now actions are buffered (NOT yet executed — the channel +
+     * executor coroutine wiring lands separately), the staged rows for
+     * that page flip from STAGED to RECONCILED so a daemon restart
+     * resuming the scan skips them in the per-page reconciler slice.
+     * The deferred bucket is NOT persisted — re-derive at scan-end from
+     * the final action sweep per spec §5 decision 2.
+     */
+    private suspend fun gatherStreamingChanges(
+        localChanges: Map<String, ChangeState>,
+    ): Pair<Map<String, CloudItem>, List<SyncAction>> {
+        val storedCursor = db.getSyncState("delta_cursor")
+        val cursor = storedCursor?.ifEmpty { null }
+        val isFullSync = cursor == null
+        val changes = mutableMapOf<String, CloudItem>()
+        val buffer = StreamingReconcileBuffer()
+        val safeAccumulator = mutableListOf<SyncAction>()
+
+        // UD-223 fast-bootstrap mirror: bootstrap adopts the cursor with
+        // zero enumeration, so there's nothing to stream — fall through
+        // to the same map-only path as the non-streaming gather.
+        if (fastBootstrap && isFullSync && Capability.FastBootstrap in provider.capabilities()) {
+            when (val result = provider.deltaFromLatest()) {
+                is CapabilityResult.Success -> {
+                    val page = result.value
+                    for (item in page.items) {
+                        val resolved = resolveItemPath(item) ?: continue
+                        changes[resolved.path] = resolved
+                    }
+                    db.setSyncState("delta_cursor", page.cursor)
+                    db.setSyncState("last_full_scan", Instant.now().toString())
+                    val stamp = Instant.now().toString()
+                    val msg =
+                        "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
+                            "Items that already exist on the remote will stay invisible until they next mutate. " +
+                            "Upload-direction sync is unaffected."
+                    log.warn(msg)
+                    reporter.onWarning(msg)
+                    return changes to emptyList()
+                }
+                is CapabilityResult.Unsupported -> {
+                    log.warn(
+                        "UD-223 fast-bootstrap requested but provider '{}' does not support it ({}). " +
+                            "Falling back to streaming first-sync enumeration.",
+                        providerId,
+                        result.reason,
+                    )
+                }
+            }
+        }
+
+        val useShared =
+            includeShared &&
+                Capability.DeltaShared in provider.capabilities()
+
+        val onPageProgress: (Int) -> Unit = { itemsSoFar ->
+            reporter.onScanProgress("remote", itemsSoFar)
+        }
+
+        var allComplete = true
+        val activeScan = db.getActiveScan(staleThreshold = java.time.Duration.ofHours(SCAN_CHECKPOINT_STALE_HOURS))
+        val resumedItems: List<CloudItem> =
+            if (activeScan != null) db.loadStagedItems(activeScan.scanId) else emptyList()
+        val scanId =
+            activeScan?.scanId
+                ?: db.beginScan(initialMarker = null)
+        if (activeScan != null) {
+            log.info(
+                "Resuming streaming-reconciliation scan id={} marker={} ({} previously-staged items)",
+                scanId,
+                activeScan.marker,
+                resumedItems.size,
+            )
+        }
+        val scanContext =
+            org.krost.unidrive.ScanContext(
+                resumeMarker = activeScan?.marker,
+                resumedItems = resumedItems,
+                persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+            )
+
+        suspend fun nextPage(c: String?): DeltaPage {
+            val page =
+                if (useShared) {
+                    when (val r = provider.deltaWithShared(c)) {
+                        is CapabilityResult.Success -> r.value
+                        is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress, scanContext)
+                    }
+                } else {
+                    provider.delta(c, onPageProgress, scanContext)
+                }
+            log.debug("Delta (streaming): {} items, hasMore={}", page.items.size, page.hasMore)
+            if (!page.complete) {
+                allComplete = false
+            }
+            return page
+        }
+
+        fun persistPendingCursor(cursor: String) {
+            db.setSyncState("pending_cursor", cursor)
+            db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
+        }
+
+        // Per-page reconciliation: build the page slice's remote map,
+        // run resolveSlice against the full local map, then classify.
+        // The state-machine flip happens after classify so a crash
+        // between page persistence and reconciliation will re-reconcile
+        // on resume rather than skip.
+        suspend fun reconcilePage(page: DeltaPage) {
+            val pageSlice = mutableMapOf<String, CloudItem>()
+            val pageRemoteIds = mutableListOf<String>()
+            for (item in page.items) {
+                val resolved = resolveItemPath(item) ?: continue
+                changes[resolved.path] = resolved
+                pageSlice[resolved.path] = resolved
+                pageRemoteIds.add(resolved.id)
+            }
+            persistPendingCursor(page.cursor)
+            reporter.onScanProgress("remote", changes.size)
+
+            if (pageSlice.isEmpty()) return
+            val pageActions = reconciler.resolveSlice(pageSlice, localChanges, syncPath)
+            val safeNow = buffer.classify(pageActions)
+            safeAccumulator.addAll(safeNow)
+            // Mark staged rows reconciled — a resume after this point
+            // will load only the still-STAGED slice (spec §5).
+            if (pageRemoteIds.isNotEmpty()) {
+                db.markStagedReconciled(scanId, pageRemoteIds)
+            }
+        }
+
+        var page = nextPage(cursor)
+        reconcilePage(page)
+        while (page.hasMore) {
+            page = nextPage(page.cursor)
+            reconcilePage(page)
+        }
+
+        if (allComplete) {
+            db.completeScan(scanId)
+        }
+
+        if (isFullSync && allComplete) {
+            detectMissingAfterFullSync(changes)
+        } else if (isFullSync) {
+            val msg =
+                "UD-360: at least one delta page returned complete=false; " +
+                    "skipping detectMissingAfterFullSync to avoid spurious del-local actions. " +
+                    "The missing inventory will be picked up on the next sync run."
+            log.warn(msg)
+            reporter.onWarning(msg)
+        }
+
+        val deferred = buffer.drainDeferred()
+        return changes to (safeAccumulator + deferred)
     }
 
     /**

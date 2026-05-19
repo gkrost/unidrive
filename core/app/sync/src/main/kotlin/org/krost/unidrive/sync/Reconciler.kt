@@ -317,6 +317,201 @@ class Reconciler(
         return sorted
     }
 
+    /**
+     * Streaming reconciliation entry point — per-page slice.
+     *
+     * Runs only the main resolution loop (the `for (path in allPaths)` body
+     * from [reconcile]) on the page's remote items plus the matching local
+     * subset. Returns raw page actions without recovery-loop synthesis,
+     * case-collision detection, move detection, or final sort — those run
+     * once at scan-end via [finalizeStreaming] against the union of all
+     * page actions plus the deferred-bucket flush.
+     *
+     * Why not call [reconcile] per page: the recovery loops iterate
+     * `db.getAllEntries()` and synthesize Download/Upload actions for
+     * every pending row. Running them per page would emit duplicate
+     * actions for every entry on every page boundary. Move detection
+     * also looks across the full action set; per-page detection misses
+     * cross-page moves and double-counts intra-page ones.
+     *
+     * Local changes scope: pass the FULL local map (LocalScanner runs to
+     * completion before streaming starts per spec §1 decision 1). The
+     * slice's allPaths is `pageRemote.keys ∪ localChanges.keys` so a
+     * remote-arrived path can pair with a local-changed path inside the
+     * same page boundary.
+     */
+    fun resolveSlice(
+        pageRemote: Map<String, CloudItem>,
+        localChanges: Map<String, ChangeState>,
+        syncPath: String? = null,
+    ): List<SyncAction> {
+        val allDbEntries = db.getAllEntries()
+        val entryByPath = allDbEntries.associateBy { it.path }
+        val pinRules = db.getPinRules()
+
+        val actions = mutableListOf<SyncAction>()
+        val allPaths =
+            (pageRemote.keys + localChanges.keys)
+                .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
+                .filter { pathInSyncScope(it, syncPath) }
+
+        for (path in allPaths) {
+            val remoteItem = pageRemote[path]
+            val localState = localChanges[path] ?: ChangeState.UNCHANGED
+            val entry = entryByPath[path]
+
+            val remoteState =
+                when {
+                    remoteItem == null -> ChangeState.UNCHANGED
+                    remoteItem.deleted -> ChangeState.DELETED
+                    entry == null -> ChangeState.NEW
+                    entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
+                    remoteItem.hash != entry.remoteHash ||
+                        remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
+                    else -> ChangeState.UNCHANGED
+                }
+
+            if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules)
+            if (action != null) actions.add(action)
+        }
+        return actions
+    }
+
+    /**
+     * Streaming reconciliation entry point — scan-end finalization.
+     *
+     * Takes the union of [streamedActions] (safe-now + deferred drained
+     * from [StreamingReconcileBuffer]) plus the accumulated [fullRemote]
+     * map and runs the recovery loops, case-collision detection, move
+     * detection, and final sort. Mirrors the bookkeeping at the bottom
+     * of [reconcile] without re-running the main path loop (that's
+     * already been done per page in [resolveSlice]).
+     *
+     * Recovery loops still iterate `db.getAllEntries()` once here — same
+     * as today's single-shot [reconcile]. The `coveredPaths` set absorbs
+     * everything [resolveSlice] already emitted so the synthesis only
+     * fires for genuinely-uncovered orphans.
+     */
+    fun finalizeStreaming(
+        streamedActions: List<SyncAction>,
+        fullRemote: Map<String, CloudItem>,
+        fullLocal: Map<String, ChangeState>,
+        syncPath: String? = null,
+    ): List<SyncAction> {
+        val allDbEntries = db.getAllEntries()
+        val entryByPath = allDbEntries.associateBy { it.path }
+        val entryByLcPath = allDbEntries.associateBy { it.path.lowercase(Locale.ROOT) }
+        val entryByRemoteId = allDbEntries.mapNotNull { e -> e.remoteId?.let { it to e } }.toMap()
+
+        val actions = streamedActions.toMutableList()
+        val coveredPaths = actions.mapTo(mutableSetOf()) { it.path }
+
+        // Case-collision detection on new local files — see [reconcile] for rationale.
+        for ((path, state) in fullLocal) {
+            if (state != ChangeState.NEW) continue
+            val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
+            if (existing != null && existing.path != path) {
+                actions.removeAll { it.path == path && it is SyncAction.Upload }
+                actions.add(
+                    SyncAction.Conflict(
+                        path = path,
+                        localState = ChangeState.NEW,
+                        remoteState = ChangeState.UNCHANGED,
+                        remoteItem = null,
+                        policy = policyForPath(path),
+                    ),
+                )
+            }
+        }
+
+        val newLocalPaths = fullLocal.filterValues { it == ChangeState.NEW }.keys.toList()
+        val caseGroups = newLocalPaths.groupBy { it.lowercase() }
+        for ((_, paths) in caseGroups) {
+            if (paths.size > 1) {
+                for (path in paths) {
+                    actions.removeAll { it.path == path && it is SyncAction.Upload }
+                    if (actions.none { it.path == path && it is SyncAction.Conflict }) {
+                        actions.add(
+                            SyncAction.Conflict(
+                                path = path,
+                                localState = ChangeState.NEW,
+                                remoteState = ChangeState.UNCHANGED,
+                                remoteItem = null,
+                                policy = policyForPath(path),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+
+        val recoveryStartIdx = actions.size
+        // UD-225 recovery — unhydrated DB rows surfacing as orphan downloads.
+        for (entry in allDbEntries) {
+            if (entry.isFolder || entry.isHydrated) continue
+            if (entry.remoteSize <= 0) continue
+            if (entry.path in coveredPaths) continue
+            if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+            if (!pathInSyncScope(entry.path, syncPath)) continue
+            val remoteItem =
+                fullRemote[entry.path] ?: CloudItem(
+                    id = entry.remoteId ?: "",
+                    name = entry.path.substringAfterLast('/'),
+                    path = entry.path,
+                    size = entry.remoteSize,
+                    isFolder = false,
+                    modified = entry.remoteModified,
+                    created = null,
+                    hash = entry.remoteHash,
+                    mimeType = null,
+                )
+            actions.add(SyncAction.DownloadContent(entry.path, remoteItem))
+        }
+
+        // UD-901 recovery — pending-upload DB rows.
+        for (entry in allDbEntries) {
+            if (entry.isFolder) continue
+            if (entry.remoteId != null) continue
+            if (!entry.isHydrated) continue
+            if (entry.path in coveredPaths) continue
+            if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
+            if (!pathInSyncScope(entry.path, syncPath)) continue
+            val localPath = safeResolveLocal(syncRoot, entry.path)
+            if (!Files.isRegularFile(localPath)) continue
+            actions.add(SyncAction.Upload(entry.path))
+        }
+
+        // UD-901b — synthesize missing-parent CreateRemoteFolder for recovery-emitted actions.
+        val recoveryEmitted = actions.subList(recoveryStartIdx, actions.size).toList()
+        if (recoveryEmitted.isNotEmpty()) {
+            val ancestorsToCreate = mutableSetOf<String>()
+            for (action in recoveryEmitted) {
+                val parts = action.path.removePrefix("/").split('/')
+                if (parts.size <= 1) continue
+                for (i in 1 until parts.size) {
+                    val ancestor = "/" + parts.take(i).joinToString("/")
+                    if (ancestor in coveredPaths) continue
+                    if (ancestor in ancestorsToCreate) continue
+                    val existing = entryByPath[ancestor]
+                    if (existing != null && existing.remoteId != null) continue
+                    ancestorsToCreate.add(ancestor)
+                }
+            }
+            for (ancestor in ancestorsToCreate.sortedBy { it.count { c -> c == '/' } }) {
+                actions.add(SyncAction.CreateRemoteFolder(ancestor))
+                coveredPaths.add(ancestor)
+            }
+        }
+
+        // Cross-page move detection runs here on the combined action set —
+        // per-page detection would miss renames that span page boundaries.
+        detectMoves(actions, entryByPath)
+        detectRemoteRenames(actions, fullRemote, entryByRemoteId)
+
+        return sortActions(actions)
+    }
+
     private fun resolveAction(
         path: String,
         localState: ChangeState,

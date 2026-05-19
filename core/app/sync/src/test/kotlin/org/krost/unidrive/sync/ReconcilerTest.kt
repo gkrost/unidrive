@@ -1570,4 +1570,100 @@ class ReconcilerTest {
         // Second drain returns nothing — the slot is fresh.
         assertEquals(0, buf.drainDeferred().size)
     }
+
+    @Test
+    fun `resolveSlice on remote-new page emits DownloadContent`() {
+        // Per-page reconciliation of a page that contains only remote-new
+        // items: same per-path verdict as the single-shot reconcile, but
+        // without recovery loops or final sort firing.
+        val pageRemote = mapOf("/a.txt" to cloudItem("/a.txt"))
+        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), null)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DownloadContent>(actions[0])
+        assertEquals("/a.txt", actions[0].path)
+    }
+
+    @Test
+    fun `resolveSlice with empty page returns empty`() {
+        val actions = reconciler.resolveSlice(emptyMap(), emptyMap(), null)
+        assertTrue(actions.isEmpty())
+    }
+
+    @Test
+    fun `resolveSlice respects excludePatterns`() {
+        val excluded = Reconciler(db, syncRoot, ConflictPolicy.KEEP_BOTH, excludePatterns = listOf("**.tmp"))
+        val pageRemote =
+            mapOf(
+                "/keep.txt" to cloudItem("/keep.txt"),
+                "/skip.tmp" to cloudItem("/skip.tmp"),
+            )
+        val actions = excluded.resolveSlice(pageRemote, emptyMap(), null)
+        assertEquals(1, actions.size)
+        assertEquals("/keep.txt", actions[0].path)
+    }
+
+    @Test
+    fun `resolveSlice respects syncPath scope filter`() {
+        val pageRemote =
+            mapOf(
+                "/in/x.txt" to cloudItem("/in/x.txt"),
+                "/out/y.txt" to cloudItem("/out/y.txt"),
+            )
+        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), syncPath = "/in")
+        assertEquals(1, actions.size)
+        assertEquals("/in/x.txt", actions[0].path)
+    }
+
+    @Test
+    fun `finalizeStreaming surfaces UD-901 pending-upload recovery`() {
+        // A hydrated DB row with remoteId=null + the corresponding local
+        // file represents an interrupted upload. The recovery loop at the
+        // bottom of [reconcile] (and now [finalizeStreaming]) emits an
+        // Upload so the next sync drains it.
+        Files.createFile(syncRoot.resolve("orphan.bin"))
+        db.upsertEntry(
+            SyncEntry(
+                path = "/orphan.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 0,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+        // Streaming would have emitted nothing for this path (no remote
+        // page touches it, no local change). Finalize fills the gap.
+        val finalized = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap(), null)
+        assertEquals(1, finalized.size)
+        assertIs<SyncAction.Upload>(finalized[0])
+        assertEquals("/orphan.bin", finalized[0].path)
+    }
+
+    @Test
+    fun `finalizeStreaming runs cross-page move detection on safe-fired creates`() {
+        // Page 1 streamed a DeleteRemote(/old.txt); page 2 streamed an
+        // Upload(/new.txt) of matching size. Per-page reconcile saw each
+        // half separately and emitted both verbatim. finalizeStreaming
+        // runs detectMoves over the union and converts the pair into a
+        // MoveRemote — same shape the single-shot reconciler produces
+        // when both halves land in the same call.
+        Files.createFile(syncRoot.resolve("new.txt"))
+        Files.write(syncRoot.resolve("new.txt"), ByteArray(100))
+        db.upsertEntry(dbEntry("/old.txt"))
+        val streamed =
+            listOf(
+                SyncAction.DeleteRemote("/old.txt"),
+                SyncAction.Upload("/new.txt"),
+            )
+        val finalized = reconciler.finalizeStreaming(streamed, emptyMap(), emptyMap(), null)
+        assertEquals(1, finalized.size)
+        val move = assertIs<SyncAction.MoveRemote>(finalized[0])
+        assertEquals("/new.txt", move.path)
+        assertEquals("/old.txt", move.fromPath)
+    }
 }
