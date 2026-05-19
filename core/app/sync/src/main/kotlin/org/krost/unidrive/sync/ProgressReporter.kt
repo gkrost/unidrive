@@ -39,6 +39,31 @@ interface ProgressReporter {
     ) {}
 
     /**
+     * Hand the reporter the cursor that THIS scan will be using as its
+     * "modified since" filter, plus a flag indicating whether the prior
+     * scan that produced it ran to completion. Surface this in the
+     * scan-start label so the user can see at a glance what window of
+     * remote state is being polled, and whether the cursor is fresher
+     * (last run complete) or pinned (last run incomplete — typically
+     * because a folder 503'd into the fallback path).
+     *
+     * `cursor` is the raw ISO-8601 string written to `delta_cursor`;
+     * null means no prior cursor exists (first sync / `--reset`).
+     * `complete` mirrors `pending_cursor_complete` — true when the last
+     * gather pass that wrote a cursor finished cleanly; false when it
+     * ended on a `complete=false` page and the active cursor wasn't
+     * refreshed.
+     *
+     * Default no-op — reporters that don't surface scan labels (IPC,
+     * Notify, Silent, test shells) need no update.
+     */
+    fun onScanCursorHint(
+        phase: String,
+        cursor: String?,
+        complete: Boolean = true,
+    ) {}
+
+    /**
      * UD-240g: progress heartbeat for the reconcile phase. Fired by
      * [Reconciler.reconcile] every 5k iterations / 10s wall-clock (see
      * [ScanHeartbeat]) so the CLI / IPC clients show movement instead of

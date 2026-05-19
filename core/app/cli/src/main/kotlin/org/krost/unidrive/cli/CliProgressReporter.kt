@@ -39,6 +39,14 @@ class CliProgressReporter(
     // wall-clock-only path (UD-747) is the fallback.
     private val historicalScanCount = mutableMapOf<String, Int>()
 
+    // Per-phase cursor + completeness, populated via onScanCursorHint at
+    // scan-start. Rendered into the count==0 baseline label so the user
+    // sees the "since X" window the gather is polling, plus a
+    // "(incomplete prior run)" qualifier when the cursor is pinned from
+    // an incomplete prior pass.
+    private val scanCursors = mutableMapOf<String, String>()
+    private val scanCursorComplete = mutableMapOf<String, Boolean>()
+
     override fun onScanProgress(
         phase: String,
         count: Int,
@@ -46,7 +54,7 @@ class CliProgressReporter(
         val now = clock()
         if (count == 0) {
             scanStartTimes[phase] = now
-            printInline("Scanning ${phaseLabel(phase)}...")
+            printInline("Scanning ${phaseLabel(phase)}${cursorSuffix(phase)}...")
         } else {
             val start = scanStartTimes[phase] ?: now
             val elapsedSecs = (now - start) / 1000
@@ -118,6 +126,48 @@ class CliProgressReporter(
     ) {
         if (lastCount > 0) historicalScanCount[phase] = lastCount
     }
+
+    override fun onScanCursorHint(
+        phase: String,
+        cursor: String?,
+        complete: Boolean,
+    ) {
+        if (cursor.isNullOrBlank()) {
+            scanCursors.remove(phase)
+            scanCursorComplete.remove(phase)
+        } else {
+            scanCursors[phase] = cursor
+            scanCursorComplete[phase] = complete
+        }
+    }
+
+    /**
+     * Build the " since <YYYY-MM-DD HH:mm>[ (incomplete prior run)]"
+     * suffix that follows the phase label at scan-start. Returns "" when
+     * no cursor hint exists for [phase], when the cursor is blank, or
+     * when it fails to parse as ISO-8601 (defensive — never break the
+     * heartbeat line over a malformed sync_state value, just drop the
+     * suffix). Formatting is in the user's local timezone since the
+     * label is for human at-a-glance use, not log correlation.
+     */
+    internal fun cursorSuffix(phase: String): String {
+        val raw = scanCursors[phase] ?: return ""
+        val formatted = formatCursorForDisplay(raw) ?: return ""
+        val incompleteTag = if (scanCursorComplete[phase] == false) " (incomplete prior run)" else ""
+        return " since $formatted$incompleteTag"
+    }
+
+    internal fun formatCursorForDisplay(iso: String): String? =
+        try {
+            val instant = java.time.Instant.parse(iso)
+            val formatter =
+                java.time.format.DateTimeFormatter
+                    .ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT)
+                    .withZone(java.time.ZoneId.systemDefault())
+            formatter.format(instant)
+        } catch (_: java.time.format.DateTimeParseException) {
+            null
+        }
 
     override fun onActionCount(
         total: Int,

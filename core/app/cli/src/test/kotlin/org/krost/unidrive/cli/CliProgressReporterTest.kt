@@ -365,6 +365,52 @@ class CliProgressReporterTest {
     }
 
     @Test
+    fun `scan label renders since cursor when delta_cursor is set and complete`() {
+        val reporter = CliProgressReporter()
+        // Fixed UTC instant so the formatter output is deterministic given the
+        // local timezone — assert on the date prefix + presence of " since"
+        // rather than the exact HH:mm (varies by JVM tz).
+        reporter.onScanCursorHint("remote", "2026-05-18T17:20:30.000Z", complete = true)
+        reporter.onScanProgress("remote", 0)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("Scanning remote changes since 2026-05-1"), "expected ' since 2026-05-1…'; got: $output")
+        assertFalse(output.contains("(incomplete prior run)"), "no incomplete tag when complete=true; got: $output")
+        assertTrue(output.contains("..."), "ellipsis preserved; got: $output")
+    }
+
+    @Test
+    fun `scan label appends incomplete prior run when complete=false`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanCursorHint("remote", "2026-05-18T17:20:30.000Z", complete = false)
+        reporter.onScanProgress("remote", 0)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("Scanning remote changes since 2026-05-1"), "expected ' since 2026-05-1…'; got: $output")
+        assertTrue(output.contains("(incomplete prior run)..."), "expected '(incomplete prior run)…'; got: $output")
+    }
+
+    @Test
+    fun `scan label drops since suffix when cursor is null`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanCursorHint("remote", null, complete = true)
+        reporter.onScanProgress("remote", 0)
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(output.contains("Scanning remote changes..."), "bare label when cursor null; got: $output")
+        assertFalse(output.contains("since"), "no 'since' segment when cursor null; got: $output")
+    }
+
+    @Test
+    fun `scan label drops since suffix when cursor unparseable`() {
+        val reporter = CliProgressReporter()
+        reporter.onScanCursorHint("remote", "not-an-iso-timestamp", complete = false)
+        reporter.onScanProgress("remote", 0)
+        val output = captured.toString(Charsets.UTF_8)
+        // Defensive degradation — malformed sync_state must not break the heartbeat.
+        assertTrue(output.contains("Scanning remote changes..."), "bare label on parse failure; got: $output")
+        assertFalse(output.contains("since"), "no since on parse failure; got: $output")
+        assertFalse(output.contains("incomplete"), "no incomplete tag on parse failure; got: $output")
+    }
+
+    @Test
     fun `UD-757 scan progress no history renders count and elapsed but no ETA`() {
         val clock = FakeClock()
         val reporter = CliProgressReporter(clock = { clock.nowMs })

@@ -336,6 +336,15 @@ class SyncEngine(
         db.getSyncState("last_scan_count_remote")?.toIntOrNull()?.let {
             reporter.onScanCountHint("remote", it)
         }
+        // Surface the cursor THIS scan will filter on, plus whether the prior
+        // gather that produced it ran clean. delta_cursor is the active filter
+        // (null on first sync / `--reset`); pending_cursor_complete=false means
+        // a prior incomplete pass left the cursor pinned at its older value.
+        reporter.onScanCursorHint(
+            phase = "remote",
+            cursor = db.getSyncState("delta_cursor")?.ifBlank { null },
+            complete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true,
+        )
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
         // UD-236: skipRemoteGather (apply mode) bypasses provider.delta() entirely.
