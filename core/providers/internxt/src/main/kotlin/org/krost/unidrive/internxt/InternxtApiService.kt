@@ -19,6 +19,7 @@ import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.InFlightDedup
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
+import org.krost.unidrive.http.currentPriority
 import org.krost.unidrive.http.streamingFileBody
 import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.internxt.model.*
@@ -101,7 +102,7 @@ class InternxtApiService(
     internal val listFoldersDedup = InFlightDedup<String, List<InternxtFolder>>()
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
-        folderContentsDedup.load(folderUuid) {
+        folderContentsDedup.load(folderUuid, currentPriority()) {
             val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
             json.decodeFromString<FolderContentResponse>(body)
         }
@@ -112,7 +113,7 @@ class InternxtApiService(
         offset: Int = 0,
         status: String = "ALL",
     ): List<InternxtFile> =
-        listFilesDedup.load("$updatedAt|$limit|$offset|$status") {
+        listFilesDedup.load("$updatedAt|$limit|$offset|$status", currentPriority()) {
             val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status))
             json.decodeFromString<List<InternxtFile>>(body)
         }
@@ -123,13 +124,13 @@ class InternxtApiService(
         offset: Int = 0,
         status: String = "ALL",
     ): List<InternxtFolder> =
-        listFoldersDedup.load("$updatedAt|$limit|$offset|$status") {
+        listFoldersDedup.load("$updatedAt|$limit|$offset|$status", currentPriority()) {
             val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status))
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 
     suspend fun getFileMeta(uuid: String): InternxtFile =
-        fileMetaDedup.load(uuid) {
+        fileMetaDedup.load(uuid, currentPriority()) {
             val body = authenticatedGet("$baseUrl/files/$uuid/meta")
             json.decodeFromString<InternxtFile>(body)
         }

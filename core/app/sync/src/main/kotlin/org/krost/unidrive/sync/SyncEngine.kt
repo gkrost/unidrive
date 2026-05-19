@@ -9,6 +9,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.FileSystems
@@ -723,97 +724,104 @@ class SyncEngine(
 
         // Pass 1: sequential actions (placeholder ops, deletes, moves, conflicts, remote folder creates)
         // Batched into one SQLite transaction — avoids one fsync per action.
+        // Pass 1 is user-driven: every action here is either a mkdir, move,
+        // delete, or rename triggered by a local edit observed in this run.
+        // Wrap in Priority.Foreground so the provider's throttle coordinator
+        // gates the corresponding Drive REST calls in the foreground lane and
+        // any concurrent background scan traffic yields.
         val sequentialActions =
             actions.filter {
                 it !is SyncAction.DownloadContent && it !is SyncAction.Upload
             }
         db.beginBatch()
         try {
-            for (action in sequentialActions) {
-                try {
-                    when (action) {
-                        is SyncAction.CreatePlaceholder -> {
-                            applyCreatePlaceholder(action)
-                            if (action.shouldHydrate) downloaded.incrementAndGet()
+            withContext(Priority.Foreground) {
+                for (action in sequentialActions) {
+                    try {
+                        when (action) {
+                            is SyncAction.CreatePlaceholder -> {
+                                applyCreatePlaceholder(action)
+                                if (action.shouldHydrate) downloaded.incrementAndGet()
+                            }
+                            is SyncAction.UpdatePlaceholder -> {
+                                applyUpdatePlaceholder(action)
+                                if (action.wasHydrated) downloaded.incrementAndGet()
+                            }
+                            is SyncAction.MoveRemote -> applyMoveRemote(action)
+                            is SyncAction.MoveLocal -> applyMoveLocal(action)
+                            is SyncAction.DeleteLocal -> applyDeleteLocal(action)
+                            is SyncAction.DeleteRemote -> applyDeleteRemote(action)
+                            is SyncAction.CreateRemoteFolder -> applyCreateRemoteFolder(action)
+                            is SyncAction.Conflict -> {
+                                applyConflict(action)
+                                conflicts.incrementAndGet()
+                            }
+                            is SyncAction.RemoveEntry -> applyRemoveEntry(action)
+                            else -> {}
                         }
-                        is SyncAction.UpdatePlaceholder -> {
-                            applyUpdatePlaceholder(action)
-                            if (action.wasHydrated) downloaded.incrementAndGet()
-                        }
-                        is SyncAction.MoveRemote -> applyMoveRemote(action)
-                        is SyncAction.MoveLocal -> applyMoveLocal(action)
-                        is SyncAction.DeleteLocal -> applyDeleteLocal(action)
-                        is SyncAction.DeleteRemote -> applyDeleteRemote(action)
-                        is SyncAction.CreateRemoteFolder -> applyCreateRemoteFolder(action)
-                        is SyncAction.Conflict -> {
-                            applyConflict(action)
-                            conflicts.incrementAndGet()
-                        }
-                        is SyncAction.RemoveEntry -> applyRemoveEntry(action)
-                        else -> {}
-                    }
-                    consecutiveFailures = 0
-                } catch (e: AuthenticationException) {
-                    // UD-253: include exception class + full stack for auth failures.
-                    // UD-203: append `requestId=<id>` when the provider's exception
-                    // carries one, so the ERROR log line points at a Graph / S3 /
-                    // Internxt support trace.
-                    log.error(
-                        "Authentication failed, stopping sync: {}: {}{}",
-                        e.javaClass.simpleName,
-                        e.message,
-                        org.krost.unidrive.requestIdSuffix(e),
-                        e,
-                    )
-                    throw e
-                } catch (e: Exception) {
-                    consecutiveFailures++
-                    passOneFailures.incrementAndGet()
-                    // UD-253: class name + throwable (SLF4J renders stack trace when the
-                    // last arg is a Throwable) so WARNs are self-diagnosing in the log.
-                    // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
-                    // caught exception is a ProviderException with a non-null id,
-                    // empty string otherwise — same line shape as before for non-
-                    // provider failures.
-                    log.warn(
-                        "Action failed for {} ({} consecutive): {}: {}{}",
-                        action.path,
-                        consecutiveFailures,
-                        e.javaClass.simpleName,
-                        e.message,
-                        org.krost.unidrive.requestIdSuffix(e),
-                        e,
-                    )
-                    reporter.onWarning("Failed: ${action.path} - ${e.message}")
-                    logFailure(action, e)
-                    // UD-248: previously, hitting 3 consecutive action failures
-                    // threw ProviderException which tore down the whole pass and
-                    // made the watch loop restart syncOnce (re-enumerating the
-                    // entire remote tree — expensive for 22k-file profiles).
-                    // Now we skip the failing action and continue with the rest.
-                    // The watch loop's own cycle-failure backoff handles the
-                    // truly-broken case (every action fails → next cycle delays
-                    // longer). Catastrophic outage still trips at
-                    // CONSECUTIVE_SYNC_FAILURE_HARD_CAP, far above the 3-in-a-row
-                    // threshold that was firing on transient provider 500s.
-                    if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
+                        consecutiveFailures = 0
+                    } catch (e: AuthenticationException) {
+                        // UD-253: include exception class + full stack for auth failures.
+                        // UD-203: append `requestId=<id>` when the provider's exception
+                        // carries one, so the ERROR log line points at a Graph / S3 /
+                        // Internxt support trace.
                         log.error(
-                            "Stopping sync pass: {} consecutive action failures " +
-                                "(last: {} on {}) — treating as upstream outage",
-                            consecutiveFailures,
+                            "Authentication failed, stopping sync: {}: {}{}",
                             e.javaClass.simpleName,
-                            action.path,
-                        )
-                        throw ProviderException(
-                            "Stopping sync after $consecutiveFailures consecutive failures",
+                            e.message,
+                            org.krost.unidrive.requestIdSuffix(e),
                             e,
                         )
+                        throw e
+                    } catch (e: Exception) {
+                        consecutiveFailures++
+                        passOneFailures.incrementAndGet()
+                        // UD-253: class name + throwable (SLF4J renders stack trace when the
+                        // last arg is a Throwable) so WARNs are self-diagnosing in the log.
+                        // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
+                        // caught exception is a ProviderException with a non-null id,
+                        // empty string otherwise — same line shape as before for non-
+                        // provider failures.
+                        log.warn(
+                            "Action failed for {} ({} consecutive): {}: {}{}",
+                            action.path,
+                            consecutiveFailures,
+                            e.javaClass.simpleName,
+                            e.message,
+                            org.krost.unidrive.requestIdSuffix(e),
+                            e,
+                        )
+                        reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                        logFailure(action, e)
+                        // UD-248: previously, hitting 3 consecutive action failures
+                        // threw ProviderException which tore down the whole pass and
+                        // made the watch loop restart syncOnce (re-enumerating the
+                        // entire remote tree — expensive for 22k-file profiles).
+                        // Now we skip the failing action and continue with the rest.
+                        // The watch loop's own cycle-failure backoff handles the
+                        // truly-broken case (every action fails → next cycle delays
+                        // longer). Catastrophic outage still trips at
+                        // CONSECUTIVE_SYNC_FAILURE_HARD_CAP, far above the 3-in-a-row
+                        // threshold that was firing on transient provider 500s.
+                        if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
+                            log.error(
+                                "Stopping sync pass: {} consecutive action failures " +
+                                    "(last: {} on {}) — treating as upstream outage",
+                                consecutiveFailures,
+                                e.javaClass.simpleName,
+                                action.path,
+                            )
+                            throw ProviderException(
+                                "Stopping sync after $consecutiveFailures consecutive failures",
+                                e,
+                            )
+                        }
+                        // Exponential backoff capped at 10s so the pass doesn't
+                        // stall indefinitely on a failure cluster.
+                        delay(minOf(2_000L * consecutiveFailures, 10_000L))
                     }
-                    // Exponential backoff capped at 10s so the pass doesn't
-                    // stall indefinitely on a failure cluster.
-                    delay(minOf(2_000L * consecutiveFailures, 10_000L))
+                    reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), displayPath(action))
                 }
-                reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), displayPath(action))
             }
             db.commitBatch()
         } catch (e: Exception) {
@@ -861,89 +869,93 @@ class SyncEngine(
                     when (action) {
                         is SyncAction.DownloadContent -> {
                             launch {
-                                transferSemaphore.withPermit {
-                                    try {
-                                        applyDownload(action)
-                                        downloaded.incrementAndGet()
-                                    } catch (e: AuthenticationException) {
-                                        // UD-253: include exception class + full stack.
-                                        log.error(
-                                            "Authentication failed during download of {}: {}: {}",
-                                            action.path,
-                                            e.javaClass.simpleName,
-                                            e.message,
-                                            e,
-                                        )
-                                        restoreToPlaceholder(action.path, action.remoteItem)
-                                        transferFailures.incrementAndGet()
-                                        authFailure.compareAndSet(null, e)
-                                        this@coroutineScope.cancel()
-                                    } catch (e: CancellationException) {
-                                        restoreToPlaceholder(action.path, action.remoteItem)
-                                        throw e
-                                    } catch (e: Exception) {
-                                        // UD-253: class name + throwable (SLF4J stack trace).
-                                        log.warn(
-                                            "Download failed for {}: {}: {}",
-                                            action.path,
-                                            e.javaClass.simpleName,
-                                            e.message,
-                                            e,
-                                        )
-                                        reporter.onWarning("Failed: ${action.path} - ${e.message}")
-                                        logFailure(action, e)
-                                        restoreToPlaceholder(action.path, action.remoteItem)
-                                        transferFailures.incrementAndGet()
-                                    } finally {
-                                        reporter.onActionProgress(
-                                            completedActions.incrementAndGet(),
-                                            actions.size,
-                                            actionLabel(action),
-                                            displayPath(action),
-                                        )
+                                withContext(Priority.Foreground) {
+                                    transferSemaphore.withPermit {
+                                        try {
+                                            applyDownload(action)
+                                            downloaded.incrementAndGet()
+                                        } catch (e: AuthenticationException) {
+                                            // UD-253: include exception class + full stack.
+                                            log.error(
+                                                "Authentication failed during download of {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                                e,
+                                            )
+                                            restoreToPlaceholder(action.path, action.remoteItem)
+                                            transferFailures.incrementAndGet()
+                                            authFailure.compareAndSet(null, e)
+                                            this@coroutineScope.cancel()
+                                        } catch (e: CancellationException) {
+                                            restoreToPlaceholder(action.path, action.remoteItem)
+                                            throw e
+                                        } catch (e: Exception) {
+                                            // UD-253: class name + throwable (SLF4J stack trace).
+                                            log.warn(
+                                                "Download failed for {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                                e,
+                                            )
+                                            reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                                            logFailure(action, e)
+                                            restoreToPlaceholder(action.path, action.remoteItem)
+                                            transferFailures.incrementAndGet()
+                                        } finally {
+                                            reporter.onActionProgress(
+                                                completedActions.incrementAndGet(),
+                                                actions.size,
+                                                actionLabel(action),
+                                                displayPath(action),
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                         is SyncAction.Upload -> {
                             launch {
-                                transferSemaphore.withPermit {
-                                    try {
-                                        applyUpload(action)
-                                        uploaded.incrementAndGet()
-                                    } catch (e: AuthenticationException) {
-                                        // UD-253: include exception class + full stack.
-                                        log.error(
-                                            "Authentication failed during upload of {}: {}: {}",
-                                            action.path,
-                                            e.javaClass.simpleName,
-                                            e.message,
-                                            e,
-                                        )
-                                        transferFailures.incrementAndGet()
-                                        authFailure.compareAndSet(null, e)
-                                        this@coroutineScope.cancel()
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        // UD-253: class name + throwable (SLF4J stack trace).
-                                        log.warn(
-                                            "Upload failed for {}: {}: {}",
-                                            action.path,
-                                            e.javaClass.simpleName,
-                                            e.message,
-                                            e,
-                                        )
-                                        reporter.onWarning("Failed: ${action.path} - ${e.message}")
-                                        logFailure(action, e)
-                                        transferFailures.incrementAndGet()
-                                    } finally {
-                                        reporter.onActionProgress(
-                                            completedActions.incrementAndGet(),
-                                            actions.size,
-                                            actionLabel(action),
-                                            displayPath(action),
-                                        )
+                                withContext(Priority.Foreground) {
+                                    transferSemaphore.withPermit {
+                                        try {
+                                            applyUpload(action)
+                                            uploaded.incrementAndGet()
+                                        } catch (e: AuthenticationException) {
+                                            // UD-253: include exception class + full stack.
+                                            log.error(
+                                                "Authentication failed during upload of {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                                e,
+                                            )
+                                            transferFailures.incrementAndGet()
+                                            authFailure.compareAndSet(null, e)
+                                            this@coroutineScope.cancel()
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            // UD-253: class name + throwable (SLF4J stack trace).
+                                            log.warn(
+                                                "Upload failed for {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                                e,
+                                            )
+                                            reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                                            logFailure(action, e)
+                                            transferFailures.incrementAndGet()
+                                        } finally {
+                                            reporter.onActionProgress(
+                                                completedActions.incrementAndGet(),
+                                                actions.size,
+                                                actionLabel(action),
+                                                displayPath(action),
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -983,7 +995,7 @@ class SyncEngine(
         )
     }
 
-    private suspend fun gatherRemoteChanges(): Map<String, CloudItem> {
+    private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         val isFullSync = cursor == null
@@ -1018,7 +1030,7 @@ class SyncEngine(
                                 "Upload-direction sync is unaffected."
                         log.warn(msg)
                         reporter.onWarning(msg)
-                        return changes
+                        return@withContext changes
                     }
                     is CapabilityResult.Unsupported -> {
                         log.warn(
@@ -1185,7 +1197,7 @@ class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
-        return changes
+        changes
     }
 
     /**
@@ -1208,7 +1220,7 @@ class SyncEngine(
      */
     private suspend fun gatherStreamingChanges(
         localChanges: Map<String, ChangeState>,
-    ): Pair<Map<String, CloudItem>, List<SyncAction>> {
+    ): Pair<Map<String, CloudItem>, List<SyncAction>> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         val isFullSync = cursor == null
@@ -1236,7 +1248,7 @@ class SyncEngine(
                             "Upload-direction sync is unaffected."
                     log.warn(msg)
                     reporter.onWarning(msg)
-                    return changes to emptyList()
+                    return@withContext changes to emptyList()
                 }
                 is CapabilityResult.Unsupported -> {
                     log.warn(
@@ -1437,7 +1449,7 @@ class SyncEngine(
         }
 
         val deferred = buffer.drainDeferred()
-        return changes to (safeAccumulator + deferred)
+        changes to (safeAccumulator + deferred)
     }
 
     /**

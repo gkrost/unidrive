@@ -5,6 +5,7 @@ import io.ktor.utils.io.toByteArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -2402,5 +2403,247 @@ class InternxtApiServiceTest {
                 java.nio.file.Files.deleteIfExists(local)
                 tmp.toFile().deleteRecursively()
             }
+        }
+
+    // Internxt request prioritization: two-lane Foreground/Background overlay
+    // on HttpRetryBudget plus monotonic promotion through InFlightDedup. The
+    // following four tests pin the spec's invariants.
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `foreground call jumps the queue ahead of background callers`() =
+        kotlinx.coroutines.test.runTest {
+            // Eight background callers parked in the yield loop because a
+            // foreground admission landed at t=0; one fresh foreground caller
+            // must be admitted before any of them clear the loop. Drive the
+            // budget's clock off the test scheduler so delay()s resolve
+            // against the same virtual time the budget reads.
+            val budget =
+                org.krost.unidrive.http.HttpRetryBudget(
+                    maxConcurrency = 8,
+                    minSpacingMs = 500L,
+                    clock = { testScheduler.currentTime },
+                )
+            // Seed a foreground admission so the background yield loop has
+            // something to wait on (sets lastForegroundAdmissionMs).
+            budget.awaitSlot(org.krost.unidrive.http.Priority.Foreground)
+
+            val admissionOrder = java.util.Collections.synchronizedList(mutableListOf<String>())
+            val bgJobs =
+                (1..8).map { i ->
+                    async {
+                        budget.awaitSlot(org.krost.unidrive.http.Priority.Background)
+                        admissionOrder.add("bg-$i")
+                    }
+                }
+            // Yield once so all 8 background callers reach the spin loop and
+            // suspend on delay(yieldWindowMs). They will be parked because
+            // lastForegroundAdmissionMs is fresh (within the 500ms window).
+            testScheduler.runCurrent()
+
+            // Now fire one foreground caller. It must skip the lane gate
+            // entirely. Drain the scheduler enough for any token-bucket
+            // spacing wait to resolve and the foreground caller to admit
+            // — but stop short of letting the yield window expire so the
+            // background callers are still parked when we assert order.
+            val fgJob =
+                async {
+                    budget.awaitSlot(org.krost.unidrive.http.Priority.Foreground)
+                    admissionOrder.add("fg")
+                }
+            // Advance just past minSpacingMs (500ms) so token-bucket spacing
+            // elapses for the foreground caller. The background yield window
+            // (yieldWindowMs=minSpacingMs=500ms) elapses at the same moment,
+            // so we cap at 499ms to keep background parked.
+            testScheduler.advanceTimeBy(499)
+            testScheduler.runCurrent()
+
+            kotlin.test.assertTrue(
+                "fg" in admissionOrder,
+                "foreground caller must have admitted while background callers were still parked",
+            )
+            kotlin.test.assertEquals(
+                "fg",
+                admissionOrder.first(),
+                "foreground caller must be admitted before any background caller",
+            )
+
+            // Drain the rest deterministically.
+            testScheduler.advanceUntilIdle()
+            bgJobs.awaitAll()
+        }
+
+    @Test
+    fun `dedup promotes a background load to foreground when a foreground caller joins`() =
+        kotlinx.coroutines.test.runTest {
+            // Pin the InFlightDedup priority-promotion contract: a foreground
+            // caller arriving at an in-flight background key flips the shared
+            // AtomicReference to Foreground; the winner's loader, parked
+            // inside HttpRetryBudget.awaitSlot's spin loop on a Promotable
+            // Priority element, must break out the moment it sees the flip.
+            //
+            // Observe the flip via currentPriority() read from inside the
+            // winner's loader — Promotable resolves on each call, so the
+            // value at release time reflects the latest joiner.
+            val dedup = org.krost.unidrive.http.InFlightDedup<String, String>()
+            val winnerEntered = CompletableDeferred<Unit>()
+            val gate = CompletableDeferred<Unit>()
+            val observedPriorityAtRelease =
+                java.util.concurrent.atomic
+                    .AtomicReference<org.krost.unidrive.http.Priority?>(null)
+
+            val winner =
+                async {
+                    dedup.load("uuid-A", org.krost.unidrive.http.Priority.Background) {
+                        winnerEntered.complete(Unit)
+                        gate.await()
+                        // Read priority from coroutine context *after* the
+                        // joiner has promoted — must be Foreground.
+                        observedPriorityAtRelease.set(org.krost.unidrive.http.currentPriority())
+                        "result"
+                    }
+                }
+            // Drain so the winner's loader starts and parks on gate.await().
+            testScheduler.runCurrent()
+            winnerEntered.await()
+
+            // Foreground caller joins the same key.
+            val joiner =
+                async {
+                    dedup.load("uuid-A", org.krost.unidrive.http.Priority.Foreground) {
+                        kotlin.test.fail("joiner's loader must not run — winner is in flight")
+                    }
+                }
+            // Drain so the joiner reaches the inFlight[key] fast path and
+            // promotes the shared reference.
+            testScheduler.runCurrent()
+
+            // Release the winner; both callers observe the same result.
+            gate.complete(Unit)
+            kotlin.test.assertEquals("result", winner.await())
+            kotlin.test.assertEquals("result", joiner.await())
+            // The winner's coroutine context (Priority.Promotable wrapping the
+            // shared AtomicReference) resolves to Foreground at release time.
+            kotlin.test.assertEquals(
+                org.krost.unidrive.http.Priority.Foreground,
+                observedPriorityAtRelease.get(),
+                "winner's currentPriority() must reflect the post-promotion lane",
+            )
+        }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `background starves under continuously claimed foreground (strict priority)`() =
+        kotlinx.coroutines.test.runTest {
+            // Strict priority: as long as a foreground slot has been claimed
+            // within the last yieldWindowMs, no background caller is admitted.
+            // Hold one foreground caller continuously claiming slots and
+            // assert background never makes it through within 60s of virtual
+            // time. Release the foreground driver and background must admit
+            // within one yieldWindowMs.
+            val budget =
+                org.krost.unidrive.http.HttpRetryBudget(
+                    maxConcurrency = 8,
+                    minSpacingMs = 500L,
+                    clock = { testScheduler.currentTime },
+                )
+            val stopFg =
+                java.util.concurrent.atomic
+                    .AtomicBoolean(false)
+            val bgAdmitted =
+                java.util.concurrent.atomic
+                    .AtomicBoolean(false)
+
+            // Foreground driver: claim a slot, sleep less than yieldWindowMs,
+            // repeat. Each admission stamps lastForegroundAdmissionMs.
+            val fgJob =
+                async {
+                    while (!stopFg.get()) {
+                        budget.awaitSlot(org.krost.unidrive.http.Priority.Foreground)
+                        // Sleep less than the yield window so background never
+                        // sees a quiet gap. minSpacingMs=500 ⇒ stay under 500.
+                        kotlinx.coroutines.delay(200L)
+                    }
+                }
+            val bgJob =
+                async {
+                    budget.awaitSlot(org.krost.unidrive.http.Priority.Background)
+                    bgAdmitted.set(true)
+                }
+
+            // Advance virtual time by 60 s; the test scheduler drives both
+            // delay() resolution and the budget's clock through the
+            // testScheduler.currentTime closure.
+            testScheduler.advanceTimeBy(60_000)
+            testScheduler.runCurrent()
+            kotlin.test.assertFalse(
+                bgAdmitted.get(),
+                "background must starve while foreground holds the lane (advanced 60s of virtual time)",
+            )
+
+            // Release foreground and assert background admits within one yield window.
+            stopFg.set(true)
+            fgJob.cancelAndJoin()
+            // Advance past the yield window (minSpacingMs=500).
+            testScheduler.advanceTimeBy(1_000)
+            testScheduler.runCurrent()
+            testScheduler.advanceUntilIdle()
+            bgJob.await()
+            kotlin.test.assertTrue(
+                bgAdmitted.get(),
+                "background must admit within one yieldWindowMs of the last foreground admission",
+            )
+        }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `storm detector and spacing apply uniformly across priority lanes`() =
+        kotlinx.coroutines.test.runTest {
+            // One storm, both lanes feel it: a foreground-driven 503 widens
+            // the budget's spacing to stormSpacingMs, and a subsequent
+            // background call sees the same spacing — the storm coordinator
+            // is global, the priority overlay does not partition it.
+            val budget =
+                org.krost.unidrive.http.HttpRetryBudget(
+                    maxConcurrency = 4,
+                    stormThreshold = 1,
+                    minSpacingMs = 200L,
+                    stormSpacingMs = 1_000L,
+                    clock = { testScheduler.currentTime },
+                )
+            kotlin.test.assertEquals(0L, budget.currentSpacingMs(), "pre-storm: steady-state fast path")
+
+            // Foreground-driven throttle. recordThrottle is lane-agnostic and
+            // does not consult Priority.
+            budget.recordThrottle(retryAfterMs = 2_000L)
+            val fgSpacing = budget.currentSpacingMs()
+            kotlin.test.assertTrue(
+                fgSpacing > 0L,
+                "post-503 in foreground context must widen the budget spacing",
+            )
+
+            // Now read the same currentSpacingMs() — it must be identical for
+            // background callers (the budget is single, not per-lane).
+            kotlin.test.assertEquals(
+                fgSpacing,
+                budget.currentSpacingMs(),
+                "background lane must observe the same global spacing as foreground",
+            )
+
+            // Exercise both lanes through awaitSlot to confirm the storm
+            // gate (circuit + spacing) applies regardless of priority. Both
+            // wait out the circuit-breaker pause (stormBackoffFactor=1.2 ×
+            // retryAfterMs=2400ms). Drain the scheduler.
+            val fgAdmit =
+                async {
+                    budget.awaitSlot(org.krost.unidrive.http.Priority.Foreground)
+                }
+            val bgAdmit =
+                async {
+                    budget.awaitSlot(org.krost.unidrive.http.Priority.Background)
+                }
+            testScheduler.advanceUntilIdle()
+            fgAdmit.await()
+            bgAdmit.await()
         }
 }

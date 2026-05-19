@@ -5,6 +5,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * UD-205: in-flight request deduplication primitive, ported in spirit from
@@ -63,7 +64,12 @@ import java.util.concurrent.ConcurrentHashMap
  * ```
  */
 class InFlightDedup<K : Any, V> {
-    private val inFlight = ConcurrentHashMap<K, Deferred<V>>()
+    private data class Entry<V>(
+        val deferred: Deferred<V>,
+        val priority: AtomicReference<Priority>,
+    )
+
+    private val inFlight = ConcurrentHashMap<K, Entry<V>>()
 
     /**
      * Run [loader] under [key], deduplicated against any concurrently
@@ -76,27 +82,84 @@ class InFlightDedup<K : Any, V> {
     suspend fun load(
         key: K,
         loader: suspend () -> V,
+    ): V = load(key, Priority.Background, loader)
+
+    /**
+     * Priority-aware variant of [load]. When a second caller arrives with a
+     * higher priority while an in-flight load is still running, the
+     * in-flight entry's effective priority is promoted to the higher value
+     * (monotonic — only Foreground > Background, never the other way), and
+     * the winner's loader sees the change on the next iteration of
+     * [HttpRetryBudget.awaitSlot]'s yield loop via the [Priority.Promotable]
+     * element installed on its scope.
+     *
+     * Callers should pass `currentPriority()` (or an explicit
+     * [Priority.Foreground] when they know the call is user-driven) so the
+     * dedup'd metadata reads inherit the engine-level lane.
+     */
+    suspend fun load(
+        key: K,
+        priority: Priority,
+        loader: suspend () -> V,
     ): V =
         coroutineScope {
             // Fast path: an outstanding deferred already exists for this key.
-            inFlight[key]?.let { return@coroutineScope it.await() }
+            // Promote its priority monotonically and join the wait.
+            inFlight[key]?.let { entry ->
+                promote(entry.priority, priority)
+                return@coroutineScope entry.deferred.await()
+            }
 
             // Slow path: race to install our own deferred. Use LAZY so the
             // loser doesn't leak a started coroutine — only the winner ever
-            // gets awaited.
-            val deferred = async(start = CoroutineStart.LAZY) { loader() }
-            val winner = inFlight.putIfAbsent(key, deferred) ?: deferred
+            // gets awaited. The shared AtomicReference is installed on the
+            // loader's coroutine context as a Promotable Priority so any
+            // later caller's promotion is observable from inside the loader.
+            val sharedPriority = AtomicReference(priority)
+            val deferred =
+                async(
+                    context = Priority.Promotable(sharedPriority),
+                    start = CoroutineStart.LAZY,
+                ) {
+                    loader()
+                }
+            val entry = Entry(deferred, sharedPriority)
+            val winner = inFlight.putIfAbsent(key, entry) ?: entry
+            if (winner !== entry) {
+                // Lost the race; promote the existing entry and discard our
+                // LAZY deferred unstarted (CoroutineStart.LAZY means it never
+                // started, no coroutine to clean up).
+                promote(winner.priority, priority)
+            }
             try {
-                winner.await()
+                winner.deferred.await()
             } finally {
                 // remove(key, value) is the conditional form: only removes
-                // the entry if it still maps to *our* deferred. Protects
+                // the entry if it still maps to *our* entry. Protects
                 // against the (theoretical) reorder where a later load() for
-                // the same key has already installed a new deferred.
+                // the same key has already installed a new entry.
                 inFlight.remove(key, winner)
             }
         }
 
     /** Number of outstanding (in-flight) keys. Exposed for tests / diagnostics. */
     internal fun inFlightCount(): Int = inFlight.size
+
+    /** Read the current effective priority of an in-flight key, or null if
+     *  no loader is in flight. Exposed for tests. */
+    internal fun inFlightPriority(key: K): Priority? = inFlight[key]?.priority?.get()
+
+    private fun promote(
+        ref: AtomicReference<Priority>,
+        candidate: Priority,
+    ) {
+        // Monotonic: Foreground > Background. Background candidates never
+        // demote an already-Foreground entry.
+        if (candidate.resolve() != Priority.Foreground) return
+        while (true) {
+            val cur = ref.get()
+            if (cur.resolve() == Priority.Foreground) return
+            if (ref.compareAndSet(cur, Priority.Foreground)) return
+        }
+    }
 }

@@ -89,6 +89,14 @@ class HttpRetryBudget(
     private val lastThrottleEventMs = AtomicLong(Long.MIN_VALUE)
     private val lastRecoveryAtMs = AtomicLong(Long.MIN_VALUE)
 
+    // Priority-lane admission watermark. Background callers spin (suspend, not
+    // busy-wait) on `delay(yieldWindowMs)` increments until no foreground slot
+    // has been claimed within the last yieldWindowMs. Strict priority falls
+    // out naturally — when foreground is saturated, background starves.
+    // Sentinel Long.MIN_VALUE = "no foreground slot has ever been claimed."
+    private val lastForegroundAdmissionMs = AtomicLong(Long.MIN_VALUE)
+    private val yieldWindowMs: Long = minSpacingMs
+
     /** Current target concurrency. Callers can read this each time they acquire a permit
      *  and shrink their own semaphore to match. */
     fun currentConcurrency(): Int = concurrency.get()
@@ -140,8 +148,33 @@ class HttpRetryBudget(
     }
 
     /** Blocks until the circuit is closed AND the token bucket admits this caller.
-     *  Call this immediately before starting a request. */
+     *  Call this immediately before starting a request.
+     *
+     *  Reads [Priority] from the calling coroutine context (default
+     *  [Priority.Background] when absent) and delegates to [awaitSlot].
+     *  Providers that haven't opted into the priority overlay (OneDrive's
+     *  GraphApiService) call this zero-arg form and admit at Background —
+     *  identical behaviour to before the priority overlay landed since the
+     *  Background lane has no separate spacing watermark on its own. */
     suspend fun awaitSlot() {
+        awaitSlot(currentPriority())
+    }
+
+    /** Priority-aware variant of [awaitSlot]. [Priority.Foreground] callers
+     *  jump the queue ahead of any background callers currently parked in
+     *  the yield loop; [Priority.Background] callers spin (suspend, not
+     *  busy-wait) on [yieldWindowMs] increments until no foreground slot
+     *  has been claimed within the last [yieldWindowMs]. Strict priority —
+     *  when foreground is saturated, background starves indefinitely.
+     *
+     *  The token-bucket spacing applies uniformly across lanes: one storm,
+     *  both lanes feel it.
+     *
+     *  Re-resolves [priority] on every yield-loop iteration so a
+     *  [Priority.Promotable] entry installed by [InFlightDedup] flips the
+     *  spinning winner out of the background lane the moment a foreground
+     *  caller joins. */
+    suspend fun awaitSlot(priority: Priority) {
         // 1. Circuit breaker: if open, wait out the global pause.
         while (true) {
             val resumeAt = globalResumeAfter.get()
@@ -150,7 +183,20 @@ class HttpRetryBudget(
             if (circuitWait <= 0) break
             delay(circuitWait)
         }
-        // 2. Adaptive token bucket: claim a slot at least currentSpacingMs() after the
+        // 2. Priority lane discipline: background yields to recent foreground
+        //    admissions. Foreground records its admission timestamp before
+        //    falling through to the shared token bucket.
+        //    Re-resolves each iteration so a Promotable entry promoted by a
+        //    foreground joiner mid-spin breaks out the very next tick.
+        while (priority.resolve() == Priority.Background) {
+            val lastFg = lastForegroundAdmissionMs.get()
+            val now = clock()
+            if (lastFg == Long.MIN_VALUE) break
+            val sinceFg = now - lastFg
+            if (sinceFg >= yieldWindowMs) break
+            delay(yieldWindowMs - sinceFg)
+        }
+        // 3. Adaptive token bucket: claim a slot at least currentSpacingMs() after the
         //    previous claim. UD-200: 0 in the steady state (no recent throttle), restoring
         //    the pre-UD-232 ~119 files/min throughput. Ramps to 200/500 ms on throttle.
         val spacing = currentSpacingMs()
@@ -160,6 +206,9 @@ class HttpRetryBudget(
             }
         val spacingWait = myStart - clock()
         if (spacingWait > 0) delay(spacingWait)
+        if (priority.resolve() == Priority.Foreground) {
+            lastForegroundAdmissionMs.set(clock())
+        }
     }
 
     /** UD-200: adaptive inter-request spacing. Read at every [awaitSlot] from state we
