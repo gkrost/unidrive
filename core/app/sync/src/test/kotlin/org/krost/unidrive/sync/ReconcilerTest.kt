@@ -1455,4 +1455,119 @@ class ReconcilerTest {
         assertEquals(1, actions.size)
         assertIs<SyncAction.DeleteLocal>(actions[0])
     }
+
+    // ---- StreamingReconcileBuffer ----
+    //
+    // The buffer is an engine-internal layer that splits per-page reconciler
+    // verdicts into safe-now (additive) and deferred (deletion-bearing)
+    // slices. Tests live alongside ReconcilerTest because the buffer's
+    // contract is "given a Reconciler.reconcile output, classify it" —
+    // the action shapes belong to the reconciler's vocabulary.
+
+    @Test
+    fun `streaming buffer routes additive actions to safe-now`() {
+        val buf = StreamingReconcileBuffer()
+        val download = SyncAction.DownloadContent("/new.txt", cloudItem("/new.txt"))
+        val upload = SyncAction.Upload("/local-new.txt")
+        val mkdir = SyncAction.CreateRemoteFolder("/local-dir")
+        val placeholder =
+            SyncAction.CreatePlaceholder("/p.txt", cloudItem("/p.txt"), shouldHydrate = false)
+        val update =
+            SyncAction.UpdatePlaceholder("/u.txt", cloudItem("/u.txt"), wasHydrated = false)
+        val safeNow = buf.classify(listOf(download, upload, mkdir, placeholder, update))
+        assertEquals(5, safeNow.size, "all additive actions fire per page")
+        assertEquals(0, buf.drainDeferred().size, "no deferred actions for additive verdict")
+    }
+
+    @Test
+    fun `streaming buffer routes deletion-bearing actions to deferred`() {
+        val buf = StreamingReconcileBuffer()
+        val delLocal = SyncAction.DeleteLocal("/gone.txt")
+        val delRemote = SyncAction.DeleteRemote("/local-rm.txt")
+        val removeEntry = SyncAction.RemoveEntry("/both-gone.txt")
+        val deletedConflict =
+            SyncAction.Conflict(
+                "/dm.txt",
+                ChangeState.DELETED,
+                ChangeState.MODIFIED,
+                cloudItem("/dm.txt"),
+                ConflictPolicy.KEEP_BOTH,
+            )
+        val safeNow =
+            buf.classify(listOf(delLocal, delRemote, removeEntry, deletedConflict))
+        assertEquals(0, safeNow.size, "deletion-bearing actions never fire per page")
+        val deferred = buf.drainDeferred()
+        assertEquals(4, deferred.size)
+        assertTrue(deferred.any { it is SyncAction.DeleteLocal && it.path == "/gone.txt" })
+        assertTrue(deferred.any { it is SyncAction.DeleteRemote && it.path == "/local-rm.txt" })
+        assertTrue(deferred.any { it is SyncAction.RemoveEntry && it.path == "/both-gone.txt" })
+        assertTrue(deferred.any { it is SyncAction.Conflict && it.path == "/dm.txt" })
+    }
+
+    @Test
+    fun `streaming buffer keeps MODIFIED+MODIFIED conflicts safe-now`() {
+        // Only DELETED-bearing conflicts defer; normal merge conflicts
+        // surface as each page lands.
+        val buf = StreamingReconcileBuffer()
+        val mergeConflict =
+            SyncAction.Conflict(
+                "/m.txt",
+                ChangeState.MODIFIED,
+                ChangeState.MODIFIED,
+                cloudItem("/m.txt"),
+                ConflictPolicy.KEEP_BOTH,
+            )
+        val safeNow = buf.classify(listOf(mergeConflict))
+        assertEquals(1, safeNow.size)
+        assertEquals(0, buf.drainDeferred().size)
+    }
+
+    @Test
+    fun `streaming buffer routes Move actions to safe-now (paired within page)`() {
+        val buf = StreamingReconcileBuffer()
+        val moveLocal =
+            SyncAction.MoveLocal("/new/path.txt", "/old/path.txt", cloudItem("/new/path.txt"))
+        val moveRemote = SyncAction.MoveRemote("/new/up.txt", "/old/up.txt", "remote-id")
+        val safeNow = buf.classify(listOf(moveLocal, moveRemote))
+        assertEquals(2, safeNow.size)
+        assertEquals(0, buf.drainDeferred().size)
+    }
+
+    @Test
+    fun `streaming buffer last-write-wins on (path, action-class) deferred slot`() {
+        // Same path, same action-class across two pages: the later page
+        // overwrites the earlier. Lets a streaming rename detector
+        // supersede an inferred DeleteLocal with a MoveLocal when the
+        // matching remote arrives on the next page.
+        val buf = StreamingReconcileBuffer()
+        buf.classify(listOf(SyncAction.DeleteLocal("/x.txt")))
+        buf.classify(listOf(SyncAction.DeleteLocal("/x.txt"))) // same shape — replaces
+        val deferred = buf.drainDeferred()
+        assertEquals(1, deferred.size)
+    }
+
+    @Test
+    fun `streaming buffer touchedPaths is union of safe-fired + deferred`() {
+        // detectMissingAfterFullSync at scan-end needs the union so
+        // already-fired-or-buffered paths don't synthesise a phantom
+        // DeleteLocal a second time.
+        val buf = StreamingReconcileBuffer()
+        buf.classify(
+            listOf(
+                SyncAction.DownloadContent("/safe.txt", cloudItem("/safe.txt")),
+                SyncAction.DeleteLocal("/deferred.txt"),
+            ),
+        )
+        val touched = buf.touchedPaths()
+        assertEquals(setOf("/safe.txt", "/deferred.txt"), touched)
+    }
+
+    @Test
+    fun `streaming buffer drainDeferred clears the slot for re-use`() {
+        val buf = StreamingReconcileBuffer()
+        buf.classify(listOf(SyncAction.DeleteLocal("/x.txt")))
+        assertEquals(1, buf.drainDeferred().size)
+        // Second drain returns nothing — the slot is fresh.
+        assertEquals(0, buf.drainDeferred().size)
+    }
 }
