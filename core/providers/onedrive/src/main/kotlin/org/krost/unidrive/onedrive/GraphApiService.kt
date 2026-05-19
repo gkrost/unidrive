@@ -344,8 +344,12 @@ class GraphApiService(
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
 
+        // conflictBehavior=replace pins simple-PUT to the same overwrite policy session
+        // uploads use; without it Graph defaults to "fail" and a re-upload of a touched
+        // file returns 409 nameAlreadyExists. The two paths must agree so the policy
+        // doesn't shift based on file size crossing the 4-MiB threshold.
         val response =
-            httpClient.put("$baseUrl/me/drive/root:/$encoded:/content") {
+            httpClient.put("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=replace") {
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
                 }
@@ -452,6 +456,7 @@ class GraphApiService(
         itemId: String,
         newPath: String,
         oldPath: String? = null,
+        ifMatchETag: String? = null,
     ): DriveItem {
         // UD-753: per-operation log moved to SyncEngine.applyMoveRemote.
         val cleanPath = newPath.removePrefix("/")
@@ -480,6 +485,12 @@ class GraphApiService(
                 bearerAuth(tokenProvider(false))
                 method = HttpMethod("PATCH")
                 contentType(ContentType.Application.Json)
+                // If-Match makes the PATCH conditional on the caller's view of the item being
+                // current. A concurrent edit between getItemByPath and moveItem flips the
+                // server-side eTag and the PATCH surfaces 412 Precondition Failed instead of
+                // silently overwriting the other editor's change. Caller passes null to opt
+                // out (legacy call sites without an eTag in hand).
+                if (ifMatchETag != null) header(HttpHeaders.IfMatch, ifMatchETag)
                 setBody(body.toString())
             }
 

@@ -6,9 +6,7 @@ Top of file = next up. Work down. Move done items to `CLOSED.md` in the same com
 
 Silent corruption, orphan storage, lost local metadata. Fix before anything else.
 
-| Title | Scope |
-|---|---|
-| OneDrive `If-Match` / `@odata.etag` on mutating POST + `conflictBehavior` parity | `moveItem`/`updateItem` don't thread eTag → concurrent editors race; `uploadSimple` defaults `fail` while session uploads `replace` → inconsistent overwrite policy by file size. Thread eTag, unify policy. |
+(none currently — drain the High tier next)
 
 ## High — correctness, required for first release
 

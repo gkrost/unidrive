@@ -319,6 +319,85 @@ class ListChildrenPaginationTest {
         }
 
     @Test
+    fun `moveItem threads If-Match header when an eTag is supplied`() =
+        runTest {
+            val driveItemBody = """{"id":"item-mv","name":"renamed.txt","eTag":"\"new-etag,1\""}"""
+            var ifMatchSeen: String? = null
+            val engine =
+                MockEngine { request ->
+                    ifMatchSeen = request.headers[HttpHeaders.IfMatch]
+                    respond(driveItemBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            service.moveItem(itemId = "item-mv", newPath = "/renamed.txt", oldPath = "/old.txt", ifMatchETag = """"opaque-etag,7"""")
+
+            assertEquals(""""opaque-etag,7"""", ifMatchSeen, "moveItem must send the caller-supplied eTag in If-Match")
+            service.close()
+        }
+
+    @Test
+    fun `moveItem omits If-Match when no eTag is supplied`() =
+        runTest {
+            val driveItemBody = """{"id":"item-mv2","name":"renamed.txt"}"""
+            var ifMatchSeen: String? = "<not-set>"
+            val engine =
+                MockEngine { request ->
+                    ifMatchSeen = request.headers[HttpHeaders.IfMatch]
+                    respond(driveItemBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            service.moveItem(itemId = "item-mv2", newPath = "/renamed.txt", oldPath = "/old.txt", ifMatchETag = null)
+
+            assertEquals(null, ifMatchSeen, "moveItem must not send If-Match when caller passes null")
+            service.close()
+        }
+
+    @Test
+    fun `moveItem surfaces 412 Precondition Failed as a GraphApiException`() =
+        runTest {
+            val engine =
+                MockEngine { _ ->
+                    respond("eTag mismatch", HttpStatusCode.PreconditionFailed)
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            val ex =
+                kotlin.test.assertFailsWith<GraphApiException> {
+                    service.moveItem(itemId = "item-mv3", newPath = "/r.txt", oldPath = "/o.txt", ifMatchETag = """"stale,1"""")
+                }
+            assertEquals(412, ex.statusCode, "412 must propagate with its statusCode so the engine can refresh and retry")
+            service.close()
+        }
+
+    @Test
+    fun `uploadSimple URL pins conflictBehavior=replace to match session-upload policy`() =
+        runTest {
+            val driveItemBody = """{"id":"item-cb","name":"hello.txt","size":3}"""
+            var seenUrl: String? = null
+            val engine =
+                MockEngine { request ->
+                    seenUrl = request.url.toString()
+                    respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            service.uploadSimple("/hello.txt", "abc".toByteArray(), fileSystemInfo = null)
+
+            val url = checkNotNull(seenUrl)
+            assertTrue(
+                url.contains("@microsoft.graph.conflictBehavior=replace"),
+                "uploadSimple must send conflictBehavior=replace to match session-upload policy, URL was: $url",
+            )
+            service.close()
+        }
+
+    @Test
     fun `getDelta warns once when the on-disk delta_last_seen is older than the safe window`() =
         runTest {
             val tokenDir = java.nio.file.Files.createTempDirectory("unidrive-delta-safety-old-")

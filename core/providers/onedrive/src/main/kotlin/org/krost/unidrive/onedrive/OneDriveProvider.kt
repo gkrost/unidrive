@@ -147,7 +147,7 @@ class OneDriveProvider(
         toPath: String,
     ): CloudItem {
         val item = graphApi.getItemByPath(fromPath)
-        return graphApi.moveItem(item.id, toPath, fromPath).toCloudItem()
+        return graphApi.moveItem(item.id, toPath, fromPath, ifMatchETag = item.eTag).toCloudItem()
     }
 
     override suspend fun delta(
