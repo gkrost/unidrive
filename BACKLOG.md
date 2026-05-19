@@ -38,7 +38,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `createLink` client-side dedupe | Check `listPermissions` for an existing matching link before POSTing. |
 | OneDrive per-tenant concurrency calibration | Personal vs Business vs GCC; flagged in `core/providers/onedrive/README.md`. |
 | OneDrive `HttpRetryBudget` per-provider override | Constants currently global. |
-| Internxt retry coverage on remaining mutating verbs | `deleteFile`/`deleteFolder`/`putEncryptedShard`/`downloadFileStreaming`. |
 | Internxt local chunk-tombstone for upload resume | Compensate for missing resumable-upload protocol. |
 
 ## Low — guards and UX
@@ -61,7 +60,7 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 
 ## Design constraints (not tickets — bind when related work lands)
 
-- **Internxt upload retry must pin `indexBytes`.** Before any retry is wired around `InternxtProvider.kt:210-269`, decide the retry boundary so the random 32-byte `indexBytes` (and the derived `iv` and `fileKey`) stay stable across attempts. The server stores `indexHex` in `finishUpload`; ciphertext encrypted with an old index alongside a new index on the metadata side is silent corruption on download. Options: (a) retry stages 4–5 only (PUT + finish), hold the temp file + hash steady, or (b) restart the full pipeline including re-encryption. **Don't** mix the two. Add a unit test that asserts `indexBytes` stability across a forced retry.
+(none currently)
 
 ## Deferred — post-MVP, with reasons
 

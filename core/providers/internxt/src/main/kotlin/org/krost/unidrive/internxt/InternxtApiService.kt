@@ -731,30 +731,38 @@ class InternxtApiService(
         url: String,
         data: ByteArray,
     ) {
-        bridgeBudget.awaitSlot()
-        try {
-            val response =
-                httpClient.put(url) {
-                    // UD-337 + UD-353: size-adaptive request timeout against
-                    // OVH (Internxt's shard backend) with a pessimistic
-                    // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
-                    timeout {
-                        requestTimeoutMillis =
-                            UploadTimeoutPolicy.computeRequestTimeoutMs(
-                                fileSize = data.size.toLong(),
-                                minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
-                            )
+        // OVH PUT to a presigned URL is idempotent at the S3 layer — same key,
+        // same body overwrites cleanly — so retryOnTransient is safe here.
+        // The streaming variant (putEncryptedShardFromFile) takes its retry at
+        // the provider layer instead because that wrap also needs to keep
+        // indexBytes / iv / fileKey stable across attempts (see Design constraint
+        // in BACKLOG.md history).
+        retryOnTransient {
+            bridgeBudget.awaitSlot()
+            try {
+                val response =
+                    httpClient.put(url) {
+                        // UD-337 + UD-353: size-adaptive request timeout against
+                        // OVH (Internxt's shard backend) with a pessimistic
+                        // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
+                        timeout {
+                            requestTimeoutMillis =
+                                UploadTimeoutPolicy.computeRequestTimeoutMs(
+                                    fileSize = data.size.toLong(),
+                                    minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
+                                )
+                        }
+                        header("Content-Type", "application/octet-stream")
+                        setBody(data)
                     }
-                    header("Content-Type", "application/octet-stream")
-                    setBody(data)
+                if (!response.status.isSuccess()) {
+                    throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value)
                 }
-            if (!response.status.isSuccess()) {
-                throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value)
+                bridgeBudget.recordSuccess()
+            } catch (e: InternxtApiException) {
+                if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
+                throw e
             }
-            bridgeBudget.recordSuccess()
-        } catch (e: InternxtApiException) {
-            if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
-            throw e
         }
     }
 

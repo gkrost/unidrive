@@ -1,10 +1,13 @@
 package org.krost.unidrive.internxt
 
 import io.ktor.client.engine.mock.respond
+import io.ktor.utils.io.toByteArray
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.Mirror
 import org.krost.unidrive.internxt.model.StartUploadResponse
@@ -1008,5 +1011,245 @@ class InternxtApiServiceTest {
             } finally {
                 service.close()
             }
+        }
+
+    /**
+     * Internxt upload retry must pin `indexBytes`. Force a transient on
+     * the first attempt and on the first finishUpload, then succeed. Captures
+     * the PUT ciphertext bodies AND the indexHex passed to finishUpload across
+     * attempts; both must be byte-identical to prove that indexBytes / iv /
+     * fileKey stayed stable across the retry boundary in `InternxtProvider`.
+     *
+     * Mocked endpoints (stateful counters):
+     *  - POST /v2/buckets/{bucket}/files/start    → fresh descriptor per attempt
+     *  - PUT  https://shard-host.invalid/put-target → 503 on attempt 1, OK after
+     *  - POST /v2/buckets/{bucket}/files/finish   → 503 on attempt 2, OK on attempt 3
+     *  - POST /drive/files                         → OK (createFile after commit)
+     *
+     * Three retry-loop iterations exercise the IV-pinning constraint exactly:
+     * attempt-1 PUT fails, attempt-2 finishUpload fails, attempt-3 succeeds.
+     * Two PUT-OK bodies (attempts 2, 3) plus two finishUpload bodies (also 2, 3)
+     * pin the constraint from both observable angles.
+     */
+    @Test
+    fun `upload retry pins indexBytes across attempts (IV stability)`() =
+        kotlinx.coroutines.test.runTest {
+            val startCalls = AtomicInteger(0)
+            val putAttempts = AtomicInteger(0)
+            val capturedPutBodies = java.util.Collections.synchronizedList(mutableListOf<ByteArray>())
+            val finishAttempts = AtomicInteger(0)
+            val capturedFinishIndexHex = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+            val shardUrl = "https://shard-host.invalid/put-target"
+
+            val engine =
+                io.ktor.client.engine.mock.MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/start") -> {
+                            val n = startCalls.incrementAndGet()
+                            // Fresh descriptor per attempt — the production
+                            // pipeline re-issues startUpload on each attempt so
+                            // OVH presigned URLs can rotate without breaking
+                            // the wrap. shardUuid changes too (server-allocated),
+                            // which is fine: it's not the IV.
+                            respond(
+                                content = """{"uploads":[{"index":0,"uuid":"shard-uuid-$n","url":"$shardUrl"}]}""",
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        url == shardUrl -> {
+                            val n = putAttempts.incrementAndGet()
+                            // streamingFileBody returns OutgoingContent.WriteChannelContent
+                            // (see :app:core http/StreamingUpload.kt); drain it through
+                            // a buffer to capture the wire bytes.
+                            val bodyBytes = drainOutgoingContent(request.body)
+                            capturedPutBodies.add(bodyBytes)
+                            if (n == 1) {
+                                // Attempt 1 PUT fails with 503 — retryShardCommit
+                                // catches it and re-enters the loop.
+                                respond(
+                                    content = "",
+                                    status = io.ktor.http.HttpStatusCode.ServiceUnavailable,
+                                    headers = io.ktor.http.headersOf(),
+                                )
+                            } else {
+                                respond(
+                                    content = "",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf(),
+                                )
+                            }
+                        }
+                        url.startsWith("https://api.internxt.com/v2/buckets/") && url.contains("/files/finish") -> {
+                            val n = finishAttempts.incrementAndGet()
+                            // Parse the request body to capture indexHex.
+                            val text =
+                                when (val b = request.body) {
+                                    is io.ktor.http.content.ByteArrayContent ->
+                                        String(b.bytes(), Charsets.UTF_8)
+                                    is io.ktor.http.content.TextContent -> b.text
+                                    else -> error("unexpected finishUpload body type: ${b.javaClass}")
+                                }
+                            // FinishUploadRequest is {"index": "...", "shards": [...]}
+                            val parsed = Json.parseToJsonElement(text).jsonObject
+                            capturedFinishIndexHex.add(
+                                parsed["index"]!!.jsonPrimitive.content,
+                            )
+                            if (n == 1) {
+                                respond(
+                                    content = """{"error":"service unavailable"}""",
+                                    status = io.ktor.http.HttpStatusCode.ServiceUnavailable,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            } else {
+                                respond(
+                                    content = """{"id":"bridge-fileId","index":"${parsed["index"]!!.jsonPrimitive.content}","bucket":"test-bucket","name":"enc-name"}""",
+                                    status = io.ktor.http.HttpStatusCode.OK,
+                                    headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                                )
+                            }
+                        }
+                        url.startsWith("https://gateway.internxt.com/drive/files") -> {
+                            respond(
+                                content = """{"uuid":"file-uuid","plainName":"iv-pin-test","type":"bin","size":"32","bucket":"test-bucket","fileId":"bridge-fileId","status":"EXISTS"}""",
+                                status = io.ktor.http.HttpStatusCode.OK,
+                                headers = io.ktor.http.headersOf("Content-Type", "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL hit by upload IV-pinning test: $url")
+                    }
+                }
+
+            val provider = newProviderWithBucketCredentials()
+            val tempLocal =
+                java.nio.file.Files
+                    .createTempFile("unidrive-iv-pin-test-", ".bin")
+                    .also { p ->
+                        // Deterministic, > zero length so encryption produces
+                        // a non-trivial ciphertext.
+                        java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+                    }
+            try {
+                installMockClientOnProvider(provider, engine)
+                provider.upload(tempLocal, "/iv-pin-test.bin", existingRemoteId = null, onProgress = null)
+
+                assertEquals(3, startCalls.get(), "startUpload re-issued on each retry attempt")
+                assertEquals(3, putAttempts.get(), "PUT retried after the attempt-1 503")
+                assertEquals(2, finishAttempts.get(), "finishUpload retried after the attempt-2 503")
+                assertEquals(2, capturedFinishIndexHex.size, "two finishUpload bodies captured")
+
+                // Primary IV-pinning assertion: indexHex equality across the
+                // two finishUpload attempts — the metadata-side proof.
+                assertEquals(
+                    capturedFinishIndexHex[0],
+                    capturedFinishIndexHex[1],
+                    "indexHex passed to finishUpload MUST stay byte-identical across retry attempts " +
+                        "(server stores it; mismatch = silent corruption on download)",
+                )
+                kotlin.test.assertEquals(
+                    64,
+                    capturedFinishIndexHex[0].length,
+                    "indexHex must be 64 hex chars (32 bytes)",
+                )
+
+                // Secondary IV-pinning assertion: the PUT ciphertexts on the
+                // two OK attempts (attempt 2 and attempt 3) must be byte-identical.
+                // Equal ciphertexts under AES-CTR prove indexBytes / iv / fileKey
+                // ALL stayed stable — any drift in any of them changes the keystream
+                // and produces different ciphertext.
+                val putOnAttempt2 = capturedPutBodies[1]
+                val putOnAttempt3 = capturedPutBodies[2]
+                kotlin.test.assertTrue(
+                    putOnAttempt2.contentEquals(putOnAttempt3),
+                    "PUT ciphertext MUST be byte-identical across retry attempts — proves indexBytes/iv/fileKey stability",
+                )
+                // Also pin attempt 1's body — same ciphertext, just discarded by the 503.
+                kotlin.test.assertTrue(
+                    capturedPutBodies[0].contentEquals(putOnAttempt2),
+                    "PUT ciphertext on the failed attempt must equal the succeeding attempts' ciphertext",
+                )
+            } finally {
+                java.nio.file.Files.deleteIfExists(tempLocal)
+                provider.close()
+            }
+        }
+
+    /**
+     * Build a provider whose AuthService is pre-populated with credentials that
+     * carry a non-empty `bucket` (the upload pipeline requires it) and a
+     * far-future JWT exp so getValidCredentials never triggers a real refresh.
+     */
+    private fun newProviderWithBucketCredentials(): InternxtProvider {
+        val provider = InternxtProvider()
+        val authField = InternxtProvider::class.java.getDeclaredField("authService")
+        authField.isAccessible = true
+        val authService = authField.get(provider)
+        val credsField = authService.javaClass.getDeclaredField("credentials")
+        credsField.isAccessible = true
+        val payload = """{"exp":9999999999}"""
+        val payloadB64 =
+            java.util.Base64
+                .getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(payload.toByteArray())
+        val fakeJwt = "header.$payloadB64.signature"
+        credsField.set(
+            authService,
+            org.krost.unidrive.internxt.model.InternxtCredentials(
+                jwt = fakeJwt,
+                // BIP39 mnemonic — any valid-shape one works since
+                // deriveBucketKey is just a PBKDF2 + SHA pipeline. Use the same
+                // canonical 12-word seed phrase the InternxtCrypto tests use.
+                mnemonic =
+                    "abandon abandon abandon abandon abandon abandon " +
+                        "abandon abandon abandon abandon abandon about",
+                rootFolderId = "root-folder-uuid",
+                email = "test@example.invalid",
+                bridgeUser = "bridge-user",
+                bridgeUserId = "bridge-secret",
+                // deriveBucketKey hex-decodes the bucket id, so the test value
+                // must be valid hex (matches the InternxtCryptoTest sample).
+                bucket = "6928426c1a2316b856c9ab81",
+            ),
+        )
+        return provider
+    }
+
+    private fun installMockClientOnProvider(
+        provider: InternxtProvider,
+        engine: io.ktor.client.engine.mock.MockEngine,
+    ) {
+        val apiField = InternxtProvider::class.java.getDeclaredField("api")
+        apiField.isAccessible = true
+        val api = apiField.get(provider) as InternxtApiService
+        val field = InternxtApiService::class.java.getDeclaredField("httpClient")
+        field.isAccessible = true
+        (field.get(api) as? io.ktor.client.HttpClient)?.close()
+        field.set(api, io.ktor.client.HttpClient(engine))
+    }
+
+    private suspend fun drainOutgoingContent(content: io.ktor.http.content.OutgoingContent): ByteArray =
+        when (content) {
+            is io.ktor.http.content.ByteArrayContent -> content.bytes()
+            is io.ktor.http.content.TextContent -> content.bytes()
+            is io.ktor.http.content.OutgoingContent.ReadChannelContent ->
+                content.readFrom().toByteArray()
+            is io.ktor.http.content.OutgoingContent.WriteChannelContent ->
+                kotlinx.coroutines.coroutineScope {
+                    val channel = io.ktor.utils.io.ByteChannel(autoFlush = true)
+                    val writeJob = this.async(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            content.writeTo(channel)
+                        } finally {
+                            channel.flushAndClose()
+                        }
+                    }
+                    val bytes = channel.toByteArray()
+                    writeJob.await()
+                    bytes
+                }
+            else -> error("unexpected OutgoingContent type: ${content.javaClass}")
         }
 }

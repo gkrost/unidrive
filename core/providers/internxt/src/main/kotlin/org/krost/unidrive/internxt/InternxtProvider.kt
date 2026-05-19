@@ -217,24 +217,76 @@ class InternxtProvider(
         val bucket = fileMeta.bucket ?: throw ProviderException("File has no bucket: $remotePath")
         val fileId = fileMeta.fileId ?: throw ProviderException("File has no fileId: $remotePath")
 
-        // 1. Get encryption index from bridge
-        val bridgeInfo = api.getBridgeFileInfo(bucket, fileId)
-        val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
-        val iv = indexBytes.copyOfRange(0, 16)
+        // Retry wraps URL re-resolution + cipher reconstruction per attempt:
+        // OVH presigned URLs expire (~15 min) so a stale URL would 403 on
+        // retry, and javax.crypto.Cipher is single-use after doFinal(). The
+        // re-derived iv / fileKey are deterministic given the server-stored
+        // indexHex, so a fresh attempt produces a byte-identical cipher state.
+        // TRUNCATE_EXISTING on the destination open mode (inside
+        // downloadFileStreaming) discards any partial prior attempt's bytes.
+        return retryShardCommit {
+            // 1. Get encryption index from bridge (fresh per attempt — picks up
+            // a new presigned shard URL if the prior one expired).
+            val bridgeInfo = api.getBridgeFileInfo(bucket, fileId)
+            val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
+            val iv = indexBytes.copyOfRange(0, 16)
 
-        // 2. Derive file key: mnemonic → seed → bucketKey → fileKey
-        val creds = authService.getValidCredentials()
-        val seed = crypto.mnemonicToSeed(creds.mnemonic)
-        val bucketKey = crypto.deriveBucketKey(seed, bucket)
-        val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
+            // 2. Derive file key: mnemonic → seed → bucketKey → fileKey
+            val creds = authService.getValidCredentials()
+            val seed = crypto.mnemonicToSeed(creds.mnemonic)
+            val bucketKey = crypto.deriveBucketKey(seed, bucket)
+            val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
-        // 3. Stream: encrypted bytes → CipherInputStream(AES-256-CTR) → disk
-        val downloadUrl =
-            bridgeInfo.shards.firstOrNull { it.url.isNotBlank() }?.url
-                ?: throw ProviderException("No download URL in bridge info for $remotePath")
+            // 3. Stream: encrypted bytes → CipherInputStream(AES-256-CTR) → disk
+            val downloadUrl =
+                bridgeInfo.shards.firstOrNull { it.url.isNotBlank() }?.url
+                    ?: throw ProviderException("No download URL in bridge info for $remotePath")
 
-        val cipher = crypto.createContentDecryptCipher(fileKey, iv)
-        return api.downloadFileStreaming(downloadUrl, cipher, destination)
+            val cipher = crypto.createContentDecryptCipher(fileKey, iv)
+            api.downloadFileStreaming(downloadUrl, cipher, destination)
+        }
+    }
+
+    // Stages 5-7 of the upload pipeline (startUpload → PUT shard → finishUpload)
+    // are wrapped in this helper so a transient OVH/Bridge failure doesn't
+    // require re-encrypting the whole file. The retry is at provider scope so
+    // indexBytes / iv / fileKey / hashHex / tempFile all stay stable across
+    // attempts — that's the IV-pinning guarantee the BACKLOG design constraint
+    // demands. Retries on IOException and 5xx; never on 4xx (those are
+    // logically-final). Max 3 attempts with simple exponential backoff.
+    private suspend fun <T> retryShardCommit(op: suspend () -> T): T {
+        val maxAttempts = 3
+        var attempt = 0
+        while (true) {
+            try {
+                return op()
+            } catch (e: InternxtApiException) {
+                attempt++
+                val transient = e.statusCode in setOf(429, 500, 502, 503, 504)
+                if (!transient || attempt >= maxAttempts) throw e
+                val backoffMs = e.retryAfterMs ?: (1_000L shl (attempt - 1))
+                log.warn(
+                    "shard-commit attempt {}/{} hit status {}, sleeping {}ms before retry",
+                    attempt,
+                    maxAttempts,
+                    e.statusCode,
+                    backoffMs,
+                )
+                kotlinx.coroutines.delay(backoffMs.coerceIn(500L, 60_000L))
+            } catch (e: java.io.IOException) {
+                attempt++
+                if (attempt >= maxAttempts) throw e
+                val backoffMs = (1_000L shl (attempt - 1)).coerceAtMost(60_000L)
+                log.warn(
+                    "shard-commit attempt {}/{} hit IOException ({}), sleeping {}ms before retry",
+                    attempt,
+                    maxAttempts,
+                    e.message ?: e.javaClass.simpleName,
+                    backoffMs,
+                )
+                kotlinx.coroutines.delay(backoffMs)
+            }
+        }
     }
 
     // UD-304: multipart constants available in InternxtConfig.MULTIPART_*; not yet consumed (pending UD-307 multipart endpoint impl).
@@ -260,7 +312,14 @@ class InternxtProvider(
         // takes minutes to surface a 409 still finds its committed file.
         val uploadStartedAt = Instant.now()
 
-        // 2. Generate random 32-byte index; derive key + iv
+        // 2. Generate random 32-byte index; derive key + iv. These MUST stay
+        // stable across stages 5-7 retries — the server stores `indexHex` in
+        // finishUpload, and ciphertext encrypted with an old index alongside a
+        // new index on the metadata side is silent corruption on download.
+        // The retry boundary below holds indexBytes / iv / fileKey / hashHex /
+        // tempFile constant by construction (they're computed once, outside
+        // the loop). See BACKLOG history "Internxt upload retry must pin
+        // indexBytes" for the constraint that this satisfies.
         val indexBytes = ByteArray(32).also { secureRandom.nextBytes(it) }
         val iv = indexBytes.copyOfRange(0, 16)
         val creds = authService.getValidCredentials()
@@ -304,38 +363,47 @@ class InternxtProvider(
         }
         val indexHex = indexBytes.joinToString("") { "%02x".format(it) }
 
-        // Temp file deletion brackets stages 6-9 so a finishUpload-409 reconcile that
-        // needs the ciphertext for any future fresh-indexBytes re-attempt at the
-        // caller layer doesn't get its inputs deleted out from under it.
+        // Temp file deletion brackets stages 5-7 (plus the retry loop wrapping
+        // them) so a finishUpload-409 reconcile that needs the ciphertext for
+        // any future fresh-indexBytes re-attempt at the caller layer doesn't
+        // get its inputs deleted out from under it.
         val bucketEntry =
             try {
-                // 5. Start upload → get presigned PUT url + uuid
-                val startResp = api.startUpload(bucket, encryptedSize)
-                val descriptor =
-                    startResp.uploads.firstOrNull()
-                        ?: throw ProviderException("No upload URL returned for $remotePath")
-                val putUrl =
-                    descriptor.url
-                        ?: throw ProviderException("Upload descriptor has no URL for $remotePath")
+                retryShardCommit {
+                    // 5. Start upload → get presigned PUT url + uuid. Re-issued
+                    // per attempt: OVH presigned URLs expire and a stale URL
+                    // returns 403. Fresh startUpload also returns a fresh
+                    // shardUuid; commitWithRetry's finishUpload-409 reconcile
+                    // is keyed on the file's plainName + size + start window,
+                    // not the shardUuid, so the swap is safe.
+                    val startResp = api.startUpload(bucket, encryptedSize)
+                    val descriptor =
+                        startResp.uploads.firstOrNull()
+                            ?: throw ProviderException("No upload URL returned for $remotePath")
+                    val putUrl =
+                        descriptor.url
+                            ?: throw ProviderException("Upload descriptor has no URL for $remotePath")
 
-                // 6. PUT encrypted shard from temp file
-                api.putEncryptedShardFromFile(putUrl, tempFile, encryptedSize)
-                onProgress?.invoke(fileSize, fileSize)
+                    // 6. PUT encrypted shard from temp file. Single-shot at the
+                    // API layer; retry lives here so indexBytes stays pinned.
+                    api.putEncryptedShardFromFile(putUrl, tempFile, encryptedSize)
+                    onProgress?.invoke(fileSize, fileSize)
 
-                // 7-8. Finish upload (with 409-reconcile idempotency) → get bridge fileId
-                commitWithRetry(
-                    api = api,
-                    bucket = bucket,
-                    folderUuid = parentUuid,
-                    plainName = plainName,
-                    ext = ext,
-                    fileSize = fileSize,
-                    encryptedSize = encryptedSize,
-                    indexHex = indexHex,
-                    hashHex = hashHex,
-                    shardUuid = descriptor.uuid,
-                    startedAt = uploadStartedAt,
-                )
+                    // 7-8. Finish upload (with 409-reconcile idempotency) → get bridge fileId
+                    commitWithRetry(
+                        api = api,
+                        bucket = bucket,
+                        folderUuid = parentUuid,
+                        plainName = plainName,
+                        ext = ext,
+                        fileSize = fileSize,
+                        encryptedSize = encryptedSize,
+                        indexHex = indexHex,
+                        hashHex = hashHex,
+                        shardUuid = descriptor.uuid,
+                        startedAt = uploadStartedAt,
+                    )
+                }
             } finally {
                 withContext(Dispatchers.IO) { Files.deleteIfExists(tempFile) }
             }
