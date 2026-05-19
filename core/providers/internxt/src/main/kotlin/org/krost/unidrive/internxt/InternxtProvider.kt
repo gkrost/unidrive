@@ -217,6 +217,24 @@ class InternxtProvider(
         val bucket = fileMeta.bucket ?: throw ProviderException("File has no bucket: $remotePath")
         val fileId = fileMeta.fileId ?: throw ProviderException("File has no fileId: $remotePath")
 
+        // Fail-fast guard on unsupported encryptVersion. Server stores the
+        // column as a free string with no enum constraint; the public
+        // Internxt SDK / drive-desktop / drive-web all use AES-256-CTR
+        // unconditionally and only define the `03-aes` constant. A null
+        // encryptVersion is treated as `03-aes` (the field is absent on
+        // very-old records that predate the column). Anything else throws
+        // rather than silently AES-decrypting to garbage bytes — see
+        // the investigation note attached to the closed encryptVersion
+        // legacy-support entry for the search trail.
+        val version = fileMeta.encryptVersion ?: "03-aes"
+        if (version != "03-aes") {
+            throw ProviderException(
+                "Unsupported encryptVersion '$version' for $remotePath. " +
+                    "This unidrive build only decrypts files written with the standard '03-aes' format. " +
+                    "If you have legacy files that need to be read, file an issue with this version string.",
+            )
+        }
+
         // Retry wraps URL re-resolution + cipher reconstruction per attempt:
         // OVH presigned URLs expire (~15 min) so a stale URL would 403 on
         // retry, and javax.crypto.Cipher is single-use after doFinal(). The

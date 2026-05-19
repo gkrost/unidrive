@@ -72,7 +72,7 @@ Live `unidrive sync --dry-run` against the gateway has been seeing `GET /drive/f
 
 ## Quirks
 
-- **`encryptVersion` hard-coded** to `"03-aes"`. Vendor SDK supports `02-rsa` for legacy buckets; we don't.
+- **`encryptVersion` always written as `"03-aes"`** on new uploads. The server stores the column as a free string with no enum constraint, but the public SDK / drive-desktop / drive-web all use AES-256-CTR unconditionally and define no other constant. A `"02-rsa"` legacy format was assumed in earlier docs but couldn't be found in any public Internxt repo (search trail in the closed encryptVersion legacy-support entry). `downloadWithFileUuid` fail-fasts on any non-`03-aes` / non-null value rather than silently producing garbage bytes.
 - **`internxt-version` header hard-coded.** Internxt gates some endpoints on the client header being one of its own apps. Neutral user-agents have been rejected. Tracked as vendor-flux risk.
 - **Filenames sometimes arrive with a leading `\n`.** Defensively `trim()`'d.
 - **`DELETE /folders/{uuid}` takes a JSON body** listing items. RFC 7231 allows but discourages; some proxies strip DELETE bodies silently.
