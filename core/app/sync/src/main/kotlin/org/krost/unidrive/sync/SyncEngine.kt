@@ -1289,95 +1289,124 @@ class SyncEngine(
         }
 
         // Per-page reconciliation with 1-page rename-coalescing lookahead
-        // (spec §3). Each freshly-arrived page is held in `held` for one
-        // page boundary before reconciling. When the next page lands,
-        // any item id in the next page that also lives in `held` has
-        // its held entry's path replaced with the next page's path
-        // (later page wins) — Internxt's separate /files and /folders
-        // streams can deliver a renamed item's new metadata in a later
-        // page than the rename of its parent, and absorbing that here
-        // saves an emitted DownloadContent-then-MoveLocal pair.
+        // (spec §3) on a bounded backpressure channel (spec §4).
         //
-        // Three-page renames still cost a wasted download — they fall
-        // through to next-sync's detectRemoteRenames. Acceptable per
-        // spec §3 risks.
+        // Producer coroutine: drives nextPage() in a loop, runs the
+        // lookahead merge, and sends ready-to-reconcile page slices into
+        // the channel. When the consumer falls behind, the send() suspends
+        // — which suspends nextPage() — which back-pressures the
+        // provider's delta() and its internal speculativeFetchPages
+        // through coroutineScope semantics.
         //
-        // Held-page state: list of (resolved CloudItem, original remoteId)
-        // tuples. Reconciliation processes the held page, NOT the just-
-        // arrived page; the just-arrived page becomes the new held page.
-        // markStagedReconciled fires for the held page on flush.
+        // Consumer coroutine: receives page slices, runs resolveSlice
+        // against the full local map, classifies through
+        // StreamingReconcileBuffer, accumulates safe-now actions, and
+        // flips the staged-row state-machine on scan_staging.
+        //
+        // Channel capacity (STREAMING_RECONCILE_CHANNEL_CAPACITY = 4)
+        // matches the per-provider transfer concurrency floor per spec
+        // §4 decision 2. Backpressure pauses the scan instead of buffering
+        // unboundedly: peak memory is bounded by 4 × page-size irrespective
+        // of total drive size.
         data class HeldItem(val resolved: CloudItem, val originalId: String)
-        var heldItems: MutableMap<String, HeldItem>? = null
+        data class PageSlice(
+            val slice: Map<String, CloudItem>,
+            val ids: List<String>,
+        )
 
-        suspend fun flushHeld() {
-            val held = heldItems ?: return
-            if (held.isEmpty()) {
-                heldItems = null
-                return
-            }
-            val pageSlice = mutableMapOf<String, CloudItem>()
-            val pageRemoteIds = mutableListOf<String>()
-            for ((_, item) in held) {
-                pageSlice[item.resolved.path] = item.resolved
-                pageRemoteIds.add(item.originalId)
-                changes[item.resolved.path] = item.resolved
-            }
-            reporter.onScanProgress("remote", changes.size)
-            heldItems = null
-            if (pageSlice.isEmpty()) return
-            val pageActions = reconciler.resolveSlice(pageSlice, localChanges, syncPath)
-            val safeNow = buffer.classify(pageActions)
-            safeAccumulator.addAll(safeNow)
-            if (pageRemoteIds.isNotEmpty()) {
-                db.markStagedReconciled(scanId, pageRemoteIds)
-            }
-        }
+        val pageChannel =
+            kotlinx.coroutines.channels
+                .Channel<PageSlice>(capacity = STREAMING_RECONCILE_CHANNEL_CAPACITY)
 
-        suspend fun ingestPage(page: DeltaPage) {
-            persistPendingCursor(page.cursor)
+        coroutineScope {
+            // Consumer: reconcile slices as they arrive.
+            val consumerJob =
+                launch {
+                    for (pageSlice in pageChannel) {
+                        if (pageSlice.slice.isEmpty()) continue
+                        val pageActions =
+                            reconciler.resolveSlice(pageSlice.slice, localChanges, syncPath)
+                        val safeNow = buffer.classify(pageActions)
+                        safeAccumulator.addAll(safeNow)
+                        if (pageSlice.ids.isNotEmpty()) {
+                            db.markStagedReconciled(scanId, pageSlice.ids)
+                        }
+                    }
+                }
 
-            // Resolve and stage the new page's items keyed by remote id.
-            // resolveItemPath may collapse to null for unreachable deletes;
-            // those entries are dropped from the lookahead (the next sync
-            // will surface them once their context is in the local DB).
-            val newItems = LinkedHashMap<String, HeldItem>()
-            for (item in page.items) {
-                val resolved = resolveItemPath(item) ?: continue
-                newItems[resolved.id] = HeldItem(resolved, resolved.id)
-            }
+            // Producer: page-fetch loop with 1-page lookahead.
+            launch {
+                var heldItems: MutableMap<String, HeldItem>? = null
 
-            // Merge step: any id in newItems that also lives in the held
-            // page gets its held entry's path overridden with the new
-            // page's path. The merged held item is what feeds into the
-            // reconciler when we flush.
-            val held = heldItems
-            if (held != null) {
-                for ((id, item) in newItems) {
-                    val priorHeld = held[id] ?: continue
-                    held[id] = HeldItem(
-                        resolved = priorHeld.resolved.copy(
-                            path = item.resolved.path,
-                            name = item.resolved.name,
-                        ),
-                        originalId = priorHeld.originalId,
-                    )
+                suspend fun flushHeld() {
+                    val held = heldItems ?: return
+                    heldItems = null
+                    if (held.isEmpty()) return
+                    val slice = LinkedHashMap<String, CloudItem>()
+                    val ids = mutableListOf<String>()
+                    for ((_, item) in held) {
+                        slice[item.resolved.path] = item.resolved
+                        ids.add(item.originalId)
+                        changes[item.resolved.path] = item.resolved
+                    }
+                    reporter.onScanProgress("remote", changes.size)
+                    pageChannel.send(PageSlice(slice, ids))
+                }
+
+                suspend fun ingestPage(page: DeltaPage) {
+                    persistPendingCursor(page.cursor)
+
+                    // Resolve and stage the new page's items keyed by remote id.
+                    // resolveItemPath may collapse to null for unreachable deletes;
+                    // those entries are dropped from the lookahead (the next sync
+                    // will surface them once their context is in the local DB).
+                    val newItems = LinkedHashMap<String, HeldItem>()
+                    for (item in page.items) {
+                        val resolved = resolveItemPath(item) ?: continue
+                        newItems[resolved.id] = HeldItem(resolved, resolved.id)
+                    }
+
+                    // Merge step: any id in newItems that also lives in the held
+                    // page gets its held entry's path overridden with the new
+                    // page's path (later page wins).
+                    val held = heldItems
+                    if (held != null) {
+                        for ((id, item) in newItems) {
+                            val priorHeld = held[id] ?: continue
+                            held[id] =
+                                HeldItem(
+                                    resolved =
+                                        priorHeld.resolved.copy(
+                                            path = item.resolved.path,
+                                            name = item.resolved.name,
+                                        ),
+                                    originalId = priorHeld.originalId,
+                                )
+                        }
+                    }
+
+                    // Release the held page for reconciliation (now with any
+                    // merged paths applied) and replace it with the new page.
+                    flushHeld()
+                    heldItems = newItems
+                }
+
+                try {
+                    var page = nextPage(cursor)
+                    ingestPage(page)
+                    while (page.hasMore) {
+                        page = nextPage(page.cursor)
+                        ingestPage(page)
+                    }
+                    // Final flush of whatever's still held after the last page.
+                    flushHeld()
+                } finally {
+                    pageChannel.close()
                 }
             }
 
-            // Release the held page for reconciliation (now with any
-            // merged paths applied) and replace it with the new page.
-            flushHeld()
-            heldItems = newItems
+            consumerJob.join()
         }
-
-        var page = nextPage(cursor)
-        ingestPage(page)
-        while (page.hasMore) {
-            page = nextPage(page.cursor)
-            ingestPage(page)
-        }
-        // Final flush of whatever's still held after the last page.
-        flushHeld()
 
         if (allComplete) {
             db.completeScan(scanId)
@@ -2319,6 +2348,19 @@ class SyncEngine(
          * bound; pick it.
          */
         const val REMOTE_WAKE_DEBOUNCE_MS: Long = 5_000L
+
+        /**
+         * Streaming reconciliation: bounded-channel capacity between the
+         * page-fetch producer and the per-page reconciler consumer
+         * (spec §4 decision 2). Picked to match the per-provider transfer
+         * concurrency floor — when the consumer can't keep up, the
+         * producer's `send()` suspends, suspending `nextPage()` and
+         * back-pressuring the provider's internal speculative fetch
+         * through coroutineScope semantics. Peak memory in the streaming
+         * gather is bounded by this × page-size irrespective of total
+         * drive size.
+         */
+        const val STREAMING_RECONCILE_CHANNEL_CAPACITY: Int = 4
 
         /**
          * UD-264 / PR #46 Codex P2: format a `skipped-ops.jsonl` row using
