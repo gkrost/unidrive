@@ -60,13 +60,14 @@ class InternxtApiService(
             limit: Int,
             offset: Int,
             status: String = "ALL",
+            sort: String = "uuid",
         ): Map<String, String> {
             val params =
                 mutableMapOf(
                     "status" to status,
                     "limit" to limit.toString(),
                     "offset" to offset.toString(),
-                    "sort" to "uuid",
+                    "sort" to sort,
                     "order" to "ASC",
                 )
             if (updatedAt != null) params["updatedAt"] = updatedAt
@@ -112,9 +113,10 @@ class InternxtApiService(
         limit: Int = InternxtConfig.LISTING_PAGE_SIZE,
         offset: Int = 0,
         status: String = "ALL",
+        sort: String = "uuid",
     ): List<InternxtFile> =
-        listFilesDedup.load("$updatedAt|$limit|$offset|$status", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status))
+        listFilesDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
+            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status, sort))
             json.decodeFromString<List<InternxtFile>>(body)
         }
 
@@ -123,9 +125,10 @@ class InternxtApiService(
         limit: Int = InternxtConfig.LISTING_PAGE_SIZE,
         offset: Int = 0,
         status: String = "ALL",
+        sort: String = "uuid",
     ): List<InternxtFolder> =
-        listFoldersDedup.load("$updatedAt|$limit|$offset|$status", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status))
+        listFoldersDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
+            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status, sort))
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 

@@ -92,6 +92,7 @@ class InternxtProvider(
         setOf(
             Capability.Delta,
             Capability.QuotaExact,
+            Capability.FastBootstrap,
         )
 
     /**
@@ -910,6 +911,34 @@ class InternxtProvider(
     }
 
 
+    /**
+     * Fast-bootstrap: adopt the current wall-clock instant as the cursor with
+     * zero enumeration. Subsequent [delta] calls receive only items whose
+     * `updatedAt > now - rewindCursorWindow`, so the engine starts with a
+     * clean slate and pays no upfront enumeration cost.
+     *
+     * Trade-off: every file that exists on the remote *before* this call is
+     * invisible to unidrive until it next mutates. Upload-direction sync is
+     * unaffected (local files still upload). The engine's fast-bootstrap path
+     * in `SyncEngine.gatherRemoteChanges` (UD-223) emits a loud warning so
+     * the user knows the cursor was adopted without verification.
+     *
+     * Internxt has no server-side `?token=latest` equivalent of OneDrive
+     * Graph's delta link, but the cursor model here is a plain ISO-8601
+     * `updatedAt` timestamp, so synthesising one client-side is equivalent.
+     * Wall-clock skew between this host and Internxt's storage is absorbed
+     * by the same `rewindCursor` window the regular delta path uses.
+     */
+    override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> =
+        CapabilityResult.Success(
+            DeltaPage(
+                items = emptyList(),
+                cursor = Instant.now().toString(),
+                hasMore = false,
+                complete = true,
+            ),
+        )
+
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -919,6 +948,16 @@ class InternxtProvider(
         foldersSkipped.set(0)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val limit = InternxtConfig.LISTING_PAGE_SIZE
+        // drive-desktop parity: fresh full enum (cursor=null) uses sort=uuid
+        // for offset-stable pagination + status=EXISTS to skip the tombstone
+        // population (20–40 % payload win on a long-lived account — no need
+        // for tombstones on first walk because there's no local state to
+        // diff them against). Incremental delta (cursor!=null) uses
+        // sort=updatedAt so the per-page max() is monotonically advancing
+        // (next page advances the effective cursor) and status=ALL because
+        // tombstones ARE the signal for deletes since the last sync.
+        val sort = if (cursor == null) "uuid" else "updatedAt"
+        val status = if (cursor == null) "EXISTS" else "ALL"
 
         // Resume support: a non-null scanContext means the engine is tracking
         // staged pages in state.db. On a resumed scan the previously-fetched
@@ -975,6 +1014,9 @@ class InternxtProvider(
                 )
             }
 
+        // Harvested by the /files-503 fallback walk; merged into allFolders
+        // after foldersDeferred completes. Empty on the happy path.
+        val fallbackFolderHarvest = mutableListOf<InternxtFolder>()
         coroutineScope {
             val foldersDeferred =
                 async {
@@ -985,7 +1027,7 @@ class InternxtProvider(
                         combinedTotal = combinedTotal,
                         label = "folders",
                         startOffset = resume.foldersOffset,
-                        fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset) },
+                        fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset, status, sort) },
                         onPage = { page, nextOffset ->
                             persister?.notifyFoldersPage(page, nextOffset)
                         },
@@ -1003,7 +1045,7 @@ class InternxtProvider(
                         combinedTotal = combinedTotal,
                         label = "files",
                         startOffset = resume.filesOffset,
-                        fetchPage = { offset -> api.listFiles(adjustedCursor, limit, offset) },
+                        fetchPage = { offset -> api.listFiles(adjustedCursor, limit, offset, status, sort) },
                         onPage = { page, nextOffset ->
                             persister?.notifyFilesPage(page, nextOffset)
                         },
@@ -1011,14 +1053,42 @@ class InternxtProvider(
                 } catch (e: InternxtApiException) {
                     if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
                     log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
-                    val fallback = mutableListOf<InternxtFile>()
-                    collectFilesFromFolders(authService.getValidCredentials().rootFolderId, fallback, 0)
-                    filesCount.set(allFiles.size + fallback.size)
+                    // Discard the speculative partial counter: those pages
+                    // are dropped on the floor, the fallback walk will
+                    // re-count from scratch. Without this the heartbeat
+                    // sits at a stale-high value (speculative pre-503)
+                    // while the slow tree walk runs and /folders keeps
+                    // ticking — producing the up-then-down jump that's
+                    // alarmed users (208k → 261k → 218k).
+                    val baselineFilesCount = allFiles.size
+                    filesCount.set(baselineFilesCount)
                     heartbeat?.tick(combinedTotal())
+                    val fallback = mutableListOf<InternxtFile>()
+                    collectFilesFromFolders(
+                        authService.getValidCredentials().rootFolderId,
+                        fallback,
+                        fallbackFolderHarvest,
+                        depth = 0,
+                        onProgress = {
+                            filesCount.set(baselineFilesCount + fallback.size)
+                            heartbeat?.tick(combinedTotal())
+                        },
+                    )
                     fallback
                 }
             allFiles.addAll(filesResult)
             allFolders.addAll(foldersDeferred.await())
+        }
+        // Merge fallback-walk folders into allFolders so folderMap below
+        // contains the complete ancestor chain for every harvested file.
+        // associateBy keeps the last entry per uuid; the /folders delta
+        // entries arrive first (above) and the fallback's stamped copies
+        // win on collisions — fine since the harvest carries the same
+        // identity attributes plus an authoritative parentUuid.
+        if (fallbackFolderHarvest.isNotEmpty()) {
+            allFolders.addAll(fallbackFolderHarvest)
+            foldersCount.set(allFolders.size)
+            heartbeat?.tick(combinedTotal())
         }
 
         val creds = authService.getValidCredentials()
@@ -1215,16 +1285,20 @@ class InternxtProvider(
     private suspend fun collectFilesFromFolders(
         folderUuid: String,
         accumulator: MutableList<InternxtFile>,
+        folderAccumulator: MutableList<InternxtFolder>,
         depth: Int,
+        onProgress: (() -> Unit)? = null,
     ) {
         collectFilesFromFoldersImpl(
             getContents = api::getFolderContents,
             folderUuid = folderUuid,
             accumulator = accumulator,
+            folderAccumulator = folderAccumulator,
             depth = depth,
             scanned = foldersScanned,
             skipped = foldersSkipped,
             log = log,
+            onProgress = onProgress,
         )
     }
 
@@ -1307,21 +1381,35 @@ class InternxtProvider(
 
         /**
          * UD-361: testable recursion driver. Walks the folder tree rooted at
-         * [folderUuid], accumulating files into [accumulator]. On 500/503
-         * from [getContents], increments [skipped] and returns (the subtree
-         * is silently dropped from the accumulator — caller is responsible
-         * for inspecting [skipped] and rejecting partial gathers). Other
-         * exceptions propagate. Increments [scanned] for every successfully
-         * walked folder.
+         * [folderUuid], accumulating files into [accumulator] and the folders
+         * it descended through into [folderAccumulator]. On 500/503 from
+         * [getContents], increments [skipped] and returns (the subtree is
+         * silently dropped — caller is responsible for inspecting [skipped]
+         * and rejecting partial gathers). Other exceptions propagate.
+         * Increments [scanned] for every successfully walked folder, then
+         * invokes [onProgress] so the caller can tick a heartbeat from
+         * within the walk.
+         *
+         * Each child folder stamped into [folderAccumulator] has its
+         * `parentUuid` set from the recursion context (the `folderUuid`
+         * arg). The /folders/:uuid/content endpoint omits `parentUuid` on
+         * the children listing — without this stamp, downstream
+         * `buildFolderPath` would treat the child as a root child and
+         * compute the wrong path. Threading these folders into the caller's
+         * `allFolders` is what closes the ancestor-uuid-drop gap when the
+         * fallback fires (otherwise `folderMap` only contains the
+         * cursor-filtered /folders delta and most files get dropped).
          */
         internal suspend fun collectFilesFromFoldersImpl(
             getContents: suspend (String) -> FolderContentResponse,
             folderUuid: String,
             accumulator: MutableList<InternxtFile>,
+            folderAccumulator: MutableList<InternxtFolder>,
             depth: Int,
             scanned: java.util.concurrent.atomic.AtomicInteger,
             skipped: java.util.concurrent.atomic.AtomicInteger,
             log: org.slf4j.Logger,
+            onProgress: (() -> Unit)? = null,
         ) {
             val content =
                 try {
@@ -1337,25 +1425,49 @@ class InternxtProvider(
             accumulator.addAll(content.files)
             val total = scanned.incrementAndGet()
             log.debug("Scanning: {} files, {} folders scanned", accumulator.size, total)
+            onProgress?.invoke()
             for (child in content.children) {
                 if (child.status == "EXISTS" && !child.removed && !child.deleted) {
+                    val stamped =
+                        if (child.parentUuid != null) child else child.copy(parentUuid = folderUuid)
+                    folderAccumulator.add(stamped)
                     collectFilesFromFoldersImpl(
                         getContents,
-                        child.uuid,
+                        stamped.uuid,
                         accumulator,
+                        folderAccumulator,
                         depth + 1,
                         scanned,
                         skipped,
                         log,
+                        onProgress,
                     )
                 }
             }
         }
 
+        /**
+         * Look-back window applied to the persisted delta cursor before each
+         * `/files` and `/folders` query, so items that mutated in the seam
+         * between the prior gather's `max(updatedAt)` snapshot and the cursor
+         * write are caught on the next pass.
+         *
+         * 2 minutes matches drive-desktop's `TWO_MINUTES_IN_MILLISECONDS`
+         * (`src/apps/main/remote-sync/helpers/get-checkpoint.ts:19`). The
+         * earlier 6-hour window was a defensive over-correction from when
+         * cursor promotion was unreliable; with promote-always now in place
+         * and `sort=updatedAt` on the delta path advancing the effective
+         * cursor per page, 2 minutes is sufficient and turns "every restart
+         * re-walks 6 h of activity" into "re-walks the last 120 s." On a hot
+         * account this is the difference between a sub-second incremental
+         * scan and a multi-minute one.
+         */
         fun rewindCursor(cursor: String): String {
             val instant = Instant.parse(cursor)
-            return instant.minus(6, ChronoUnit.HOURS).toString()
+            return instant.minus(REWIND_CURSOR_SECONDS, ChronoUnit.SECONDS).toString()
         }
+
+        internal const val REWIND_CURSOR_SECONDS: Long = 120
 
         fun pathSegments(path: String): List<String> = path.removePrefix("/").split("/").filter { it.isNotEmpty() }
 

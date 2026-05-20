@@ -56,17 +56,22 @@ class InternxtApiServiceTest {
     }
 
     @Test
-    fun `delta cursor rewinds 6 hours`() {
+    fun `delta cursor rewinds 120 seconds (drive-desktop parity)`() {
+        // Was 6 hours pre-2026-05-20; tightened to 2 minutes after the
+        // cursor-promotion-always fix made the 6h defensive window obsolete.
+        // Matches drive-desktop's `TWO_MINUTES_IN_MILLISECONDS`. On a hot
+        // account this is the difference between a sub-second incremental
+        // walk and a multi-minute one.
         val cursor = "2026-03-29T18:30:00.000Z"
         val rewound = InternxtProvider.rewindCursor(cursor)
-        assertEquals("2026-03-29T12:30:00Z", rewound)
+        assertEquals("2026-03-29T18:28:00Z", rewound)
     }
 
     @Test
-    fun `delta cursor rewind crosses midnight`() {
-        val cursor = "2026-03-29T03:00:00.000Z"
+    fun `delta cursor rewind crosses midnight (still only 120 seconds back)`() {
+        val cursor = "2026-03-29T00:01:00.000Z"
         val rewound = InternxtProvider.rewindCursor(cursor)
-        assertEquals("2026-03-28T21:00:00Z", rewound)
+        assertEquals("2026-03-28T23:59:00Z", rewound)
     }
 
     @Test
@@ -326,14 +331,14 @@ class InternxtApiServiceTest {
     }
 
     @Test
-    fun `UD-358 listing query params include sort=uuid and order=ASC`() {
-        // Without sort/order, paginated /files and /folders walks can drop or
-        // duplicate rows on concurrent mutation. uuid is the only stable sort
-        // key (immutable per row); order=ASC is conventional.
+    fun `UD-358 listing query params default to sort=uuid and order=ASC`() {
+        // The default (no sort arg) is the offset-stable uuid sort used by
+        // the fresh-cursor full-enum path. Tombstones default to ALL so
+        // callers must opt out explicitly when they want EXISTS-only.
         val params = InternxtApiService.listingQueryParams(updatedAt = null, limit = 50, offset = 0)
         assertEquals("uuid", params["sort"])
         assertEquals("ASC", params["order"])
-        assertEquals("ALL", params["status"], "tombstones must remain visible")
+        assertEquals("ALL", params["status"], "tombstones default-visible; delta-path opts EXISTS only on fresh scans")
         assertEquals("50", params["limit"])
         assertEquals("0", params["offset"])
         kotlin.test.assertNull(params["updatedAt"], "no updatedAt when null")
@@ -348,6 +353,38 @@ class InternxtApiServiceTest {
         assertEquals("ASC", params["order"])
         assertEquals("100", params["limit"])
         assertEquals("50", params["offset"])
+    }
+
+    @Test
+    fun `listing query params honour explicit sort and status overrides for the delta path`() {
+        // drive-desktop pattern: incremental delta walks pass sort=updatedAt
+        // (so the per-page max() advances the effective cursor) and
+        // status=ALL (tombstones are the signal for "deleted since cursor").
+        // Verified against drive-desktop sync-remote-files.ts:30 + swagger
+        // schema.ts:5115/5119. Fresh full-enum walks instead pass
+        // status=EXISTS to skip the ~20–40 % tombstone payload on a
+        // long-lived account.
+        val deltaParams =
+            InternxtApiService.listingQueryParams(
+                updatedAt = "2026-05-20T08:00:00Z",
+                limit = 999,
+                offset = 0,
+                status = "ALL",
+                sort = "updatedAt",
+            )
+        assertEquals("updatedAt", deltaParams["sort"])
+        assertEquals("ALL", deltaParams["status"])
+
+        val freshParams =
+            InternxtApiService.listingQueryParams(
+                updatedAt = null,
+                limit = 999,
+                offset = 0,
+                status = "EXISTS",
+                sort = "uuid",
+            )
+        assertEquals("uuid", freshParams["sort"])
+        assertEquals("EXISTS", freshParams["status"])
     }
 
     // UD-807: rewritten to use kotlinx-coroutines-test `runTest` + virtual time.
