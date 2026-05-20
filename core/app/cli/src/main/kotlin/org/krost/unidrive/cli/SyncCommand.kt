@@ -596,6 +596,16 @@ open class SyncCommand : Runnable {
                     // close() is idempotent (acceptJob?.cancel() is a no-op on
                     // already-cancelled jobs), so the double-close is harmless.
                     ipcServer.close()
+                    // Sync is logically done. Schedule a force-halt watchdog so any
+                    // hang in subsequent shutdown — runBlocking unwind, finally{}
+                    // cleanups, JVM exit — doesn't leave the user staring at a
+                    // dead terminal. NotificationsClient's socket.io v2.1.2 worker
+                    // is the known offender (non-daemon thread that keeps the JVM
+                    // alive past close()); the watchdog is daemon, so it can't keep
+                    // the JVM alive on its own, but it CAN halt the JVM if something
+                    // else is. 3 s is generous for the legitimate finally path
+                    // (db.close, HTTP client shutdown — milliseconds in practice).
+                    scheduleForceHalt(exitCode = 0, delayMs = 3000)
                 }
             }
         } catch (e: AuthenticationException) {
@@ -814,6 +824,35 @@ open class SyncCommand : Runnable {
             if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
             // A bare "/" is the whole tree — same as no scope.
             return if (s == "/") null else s
+        }
+
+        /**
+         * Schedule a `Runtime.halt()` after [delayMs]. Daemon thread, so it
+         * can't keep the JVM alive on its own; it only fires if some OTHER
+         * non-daemon thread is preventing normal shutdown.
+         *
+         * The motivating offender is NotificationsClient's socket.io v2.1.2
+         * worker — `disconnect()` is supposed to release it but doesn't
+         * reliably on Windows. Without this watchdog the user's terminal
+         * sits without a prompt for minutes after a clean sync, which reads
+         * as "the app crashed" even though the sync work itself succeeded.
+         */
+        internal fun scheduleForceHalt(
+            exitCode: Int,
+            delayMs: Long,
+        ) {
+            Thread({
+                try {
+                    Thread.sleep(delayMs)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                Runtime.getRuntime().halt(exitCode)
+            }, "unidrive-exit-watchdog")
+                .apply {
+                    isDaemon = true
+                    start()
+                }
         }
     }
 }

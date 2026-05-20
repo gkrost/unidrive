@@ -822,9 +822,43 @@ fun main(args: Array<String>) {
         .loadInto(cmd, services)
     try {
         val exitCode = cmd.execute(*args)
+        forceExitAfterGracePeriod(exitCode)
         System.exit(exitCode)
     } catch (e: Exception) {
         System.err.println("Error: ${e.message ?: e.javaClass.simpleName}")
+        forceExitAfterGracePeriod(1)
         System.exit(1)
     }
+}
+
+/**
+ * Schedule a fallback `Runtime.halt()` after a grace period. Backstop for
+ * non-daemon worker threads we don't own (socket.io v2.1.2's engine.io
+ * dispatcher among them) that prevent `System.exit` from finishing cleanly.
+ * On a healthy run the JVM exits within milliseconds of the System.exit
+ * call below this watchdog and the halt is a no-op against an already-dead
+ * process. On the failure mode the user was hitting — sync completes, JVM
+ * camps for minutes with the WS thread still alive — the halt forces the
+ * prompt back so a `unidrive sync` invocation doesn't feel like the app
+ * crashed.
+ *
+ * 2 s is enough headroom for the normal close() sequence (HTTP client
+ * shutdown, db.close, IPC socket teardown) on a hot path and short enough
+ * that an interactive user doesn't notice. Halt code mirrors the requested
+ * exit code so scripts wrapping `unidrive sync` see the right status.
+ */
+private fun forceExitAfterGracePeriod(exitCode: Int) {
+    val watchdog =
+        Thread({
+            try {
+                Thread.sleep(2000)
+            } catch (_: InterruptedException) {
+                // Normal exit ran fast and the JVM is shutting down — let it.
+                return@Thread
+            }
+            // If we got here the normal shutdown is taking too long. Force.
+            Runtime.getRuntime().halt(exitCode)
+        }, "unidrive-exit-watchdog")
+    watchdog.isDaemon = true
+    watchdog.start()
 }
