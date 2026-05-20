@@ -586,26 +586,37 @@ open class SyncCommand : Runnable {
                         skipTransfers = skipTransfers,
                         skipRemoteGather = skipRemoteGather,
                     )
-                    // UD-406: cancel the IPC accept loop so runBlocking can return.
-                    // ipcServer.start(this) at line ~366 above launches an infinite
-                    // accept-loop coroutine into this scope; runBlocking { } would
-                    // otherwise block forever waiting for it to complete. The
-                    // finally{} below ALSO calls ipcServer.close(), but that runs
-                    // only AFTER runBlocking returns — chicken-and-egg.
+                    // Sync is logically done. Clean up resources and exit
+                    // explicitly. Why not let runBlocking unwind naturally?
+                    // On Windows the AF_UNIX `ServerSocketChannel.accept()`
+                    // used by IpcServer doesn't unblock when the channel
+                    // close()s; the accept coroutine stays in native
+                    // `accept0()` indefinitely, and runBlocking parks
+                    // joinBlocking forever waiting for it. Verified live
+                    // 2026-05-20 via jstack on PID 20980: 7+ minutes after
+                    // `Scan ended` the main was still parked in joinBlocking
+                    // and DefaultDispatcher-worker-1 was still in
+                    // `accept0()`. (An earlier daemon-thread watchdog
+                    // wasn't observed to fire — the symptom was the same.)
                     //
-                    // close() is idempotent (acceptJob?.cancel() is a no-op on
-                    // already-cancelled jobs), so the double-close is harmless.
-                    ipcServer.close()
-                    // Sync is logically done. Schedule a force-halt watchdog so any
-                    // hang in subsequent shutdown — runBlocking unwind, finally{}
-                    // cleanups, JVM exit — doesn't leave the user staring at a
-                    // dead terminal. NotificationsClient's socket.io v2.1.2 worker
-                    // is the known offender (non-daemon thread that keeps the JVM
-                    // alive past close()); the watchdog is daemon, so it can't keep
-                    // the JVM alive on its own, but it CAN halt the JVM if something
-                    // else is. 3 s is generous for the legitimate finally path
-                    // (db.close, HTTP client shutdown — milliseconds in practice).
-                    scheduleForceHalt(exitCode = 0, delayMs = 3000)
+                    // Cleanup mirrors the outer `finally{}` block. Each
+                    // close is runCatching'd because we'd rather log a
+                    // close-failure to stderr than skip System.exit. Order
+                    // matches the existing finally so semantic dependencies
+                    // (ipcServer before its db, db last) are preserved.
+                    System.out.flush()
+                    System.err.flush()
+                    runCatching { ipcServer.close() }
+                    runCatching { rawProvider.close() }
+                    runCatching { subscriptionStore.close() }
+                    runCatching { db.close() }
+                    runCatching { lock.unlock() }
+                    // System.exit triggers JVM shutdown directly. With no
+                    // shutdown hooks registered in non-watch mode, this
+                    // halts within milliseconds — the user's terminal
+                    // prompt returns instead of camping for minutes on
+                    // the stuck accept loop.
+                    System.exit(0)
                 }
             }
         } catch (e: AuthenticationException) {
