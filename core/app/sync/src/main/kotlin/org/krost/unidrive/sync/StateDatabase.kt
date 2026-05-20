@@ -423,6 +423,24 @@ class StateDatabase(
         }
     }
 
+    /**
+     * Count of alive entries whose content has actually been downloaded
+     * locally (`is_hydrated = 1`). Used by the empty-local sanity guard
+     * to distinguish "user wiped a populated drive" (lots of hydrated
+     * entries missing — refuse to propagate as deletes) from "previous
+     * sync got far enough to write metadata but never finished
+     * downloads" (no hydrated entries — let UD-225 recovery re-download
+     * everything).
+     */
+    @Synchronized
+    fun getHydratedEntryCount(): Int {
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT COUNT(*) FROM alive_entries WHERE is_hydrated = 1")
+            rs.next()
+            return rs.getInt(1)
+        }
+    }
+
     @Synchronized
     fun getAllEntries(): List<SyncEntry> {
         conn.createStatement().use { stmt ->

@@ -516,12 +516,29 @@ class SyncEngine(
         // the reconciler turns it into a wall of del-remote actions.
         // Fires in dry-run too — that's where the user is most likely
         // to notice and the system has the least to lose by being loud.
-        if (!forceDelete && db.getEntryCount() > 10 && isSyncRootEffectivelyEmpty()) {
+        //
+        // Gate on the HYDRATED entry count, not the total. A state.db
+        // populated by previous failed gather passes (Internxt "dance"
+        // pattern: many delta walks, no successful downloads) is full of
+        // unhydrated rows that represent cloud-side items the user still
+        // needs to download — refusing to run there blocks the UD-225
+        // recovery loop from doing its job. The original concern (mass
+        // DeleteRemote when sync_root is mis-pointed) only applies when
+        // hydrated entries are missing locally; LocalScanner now skips
+        // unhydrated rows in its deletion-detection loop, so the only
+        // way to generate Delete actions here is via hydrated rows.
+        // Live repro 2026-05-20: 171 386 file rows all is_hydrated=0,
+        // sync_root empty, old guard refused with a misleading
+        // "--force-delete" hint that would have catastrophically wiped
+        // the cloud side.
+        val hydratedEntryCount = db.getHydratedEntryCount()
+        if (!forceDelete && hydratedEntryCount > 10 && isSyncRootEffectivelyEmpty()) {
             val msg =
                 "Local sync_root '$syncRoot' is empty, but state DB knows " +
-                    "${db.getEntryCount()} entries. sync_root probably points at the " +
-                    "wrong directory. Re-run with --force-delete if the local data was " +
-                    "intentionally wiped."
+                    "$hydratedEntryCount previously-hydrated entries (of " +
+                    "${db.getEntryCount()} total). sync_root probably points at " +
+                    "the wrong directory. Re-run with --force-delete if the " +
+                    "local data was intentionally wiped."
             if (dryRun) {
                 reporter.onWarning(msg)
             } else {

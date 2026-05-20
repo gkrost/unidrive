@@ -823,6 +823,43 @@ class SyncEngineTest {
             )
         }
 
+    @Test
+    fun `UD-297 empty sync_root with only unhydrated DB entries does not block`() =
+        runTest {
+            // Internxt "dance" repro 2026-05-20: previous failed gather passes
+            // populated state.db with 171k file rows, all is_hydrated=0, and
+            // never managed to actually download anything. sync_root is empty
+            // because nothing was ever downloaded. Pre-fix the empty-local
+            // guard refused with a "--force-delete" hint that would have
+            // catastrophically wiped the cloud side; post-fix the guard
+            // gates on the HYDRATED count so the UD-225 recovery loop can
+            // re-hydrate the cloud inventory locally instead.
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            for (i in 0 until 100) {
+                db.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/unhydrated-$i.txt",
+                        remoteId = "id-$i",
+                        remoteHash = "hash-$i",
+                        remoteSize = 100,
+                        remoteModified = now,
+                        localMtime = 0L,
+                        localSize = 0L,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = false,
+                        lastSynced = now,
+                    ),
+                )
+            }
+            db.setSyncState("delta_cursor", "seeded-cursor")
+            provider.deltaItems = emptyList()
+
+            // Must not throw — engine proceeds, UD-225 recovery loop will
+            // emit DownloadContent for each unhydrated row.
+            engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = false)
+        }
+
     // UD-298 — apply percentage deletion safeguard in dry-run as warning
 
     @Test
