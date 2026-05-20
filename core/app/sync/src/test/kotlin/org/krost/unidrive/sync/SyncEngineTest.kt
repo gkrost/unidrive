@@ -199,6 +199,40 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `delta cursor advances even when some downloads fail`() =
+        runTest {
+            // Regression for the 2026-05-20 first-sync loop: when transferFailures > 0
+            // the cursor used to stay pinned at null, so every subsequent run re-did
+            // the full enumeration and re-failed on the same flaky items. On a busy
+            // 200k-item drive that loop never terminated — every gather had *some*
+            // transient transfer failure (503 / network blip / partial upload).
+            //
+            // The UD-225 recovery loop in Reconciler.reconcile re-queues unhydrated
+            // entries on the next pass, so promoting the cursor on the failure path
+            // is safe: failed items get retried via that loop, not via re-delta.
+            provider.files["/ok.txt"] = ByteArray(10)
+            provider.files["/flaky.txt"] = ByteArray(10)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/ok.txt", size = 10),
+                    cloudItem("/flaky.txt", size = 10),
+                )
+            provider.deltaCursor = "advanced-cursor"
+            provider.downloadFailCount = 1 // first download attempt throws
+
+            engine.syncOnce()
+
+            assertEquals(
+                "advanced-cursor",
+                db.getSyncState("delta_cursor"),
+                "cursor must advance even when at least one download failed — the UD-225 recovery " +
+                    "loop will pick up the failed item on the next pass; pinning the cursor here " +
+                    "produces an inescapable first-sync loop on drives where transfers always " +
+                    "have some transient failure",
+            )
+        }
+
+    @Test
     fun `full sync detects deletion when item missing from delta`() =
         runTest {
             // First sync: item appears in delta
@@ -1401,6 +1435,41 @@ class SyncEngineTest {
             // The pre-existing remote item must NOT have been materialised locally —
             // that's the whole point of the bootstrap trade-off.
             assertFalse(Files.exists(syncRoot.resolve("pre-existing.txt")))
+        }
+
+    @Test
+    fun `UD-223 fast-bootstrap clears stale scan_in_progress checkpoint`() =
+        runTest {
+            // Live repro 2026-05-20: fast-bootstrap set delta_cursor without
+            // clearing scan_in_progress. The next regular sync resumed
+            // pagination at offset 128274|20069 against a different cursor's
+            // result set — silently paging past items modified in the seam
+            // before they could be observed. Pin that the cleanup runs.
+            //
+            // Seed: a prior, never-completed scan left a checkpoint in
+            // sync_state. Fast-bootstrap on next launch must wipe it.
+            db.setSyncState(StateDatabase.SCAN_IN_PROGRESS_ID, "stale-scan-id")
+            db.setSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER, "128274|20069")
+            db.setSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT, "2026-05-20T06:12:07.478Z")
+
+            provider.supportsFastBootstrap = true
+            provider.deltaCursor = "latest-cursor"
+
+            bootstrapEngine().syncOnce()
+
+            assertNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID),
+                "scan_in_progress_id must be cleared by fast-bootstrap — the old offsets index into the wrong result set",
+            )
+            assertNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
+                "scan_in_progress_marker must be cleared",
+            )
+            assertNull(
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_STARTED_AT),
+                "scan_in_progress_started_at must be cleared",
+            )
+            assertEquals("latest-cursor", db.getSyncState("delta_cursor"))
         }
 
     @Test

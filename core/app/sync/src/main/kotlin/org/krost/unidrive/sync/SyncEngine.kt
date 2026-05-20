@@ -974,16 +974,23 @@ class SyncEngine(
         // refresh / re-auth flows trigger instead of a silent "0 downloaded, many failed" result.
         authFailure.get()?.let { throw it }
 
-        // Persist cursor only if every transfer succeeded. A single failed download would
-        // otherwise be lost forever: the server-side delta cursor advances past it and future
-        // syncs would not re-see it as "new". Failed items keep pending_cursor → next sync redoes
-        // the delta from the previous promoted cursor.
+        // Promote unconditionally. The original gate was `transferFailures == 0`,
+        // which protected against "cursor advances past a failed download and the
+        // item is never re-seen by future deltas". That concern is now handled by
+        // the UD-225 / UD-901 recovery loops in Reconciler.reconcile, which scan
+        // db.getAllEntries() every pass and synthesise DownloadContent for any
+        // isHydrated=false row and Upload for any remoteId=null row that no live
+        // action already covers.
         //
-        // promotePendingCursor advances even on incomplete gathers — the trade is
-        // documented at its definition site.
-        if (transferFailures.get() == 0) {
-            promotePendingCursor()
-        }
+        // Holding the cursor on transfer failures looked safe in isolation but
+        // produced an inescapable first-sync loop on busy drives: a 200 k-item
+        // gather is essentially guaranteed to have *some* transient transfer
+        // failure (Internxt 503s, network blips, partial uploads), so every run
+        // ended with the cursor pinned at null → next run re-enumerated from
+        // scratch → same outcome. Live repro 2026-05-20 def535f1: 14.8 h scan,
+        // 218 k items, pending_cursor written, delta_cursor never set; the
+        // following run did the full enum again.
+        promotePendingCursor()
 
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(
@@ -1023,6 +1030,21 @@ class SyncEngine(
                         // the promotion and the next run re-bootstraps forever.
                         db.setSyncState("delta_cursor", page.cursor)
                         db.setSyncState("last_full_scan", Instant.now().toString())
+                        // Invalidate any in-progress scan checkpoint. The offsets persisted
+                        // in `scan_in_progress_marker` correspond to the previous gather's
+                        // cursor (cursor=null full enum, or an earlier delta cursor); they
+                        // index into a different result set than what the new cursor=now
+                        // delta will return. Resuming with the old offsets would silently
+                        // page past items modified in the seam. Clearing the staging slice
+                        // is cheap (no live `sync_entries` rows touched).
+                        db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { staleScanId ->
+                            log.info(
+                                "UD-223 fast-bootstrap: invalidating stale scan checkpoint scan={} marker={}",
+                                staleScanId,
+                                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
+                            )
+                            db.completeScan(staleScanId)
+                        }
                         val stamp = Instant.now().toString()
                         val msg =
                             "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
@@ -1241,6 +1263,17 @@ class SyncEngine(
                     }
                     db.setSyncState("delta_cursor", page.cursor)
                     db.setSyncState("last_full_scan", Instant.now().toString())
+                    // See the non-streaming `gatherRemoteChanges` fast-bootstrap path
+                    // for rationale. Stale `scan_in_progress_*` offsets index into a
+                    // different result set than the new cursor=now delta returns.
+                    db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { staleScanId ->
+                        log.info(
+                            "UD-223 fast-bootstrap: invalidating stale scan checkpoint scan={} marker={}",
+                            staleScanId,
+                            db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
+                        )
+                        db.completeScan(staleScanId)
+                    }
                     val stamp = Instant.now().toString()
                     val msg =
                         "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +

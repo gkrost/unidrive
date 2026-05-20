@@ -227,12 +227,19 @@ class SyncCornerCaseTest {
     // ========== Network outage ==========
 
     @Test
-    fun `bulk download failures are logged but cursor is not promoted`() =
+    fun `bulk download failures leave non-hydrated entries for UD-225 retry`() =
         runTest {
             // UD-222: Pass 2 (download hydration) no longer aborts sync on consecutive failures —
-            // a 129k-file first sync should survive transient hiccups on individual files. What DOES
-            // abort is cursor promotion: if any transfer failed, pending_cursor is not advanced, so
-            // the next sync retries everything from the previous known-good cursor.
+            // a 129k-file first sync should survive transient hiccups on individual files.
+            //
+            // 2026-05-20: cursor promotion used to be gated on transferFailures == 0; that
+            // produced an inescapable first-sync loop on busy drives (every gather had *some*
+            // transient transfer failure, so every run failed to promote, so every next run
+            // re-enumerated from scratch). The UD-225 recovery loop in Reconciler.reconcile
+            // re-queues unhydrated entries on the next pass, so promoting the cursor on the
+            // failure path is safe: failed items are tracked in the DB as non-hydrated rows,
+            // not via re-delta. Live repro: def535f1 / 14.8 h scan / 218 k items, cursor
+            // never promoted, next run re-did the whole enum.
             db.setSyncState("delta_cursor", "prior-cursor")
             provider.deltaItems =
                 listOf(
@@ -246,9 +253,11 @@ class SyncCornerCaseTest {
 
             engine().syncOnce() // no throw — bulk failures are survivable
 
-            // Cursor did NOT advance — the failed items must get another chance.
-            assertEquals("prior-cursor", db.getSyncState("delta_cursor"))
-            // Each failed download left a non-hydrated DB entry for retry.
+            // Cursor advanced: progress is made even though every transfer failed. The
+            // non-hydrated entries below are what the next pass picks up via UD-225.
+            assertEquals("fresh-cursor", db.getSyncState("delta_cursor"))
+            // Each failed download left a non-hydrated DB entry — UD-225 will synthesise
+            // a DownloadContent for each one on the next reconcile pass.
             for (name in listOf("/a.txt", "/b.txt", "/c.txt", "/d.txt")) {
                 val entry = db.getEntry(name)
                 assertNotNull(entry)
@@ -354,10 +363,12 @@ class SyncCornerCaseTest {
         }
 
     @Test
-    fun `pending cursor not promoted on transfer failure`() =
+    fun `pending cursor advances on transfer failure (UD-225 covers retry)`() =
         runTest {
-            // UD-222: sync no longer throws on per-file failures, but the cursor promotion guard
-            // keeps the delta cursor at its previous value so failed items get retried.
+            // UD-222: sync no longer throws on per-file failures. 2026-05-20: cursor
+            // promotion no longer gates on transferFailures either — see
+            // `bulk download failures leave non-hydrated entries for UD-225 retry`
+            // above for the full rationale and live repro.
             db.setSyncState("delta_cursor", "good-cursor")
 
             provider.deltaItems =
@@ -371,8 +382,9 @@ class SyncCornerCaseTest {
 
             engine().syncOnce()
 
-            // The cursor should NOT have been promoted — three failures means next sync retries.
-            assertEquals("good-cursor", db.getSyncState("delta_cursor"))
+            // Cursor advanced. Failed downloads left non-hydrated DB rows that the
+            // UD-225 loop in Reconciler.reconcile will re-queue on the next pass.
+            assertEquals("bad-cursor", db.getSyncState("delta_cursor"))
         }
 
     // ========== DB state recovery ==========

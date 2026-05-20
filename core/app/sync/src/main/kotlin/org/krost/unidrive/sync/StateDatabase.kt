@@ -689,6 +689,15 @@ class StateDatabase(
      * than [staleThreshold]. A stale checkpoint is cleared in-place
      * (staging slice deleted + sync_state keys cleared) so the caller can
      * treat a null return as "start from scratch".
+     *
+     * Also invalidates the checkpoint when `last_full_scan` was set AFTER
+     * the scan started. That marker is stamped by `promotePendingCursor`
+     * on completion AND by the UD-223 fast-bootstrap path; either event
+     * means the cursor advanced underneath us, so the persisted offsets
+     * index into a different result set than the next gather will return.
+     * Without this self-heal, a state.db left over from an older jar
+     * (whose fast-bootstrap didn't clear the checkpoint) silently pages
+     * past items modified in the seam.
      */
     @Synchronized
     fun getActiveScan(staleThreshold: Duration): ActiveScan? {
@@ -696,6 +705,12 @@ class StateDatabase(
         val startedAtRaw = getSyncState(SCAN_IN_PROGRESS_STARTED_AT)
         val startedAt = startedAtRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
         if (startedAt == null || Instant.now().isAfter(startedAt.plus(staleThreshold))) {
+            clearScan(scanId)
+            return null
+        }
+        val lastFullScanRaw = getSyncState("last_full_scan")
+        val lastFullScan = lastFullScanRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        if (lastFullScan != null && lastFullScan.isAfter(startedAt)) {
             clearScan(scanId)
             return null
         }
