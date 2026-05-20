@@ -578,32 +578,36 @@ open class SyncCommand : Runnable {
                         watcher.drainChanges()
                     }
                 } else {
-                    engine.syncOnce(
-                        dryRun = dryRun,
-                        forceDelete = forceDelete,
-                        reason = org.krost.unidrive.sync.SyncReason.MANUAL,
-                        // refresh / apply set these via subclass.
-                        skipTransfers = skipTransfers,
-                        skipRemoteGather = skipRemoteGather,
-                    )
-                    // Sync is logically done. Clean up resources and exit
-                    // explicitly. Why not let runBlocking unwind naturally?
-                    // On Windows the AF_UNIX `ServerSocketChannel.accept()`
-                    // used by IpcServer doesn't unblock when the channel
-                    // close()s; the accept coroutine stays in native
-                    // `accept0()` indefinitely, and runBlocking parks
-                    // joinBlocking forever waiting for it. Verified live
-                    // 2026-05-20 via jstack on PID 20980: 7+ minutes after
-                    // `Scan ended` the main was still parked in joinBlocking
-                    // and DefaultDispatcher-worker-1 was still in
-                    // `accept0()`. (An earlier daemon-thread watchdog
-                    // wasn't observed to fire — the symptom was the same.)
+                    // Wrap in try/finally so we ALWAYS reach cleanup + System.exit,
+                    // even when syncOnce throws. The previous straight-line version
+                    // had this bug: any throw between `Scan ended` and System.exit
+                    // (deletion safeguards, reconciler invariants, etc.) propagated
+                    // out into runBlocking's unwind, which then parked forever in
+                    // joinBlocking waiting for the AF_UNIX accept loop to cancel
+                    // (Windows: it doesn't). Jstack verified the symptom — main
+                    // stuck in joinBlocking with no exit logging, no Error: line,
+                    // just silence.
                     //
-                    // Cleanup mirrors the outer `finally{}` block. Each
-                    // close is runCatching'd because we'd rather log a
-                    // close-failure to stderr than skip System.exit. Order
-                    // matches the existing finally so semantic dependencies
-                    // (ipcServer before its db, db last) are preserved.
+                    // Print the exception explicitly (printStackTrace to stderr) so
+                    // failure modes don't disappear behind picocli's exception
+                    // handler that never gets a chance to run.
+                    var failure: Throwable? = null
+                    try {
+                        engine.syncOnce(
+                            dryRun = dryRun,
+                            forceDelete = forceDelete,
+                            reason = org.krost.unidrive.sync.SyncReason.MANUAL,
+                            // refresh / apply set these via subclass.
+                            skipTransfers = skipTransfers,
+                            skipRemoteGather = skipRemoteGather,
+                        )
+                    } catch (e: Throwable) {
+                        failure = e
+                    }
+                    if (failure != null) {
+                        System.err.println("Sync error: ${failure.javaClass.simpleName}: ${failure.message ?: "(no message)"}")
+                        failure.printStackTrace(System.err)
+                    }
                     System.out.flush()
                     System.err.flush()
                     runCatching { ipcServer.close() }
@@ -611,12 +615,12 @@ open class SyncCommand : Runnable {
                     runCatching { subscriptionStore.close() }
                     runCatching { db.close() }
                     runCatching { lock.unlock() }
-                    // System.exit triggers JVM shutdown directly. With no
-                    // shutdown hooks registered in non-watch mode, this
-                    // halts within milliseconds — the user's terminal
-                    // prompt returns instead of camping for minutes on
-                    // the stuck accept loop.
-                    System.exit(0)
+                    // System.exit triggers JVM shutdown directly. No shutdown
+                    // hooks registered in non-watch mode → halts within
+                    // milliseconds. Bypasses the runBlocking unwind that
+                    // would otherwise park forever on the AF_UNIX accept
+                    // loop the OS won't let us cancel.
+                    System.exit(if (failure != null) 1 else 0)
                 }
             }
         } catch (e: AuthenticationException) {
