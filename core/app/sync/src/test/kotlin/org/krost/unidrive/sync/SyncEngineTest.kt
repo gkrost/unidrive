@@ -1499,6 +1499,62 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `streaming gather dispatches downloads inside the gather scope without double-dispatching in Pass 2`() =
+        runTest {
+            // Phase 3 (Internxt boosters plan): the streaming-gather executor
+            // fires DownloadContent / Upload actions concurrently with page
+            // ingestion so the user sees bytes flowing in ~30 s instead of
+            // waiting for the full enum. Pass 2 must NOT re-dispatch a
+            // path the executor already handled — otherwise we double the
+            // API round-trips and risk a file-locked-by-prior-write race on
+            // Windows.
+            //
+            // Pin: with streamingReconciliation=on, N remote files produce
+            // exactly N download calls across the run (not 2N). Existing
+            // FakeCloudProvider returns the delta in a single page; that's
+            // fine — the streaming executor still processes that single
+            // page, marks the paths as executed, and Pass 2 finds them all
+            // already in executedPaths and skips.
+            provider.files["/a.txt"] = ByteArray(10)
+            provider.files["/b.txt"] = ByteArray(10)
+            provider.files["/c.txt"] = ByteArray(10)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/a.txt", size = 10),
+                    cloudItem("/b.txt", size = 10),
+                    cloudItem("/c.txt", size = 10),
+                )
+            provider.deltaCursor = "after-streaming"
+
+            val streamingEngine =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    streamingReconciliation = true,
+                )
+            streamingEngine.syncOnce()
+
+            val totalDownloads = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+            assertEquals(
+                3,
+                totalDownloads,
+                "expected exactly one download per file across streaming-executor + Pass 2 " +
+                    "(got byId=${provider.downloadByIdCalls.size} byPath=${provider.downloadByPathCalls.size}); " +
+                    "duplicate calls mean Pass 2 didn't honour executedPaths",
+            )
+            // All three files should be hydrated locally.
+            for (name in listOf("a.txt", "b.txt", "c.txt")) {
+                assertTrue(Files.exists(syncRoot.resolve(name)), "$name must be downloaded")
+            }
+            // Cursor advanced normally — streaming dispatch is orthogonal
+            // to the cursor flow and must not interfere with promotion.
+            assertEquals("after-streaming", db.getSyncState("delta_cursor"))
+        }
+
+    @Test
     fun `UD-223 fast-bootstrap falls back to enumeration when provider lacks capability`() =
         runTest {
             provider.supportsFastBootstrap = false // default; capability absent

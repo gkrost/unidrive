@@ -224,6 +224,34 @@ class SyncEngine(
         val downloaded = AtomicInteger(0)
         val uploaded = AtomicInteger(0)
         val conflicts = AtomicInteger(0)
+        // Lifted up from Pass 2 so the streaming-reconciliation gather can
+        // dispatch transfers concurrently with the scan and share the same
+        // failure counter + auth-failure latch. On the non-streaming path
+        // only Pass 2 increments them, so the move is behaviour-preserving.
+        val transferFailures = AtomicInteger(0)
+        val authFailure =
+            java.util.concurrent.atomic
+                .AtomicReference<AuthenticationException?>(null)
+        // Paths the streaming-gather executor already dispatched. Pass 2
+        // skips them so a Download/Upload doesn't fire twice (waste of an
+        // API round-trip + potential file-locked-by-prior-write race on
+        // Windows). Concurrent set: producer is the streaming executor,
+        // consumer is Pass 2's launch loop.
+        val executedPaths =
+            java.util.concurrent.ConcurrentHashMap
+                .newKeySet<String>()
+        // UD-263: per-provider transfer concurrency cap. Lifted to the top
+        // of doSyncOnce so both Pass 2 AND the streaming-gather executor
+        // share one semaphore — they pick from a single concurrency
+        // budget rather than each having their own. Audit values flow
+        // from docs/providers/<id>-robustness.md §5 → ProviderMetadata
+        // → here. Memory-pressure protection on big files is delegated to
+        // the provider's HttpRetryBudget (UD-232).
+        val perProviderConcurrency =
+            org.krost.unidrive.ProviderRegistry
+                .getMetadata(providerId)
+                ?.maxConcurrentTransfers ?: 4
+        val transferSemaphore = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
 
         // UD-299: detect sync_root drift between runs. state.db is per-profile
         // (not per-(profile, sync_root)), so editing sync_root in config.toml
@@ -396,7 +424,16 @@ class SyncEngine(
             db.setSyncState("last_scan_count_local", localChangesPre.size.toString())
             localChangesForStreaming = localChangesPre
 
-            val (remoteMap, actions) = gatherStreamingChanges(localChangesPre)
+            val (remoteMap, actions) =
+                gatherStreamingChanges(
+                    localChanges = localChangesPre,
+                    downloaded = downloaded,
+                    uploaded = uploaded,
+                    transferFailures = transferFailures,
+                    authFailure = authFailure,
+                    executedPaths = executedPaths,
+                    transferSemaphore = transferSemaphore,
+                )
             allRemoteChanges = remoteMap
             streamingActions = actions
         } else {
@@ -695,20 +732,11 @@ class SyncEngine(
         }
 
         // Phase 3: Apply
-        // UD-263: replaced the pre-fix 16/6/2 size-based split with a single
-        // per-provider semaphore sized from ProviderRegistry metadata. The
-        // size-based split was provider-agnostic and routinely overshot the
-        // tighter providers (Synology DSM 500s above ~4, SharePoint heavy
-        // throttling above 2). Per-provider audit values now flow from
-        // docs/providers/<id>-robustness.md §5 → ProviderMetadata →
-        // SyncEngine. Memory-pressure protection on big files is delegated
-        // to the provider's HttpRetryBudget (UD-232) which serialises throttle
-        // responses end-to-end.
-        val perProviderConcurrency =
-            org.krost.unidrive.ProviderRegistry
-                .getMetadata(providerId)
-                ?.maxConcurrentTransfers ?: 4
-        val transferSemaphore = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+        // perProviderConcurrency + transferSemaphore are now declared at
+        // the top of doSyncOnce so the streaming-gather executor and Pass 2
+        // share one concurrency budget. The per-provider audit values
+        // (docs/providers/<id>-robustness.md §5 → ProviderMetadata) still
+        // drive the cap.
         log.info(
             "Pass 2 transfer semaphore: provider={} maxConcurrentTransfers={}",
             providerId.ifBlank { "<unknown>" },
@@ -859,13 +887,18 @@ class SyncEngine(
             actions.filter {
                 it is SyncAction.DownloadContent || it is SyncAction.Upload
             }
-        val transferFailures = AtomicInteger(0)
-        val authFailure =
-            java.util.concurrent.atomic
-                .AtomicReference<AuthenticationException?>(null)
+        // transferFailures + authFailure are now declared at the top of
+        // doSyncOnce so the streaming-gather executor (gatherStreamingChanges)
+        // can share them. On the non-streaming path nothing else mutates
+        // them before this point, so the move is behaviour-preserving.
         try {
             coroutineScope {
                 for (action in transferActions) {
+                    // Streaming-gather executor may have already dispatched
+                    // this transfer mid-scan; skip the second dispatch so we
+                    // don't redo the API round-trip or hit a Windows
+                    // file-locked-by-prior-write race.
+                    if (action.path in executedPaths) continue
                     when (action) {
                         is SyncAction.DownloadContent -> {
                             launch {
@@ -1240,8 +1273,126 @@ class SyncEngine(
      * The deferred bucket is NOT persisted — re-derive at scan-end from
      * the final action sweep per spec §5 decision 2.
      */
+    /**
+     * Per-page streaming dispatch helper for downloads. Mirrors Pass 2's
+     * dispatch shape one-for-one (foreground priority, shared semaphore,
+     * restore-to-placeholder on failure, shared counters) so a streamed
+     * transfer is indistinguishable from a Pass 2 dispatch in terms of
+     * side effects. `gatherScope` is the outer `coroutineScope` in
+     * `gatherStreamingChanges`; cancelling it propagates an auth failure
+     * to the consumer + producer the same way `this@coroutineScope.cancel()`
+     * does in Pass 2.
+     */
+    private suspend fun dispatchStreamingDownload(
+        action: SyncAction.DownloadContent,
+        downloaded: AtomicInteger,
+        transferFailures: AtomicInteger,
+        authFailure: java.util.concurrent.atomic.AtomicReference<AuthenticationException?>,
+        executedPaths: MutableSet<String>,
+        gatherScope: kotlinx.coroutines.CoroutineScope,
+        transferSemaphore: kotlinx.coroutines.sync.Semaphore,
+    ) {
+        withContext(Priority.Foreground) {
+            transferSemaphore.withPermit {
+                try {
+                    applyDownload(action)
+                    downloaded.incrementAndGet()
+                    executedPaths.add(action.path)
+                } catch (e: AuthenticationException) {
+                    log.error(
+                        "Authentication failed during streaming download of {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    restoreToPlaceholder(action.path, action.remoteItem)
+                    transferFailures.incrementAndGet()
+                    executedPaths.add(action.path)
+                    authFailure.compareAndSet(null, e)
+                    gatherScope.cancel()
+                } catch (e: CancellationException) {
+                    restoreToPlaceholder(action.path, action.remoteItem)
+                    throw e
+                } catch (e: Exception) {
+                    log.warn(
+                        "Streaming download failed for {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                    logFailure(action, e)
+                    restoreToPlaceholder(action.path, action.remoteItem)
+                    transferFailures.incrementAndGet()
+                    // UD-225 recovery picks failed downloads up on the next
+                    // pass; mark executed so Pass 2 of *this* run doesn't
+                    // double-dispatch.
+                    executedPaths.add(action.path)
+                }
+            }
+        }
+    }
+
+    /** Companion to [dispatchStreamingDownload]; same shape, no placeholder restore. */
+    private suspend fun dispatchStreamingUpload(
+        action: SyncAction.Upload,
+        uploaded: AtomicInteger,
+        transferFailures: AtomicInteger,
+        authFailure: java.util.concurrent.atomic.AtomicReference<AuthenticationException?>,
+        executedPaths: MutableSet<String>,
+        gatherScope: kotlinx.coroutines.CoroutineScope,
+        transferSemaphore: kotlinx.coroutines.sync.Semaphore,
+    ) {
+        withContext(Priority.Foreground) {
+            transferSemaphore.withPermit {
+                try {
+                    applyUpload(action)
+                    uploaded.incrementAndGet()
+                    executedPaths.add(action.path)
+                } catch (e: AuthenticationException) {
+                    log.error(
+                        "Authentication failed during streaming upload of {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    transferFailures.incrementAndGet()
+                    executedPaths.add(action.path)
+                    authFailure.compareAndSet(null, e)
+                    gatherScope.cancel()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.warn(
+                        "Streaming upload failed for {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                        e,
+                    )
+                    reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                    logFailure(action, e)
+                    transferFailures.incrementAndGet()
+                    // UD-901 recovery picks failed uploads up on the next
+                    // pass; mark executed so Pass 2 of *this* run doesn't
+                    // double-dispatch.
+                    executedPaths.add(action.path)
+                }
+            }
+        }
+    }
+
     private suspend fun gatherStreamingChanges(
         localChanges: Map<String, ChangeState>,
+        downloaded: AtomicInteger,
+        uploaded: AtomicInteger,
+        transferFailures: AtomicInteger,
+        authFailure: java.util.concurrent.atomic.AtomicReference<AuthenticationException?>,
+        executedPaths: MutableSet<String>,
+        transferSemaphore: kotlinx.coroutines.sync.Semaphore,
     ): Pair<Map<String, CloudItem>, List<SyncAction>> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
@@ -1376,8 +1527,31 @@ class SyncEngine(
             kotlinx.coroutines.channels
                 .Channel<PageSlice>(capacity = STREAMING_RECONCILE_CHANNEL_CAPACITY)
 
+        // Per-page streaming dispatch: as each page reconciles, its safe-now
+        // DownloadContent and Upload actions are forwarded to an executor
+        // coroutine that dispatches them concurrently with the still-running
+        // gather. Time-to-first-byte goes from "full enum then transfers"
+        // to "first transfer fires ~30 s after start, the rest stream in
+        // as pages reconcile." The executor uses the same applyDownload /
+        // applyUpload paths as Pass 2 and bumps the shared counters, so
+        // the final onSyncComplete totals reflect the streamed transfers.
+        // Pass 2 checks `executedPaths` to skip re-dispatch on the same
+        // path. Capacity matches the page-channel: bounded memory under
+        // backpressure.
+        val executorChannel =
+            kotlinx.coroutines.channels
+                .Channel<SyncAction>(capacity = STREAMING_RECONCILE_CHANNEL_CAPACITY)
+
         coroutineScope {
-            // Consumer: reconcile slices as they arrive.
+            // Reference to this outer scope. The executor launches dispatch
+            // jobs into it (rather than into a child scope) so an auth-
+            // failure cancel here propagates to consumer + producer too,
+            // mirroring Pass 2's `this@coroutineScope.cancel()` shape.
+            val gatherScope = this
+
+            // Consumer: reconcile slices as they arrive. Forward safe-now
+            // transfer actions to the executor; the rest land in
+            // safeAccumulator for the engine's final Pass 1 / Pass 2 sweep.
             val consumerJob =
                 launch {
                     for (pageSlice in pageChannel) {
@@ -1386,8 +1560,61 @@ class SyncEngine(
                             reconciler.resolveSlice(pageSlice.slice, localChanges, syncPath)
                         val safeNow = buffer.classify(pageActions)
                         safeAccumulator.addAll(safeNow)
+                        for (action in safeNow) {
+                            if (action is SyncAction.DownloadContent || action is SyncAction.Upload) {
+                                executorChannel.send(action)
+                            }
+                        }
                         if (pageSlice.ids.isNotEmpty()) {
                             db.markStagedReconciled(scanId, pageSlice.ids)
+                        }
+                    }
+                    // Producer is done and we drained the page channel; the
+                    // executor can stop accepting new work and finish its
+                    // in-flight items.
+                    executorChannel.close()
+                }
+
+            // Executor: dispatch safe-now transfers concurrently with the
+            // gather. Mirrors the Pass 2 dispatch shape (foreground priority,
+            // shared semaphore, restore-to-placeholder on download failure)
+            // so a streamed transfer is indistinguishable from a Pass 2
+            // dispatch in terms of side effects. Launches into `gatherScope`
+            // (not into a child scope) so an auth failure cancels consumer
+            // + producer too, matching Pass 2's behaviour.
+            val executorJob =
+                launch {
+                    for (action in executorChannel) {
+                        when (action) {
+                            is SyncAction.DownloadContent ->
+                                gatherScope.launch {
+                                    dispatchStreamingDownload(
+                                        action = action,
+                                        downloaded = downloaded,
+                                        transferFailures = transferFailures,
+                                        authFailure = authFailure,
+                                        executedPaths = executedPaths,
+                                        gatherScope = gatherScope,
+                                        transferSemaphore = transferSemaphore,
+                                    )
+                                }
+                            is SyncAction.Upload ->
+                                gatherScope.launch {
+                                    dispatchStreamingUpload(
+                                        action = action,
+                                        uploaded = uploaded,
+                                        transferFailures = transferFailures,
+                                        authFailure = authFailure,
+                                        executedPaths = executedPaths,
+                                        gatherScope = gatherScope,
+                                        transferSemaphore = transferSemaphore,
+                                    )
+                                }
+                            else -> {
+                                // Defensive: classify() only surfaces
+                                // Download/Upload to us. Ignore the rest so
+                                // a future SyncAction variant doesn't crash.
+                            }
                         }
                     }
                 }
@@ -1464,7 +1691,19 @@ class SyncEngine(
             }
 
             consumerJob.join()
+            // executorJob.join() is implicit at coroutineScope exit, but be
+            // explicit: scope-exit will wait for it anyway. The consumer
+            // closed executorChannel above so the executor's `for` loop
+            // exits cleanly once it drains in-flight items.
+            executorJob.join()
         }
+        // AuthenticationException latched by the executor — surface to the
+        // caller exactly like Pass 2 does so token refresh / re-auth flows
+        // trigger instead of a silent "0 downloaded, many failed" result.
+        // Pass 2 does the same rethrow after its own scope, but doing it
+        // here too means a streaming-only auth failure (no Pass 2 actions
+        // left to dispatch) still propagates.
+        authFailure.get()?.let { throw it }
 
         if (allComplete) {
             db.completeScan(scanId)
