@@ -4,9 +4,11 @@
 
     <!-- UD-212: %X{profile:-*} renders the MDC `profile` key, with `*` as the fallback when
          no profile is active (e.g. startup, before resolveCurrentProfile() runs).
-         UD-234: %X{build:-???????} renders the short git sha captured at build time
+         UD-234: %X{build:_dashes_} renders the short git sha captured at build time
          (populated from BuildInfo.COMMIT in Main.main). Lets end-users copy a log snippet
-         and know which build produced it. -->
+         and know which build produced it. The literal fallback in the pattern below is
+         a run of dashes matching the scan-slot convention (XML comments forbid the
+         two-dash sequence, so it can only be written outside this comment). -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>WARN</level>
@@ -18,7 +20,7 @@
                  Windows produces 'ÔåÉ' mojibake for '←'). Console rendering still
                  depends on the user's terminal codepage; Windows needs `chcp 65001`. -->
             <charset>UTF-8</charset>
-            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] %logger{36} - %msg%n</pattern>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{build:--------}] [%X{profile:-*}] [%X{scan:--------}] %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
@@ -39,7 +41,7 @@
                  landed in the file as cp437 bytes on Windows and could not be
                  recovered by any UTF-8-aware viewer. -->
             <charset>UTF-8</charset>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{build:-???????}] [%X{profile:-*}] [%X{scan:--------}] [%thread] %logger{36} - %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{build:--------}] [%X{profile:-*}] [%X{scan:--------}] [%thread] %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
