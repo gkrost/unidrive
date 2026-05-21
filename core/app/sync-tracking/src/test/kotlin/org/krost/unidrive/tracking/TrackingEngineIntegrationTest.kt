@@ -248,6 +248,92 @@ class TrackingEngineIntegrationTest {
     }
 
     /**
+     * Codex P1: when remote enumeration is incomplete (transient API
+     * failure mid-walk, or a DeltaPage reporting complete=false), the
+     * engine MUST suppress delete actions for tracked paths it didn't
+     * see — otherwise those paths look remote-absent to the reconciler
+     * and would emit PropagateRemoteDelete that pass through the
+     * BatchGuard whenever delete counts stay under the ratio.
+     */
+    @Test
+    fun `incomplete remote enumeration suppresses all delete actions`() {
+        // Seed two remote files, sync them to TrackedSynced, then nuke local
+        // copies AND tell the fake provider its next delta is incomplete.
+        provider.files["/a.txt"] = "a".toByteArray()
+        provider.files["/b.txt"] = "b".toByteArray()
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(2, tracking.countsByState()[TrackState.TrackedSynced])
+
+            // Local copies vanish AND the next enumeration reports incomplete.
+            // Without the fix, the engine would see remote items present + local
+            // gone → 2 × PropagateLocalDelete, both passing BatchGuard at the
+            // permissive setting.
+            Files.delete(syncRoot.resolve("a.txt"))
+            Files.delete(syncRoot.resolve("b.txt"))
+            provider.deltaComplete = false
+
+            val permissive = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE)
+            val report = engine(tracking = tracking, guard = permissive, dryRun = true).syncOnce()
+
+            // Plan still contains the would-be deletes; effectivePlan does not.
+            assertEquals(
+                2,
+                report.plan.count { it is ReconcileAction.PropagateLocalDelete },
+                "plan should still record the deletes the reconciler emitted",
+            )
+            assertEquals(
+                0,
+                report.effectivePlan.count {
+                    it is ReconcileAction.PropagateLocalDelete ||
+                        it is ReconcileAction.PropagateRemoteDelete
+                },
+                "incomplete-enumeration suppression must drop every delete from effectivePlan",
+            )
+            assertFalse(report.remoteEnumerationComplete)
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
+     * Codex P2: when a tracked path's both sides have vanished, the
+     * reconciler returns NoOp and the engine MUST remove the tracking
+     * row (spec "both gone" cleanup). Otherwise stale rows accumulate,
+     * inflate trackedTotal, weaken BatchGuard ratios, and pollute
+     * `ts status`.
+     */
+    @Test
+    fun `tracked row removed when both sides vanish`() {
+        provider.files["/doc.txt"] = "hello".toByteArray()
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(1, tracking.countsByState()[TrackState.TrackedSynced])
+
+            // Disappear both sides — out-of-band local rm + remote rm.
+            Files.delete(syncRoot.resolve("doc.txt"))
+            provider.files.remove("/doc.txt")
+
+            val report = engine(tracking = tracking).syncOnce()
+            assertTrue(
+                report.cleanedUp.contains("/doc.txt"),
+                "both-gone tracked path should be reported in cleanedUp; was ${report.cleanedUp}",
+            )
+            assertEquals(
+                0,
+                tracking.paths().size,
+                "tracking set should be empty after both-gone cleanup; still had ${tracking.paths()}",
+            )
+            // No action should have been emitted (NoOp is filtered before plan).
+            assertEquals(0, report.plan.size, "both-gone cleanup must not emit any action; plan=${report.plan}")
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
      * Spec Amendment 2: an untracked path that exists on BOTH sides with
      * matching content is adopted silently. With non-matching content
      * the engine emits a loud ReportCollision, never a download or

@@ -31,6 +31,14 @@ class FakeTrackingProvider : CloudProvider {
     val uploadedPaths: MutableList<String> = mutableListOf()
     val deletedPaths: MutableList<String> = mutableListOf()
 
+    /**
+     * Test hook: flip to false to simulate a provider whose delta enumeration
+     * couldn't gather the full inventory (transient API failure, throttling
+     * mid-walk, etc.). The returned [DeltaPage] still carries [files] but
+     * marks `complete = false` so the engine knows the view is partial.
+     */
+    var deltaComplete: Boolean = true
+
     override fun capabilities(): Set<Capability> =
         setOf(Capability.Delta, Capability.VerifyItem)
 
@@ -98,7 +106,7 @@ class FakeTrackingProvider : CloudProvider {
         scanContext: ScanContext?,
     ): DeltaPage {
         val items = files.entries.map { (path, bytes) -> itemFor(path, bytes) }
-        return DeltaPage(items = items, cursor = "fake-cursor", hasMore = false)
+        return DeltaPage(items = items, cursor = "fake-cursor", hasMore = false, complete = deltaComplete)
     }
 
     override suspend fun quota(): QuotaInfo = QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)

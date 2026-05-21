@@ -55,13 +55,15 @@ class TrackingEngine(
     fun syncOnce(): PassReport =
         runBlocking {
             val localObs = scanLocal()
-            val remoteObs = enumerateRemote()
+            val remoteEnum = enumerateRemote()
+            val remoteObs = remoteEnum.observations
             val tracked = trackingSet.paths()
             val universe = (localObs.keys + remoteObs.keys + tracked).toSortedSet()
 
             val plan = mutableListOf<ReconcileAction>()
             val collisions = mutableListOf<ReconcileAction.ReportCollision>()
             val adopted = mutableListOf<String>()
+            val cleanedUp = mutableListOf<String>()
 
             for (path in universe) {
                 val l = localObs[path] ?: LocalObservation(exists = false, hash = null, size = null, mtime = null, inode = null)
@@ -87,21 +89,50 @@ class TrackingEngine(
                 }
 
                 val action = reconciler.reconcile(path, l, r, t)
-                if (action is ReconcileAction.NoOp) continue
+                if (action is ReconcileAction.NoOp) {
+                    // Cleanup branch: tracked row with no observations on
+                    // either side. The reconciler emits NoOp here and
+                    // expects the engine to remove the row (spec
+                    // "both gone" case). Skip in dry-run.
+                    if (t != null && !l.exists && !r.exists) {
+                        if (!dryRun) trackingSet.remove(path)
+                        cleanedUp += path
+                    }
+                    continue
+                }
                 if (action is ReconcileAction.ReportCollision) collisions += action
                 plan += action
             }
 
             val verdict = batchGuard.inspect(plan, trackedTotal = tracked.size)
             val effectivePlan =
-                if (verdict is BatchGuard.Verdict.Deny) {
-                    log.warn("{}", verdict.describe())
-                    plan.filterNot {
-                        it is ReconcileAction.PropagateLocalDelete ||
-                            it is ReconcileAction.PropagateRemoteDelete
+                when {
+                    !remoteEnum.complete -> {
+                        // Remote enumeration didn't see the full inventory
+                        // (ProviderException mid-loop, a DeltaPage with
+                        // complete=false, or no Delta capability at all).
+                        // Tracked paths we didn't see look remote-absent to
+                        // the reconciler and would otherwise emit
+                        // PropagateRemoteDelete. Suppress all delete actions
+                        // unconditionally to avoid propagating spurious
+                        // deletes from a transient enumeration failure.
+                        log.warn(
+                            "Remote enumeration incomplete; suppressing delete actions for this pass " +
+                                "(tracked rows that we didn't see are kept, not deleted).",
+                        )
+                        plan.filterNot {
+                            it is ReconcileAction.PropagateLocalDelete ||
+                                it is ReconcileAction.PropagateRemoteDelete
+                        }
                     }
-                } else {
-                    plan
+                    verdict is BatchGuard.Verdict.Deny -> {
+                        log.warn("{}", verdict.describe())
+                        plan.filterNot {
+                            it is ReconcileAction.PropagateLocalDelete ||
+                                it is ReconcileAction.PropagateRemoteDelete
+                        }
+                    }
+                    else -> plan
                 }
 
             val applied = if (dryRun) emptyList() else applyActions(effectivePlan)
@@ -113,6 +144,8 @@ class TrackingEngine(
                 adopted = adopted,
                 collisions = collisions,
                 guardVerdict = verdict,
+                remoteEnumerationComplete = remoteEnum.complete,
+                cleanedUp = cleanedUp,
             )
         }
 
@@ -273,7 +306,7 @@ class TrackingEngine(
         }
     }
 
-    private suspend fun enumerateRemote(): Map<String, RemoteObservation> {
+    private suspend fun enumerateRemote(): RemoteEnumResult {
         val out = mutableMapOf<String, RemoteObservation>()
         if (!provider.capabilities().contains(Capability.Delta)) {
             log.warn(
@@ -282,15 +315,21 @@ class TrackingEngine(
                     "been verified end-to-end against real providers.",
                 provider.id,
             )
-            return out
+            // No remote view at all is treated as incomplete so the caller
+            // doesn't interpret zero items seen as a universal-delete signal.
+            return RemoteEnumResult(out, complete = false)
         }
         var cursor: String? = null
+        var complete = true
         // Drain delta pages once. Does not persist a cursor across runs — every
         // pass is a full enumeration. Cursor persistence is follow-up work for
         // real-provider integration.
         try {
             do {
                 val page = provider.delta(cursor)
+                if (!page.complete) {
+                    complete = false
+                }
                 for (item in page.items) {
                     if (item.deleted) continue
                     if (item.isFolder) continue
@@ -307,9 +346,10 @@ class TrackingEngine(
                 cursor = page.cursor
             } while (page.hasMore)
         } catch (e: ProviderException) {
-            log.warn("Remote enumeration failed: ${e.message}")
+            log.warn("Remote enumeration failed mid-loop; marking pass incomplete: ${e.message}")
+            complete = false
         }
-        return out
+        return RemoteEnumResult(out, complete)
     }
 
     private suspend fun observeRemote(path: String): RemoteObservation =
@@ -361,9 +401,9 @@ data class AppliedAction(
 
 /** Per-pass summary suitable for `ts sync` / `ts status` rendering. */
 data class PassReport(
-    /** The full action list before [BatchGuard]. */
+    /** The full action list before [BatchGuard] / incomplete-enumeration suppression. */
     val plan: List<ReconcileAction>,
-    /** What the engine actually attempted (delete actions removed if guard tripped). */
+    /** What the engine actually attempted (deletes removed if guard tripped OR enumeration was incomplete). */
     val effectivePlan: List<ReconcileAction>,
     /** Per-action outcomes (empty in dry-run). */
     val applied: List<AppliedAction>,
@@ -373,9 +413,24 @@ data class PassReport(
     val collisions: List<ReconcileAction.ReportCollision>,
     /** The BatchGuard verdict; useful for rendering operator-facing warnings. */
     val guardVerdict: BatchGuard.Verdict,
+    /**
+     * False if remote enumeration didn't see the full inventory
+     * (`ProviderException` mid-loop, a `DeltaPage.complete=false`, or no Delta
+     * capability at all). When false, the engine suppresses delete actions to
+     * avoid propagating spurious deletes from a transient failure.
+     */
+    val remoteEnumerationComplete: Boolean = true,
+    /** Tracked paths removed because both local and remote vanished (spec "both gone" cleanup). */
+    val cleanedUp: List<String> = emptyList(),
 ) {
     fun deleteCount(): Int =
         plan.count {
             it is ReconcileAction.PropagateLocalDelete || it is ReconcileAction.PropagateRemoteDelete
         }
 }
+
+/** Internal result type for [TrackingEngine.enumerateRemote]. */
+private data class RemoteEnumResult(
+    val observations: Map<String, RemoteObservation>,
+    val complete: Boolean,
+)
