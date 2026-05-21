@@ -23,7 +23,7 @@ import org.krost.unidrive.sync.SyncDirection
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.ThrottledProvider
 import org.krost.unidrive.sync.TrashManager
-import org.krost.unidrive.sync.computePollInterval
+import org.krost.unidrive.sync.computePollIntervalWithWs
 import org.krost.unidrive.sync.pollStateName
 import org.slf4j.LoggerFactory
 import picocli.CommandLine
@@ -485,7 +485,21 @@ open class SyncCommand : Runnable {
                     // wakes the loop early without waiting out the adaptive
                     // interval. Conflated → at most one pending hint.
                     val remoteWakeChannel = Channel<Unit>(Channel.CONFLATED)
+                    // Track the most recent remote-wake hint timestamp so the
+                    // poll cadence can collapse to `max_poll_interval` (stale
+                    // heartbeat) while a server-pushed change feed is healthy.
+                    // The engine already debounces raw frames (5s); we therefore
+                    // see at most one hint per debounce window, including the
+                    // one socket.io fires on (re)connect. WS-healthy is just
+                    // "the last hint is recent enough that aggressive polling
+                    // would be a waste." Silence beyond WS_SILENCE_THRESHOLD_MS
+                    // falls back to the existing adaptive ladder. The threshold
+                    // is comfortably larger than socket.io's reconnect window
+                    // so a transient disconnect doesn't flap us back to
+                    // aggressive poll.
+                    val lastRemoteWakeMs = java.util.concurrent.atomic.AtomicLong(0L)
                     engine.registerRemoteWakeListener(this) {
+                        lastRemoteWakeMs.set(System.currentTimeMillis())
                         remoteWakeChannel.trySend(Unit)
                     }
 
@@ -544,8 +558,17 @@ open class SyncCommand : Runnable {
                             idleCycles++
                         }
 
+                        val lastWake = lastRemoteWakeMs.get()
+                        val wsHealthy =
+                            lastWake > 0 && (System.currentTimeMillis() - lastWake) < WS_SILENCE_THRESHOLD_MS
                         val adaptiveSeconds =
-                            computePollInterval(idleCycles, config.minPollInterval, config.pollInterval, config.maxPollInterval)
+                            computePollIntervalWithWs(
+                                idleCycles,
+                                config.minPollInterval,
+                                config.pollInterval,
+                                config.maxPollInterval,
+                                wsHealthy,
+                            )
                         val failureBackoffSeconds = if (cycleFailures > 0) minOf(10 * (1 shl (cycleFailures - 1)), 600) else 0
                         val intervalSeconds = maxOf(adaptiveSeconds, failureBackoffSeconds)
 
@@ -812,6 +835,22 @@ open class SyncCommand : Runnable {
     }
 
     companion object {
+        /**
+         * Threshold for "the server-pushed change feed is alive."
+         *
+         * The poll loop stamps `lastRemoteWakeMs` on every debounced wake
+         * hint (Internxt notifications WS fires one on EVENT_CONNECT plus
+         * one per remote-origin frame). When the most recent stamp is
+         * within this window, we treat the WS as healthy and collapse the
+         * poll cadence to `max_poll_interval`. Anything older flips us back
+         * to the aggressive adaptive ladder.
+         *
+         * Comfortably longer than socket.io's reconnect backoff cap (60s in
+         * `NotificationsClient.RECONNECT_MAX_DELAY_MS`) so a transient
+         * disconnect doesn't flap us into the aggressive interval and back.
+         */
+        internal const val WS_SILENCE_THRESHOLD_MS: Long = 90_000L
+
         /**
          * UD-405: normalise a `--sync-path` value (or its `sync_path` config
          * equivalent) to the forward-slash, leading-slash, no-trailing-slash

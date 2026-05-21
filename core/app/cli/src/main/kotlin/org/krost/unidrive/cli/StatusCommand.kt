@@ -8,6 +8,7 @@ import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.ProfileInfo
+import org.krost.unidrive.sync.RawSyncConfig
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import picocli.CommandLine.Command
@@ -327,12 +328,21 @@ class StatusCommand : Runnable {
      * the real quota: enumerated DriveItem sizes don't include revision
      * history, recycle bin, or OneNote metadata. Field-observed delta on
      * `onedrive-test`: 164 GB enumerated vs 349 GB real (~46 % shortfall).
+     *
+     * Side-effect contract: status is a read-only diagnostic. We never call
+     * `provider.authenticateAndLog()` against a profile whose offline health
+     * check isn't `Ok` — for Internxt that path would prompt for email /
+     * password / 2FA mid-render, which is the wrong UX for a status query.
+     * Interactive auth happens via `unidrive auth`; here a non-Ok health
+     * just returns null and the caller renders the cached state with the
+     * stale glyph from [buildAccountRow].
      */
     private fun fetchQuotaUsedIfSupported(
         profile: ProfileInfo,
         configDir: Path,
-    ): Long? =
-        try {
+    ): Long? {
+        if (!shouldProbeRemoteForStatus(parent.checkCredentialHealth(profile, configDir))) return null
+        return try {
             val provider = parent.createProviderFor(profile, configDir)
             if (Capability.QuotaExact !in provider.capabilities()) return null
             runBlocking {
@@ -345,6 +355,7 @@ class StatusCommand : Runnable {
             // falls back to enumerated sum which is at least non-null.
             null
         }
+    }
 
     private fun buildAccountRow(
         profile: ProfileInfo,
@@ -367,7 +378,6 @@ class StatusCommand : Runnable {
             health is org.krost.unidrive.CredentialHealth.Ok ||
                 health is org.krost.unidrive.CredentialHealth.ExpiresIn
         val isExpiring = health is org.krost.unidrive.CredentialHealth.ExpiresIn
-        val expiryMessage = (health as? org.krost.unidrive.CredentialHealth.ExpiresIn)?.message
 
         if (!hasDb && !effectiveCanAuth) {
             return AccountRow(
@@ -383,7 +393,14 @@ class StatusCommand : Runnable {
         }
 
         if (!hasDb && effectiveCanAuth) {
-            val statusLabel = if (isExpiring) GlyphRenderer.warnLabel(expiryMessage ?: "expiring") else GlyphRenderer.okLabel()
+            // ExpiresIn means the persisted token is past its expiry: render
+            // the stale glyph so the user sees `[⚠ STALE]` and knows to run
+            // `unidrive auth`. We deliberately don't echo the full expiry
+            // message into the STATUS column — the column is 10 chars wide,
+            // long messages truncate, and the BACKLOG entry's worked example
+            // calls out `⚠︎ STALE` as the rendering. The full expiry
+            // message lives in `health.message` for `--check-auth` output.
+            val statusLabel = if (isExpiring) GlyphRenderer.warnLabel("STALE") else GlyphRenderer.okLabel()
             return AccountRow(
                 profileName = label,
                 status = if (isExpiring) "warn" else "ok",
@@ -429,7 +446,7 @@ class StatusCommand : Runnable {
                     lastSync = lastSyncFormatted,
                 )
             } else {
-                val statusLabel = if (isExpiring) GlyphRenderer.warnLabel(expiryMessage ?: "expiring") else GlyphRenderer.okLabel()
+                val statusLabel = if (isExpiring) GlyphRenderer.warnLabel("STALE") else GlyphRenderer.okLabel()
                 return AccountRow(
                     profileName = label,
                     status = if (isExpiring) "warn" else "ok",
@@ -614,10 +631,10 @@ class StatusCommand : Runnable {
     }
 
     /**
-     * Discover all profiles to show in --all mode:
-     * 1. Configured profiles from config.toml [providers.*]
-     * 2. Legacy dirs with state.db not already in config
-     * 3. Fallback to known types if nothing discovered
+     * Discover all profiles to show in --all mode. Delegates to the pure
+     * [discoverProfilesFromRaw] helper for testability — the helper does not
+     * read `config.toml` itself so a unit test can hand it a synthesised
+     * [org.krost.unidrive.sync.RawSyncConfig].
      */
     private fun discoverProfiles(baseDir: Path): List<ProfileInfo> {
         val configFile = baseDir.resolve("config.toml")
@@ -627,52 +644,7 @@ class StatusCommand : Runnable {
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
-
-        val seen = mutableSetOf<String>()
-        val profiles = mutableListOf<ProfileInfo>()
-
-        // 1. Configured profiles (skip unknown provider types gracefully)
-        for (name in raw.providers.keys) {
-            try {
-                profiles.add(SyncConfig.resolveProfile(name, raw))
-                seen.add(name)
-            } catch (_: IllegalArgumentException) {
-                // Provider type not on classpath (e.g. private provider in public CLI), skip
-                seen.add(name)
-            }
-        }
-
-        // 2. Legacy dirs with state.db not in config but with a config section
-        if (Files.isDirectory(baseDir)) {
-            Files.list(baseDir).use { stream ->
-                stream
-                    .filter { Files.isDirectory(it) && Files.exists(it.resolve("state.db")) }
-                    .map { it.fileName.toString() }
-                    .filter { it !in seen && it in raw.providers }
-                    .sorted()
-                    .forEach { dirName ->
-                        try {
-                            val profile = SyncConfig.resolveProfile(dirName, raw)
-                            profiles.add(profile)
-                            seen.add(dirName)
-                        } catch (e: IllegalArgumentException) {
-                            // Config section exists but invalid, skip
-                        }
-                    }
-            }
-        }
-
-        // 3. Fallback: known types not yet seen (only if NO profiles discovered)
-        if (profiles.isEmpty()) {
-            for (type in SyncConfig.KNOWN_TYPES.sorted()) {
-                if (type !in seen) {
-                    profiles.add(SyncConfig.resolveProfile(type, raw))
-                    seen.add(type)
-                }
-            }
-        }
-
-        return profiles
+        return discoverProfilesFromRaw(raw, baseDir)
     }
 
     private fun providerDisplayName(type: String): String {
@@ -701,4 +673,99 @@ class StatusCommand : Runnable {
             }
         }
     }
+}
+
+/**
+ * Pure side-effect-gate for `unidrive status`. The status command is a
+ * read-only diagnostic; the network probe must never be attempted against
+ * a profile whose offline credential health says the persisted token is
+ * missing, stale, or otherwise won't authenticate without interaction.
+ *
+ * For Internxt specifically, calling `provider.authenticateAndLog()` on a
+ * profile with an expired JWT drops into `authService.authenticateInteractive()`
+ * which prompts for email / password / 2FA on stdin — completely the wrong
+ * UX mid-status-render. Interactive auth happens via `unidrive auth`; here
+ * a non-Ok health just returns null from the quota probe and the caller
+ * renders the cached state with a stale glyph.
+ *
+ * The only health value that licenses a network round-trip is [CredentialHealth.Ok].
+ * [CredentialHealth.ExpiresIn] explicitly does not — it's the "token is past
+ * expiry" signal that the BACKLOG entry wants visible in the STATUS column
+ * as `[⚠ STALE]`, not silently fixed-up via an interactive auth prompt.
+ */
+internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
+
+/**
+ * Pure helper extracted from [StatusCommand.discoverProfiles] so unit tests
+ * can drive it with a synthesised [RawSyncConfig] instead of a real
+ * `config.toml` on disk.
+ *
+ * Returns the profiles to render in `status --all`, in this order:
+ *   1. Every section declared under `[providers.*]`, in `config.toml`
+ *      declaration order. ktoml's `Map<String, RawProvider>` is a
+ *      `LinkedHashMap` so iteration matches file order — verified by the
+ *      `enumerates two same-type profiles in declaration order` test.
+ *      Sections whose `type` is unknown to the provider classpath are
+ *      skipped silently (a private provider not bundled in a public CLI
+ *      build), but still reserved in `seen` so step 2 can't double-count.
+ *   2. Legacy directories under [baseDir] that hold a `state.db` AND are
+ *      declared in `config.toml` but somehow missed step 1. Sorted for
+ *      deterministic output; in practice this step is empty because step 1
+ *      already covers everything `in raw.providers`.
+ *   3. If nothing was discovered at all, fall back to the registered
+ *      provider types so an out-of-the-box `status --all` (no config) still
+ *      shows useful rows.
+ */
+internal fun discoverProfilesFromRaw(
+    raw: RawSyncConfig,
+    baseDir: Path,
+): List<ProfileInfo> {
+    val seen = mutableSetOf<String>()
+    val profiles = mutableListOf<ProfileInfo>()
+
+    // 1. Configured profiles in declaration order. ktoml emits a LinkedHashMap
+    //    so `raw.providers.entries` iterates in file order; we honour that so
+    //    the rendered table reads top-to-bottom the same way the user wrote
+    //    the file.
+    for ((name, _) in raw.providers) {
+        try {
+            profiles.add(SyncConfig.resolveProfile(name, raw))
+            seen.add(name)
+        } catch (_: IllegalArgumentException) {
+            // Provider type not on classpath (e.g. private provider in public CLI), skip
+            seen.add(name)
+        }
+    }
+
+    // 2. Legacy dirs with state.db not in config but with a config section
+    if (Files.isDirectory(baseDir)) {
+        Files.list(baseDir).use { stream ->
+            stream
+                .filter { Files.isDirectory(it) && Files.exists(it.resolve("state.db")) }
+                .map { it.fileName.toString() }
+                .filter { it !in seen && it in raw.providers }
+                .sorted()
+                .forEach { dirName ->
+                    try {
+                        val profile = SyncConfig.resolveProfile(dirName, raw)
+                        profiles.add(profile)
+                        seen.add(dirName)
+                    } catch (_: IllegalArgumentException) {
+                        // Config section exists but invalid, skip
+                    }
+                }
+        }
+    }
+
+    // 3. Fallback: known types not yet seen (only if NO profiles discovered)
+    if (profiles.isEmpty()) {
+        for (type in SyncConfig.KNOWN_TYPES.sorted()) {
+            if (type !in seen) {
+                profiles.add(SyncConfig.resolveProfile(type, raw))
+                seen.add(type)
+            }
+        }
+    }
+
+    return profiles
 }
