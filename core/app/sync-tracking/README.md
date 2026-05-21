@@ -66,6 +66,158 @@ is just "use `unidrive sync` instead of `unidrive ts sync`".
 | Batch-level delete safeguard | Percentage + absolute + per-subtree | `BatchGuard` ratio + absolute; deletes dropped if tripped, uploads still proceed |
 | Identity | path (with rename heuristics) | `(provider_id, remote_file_id)` once known, content-hash for rename (spec Amendment 1) |
 
+## Reconciliation by scenario
+
+The reconciler's decision table is the spec — but four concrete scenarios cover the load-bearing cases. Each shows local FS / tracking.db / remote before and after one `ts sync` pass.
+
+```
+LEGEND      ●  present       ──── ts sync ────►  one reconcile pass
+            ∅  absent        ◄──  newly arrived (no engine action yet)
+
+Three columns per scenario:
+
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │  files on   │    │  the engine's state   │    │  what the   │
+  │  sync_root  │    │  model + state machine│    │  provider   │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+
+══════════════════════════════════════════════════════════════════════
+ A.  first sync from empty local (the populated-remote case)
+══════════════════════════════════════════════════════════════════════
+
+  before:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ (empty)     │    │ (empty)               │    │ a.txt    ●  │
+  │             │    │                       │    │ b.txt    ●  │
+  │             │    │                       │    │ c.txt    ●  │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  reconcile:
+    /a..c   track=∅ + local=∅ + remote=●   →  DownloadRemote × 3
+
+                       ──── ts sync ────►
+
+  after:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ a.txt    ●  │    │ /a.txt  TrackedSynced │    │ a.txt    ●  │
+  │ b.txt    ●  │    │ /b.txt  TrackedSynced │    │ b.txt    ●  │
+  │ c.txt    ●  │    │ /c.txt  TrackedSynced │    │ c.txt    ●  │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+
+══════════════════════════════════════════════════════════════════════
+ B.  partially-filled local — recovery from a crashed first sync
+══════════════════════════════════════════════════════════════════════
+
+  Crash before any bytes hit disk: 5 PendingDownload rows already
+  persisted; local is still empty.
+
+  before:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ (empty)     │    │ /.safe/f-0 PendingDl  │    │ /.safe/     │
+  │             │    │ /.safe/f-1 PendingDl  │    │  f-0     ●  │
+  │             │    │ /.safe/f-2 PendingDl  │    │  f-1     ●  │
+  │             │    │ /.safe/f-3 PendingDl  │    │  ...        │
+  │             │    │ /.safe/f-4 PendingDl  │    │  f-29    ●  │
+  │             │    │  (localHash = null)   │    │             │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  reconcile (the lemma in action):
+    f-0..4   track=PendingDl + local=∅ + remote=●
+             snapshot.localHash == null  → NOT localGone
+             PendingDownload short-circuit fires → DownloadRemote
+    f-5..29  track=∅ + local=∅ + remote=●  → DownloadRemote
+
+  ✓ 30 DownloadRemote planned   ✗ 0 PropagateRemoteDelete
+  (legacy state.db-as-authoritative would emit 28 del-remote actions
+   from the same phantom-row shape — the bug this engine was built for)
+
+                       ──── ts sync ────►
+
+  after:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ /.safe/     │    │ /.safe/f-0..29        │    │ /.safe/     │
+  │  f-0..29 ●  │    │   TrackedSynced × 30  │    │  f-0..29 ●  │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+
+══════════════════════════════════════════════════════════════════════
+ C.  populated local + populated remote — adopt-on-content-match
+══════════════════════════════════════════════════════════════════════
+
+  Pre-existing files on both sides. Some match exactly; some don't.
+
+  before:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ a.txt "abc" │    │ (empty)               │    │ a.txt "abc" │
+  │ b.txt "L"   │    │                       │    │ b.txt "R"   │
+  │ c.txt "z"   │    │                       │    │ (no c)      │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  reconcile (spec Amendment 2):
+    /a.txt   track=∅ + local=● + remote=● + hash match    → adopt
+    /b.txt   track=∅ + local=● + remote=● + hash differ   → collision
+    /c.txt   track=∅ + local=● + remote=∅                 → NoOp
+
+                       ──── ts sync ────►
+
+  after:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ a.txt "abc" │    │ /a.txt  TrackedSynced │    │ a.txt "abc" │
+  │ b.txt "L"   │    │ (no /b.txt row)       │    │ b.txt "R"   │
+  │ c.txt "z"   │    │ (no /c.txt row)       │    │             │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  console:
+    ! /b.txt: untracked path exists on both sides with different content
+    Resolve with: unidrive ts claim /b.txt
+    (/c.txt is invisible — untracked pure-local files are never deleted
+     and never auto-uploaded; the user runs `ts claim /c.txt` to opt in.)
+
+
+══════════════════════════════════════════════════════════════════════
+ D.  populated + all-synced, then bulk-rm — BatchGuard intervenes
+══════════════════════════════════════════════════════════════════════
+
+  Steady state. User rm's the whole sync_root by accident
+  (or remounts over the wrong volume).
+
+  before:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ (empty)  ◄──│    │ /a.txt  TrackedSynced │    │ a.txt    ●  │
+  │             │    │ /b.txt  TrackedSynced │    │ b.txt    ●  │
+  │             │    │ /c.txt  TrackedSynced │    │ c.txt    ●  │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  reconcile:
+    /a..c   tracked + local=∅ + remote=●  → PropagateLocalDelete × 3
+
+  BatchGuard.inspect(plan, trackedTotal=3) with defaults 0.5 / 50:
+    ratio    = 3 / 3 = 1.00 > 0.50   → ratio tripped
+    absolute = 3 ≤ 50                → absolute not tripped
+    Verdict: Deny — drop all delete actions; non-delete actions still apply.
+
+                       ──── ts sync ────►
+
+  after:
+  ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
+  │ (empty)     │    │ /a.txt  TrackedSynced │    │ a.txt    ●  │
+  │             │    │ /b.txt  TrackedSynced │    │ b.txt    ●  │
+  │             │    │ /c.txt  TrackedSynced │    │ c.txt    ●  │
+  └─────────────┘    └───────────────────────┘    └─────────────┘
+
+  console:
+    BatchGuard tripped: 3 delete(s) requested (tracked total: 3,
+    ratio: 1.00). Ratio exceeds 0.50. No deletes applied this pass.
+
+  (Defense-in-depth. The lemma already rules out untracked-path deletion;
+   the BatchGuard backstops the "tracked-but-provider-lied" residual.
+   Re-running `ts sync` reproduces this identically — the guard is
+   per-pass, recomputed from the plan. Restore the missing files or
+   pass `--max-delete-ratio=1.0` to bypass.)
+```
+
 ## What is intentionally NOT implemented yet
 
 These are the explicit scope cuts; each is a follow-up worth its own
