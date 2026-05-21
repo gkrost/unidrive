@@ -264,6 +264,48 @@ When you're confident the tracking-set plan is sound, run `ts sync` for
 real. The existing `state.db` is untouched, so falling back to
 `unidrive sync` is a no-op revert.
 
+## Differential verification against the official Internxt client
+
+When the Internxt official desktop client runs against the same account
+on the same machine, its sync_root is the **oracle** for what the cloud
+actually contains. `scripts/dev/verify-against-internxt-official.sh` is
+a loop tool that snapshots both sync_roots, runs `ts sync --dry-run`,
+parses the plan, and flags any action that contradicts the oracle.
+
+Falsification table:
+
+| plan action | path in oracle? | verdict |
+|---|---|---|
+| `del-remote /foo` | yes | **BUG** — would delete a file the cloud actually has |
+| `del-local /foo`  | yes | **BUG** — would delete locally for a cloud-absence that isn't real |
+| `download /foo`   | no  | SUSPICIOUS — delta saw a path the oracle didn't (timing window or stale view) |
+| `upload /foo`     | yes (different content) | COLLISION — worth surfacing |
+| any for `/foo` only in unidrive's root | n/a | pure-local untracked, expected (Amendment 2) |
+
+Usage:
+
+```bash
+scripts/dev/verify-against-internxt-official.sh \
+  --official-root='C:/Users/gerno/InternxtDrive - 0c06806b-...' \
+  --unidrive-root='C:/Users/gerno/Internxt' \
+  --profile=internxt \
+  --interval=30 --max-iters=10
+```
+
+Exit codes: `0` = no falsifying actions across the run; `1` = at least
+one BUG flagged; `2` = misconfiguration. Persistent flags across multiple
+iterations are real bugs; one-off transient flags can be timing artifacts
+(one client's delta hasn't caught up yet, or the other client is mid-
+download). The loop interval is what lets the operator distinguish.
+
+This tool complements the Gradle live-integration test
+(`TrackingEngineInternxtLiveTest`): the JUnit test is the per-commit
+assertion that the engine doesn't crash against real Internxt; the
+script is the interactive convergence-watching tool for the harder
+"does it produce the *right* plan" question. Per the "Verify Internxt
+provider end-to-end" BACKLOG entry, BUG-category surfaces should be
+filed as follow-up entries rather than fixed inline.
+
 ## Module layout
 
 ```
