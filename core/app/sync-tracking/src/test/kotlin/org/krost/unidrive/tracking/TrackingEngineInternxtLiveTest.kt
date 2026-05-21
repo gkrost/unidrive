@@ -1,6 +1,7 @@
 package org.krost.unidrive.tracking
 
 import kotlinx.coroutines.runBlocking
+import org.junit.Assume.assumeTrue
 import org.krost.unidrive.internxt.InternxtConfig
 import org.krost.unidrive.internxt.InternxtProvider
 import java.nio.file.Files
@@ -34,17 +35,38 @@ class TrackingEngineInternxtLiveTest {
     companion object {
         private val shouldRun = System.getenv("UNIDRIVE_INTEGRATION_TESTS")?.toBoolean() ?: false
 
-        private fun checkEnabled(): Boolean {
-            if (!shouldRun) return false
+        /**
+         * Returns null when the test can run, or a human-readable reason string
+         * otherwise. Reason is surfaced via `assumeTrue` so a skipped run reports
+         * SKIPPED with the cause visible in the JUnit XML / Gradle test report,
+         * rather than silently early-returning as PASSED.
+         */
+        private fun skipReason(): String? {
+            if (!shouldRun) {
+                return "UNIDRIVE_INTEGRATION_TESTS env var is not 'true' " +
+                    "(set it before launching gradle; PowerShell: \$env:UNIDRIVE_INTEGRATION_TESTS = 'true')"
+            }
             val config = InternxtConfig()
             val credFile = config.tokenPath.resolve("credentials.json")
-            return Files.exists(credFile)
+            if (!Files.exists(credFile)) {
+                return "Internxt credentials not found at $credFile " +
+                    "(run `unidrive -p <profile> auth` first)"
+            }
+            return null
         }
     }
 
     @Test
     fun `tracking engine against live Internxt — lemma holds, plan is downloads-only`() {
-        if (!checkEnabled()) return
+        val reason = skipReason()
+        if (reason != null) {
+            // Mirror the skip reason to stdout so showStandardStreams=true
+            // surfaces it in the gradle console (the XML report has it via
+            // the AssumptionViolatedException message, but stdout is what
+            // most operators actually look at).
+            println("TrackingEngineInternxtLiveTest: SKIPPED — $reason")
+        }
+        assumeTrue("Live Internxt test skipped: $reason", reason == null)
 
         val workDir = createTempDirectory("ts-internxt-live")
         val syncRoot = workDir.resolve("sync-root").also { Files.createDirectories(it) }

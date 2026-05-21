@@ -28,4 +28,13 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    // Live-integration tests (TrackingEngineInternxtLiveTest) print plan size,
+    // adopted count, and other operator-facing data via println. Surface that
+    // to stdout so a human running the test can see it without digging into
+    // the HTML report. Other modules don't enable this — only sync-tracking,
+    // where the live test's println IS the answer the operator wants.
+    testLogging {
+        showStandardStreams = true
+        events("passed", "skipped", "failed")
+    }
 }
