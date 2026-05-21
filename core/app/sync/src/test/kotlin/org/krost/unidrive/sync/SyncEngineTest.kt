@@ -984,10 +984,18 @@ class SyncEngineTest {
     )
 
     @Test
-    fun `UD-264 del-remote for never-hydrated top-level is skipped`() =
+    fun `del-remote for unhydrated folder rows is skipped and audited`() =
         runTest {
             // Three unhydrated folders under /Documents; sync_root has one file
             // so UD-297 doesn't preempt. Provider returns no delta.
+            //
+            // The Reconciler drops DeleteRemote actions for unhydrated folder
+            // rows before they reach the action executor — a sparse-hydration
+            // profile would otherwise plan destruction of every cloud folder
+            // the user never visited (the 2026-05-16 incident shape on
+            // `inxt_gernot_krost_posteo`). The engine writes the dropped paths
+            // to `skipped-ops.jsonl` for operator audit; this test pins both
+            // halves of that contract.
             seedUnhydratedFolders("/Documents", count = 3)
             Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
             provider.deltaItems = emptyList()
@@ -1005,7 +1013,7 @@ class SyncEngineTest {
             assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written")
             val logBody = Files.readString(logPath)
             assertTrue(
-                logBody.contains("top_level_never_hydrated"),
+                logBody.contains("unhydrated_folder"),
                 "skipped-ops.jsonl should record the reason, got: $logBody",
             )
             assertTrue(
@@ -1046,48 +1054,74 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `UD-264 del-remote for top-level WITH hydrated descendant is propagated`() =
+    fun `del-remote for hydrated row under hydrated top-level is propagated`() =
         runTest {
-            // Three unhydrated folders under /Documents, PLUS one hydrated
-            // descendant file. The hydrated descendant is the user signal
-            // that this subtree IS known to unidrive — guard must allow
-            // delete propagation through.
-            seedUnhydratedFolders("/Documents", count = 3)
-            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A hydrated file row is locally missing — the user deleted it
+            // from disk while the remote still has it. The Reconciler emits
+            // DeleteRemote (hydrated rows ARE legitimate user-delete signals).
+            // The unhydrated-folder filter does not fire because the row is a
+            // file. UD-264's top-level guard does not fire because the row
+            // itself is a hydrated descendant under its top-level. Result:
+            // del-remote flows through.
+            //
+            // Pre-fix this test paired unhydrated folder rows with one
+            // hydrated descendant and asserted del-remote for the unhydrated
+            // folders flowed through; that was the data-risk case (Reconciler
+            // now drops unhydrated folder deletes regardless of sibling
+            // hydration). The replacement uses a hydrated file row, which is
+            // the only legitimate del-remote signal in this corner.
+            val now = Instant.parse("2026-03-28T12:00:00Z")
+            // Seed the DB row with the hash and remoteId the cloudItem helper
+            // will report, so the second scan sees remoteState=UNCHANGED for
+            // the delta item.
+            val filePath = "/Documents/hydrated-file.txt"
+            val item = cloudItem(filePath, size = 100)
             db.upsertEntry(
                 org.krost.unidrive.sync.model.SyncEntry(
-                    path = "/Documents/hydrated-file.txt",
-                    remoteId = "id-hyd",
-                    remoteHash = "h",
-                    remoteSize = 100,
-                    remoteModified = now,
+                    path = filePath,
+                    remoteId = item.id,
+                    remoteHash = item.hash,
+                    remoteSize = item.size,
+                    remoteModified = item.modified,
                     localMtime = now.toEpochMilli(),
-                    localSize = 100,
+                    localSize = item.size,
                     isFolder = false,
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = now,
                 ),
             )
-            // Place the hydrated file on disk so reconciler doesn't propose
-            // a separate DeleteRemote for it.
+            // No file on disk → LocalScanner reports DELETED. The remote still
+            // has the file (provider delta reports it), so remoteState is
+            // UNCHANGED and Reconciler emits DeleteRemote rather than the
+            // (DELETED, DELETED) RemoveEntry cleanup path.
             Files.createDirectories(syncRoot.resolve("Documents"))
-            Files.writeString(syncRoot.resolve("Documents/hydrated-file.txt"), "x".repeat(100))
-            provider.deltaItems = emptyList()
+            Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/Documents", isFolder = true),
+                    item,
+                )
 
             val reporter = RecordingReporter()
             engineWithGuards(reporter = reporter).syncOnce(dryRun = true)
 
-            // del-remote for /Documents/sub-* must show up — guard did not strip them.
+            // del-remote for the hydrated row must flow through.
             assertTrue(
-                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents/sub-") },
-                "expected del-remote for /Documents/sub-* to flow through, got: ${reporter.actions}",
+                reporter.actions.any { it.label == "del-remote" && it.path == "/Documents/hydrated-file.txt" },
+                "expected del-remote for /Documents/hydrated-file.txt, got: ${reporter.actions}",
             )
         }
 
     @Test
-    fun `UD-264 --ignore-top-level-guard lets the delete through and still logs`() =
+    fun `--ignore-top-level-guard does not override the unhydrated folder filter`() =
         runTest {
+            // The opt-out flag covers UD-264's top-level-never-hydrated guard
+            // ONLY. Unhydrated-folder DeleteRemote actions are dropped at the
+            // Reconciler layer and are not subject to the opt-out — the
+            // data-risk is too large to expose behind a CLI knob. The audit
+            // log still captures the drops under the `unhydrated_folder`
+            // reason.
             seedUnhydratedFolders("/Documents", count = 3)
             Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
             provider.deltaItems = emptyList()
@@ -1100,17 +1134,17 @@ class SyncEngineTest {
                 skippedOpsLogPath = logPath,
             ).syncOnce(dryRun = true)
 
-            // Opt-out keeps the deletes in the plan.
+            // Opt-out does NOT keep unhydrated-folder deletes in the plan.
             assertTrue(
-                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents") },
-                "ignore-top-level-guard should let del-remote flow, got: ${reporter.actions}",
+                reporter.actions.none { it.label == "del-remote" && it.path.startsWith("/Documents") },
+                "unhydrated-folder filter should drop the deletes regardless of opt-out, got: ${reporter.actions}",
             )
-            // ... but still logs them for audit.
-            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written even on opt-out")
+            // Audit log still records the drops.
+            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written")
             val logBody = Files.readString(logPath)
             assertTrue(
-                logBody.contains("top_level_never_hydrated"),
-                "opt-out path still writes the audit line, got: $logBody",
+                logBody.contains("unhydrated_folder"),
+                "audit line should use the unhydrated_folder reason, got: $logBody",
             )
         }
 

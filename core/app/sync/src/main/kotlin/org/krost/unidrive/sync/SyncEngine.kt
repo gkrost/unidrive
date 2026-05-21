@@ -562,6 +562,7 @@ class SyncEngine(
             } else {
                 reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
             }
+        logUnhydratedFolderSkips()
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
@@ -2551,6 +2552,28 @@ class SyncEngine(
             )
         }
         return kept
+    }
+
+    /**
+     * Audit-log surface for `DeleteRemote` actions that the reconciler
+     * dropped because the target was an unhydrated folder row. The
+     * Reconciler strips those actions for safety (see
+     * `Reconciler.dropUnhydratedFolderDeletes`); the engine reads the
+     * dropped paths from `reconciler.lastUnhydratedFolderDeletes` and
+     * writes them to `skipped-ops.jsonl` so operators can see what was
+     * suppressed, matching the audit shape UD-264 uses for the
+     * top-level-never-hydrated guard.
+     */
+    private fun logUnhydratedFolderSkips() {
+        val skipped = reconciler.lastUnhydratedFolderDeletes
+        if (skipped.isEmpty()) return
+        for (path in skipped) {
+            logSkippedOp(SyncAction.DeleteRemote(path), "unhydrated_folder")
+        }
+        log.warn(
+            "skipped {} del-remote action(s) for unhydrated folder rows (see skipped-ops.jsonl)",
+            skipped.size,
+        )
     }
 
     // UD-264: append a JSON line to skipped-ops.jsonl. Goes through

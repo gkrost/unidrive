@@ -237,6 +237,75 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `unhydrated folder row + local-missing produces no DeleteRemote`() {
+        // Regression smoke (b): pure-Reconciler shape. localChanges carries
+        // DELETED for a folder path, remoteChanges is empty, the DB row is an
+        // unhydrated folder. Pre-fix the (DELETED, UNCHANGED) branch fell
+        // through to SyncAction.DeleteRemote because the recovery downgrade
+        // at the resolveAction level excluded folders — planning destruction
+        // of every cloud folder the user never visited on a sparse-hydration
+        // profile. dropUnhydratedFolderDeletes strips surviving DeleteRemote
+        // actions for unhydrated folder rows after move-detection has had a
+        // chance to consume them.
+        val folderEntry = SyncEntry(
+            path = "/foo/bar",
+            remoteId = "folder-uuid",
+            remoteHash = null,
+            remoteSize = 0,
+            remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+            localMtime = null,
+            localSize = null,
+            isFolder = true,
+            isPinned = false,
+            isHydrated = false,
+            lastSynced = Instant.now(),
+        )
+        db.upsertEntry(folderEntry)
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/foo/bar" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+        assertTrue(
+            actions.none { it is SyncAction.DeleteRemote },
+            "expected no DeleteRemote actions, got $actions",
+        )
+    }
+
+    @Test
+    fun `100 unhydrated folder rows + empty syncRoot produce zero DeleteRemote actions`() {
+        // Regression smoke (a): seed 100 unhydrated folder rows (sparse-
+        // hydration profile — folders enumerated by delta but never
+        // materialised locally), walk through LocalScanner + Reconciler
+        // against an empty syncRoot. Pre-fix this planned deletion of every
+        // cloud folder the user never visited.
+        val scanner = LocalScanner(syncRoot, db)
+        repeat(100) { i ->
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/folder-$i",
+                    remoteId = "folder-uuid-$i",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+        val localChanges = scanner.scan()
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val deleteRemotes = actions.filterIsInstance<SyncAction.DeleteRemote>()
+        assertEquals(
+            0,
+            deleteRemotes.size,
+            "expected zero DeleteRemote actions for unhydrated folder sweep, got ${deleteRemotes.map { it.path }}",
+        )
+    }
+
+    @Test
     fun `UD-225a regression pin - hydrated row + local-missing still deletes remote`() {
         // Inverse pin so a future refactor can't accidentally always-rehydrate.
         // Hydrated rows mean the file WAS once present locally; if it's gone
@@ -499,11 +568,12 @@ class ReconcilerTest {
             movesToTarget.size,
             "UD-240j: at most ONE MoveRemote per destination; got: ${moves.map { "${it.fromPath}->${it.path}" }}",
         )
-        // The other Delete should survive untouched as DeleteRemote (the engine
-        // will then propagate it as a real delete-remote, OR the user can
-        // resolve via UD-205-class atomicity work — out of scope for UD-240j).
+        // The unmatched delete targets an unhydrated folder row, so the
+        // post-detectMoves unhydrated-folder filter drops it. Pre-fix the
+        // unmatched delete survived and got dispatched as a real cloud
+        // del-remote — exactly the sparse-hydration data-risk class.
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
-        assertEquals(1, deletes.size, "the unmatched delete must remain in actions; got: $deletes")
+        assertEquals(0, deletes.size, "unmatched delete for an unhydrated folder row must be dropped; got: $deletes")
     }
 
     @Test
@@ -595,11 +665,11 @@ class ReconcilerTest {
             "must pick the close-relative source (shares /Pictures parent), NOT /Sample",
         )
         assertEquals("/Pictures/_Photos/Sample", moves[0].path)
-        // The unmatched stale delete survives as a plain DeleteRemote — engine's
-        // skip-on-not-found path will handle it gracefully if it's already gone
-        // from remote.
+        // The unmatched stale delete targets an unhydrated folder row, so
+        // the post-detectMoves filter drops it. Pre-fix it survived and got
+        // dispatched as a real cloud del-remote.
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
-        assertEquals(listOf("/Sample"), deletes)
+        assertEquals(emptyList(), deletes, "unmatched delete for unhydrated folder must be dropped")
     }
 
     @Test
@@ -684,9 +754,11 @@ class ReconcilerTest {
             moves.isEmpty(),
             "ambiguous zero-score cross-tree candidates → no move; got: $moves",
         )
-        // Both deletes survive standalone.
+        // Both deletes target unhydrated folder rows, so the post-detectMoves
+        // filter drops them — safer than emitting cloud del-remote for paths
+        // the user never had locally.
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
-        assertTrue("/Lonely" in deletes && "/Old/Lonely" in deletes, "got: $deletes")
+        assertTrue(deletes.isEmpty(), "unhydrated-folder deletes must be dropped, got: $deletes")
         // Create survives standalone.
         assertTrue(actions.any { it is SyncAction.CreateRemoteFolder && it.path == "/Far/Away/Lonely" })
     }
