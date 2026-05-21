@@ -8,6 +8,7 @@ import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
@@ -944,6 +945,9 @@ class SyncEngine(
                                         } catch (e: CancellationException) {
                                             restoreToPlaceholder(action.path, action.remoteItem)
                                             throw e
+                                        } catch (e: PermanentDownloadFailureException) {
+                                            handlePermanentDownloadFailure(action, e)
+                                            transferFailures.incrementAndGet()
                                         } catch (e: Exception) {
                                             // UD-253: class name + throwable (SLF4J stack trace).
                                             log.warn(
@@ -1335,6 +1339,10 @@ class SyncEngine(
                 } catch (e: CancellationException) {
                     restoreToPlaceholder(action.path, action.remoteItem)
                     throw e
+                } catch (e: PermanentDownloadFailureException) {
+                    handlePermanentDownloadFailure(action, e)
+                    transferFailures.incrementAndGet()
+                    executedPaths.add(action.path)
                 } catch (e: Exception) {
                     log.warn(
                         "Streaming download failed for {}: {}: {}",
@@ -2389,6 +2397,16 @@ class SyncEngine(
                     remoteSize = item.size,
                     remoteModified = item.modified,
                     lastSynced = Instant.now(),
+                    // A fresh delta event for a previously-quarantined row
+                    // means the cloud is reporting it alive again — drop the
+                    // quarantine and let the next reconcile re-emit the
+                    // download. Belt-and-braces with
+                    // StateDatabase.clearDownloadQuarantine below: that call
+                    // wins on the canonical SQL UPDATE; this copy ensures
+                    // any consumer reading the merged value inside this loop
+                    // sees the cleared state too.
+                    downloadQuarantined = false,
+                    lastErrorAt = null,
                     // preserve localMtime, localSize, isHydrated, isFolder
                 ) ?: SyncEntry(
                     path = path,
@@ -2404,6 +2422,13 @@ class SyncEngine(
                     lastSynced = Instant.now(),
                 )
             db.upsertEntry(merged)
+            // Belt-and-braces (matches the .copy() above): explicitly clear
+            // the quarantine flag on the canonical row in case a future
+            // upsertEntry call path mutates the row without going through
+            // the merged.copy() construction above.
+            if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
+                db.clearDownloadQuarantine(existing.remoteId)
+            }
         }
     }
 
@@ -2555,6 +2580,35 @@ class SyncEngine(
             )
         }
         return kept
+    }
+
+    /**
+     * Permanent-download-failure handler. The provider has signalled that
+     * the remote object is gone (stable 404), so we mark the row's
+     * `download_quarantined` flag and stop retrying — without this, the
+     * UD-225 recovery loop re-emits a DownloadContent on every pass and
+     * the engine burns cycles forever (live evidence: 1,248 retries of a
+     * single zero-byte file over 8 hours). The flag clears automatically
+     * when a fresh delta event re-reports the same remote_id via
+     * [updateRemoteEntries] → [StateDatabase.clearDownloadQuarantine].
+     */
+    private fun handlePermanentDownloadFailure(
+        action: SyncAction.DownloadContent,
+        e: PermanentDownloadFailureException,
+    ) {
+        log.warn(
+            "Permanent download failure for {}: {}: {} — quarantining row",
+            action.path,
+            e.javaClass.simpleName,
+            e.message,
+        )
+        reporter.onWarning("Permanent failure: ${action.path} - ${e.message}")
+        logFailure(action, e)
+        restoreToPlaceholder(action.path, action.remoteItem)
+        val remoteId = action.remoteItem.id
+        if (remoteId.isNotEmpty()) {
+            db.setDownloadQuarantine(remoteId, Instant.now())
+        }
     }
 
     /**

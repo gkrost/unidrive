@@ -22,7 +22,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `file.hashes` in local change detector | Remote scanner uses it (`Reconciler.kt:117`); local scanner still mtime+size only (`LocalScanner.kt:100`). Avoids re-uploading on touch-only changes. |
 | OneDrive `If-Match` precondition on `createUploadSession` | Catches concurrent edits before the session URL is handed out. |
 | OneDrive refresh `downloadUrl` on `assertNotHtml` | When the CDN serves an HTML throttle page, re-resolve via `getItemById` instead of failing the download. |
-| Internxt permanent-failure quarantine on download 404 | `InternxtApiException: 404 Bucket entry … not found` is treated as transient. Live evidence: single zero-byte file retried 1,248 times over ~8h after the user deleted it. Quarantine policy: on 404-bucket-not-found from `downloadFile`, mark the local index row as `download_quarantined` with `last_error_at` and skip until a delta event for that `remote_id` clears the flag. Smoke: 5th internxt smoke asserts one failed-download and zero retries on the next pass. |
 
 ## Medium — efficiency
 

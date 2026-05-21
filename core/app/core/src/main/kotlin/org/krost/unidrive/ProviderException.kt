@@ -38,6 +38,27 @@ open class AuthenticationException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * Signals a permanent download failure that retrying would not resolve —
+ * the remote object is gone (404 from a stable identifier) and no future
+ * attempt against the same identifier will succeed. The engine catches
+ * this and quarantines the row in state.db so it stops the retry storm,
+ * waiting for a fresh delta event on the same remote_id to clear the
+ * flag.
+ *
+ * Live evidence motivating this signal: a single zero-byte file
+ * (`/Annika.txt`, Internxt bucket entry `69ee2e863da99643eebb3b8a`) was
+ * retried 1,248 times over 8 hours after the user deleted it on the
+ * upstream client; the 404 body was the stable
+ * `{"error":"Bucket entry … not found"}` shape but it was treated as a
+ * transient failure by the generic exception handler.
+ */
+open class PermanentDownloadFailureException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
+/**
  * UD-203: helper for logging call sites. Returns ` requestId=<id>` (with
  * leading space) if the throwable is a [ProviderException] subclass that
  * carries a non-null id, otherwise the empty string. The leading space

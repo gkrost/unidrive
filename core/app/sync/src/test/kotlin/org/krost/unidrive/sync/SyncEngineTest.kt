@@ -2028,6 +2028,12 @@ class SyncEngineTest {
         var deltaFailCount = 0
         var authFailOnDownload = false
 
+        // Paths for which downloadById / download should throw the
+        // permanent-failure signal (e.g. Internxt "Bucket entry … not found").
+        // Mirrors the live 1,248-retry incident shape — the engine must
+        // quarantine the row instead of retrying forever.
+        val permanentDownloadFailurePaths: MutableSet<String> = mutableSetOf()
+
         override suspend fun authenticate() {}
 
         override suspend fun logout() {}
@@ -2041,6 +2047,11 @@ class SyncEngineTest {
             destination: Path,
         ): Long {
             if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (remotePath in permanentDownloadFailurePaths) {
+                throw org.krost.unidrive.PermanentDownloadFailureException(
+                    "Bucket entry for $remotePath not found",
+                )
+            }
             if (downloadFailCount > 0) {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
@@ -2065,6 +2076,11 @@ class SyncEngineTest {
             destination: Path,
         ): Long {
             if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (remotePath in permanentDownloadFailurePaths) {
+                throw org.krost.unidrive.PermanentDownloadFailureException(
+                    "Bucket entry for $remotePath not found",
+                )
+            }
             if (downloadFailCount > 0) {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
@@ -2397,6 +2413,75 @@ class SyncEngineTest {
             assertEquals(1, trashed.size, "row must survive as TRASHED tombstone; got $trashed")
             assertEquals("/will-trash.txt", trashed.single().path)
             assertEquals("id-/will-trash.txt", trashed.single().remoteId)
+        }
+
+    @Test
+    fun `permanent download failure quarantines row and stops retry on next pass`() =
+        runTest {
+            // Live evidence motivating the quarantine flag: a single zero-byte
+            // file (`/Annika.txt`, bucket entry 69ee2e863da99643eebb3b8a) was
+            // retried 1,248 times over 8 hours after the user deleted it from
+            // Internxt. The 404 body is the stable `{"error":"Bucket entry …
+            // not found"}` shape; treating it as transient meant the UD-225
+            // recovery loop re-emitted a DownloadContent on every pass.
+            //
+            // Smoke: fake provider returns the permanent-failure signal on
+            // first download. Assert the engine records the failure exactly
+            // once on attempt 1 and emits ZERO Download actions on attempt 2
+            // for the same row.
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.permanentDownloadFailurePaths.add("/dead.txt")
+
+            // First pass: the engine tries to download, the provider throws,
+            // the engine quarantines the row.
+            val reporter1 = RecordingReporter()
+            engineWithGuards(reporter = reporter1).syncOnce()
+
+            assertEquals(
+                1,
+                reporter1.actions.count { it.label == "down" && it.path == "/dead.txt" },
+                "first pass must attempt exactly one download, got: ${reporter1.actions}",
+            )
+            val quarantined = db.getEntry("/dead.txt")
+            assertNotNull(quarantined, "row should still exist (quarantined, not removed)")
+            assertTrue(quarantined.downloadQuarantined, "row must be quarantined after permanent failure")
+            assertNotNull(quarantined.lastErrorAt, "lastErrorAt must be stamped")
+
+            // Second pass with no new delta — the recovery loop must NOT
+            // resurrect the quarantined row. The cursor has not advanced (the
+            // failure does not promote it), so deltaFromLatest may be called
+            // again on supportsFastBootstrap providers; counting reporter
+            // actions for the quarantined path is the load-bearing assertion.
+            val reporter2 = RecordingReporter()
+            engineWithGuards(reporter = reporter2).syncOnce()
+
+            assertEquals(
+                0,
+                reporter2.actions.count { it.label == "down" && it.path == "/dead.txt" },
+                "second pass must NOT re-emit Download for the quarantined row, got: ${reporter2.actions}",
+            )
+        }
+
+    @Test
+    fun `fresh delta event clears download quarantine`() =
+        runTest {
+            // Establish quarantine.
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.permanentDownloadFailurePaths.add("/dead.txt")
+            engineWithGuards().syncOnce()
+            assertTrue(db.getEntry("/dead.txt")!!.downloadQuarantined)
+
+            // Cloud reports the row alive again (fresh delta event) — clear the
+            // flag so the next reconcile re-emits the download.
+            provider.permanentDownloadFailurePaths.clear()
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.deltaCursor = "cursor-revived"
+            engineWithGuards().syncOnce()
+
+            assertFalse(
+                db.getEntry("/dead.txt")!!.downloadQuarantined,
+                "fresh delta event should clear the quarantine flag",
+            )
         }
 
     @Test

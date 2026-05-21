@@ -242,6 +242,14 @@ class Reconciler(
             // UD-901a: respect syncPath scope; orphans outside the user's requested
             // subtree must NOT be silently surfaced.
             if (!pathInSyncScope(entry.path, syncPath)) continue
+            // Permanent-failure quarantine: skip rows whose last download
+            // returned a stable 404 ("Bucket entry … not found"). Without
+            // this guard, UD-225 recovery re-emits a DownloadContent every
+            // pass and the engine burns cycles retrying the same dead
+            // identifier (live evidence: 1,248 retries over 8h). The flag
+            // clears automatically when a fresh delta event re-reports the
+            // same remote_id via SyncEngine.updateRemoteEntries.
+            if (entry.downloadQuarantined) continue
             val remoteItem =
                 remoteChanges[entry.path] ?: CloudItem(
                     id = entry.remoteId ?: "",
@@ -645,19 +653,28 @@ class Reconciler(
                     // those actions once move-detection has had a chance to pair
                     // them with a matching CreateRemoteFolder destination.
                     entry != null && !entry.isHydrated && !entry.isFolder -> {
-                        val item =
-                            remoteItem ?: CloudItem(
-                                id = entry.remoteId ?: "",
-                                name = path.substringAfterLast('/'),
-                                path = path,
-                                size = entry.remoteSize,
-                                isFolder = false,
-                                modified = entry.remoteModified,
-                                created = null,
-                                hash = entry.remoteHash,
-                                mimeType = null,
-                            )
-                        SyncAction.DownloadContent(path, item)
+                        // Sibling skip to the UD-225 recovery loop above: a
+                        // quarantined row has already burned through the
+                        // recovery cycle once and was confirmed permanently
+                        // gone. Drop the action; the next delta event
+                        // clears the flag.
+                        if (entry.downloadQuarantined) {
+                            null
+                        } else {
+                            val item =
+                                remoteItem ?: CloudItem(
+                                    id = entry.remoteId ?: "",
+                                    name = path.substringAfterLast('/'),
+                                    path = path,
+                                    size = entry.remoteSize,
+                                    isFolder = false,
+                                    modified = entry.remoteModified,
+                                    created = null,
+                                    hash = entry.remoteHash,
+                                    mimeType = null,
+                                )
+                            SyncAction.DownloadContent(path, item)
+                        }
                     }
                     // Otherwise: real user delete on a hydrated row → propagate.
                     else -> SyncAction.DeleteRemote(path)
