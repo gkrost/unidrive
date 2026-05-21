@@ -1,0 +1,176 @@
+package org.krost.unidrive.tracking
+
+import java.time.Instant
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * Unit tests over the case table from the spec pseudocode.
+ *
+ * The integration test (TrackingEngineIntegrationTest) covers the
+ * end-to-end behaviour with persistence + IO; this one nails the
+ * pure decision function so a future refactor of the case-by-case
+ * branches can't drift silently.
+ */
+class TrackingReconcilerTest {
+    private val rec = TrackingReconciler()
+
+    private fun local(
+        exists: Boolean,
+        hash: String? = "lh",
+    ) = LocalObservation(exists, hash, if (exists) 10L else null, if (exists) Instant.EPOCH else null, null)
+
+    private fun remote(
+        exists: Boolean,
+        etag: String? = "re",
+        hash: String? = "rh",
+    ) = RemoteObservation(exists, if (exists) "rid" else null, etag, if (exists) 10L else null, hash, if (exists) Instant.EPOCH else null)
+
+    private fun track(
+        localHash: String? = "lh",
+        remoteEtag: String? = "re",
+    ) = TrackingRecord(
+        path = "/p",
+        providerId = "fake",
+        remoteFileId = "rid",
+        state = TrackState.TrackedSynced,
+        localHash = localHash,
+        localSize = 10L,
+        remoteEtag = remoteEtag,
+        remoteSize = 10L,
+        lastSynced = Instant.EPOCH,
+    )
+
+    @Test
+    fun `untracked + both absent → no-op`() {
+        assertTrue(rec.reconcile("/p", local(false), remote(false), null) is ReconcileAction.NoOp)
+    }
+
+    @Test
+    fun `untracked + pure local → no-op (NOT an upload)`() {
+        // Critical: dropping a file into sync_root must NOT auto-upload.
+        val a = rec.reconcile("/p", local(true), remote(false), null)
+        assertTrue(a is ReconcileAction.NoOp, "expected NoOp for pure-local untracked, got $a")
+    }
+
+    @Test
+    fun `untracked + pure remote → download`() {
+        val a = rec.reconcile("/p", local(false), remote(true), null)
+        assertTrue(a is ReconcileAction.DownloadRemote)
+    }
+
+    @Test
+    fun `untracked + both present + content match → no-op (adopt is engine-level)`() {
+        val a = rec.reconcile("/p", local(true, hash = "same"), remote(true, hash = "same"), null)
+        assertTrue(a is ReconcileAction.NoOp)
+        assertTrue(rec.shouldAdopt(local(true, hash = "same"), remote(true, hash = "same"), null))
+    }
+
+    @Test
+    fun `untracked + both present + content mismatch → collision`() {
+        val a = rec.reconcile("/p", local(true, hash = "L"), remote(true, hash = "R"), null)
+        assertTrue(a is ReconcileAction.ReportCollision)
+    }
+
+    @Test
+    fun `tracked + no change → no-op`() {
+        assertTrue(rec.reconcile("/p", local(true, "lh"), remote(true, "re", "rh"), track()) is ReconcileAction.NoOp)
+    }
+
+    @Test
+    fun `tracked + local changed → upload`() {
+        val a = rec.reconcile("/p", local(true, "NEW"), remote(true, "re", "rh"), track())
+        assertTrue(a is ReconcileAction.UploadLocal)
+    }
+
+    @Test
+    fun `tracked + remote changed → download`() {
+        val a = rec.reconcile("/p", local(true, "lh"), remote(true, "NEW", "rh"), track())
+        assertTrue(a is ReconcileAction.DownloadRemote)
+    }
+
+    @Test
+    fun `tracked + both changed → collision`() {
+        val a = rec.reconcile("/p", local(true, "NEWL"), remote(true, "NEWR", "rh"), track())
+        assertTrue(a is ReconcileAction.ReportCollision)
+    }
+
+    @Test
+    fun `tracked + local gone → propagate local delete`() {
+        val a = rec.reconcile("/p", local(false), remote(true), track())
+        assertTrue(a is ReconcileAction.PropagateLocalDelete)
+    }
+
+    @Test
+    fun `tracked + remote gone → propagate remote delete`() {
+        val a = rec.reconcile("/p", local(true), remote(false), track())
+        assertTrue(a is ReconcileAction.PropagateRemoteDelete)
+    }
+
+    @Test
+    fun `tracked + both gone → no-op (caller cleans up)`() {
+        val a = rec.reconcile("/p", local(false), remote(false), track())
+        assertTrue(a is ReconcileAction.NoOp)
+    }
+
+    /**
+     * Pending-star states are crash-recovery markers. The reconciler re-derives
+     * the action from live observations — independent of the pending intent.
+     * This is what makes the .safe/ recovery safe.
+     */
+    @Test
+    fun `pending-download + local absent + remote present → download (not delete)`() {
+        val pending = track().copy(state = TrackState.PendingDownload, localHash = null)
+        // local absent, remote present, snapshot says "we never had it locally"
+        val a = rec.reconcile("/p", local(false), remote(true, "re", "rh"), pending)
+        assertEquals(
+            ReconcileAction.DownloadRemote("/p")::class,
+            a::class,
+            "post-crash pending-download must re-derive to DownloadRemote, got $a",
+        )
+    }
+}
+
+/** BatchGuard tests. */
+class BatchGuardTest {
+    private fun deletes(n: Int) = (0 until n).map { ReconcileAction.PropagateLocalDelete("/p-$it") }
+
+    @Test
+    fun `allow when no deletes regardless of total`() {
+        val g = BatchGuard()
+        val plan: List<ReconcileAction> = listOf(ReconcileAction.UploadLocal("/u"))
+        assertTrue(g.inspect(plan, trackedTotal = 0) is BatchGuard.Verdict.Allow)
+    }
+
+    @Test
+    fun `allow when ratio under threshold and under absolute cap`() {
+        val g = BatchGuard(maxDeleteRatio = 0.5, maxDeleteAbsolute = 50)
+        assertTrue(g.inspect(deletes(10), trackedTotal = 100) is BatchGuard.Verdict.Allow)
+    }
+
+    @Test
+    fun `deny on ratio trip`() {
+        val g = BatchGuard(maxDeleteRatio = 0.5, maxDeleteAbsolute = 1_000)
+        val v = g.inspect(deletes(51), trackedTotal = 100)
+        assertTrue(v is BatchGuard.Verdict.Deny)
+        assertTrue(v.ratioTripped)
+    }
+
+    @Test
+    fun `deny on absolute trip even with low ratio`() {
+        val g = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = 5)
+        val v = g.inspect(deletes(6), trackedTotal = 100_000)
+        assertTrue(v is BatchGuard.Verdict.Deny)
+        assertTrue(v.absoluteTripped)
+    }
+
+    @Test
+    fun `deny when trackedTotal=0 but deletes proposed`() {
+        // Edge case: tracking-set tells us nothing is tracked but somehow
+        // a delete shows up. Ratio is 100% by convention; both axes can trip.
+        val g = BatchGuard()
+        val v = g.inspect(deletes(1), trackedTotal = 0)
+        assertTrue(v is BatchGuard.Verdict.Deny, "delete with empty tracked set must trip the guard")
+    }
+}
