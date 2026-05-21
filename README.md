@@ -1,8 +1,10 @@
 # unidrive
 
-One Linux daemon that syncs **Internxt Drive** and **OneDrive** through a single config, a single CLI, and a single SQLite state DB per profile. No telemetry, no hidden control plane. Apache-2.0.
+A cloud-sync core. Today it ships as a Linux daemon syncing **Internxt Drive** and **OneDrive** through a single config, a single CLI, and a single SQLite state DB per profile. Tomorrow it powers a Windows desktop client, an Android app, and a Linux UI as separate platform surfaces. No telemetry, no hidden control plane. Apache-2.0.
 
-## Quickstart
+The Linux daemon is the only currently-shipping surface. See [docs/adr/multi-platform.md](docs/adr/multi-platform.md) for the scope this repo operates under — "multi-platform core" is the direction, not a current capability claim.
+
+## Quickstart (Linux daemon)
 
 Build the fat JAR and install:
 
@@ -27,11 +29,13 @@ journalctl --user -u unidrive.service -f            # follow logs
 
 Config lives at `~/.config/unidrive/config.toml`. Per-profile state (SQLite, OAuth tokens, conflict log) lives at `~/.config/unidrive/<profile>/`. The daemon advertises sync progress over a Unix-domain socket per profile.
 
-## Requirements
+## Requirements (current ship: Linux daemon)
 
-- Linux. x86_64 or aarch64. Windows and macOS are out of scope (see [docs/adr/linux-only.md](docs/adr/linux-only.md)).
+- Linux. x86_64 or aarch64.
 - Java 21+ runtime on `$PATH`. JRE is enough; JDK only required to build.
 - systemd-user instance (standard on Ubuntu, Fedora, Arch, Debian; absent on minimal containers).
+
+Windows and macOS are not currently supported by the daemon. A Windows desktop client (Cloud Files API placeholders, Explorer overlay) and a Linux UI (FUSE + Dolphin context menus) are planned as separate platform surfaces; neither has shipping code yet. The Android app similarly consumes the core but is not part of this repo's current build.
 
 ## Uninstall
 

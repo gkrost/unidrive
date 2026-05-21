@@ -1,5 +1,7 @@
 # Shipping surface
 
+> **Status: Superseded by [`multi-platform.md`](multi-platform.md).** The slim shipping surface remains accurate for the Linux daemon as it stands today, but the framing that no further surfaces will ship has been replaced. Re-opening criterion (a) — a funded effort with ongoing maintenance — is what motivated the supersede. Body kept as historical record.
+
 ## Context
 
 Earlier iterations carried several surfaces that were dropped on the way to the slim experiment:

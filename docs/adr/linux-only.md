@@ -1,5 +1,7 @@
 # Linux-only
 
+> **Status: Superseded by [`multi-platform.md`](multi-platform.md).** The Linux daemon remains the current ship-target, but the conclusion that Windows and macOS are permanently out of scope no longer holds — Windows desktop and Linux UI are now declared platform surfaces. Body kept as historical record.
+
 ## Context
 
 Earlier iterations carried a Windows shell-extension tier (`shell-win/`), a UI tier (`ui/`), and a `protocol/` directory of JSON-schemas + golden NDJSON fixtures designed to be the contract between the daemon and a multi-client world. The Windows extension was abandoned; the UI was abandoned; the schema directory had no consumer because the surviving client (the CLI's IPC reporter) emits NDJSON inline over a Unix-domain socket.
