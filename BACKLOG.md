@@ -6,7 +6,9 @@ Top of file = next up. Work down. Move done items to `CLOSED.md` in the same com
 
 Silent corruption, orphan storage, lost local metadata. Fix before anything else.
 
-(none currently — drain the High tier next)
+| Title | Scope |
+|---|---|
+| Tracking-set sync engine | Replace `state.db`-as-authoritative with a tracking-set predicate over deletion. Untracked paths are invisible to deletion logic; the `.safe/` phantom-row delete-cascade class of bug becomes structurally impossible by construction. Lands at `core/app/sync-tracking/` as a new module; legacy `core/app/sync/` enters a retirement path once the new engine has provider-integration parity. Lemma + regression test for the `.safe/` incident shape are non-negotiable parts of the smoke set. Identity moves to `(provider_id, remote_file_id)` with content-hash as rename heuristic; first-run non-empty `sync_root` uses adopt-on-exact-content-match with LOUD collisions; batch-level max-delete-ratio guard backstops the residual "provider transiently lied" case. Spike + prototype exist as branches in the legacy repo (`spike/tracking-set-reconcile`, `prototype/tracking-set-engine`) — relocate, don't rewrite from scratch. |
 
 ## High — correctness, required for first release
 
@@ -51,11 +53,11 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 
 ## Design constraints (not tickets — bind when related work lands)
 
-(none currently)
+- **Platform-surface code lives outside `core/app/`.** Anchor: `AGENTS.md` *What not to do* — "Don't grow the daemon to host a UI tier." Trigger: any work on the Windows desktop, Android, or Linux UI surfaces declared in `docs/adr/multi-platform.md`. Those surfaces consume the core; they don't extend it inline.
 
-## Deferred — post-MVP, with reasons
+## Deferred — post Linux-daemon ship, sequenced by [docs/adr/multi-platform.md](docs/adr/multi-platform.md)
 
-- **Virtual filesystem layer (sparse / placeholder representation of cloud-only items).** Today `state.db` tracks all known cloud items as metadata rows (`is_hydrated=0, is_pinned=0` by default), but they are invisible on the local FS — the sync_root contains only physically downloaded files. Users with large cloud accounts (live example: 625 GiB / 171k files) see an empty folder despite the daemon "knowing" everything. Two platform-specific implementations would close the gap: **Windows CloudFiles API** (Cloud Sync Engine — explicitly out of MVP scope per ADR-0012 "linux-only"), and **Linux FUSE** (substantial architectural arc; no existing FUSE surface in the tree). Either path is structurally larger than any current BACKLOG item. Interim mitigation: a `unidrive get --recursive <path>` (or `unidrive pin <path>` if pin/unpin lands) to bulk-hydrate specific subtrees on demand; an opt-in `--hydrate-on-scan` flag could give dropbox-style auto-download for users who explicitly want it. The virtual-FS work itself stays out of MVP scope; revisit once the MVP is shipped and a real platform target (Windows reinstatement, or a Linux user complaint specifically about the metadata-vs-files asymmetry) justifies the surface.
+- **Virtual filesystem layer (placeholders for cloud-only items).** Today only physically-downloaded files appear in the sync_root; large cloud accounts (live example: 625 GiB / 171k files) see an empty folder. The two platform-tier implementations that close this gap — Windows CloudFiles API for the Windows desktop client, FUSE for the Linux UI — are the explicit scope of those surfaces in `multi-platform.md`. Daemon-side interim mitigation: a `unidrive get --recursive <path>` (or `unidrive pin <path>` if pin/unpin lands) to bulk-hydrate. The platform implementations are scheduled work, not indefinitely deferred.
 
 - **Tombstone retention policy on `state.db`.** v1 keeps TRASHED rows indefinitely. Includes the permanent-delete drift case — Internxt's ~30-day purge means a TRASHED row may eventually stop appearing in cloud listings; v1 leaves the row as TRASHED rather than promoting to DELETED. Revisit alongside a `tombstone_retention_days` knob if `state.db` growth becomes user-visible.
 - **Local-modified-while-TRASHED conflict-aware merge.** Editing the local copy of a file currently in cloud trash, then restoring the cloud copy → conflict. v1 is last-write-wins (cloud restore overwrites the local edit on re-download). Conflict-aware merge would mirror the existing `ConflictPolicy` machinery for the editing-during-trash window.
@@ -64,12 +66,10 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - **OneDrive resumable-upload 416/417 nuance** — current chunked retry covers the common case; the 416 GET-probe-and-trim path is the rare edge. Defer until smoke surfaces it.
 - **Xtra E2EE re-evaluation** — the `xtra` wrapper was removed in the slim prune. Internxt is natively E2EE; OneDrive users who want client-side encryption no longer have a layer for it. Re-evaluate post-MVP if user demand surfaces.
 
-## Out of scope for this branch
+## Out of scope across all surfaces
 
-- Windows / macOS — Linux only.
-- Shell extensions, tray UI, GUI.
-- MCP server (removed).
+- MCP server (removed; not coming back).
 - Backup-tool features (snapshots, restore points).
 - Three-way merge of document conflicts — surface conflicts, offer keep-both or last-writer-wins.
-- Embedding sync as a library.
+- Embedding the core as a generic third-party library. First-party platform tiers (Windows desktop, Android, Linux UI) consume the core; there is no generic embedding offer for arbitrary third parties.
 - Provider-specific niche features without cross-provider generalization.

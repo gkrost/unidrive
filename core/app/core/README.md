@@ -33,4 +33,4 @@ This is strictly more robust than the wall-clock `setTimeout(refresh, exp - now 
 
 ## When you add a helper here
 
-The bar is "two providers would otherwise copy this." If it's specific to OneDrive's Graph quirks or Internxt's two-tier topology, it lives in the provider module. If it's a Ktor plugin, a retry primitive, an exception base, or a JSON config singleton, lift it here. Per AGENTS.md, *don't* add a new abstraction speculatively — two SPI implementations is not enough to justify a third layer.
+The bar is "two providers would otherwise copy this." If it's specific to OneDrive's Graph quirks or Internxt's two-tier topology, it lives in the provider module. If it's a Ktor plugin, a retry primitive, an exception base, or a JSON config singleton, lift it here. Per `AGENTS.md` — abstractions earn their keep. The two-implementation bar above is what that looks like for provider helpers in this module.
