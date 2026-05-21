@@ -1,0 +1,68 @@
+# Build outputs
+build/
+out/
+# Note: top-level dist/ used to be globally ignored, but the end-user
+# installer sources (UD-761) live there. We instead ignore typical
+# packaging artefact patterns inside dist/ if/when they appear.
+dist/*.tar.gz
+dist/*.zip
+dist/*.deb
+dist/*.rpm
+dist/*.AppImage
+**/build/
+**/.gradle/
+.gradle/
+**/.kotlin/
+.kotlin/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+**/CMakeUserPresets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & temp
+*.log
+*.tmp
+*.swp
+*.bak
+*.orig
+*~
+
+# Local secrets / env
+.env
+.env.local
+*.local
+
+# Local Claude Code harness settings (per-developer)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Superpowers brainstorming session artifacts
+.superpowers/
+
+# Maintainer's local doc-reference cache (not part of the OSS contract)
+_recovered/
+
+# Internal-only docs (competitive briefs, financial planning, NOT for public)
+docs/internal/
+
+# Python tooling artifacts (scripts/dev/ MCPs and helpers)
+**/__pycache__/
+**/.venv-mcps/
+**/.venv/
+
+# UD-776: per-run JSON sidecar from verify-cli.py — markdown matrix is
+# committed, JSON is a local-only artifact with per-row timings.
+docs/dev/cli-verification-matrix.json
+

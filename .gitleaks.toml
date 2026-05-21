@@ -1,0 +1,45 @@
+# .gitleaks.toml — unidrive gitleaks configuration.
+#
+# Extends the bundled default ruleset; only allowlists project-known-safe
+# fixtures, examples, and documentation snippets audited 2026-04-17 (UD-107).
+
+title = "unidrive gitleaks config"
+
+[extend]
+# Inherit gitleaks' default rule pack (AWS keys, GitHub tokens, generic
+# high-entropy, etc). We only subtract via [allowlist] below.
+useDefault = true
+
+[allowlist]
+description = "Known-safe fixtures, examples, and docs audited for UD-107 (2026-04-17)."
+
+# Regex allowlist — literal strings that must never trip a rule.
+regexes = [
+    # AWS docs' canonical "example" access key ID. Appears in CLI help text
+    # and S3 provider tests (SigV4 known-answer tests use the AWS-published
+    # example credential pair).
+    '''AKIAIOSFODNN7EXAMPLE''',
+    # Test-fixture passwords used across integration and unit tests. These
+    # are never valid outside the test harness.
+    '''"(secret|testpass|test-password-123|master-key-folder-42|test-key-99|secret123)"''',
+]
+
+# Path allowlist — files where substring matches above are expected by design.
+paths = [
+    # Sample docker-compose with commented-out `password = "testpass"` lines
+    # used to document override syntax.
+    '''core/docker/docker-compose\.integration\.yml''',
+    # SftpApiService documents the OpenSSH private-key header format
+    # (`-----BEGIN OPENSSH PRIVATE KEY-----`) in a block comment.
+    '''core/providers/sftp/src/main/kotlin/.*/SftpApiService\.kt''',
+    # Token-shape validation tests: synthetic MSA opaque + JWS fixtures
+    # constructed inline ("EwBIBMl6BAAU9Batlg" + "x".repeat(50), and a
+    # base64-decodes-to-"hello" JWS). No real tokens.
+    '''core/providers/onedrive/src/test/kotlin/.*/OAuthServiceTokenShapeTest\.kt''',
+    # Python virtualenv contents — never committed (gitignored), but the
+    # working tree contains stdlib examples (jwt/algorithms.py PrivateKey
+    # type unions, win32cryptcon CMSG_KEY_* constants) that trigger the
+    # generic-api-key entropy rule. Belt-and-braces.
+    '''scripts/dev/.*\.venv.*''',
+    '''scripts/dev/oauth-mcp/\.venv/.*''',
+]

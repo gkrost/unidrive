@@ -1,0 +1,211 @@
+package org.krost.unidrive.sync
+
+import org.krost.unidrive.sync.model.ChangeState
+import org.krost.unidrive.sync.model.SyncEntry
+import org.slf4j.LoggerFactory
+import java.io.IOException
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import java.time.Instant
+
+class LocalScanner(
+    private val syncRoot: Path,
+    private val db: StateDatabase,
+    private val excludePatterns: List<String> = emptyList(),
+) {
+    private val log = LoggerFactory.getLogger(LocalScanner::class.java)
+
+    // UD-736: count of files where visitFileFailed swallowed an IOException so
+    // the walk could continue. Reset at the start of each scan(). Caller can
+    // read this after scan() returns to surface a "skipped N entries" notice.
+    var lastScanSkipped: Int = 0
+        private set
+
+    private fun isExcluded(relativePath: String): Boolean = excludePatterns.any { pattern -> Reconciler.matchesGlob(relativePath, pattern) }
+
+    fun scan(onProgress: ((Int) -> Unit)? = null): Map<String, ChangeState> {
+        val changes = mutableMapOf<String, ChangeState>()
+        val seenPaths = mutableSetOf<String>()
+        var skipped = 0
+
+        // Load all DB entries once — avoids N+1 queries during file tree walk
+        val dbEntries = db.getAllEntries().associateBy { it.path }
+
+        // UD-742 / UD-352: heartbeat — fire onProgress every 5000 items OR
+        // every 10s wall-clock since the last fire, whichever comes first.
+        // Math lives in the shared ScanHeartbeat helper so the local + remote
+        // scan paths stay in lockstep.
+        var visited = 0
+        val heartbeat = onProgress?.let { cb -> ScanHeartbeat(cb) }
+
+        // UD-240h: wrap the walk in a single SQLite transaction. The walk's
+        // visitFile pre-writes a UD-901 pending-upload row for every NEW file
+        // it sees — on a 67k-file first sync that's 67k single-row INSERTs,
+        // each its own transaction (LocalScanner runs in the engine's Gather
+        // phase, before SyncEngine.kt:361's beginBatch). Wrapping here drops
+        // those 67k commits to one. Failures roll back the whole walk's
+        // UD-901 pre-writes — safer than partial rows for the next sync's
+        // recovery loops to interpret.
+        db.beginBatch()
+        var batchCommitted = false
+        try {
+
+        // Walk local filesystem
+        Files.walkFileTree(
+            syncRoot,
+            object : SimpleFileVisitor<Path>() {
+                override fun visitFile(
+                    file: Path,
+                    attrs: BasicFileAttributes,
+                ): FileVisitResult {
+                    val relativePath = "/" + syncRoot.relativize(file).toString().replace('\\', '/')
+                    if (isExcluded(relativePath)) return FileVisitResult.CONTINUE
+                    seenPaths.add(relativePath)
+                    visited++
+
+                    val entry = dbEntries[relativePath]
+                    if (entry == null) {
+                        changes[relativePath] = ChangeState.NEW
+                        // UD-901: write a pending-upload row immediately so the file's
+                        // localSize is visible to `status` before the upload completes.
+                        // remoteId=null marks "not yet uploaded"; applyUpload() later
+                        // upserts the same path, promoting the row to a fully-synced
+                        // state once the byte transfer succeeds.
+                        //
+                        // UD-209b: don't claim isHydrated=true for a sparse leftover
+                        // (interrupted-sync placeholder physically present but with no
+                        // real bytes). Without this guard, the engine adopts the file
+                        // as fully synced and never re-downloads — UD-222 invariant
+                        // silently regressed by UD-901 otherwise.
+                        val sparseLeftover = isSparseLeftover(file, attrs.size())
+                        db.upsertEntry(
+                            SyncEntry(
+                                path = relativePath,
+                                remoteId = null,
+                                remoteHash = null,
+                                remoteSize = 0,
+                                remoteModified = null,
+                                localMtime = attrs.lastModifiedTime().toMillis(),
+                                localSize = attrs.size(),
+                                isFolder = false,
+                                isPinned = false,
+                                isHydrated = !sparseLeftover,
+                                lastSynced = Instant.EPOCH,
+                            ),
+                        )
+                    } else if (entry.isHydrated) {
+                        val currentMtime = attrs.lastModifiedTime().toMillis()
+                        val currentSize = attrs.size()
+                        if (currentMtime != entry.localMtime || currentSize != entry.localSize) {
+                            changes[relativePath] = ChangeState.MODIFIED
+                        }
+                    }
+                    // Skip dehydrated files for modification check (mtime is synthetic)
+
+                    heartbeat?.tick(visited)
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun preVisitDirectory(
+                    dir: Path,
+                    attrs: BasicFileAttributes,
+                ): FileVisitResult {
+                    if (dir == syncRoot) return FileVisitResult.CONTINUE
+                    val relativePath = "/" + syncRoot.relativize(dir).toString().replace('\\', '/')
+                    if (isExcluded(relativePath)) return FileVisitResult.SKIP_SUBTREE
+                    seenPaths.add(relativePath)
+
+                    if (dbEntries[relativePath] == null) {
+                        changes[relativePath] = ChangeState.NEW
+                    }
+                    return FileVisitResult.CONTINUE
+                }
+
+                // UD-736: SimpleFileVisitor's default re-throws and aborts the
+                // entire walk. That's catastrophic when one Cloud-Files-API
+                // placeholder fails to recall (foreign client offline — UD-900),
+                // a permission-denied entry shows up, or an in-flight rename
+                // races us. Log and continue so the rest of the tree is still
+                // visited; the entry just doesn't get marked seen, so the
+                // existing DB-vs-disk reconciliation logic decides what to do
+                // (DELETE or skip via Files.exists check).
+                override fun visitFileFailed(
+                    file: Path,
+                    exc: IOException,
+                ): FileVisitResult {
+                    skipped++
+                    log.warn(
+                        "Skipping unreadable file {} ({}: {})",
+                        file,
+                        exc.javaClass.simpleName,
+                        exc.message,
+                    )
+                    return FileVisitResult.CONTINUE
+                }
+            },
+        )
+
+        lastScanSkipped = skipped
+
+        // Check for deletions: entries in DB but not on disk
+        for (entry in dbEntries.values) {
+            if (entry.path !in seenPaths) {
+                if (isExcluded(entry.path)) continue
+                val localPath = safeResolveLocal(syncRoot, entry.path)
+                if (!Files.exists(localPath)) {
+                    changes[entry.path] = ChangeState.DELETED
+                }
+            }
+        }
+
+        db.commitBatch()
+        batchCommitted = true
+        return changes
+        } finally {
+            // UD-240h: roll back any UD-901 pre-writes if the walk threw past
+            // commitBatch. Without this, autoCommit stays false and the
+            // engine's later beginBatch silently piggybacks on our open tx.
+            if (!batchCommitted) {
+                try {
+                    db.rollbackBatch()
+                } catch (e: Exception) {
+                    log.warn("UD-240h: rollbackBatch failed in scan() finally", e)
+                }
+            }
+        }
+    }
+
+    // UD-209b: detect sparse-file leftovers (interrupted-sync placeholders) so they
+    // don't get classified as fully-hydrated. Posix-only, returns false on Windows
+    // and on any error so the safer "assume hydrated" default applies. Only worth
+    // checking files larger than one filesystem page (4 KiB), since smaller files
+    // can't be reliably detected as sparse on tmpfs/ext4 (minimum allocation unit).
+    // Mirrors the production check in PlaceholderManager.isSparse.
+    private fun isSparseLeftover(
+        path: Path,
+        size: Long,
+    ): Boolean {
+        if (size <= 4096L) return false
+        val os = System.getProperty("os.name", "").lowercase()
+        if (os.contains("win")) return false
+        return try {
+            val proc =
+                ProcessBuilder("stat", "--format=%b", path.toAbsolutePath().toString())
+                    .redirectErrorStream(true)
+                    .start()
+            val output =
+                proc.inputStream
+                    .bufferedReader()
+                    .readLine()
+                    ?.trim() ?: return false
+            proc.waitFor()
+            val blocks = output.toLongOrNull() ?: return false
+            blocks * 512 < size
+        } catch (_: Exception) {
+            false
+        }
+    }
+}

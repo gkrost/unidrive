@@ -1,0 +1,21 @@
+rules:
+  - id: path-traversal-literal-dotdot
+    languages:
+      - kotlin
+    message: Path literal contains '..' which may indicate path traversal attempt.
+    severity: WARNING
+    patterns:
+      - pattern: Paths.get($PATH)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: '.*\.\..*'
+  - id: path-traversal-file-constructor
+    languages:
+      - kotlin
+    message: File constructor with user input may allow path traversal.
+    severity: WARNING
+    patterns:
+      - pattern: File($PATH)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: '.*\.\..*'

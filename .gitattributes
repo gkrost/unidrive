@@ -1,0 +1,27 @@
+# Normalise line endings so Windows and Linux checkouts don't churn CRLF/LF
+# warnings on every `git add`. Text files are stored as LF in the repo;
+# `core.autocrlf` is a developer preference and kept out of this file.
+
+* text=auto eol=lf
+
+# Explicit binary markers keep git from attempting any normalisation.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.jar binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.class binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+
+# Windows-only scripts that must keep CRLF to be parsed correctly by cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
