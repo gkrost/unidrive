@@ -15,6 +15,8 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | Title | Scope |
 |---|---|
 | Reach the 5+5+2 smoke target | Current live-integration surface is 4 onedrive (`LiveGraphIntegrationTest`, `OneDriveIntegrationTest`, `OneDriveDeltaIntegrationTest`, `DeltaDiagnosticTest`), 1 internxt (`InternxtIntegrationTest`), 0 sync, plus `CliSmokeTest`. Target: 5 onedrive, 5 internxt, 2 sync (auth/upload/download/delete/delta-reconciles per provider; two end-to-end sync round-trips). Each gated by `UNIDRIVE_INTEGRATION_TESTS=true`. Reducing the existing unit-test surface (≈120 files) is a separate per-test review: don't sweep wholesale, lift the smoke set up to the target first. |
+| Tracking-set engine: verify Internxt provider end-to-end | `unidrive ts sync --dry-run` against a real Internxt profile + a live-integration test gated by `UNIDRIVE_INTEGRATION_TESTS=true`. Owns 429-storm / JWT-refresh / malformed-delta interactions in the engine path; surface concrete issues as follow-up entries rather than fix them inline. Blocks closing the Critical-tier tracking-set entry. |
+| Tracking-set engine: verify OneDrive provider end-to-end | Same shape against a real OneDrive profile. Owns delta-cursor / 410-Gone-resync / FastBootstrap interactions in the engine path. Blocks closing the Critical-tier tracking-set entry. |
 | OneDrive 410 Gone resync handling | Honor `resyncChangesApplyDifferences` / `resyncChangesUploadDifferences` with `Location` restart on the delta loop. |
 | OneDrive webhook lifecycle events + validation endpoint | Handle `reauthorizationRequired`, `subscriptionRemoved`, `missed`; add an in-repo HTTP endpoint that echoes `validationToken` within 10 s. |
 | OneDrive `file.hashes` in local change detector | Remote scanner uses it (`Reconciler.kt:117`); local scanner still mtime+size only (`LocalScanner.kt:100`). Avoids re-uploading on touch-only changes. |
@@ -33,6 +35,8 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `createLink` client-side dedupe | Check `listPermissions` for an existing matching link before POSTing. |
 | OneDrive per-tenant concurrency calibration | Personal vs Business vs GCC; flagged in `core/providers/onedrive/README.md`. |
 | OneDrive `HttpRetryBudget` per-provider override | Constants currently global. |
+| Tracking-set engine: persist delta cursor per profile | Engine currently re-enumerates the full remote every pass. Persist cursor in `tracking.db` so subsequent passes see only changes. Required before tracking-set becomes the default engine. |
+| Tracking-set engine: migration / coexistence with legacy `state.db` | First `ts sync` on a profile with an existing `state.db` runs adopt-on-content-match against live observations rather than importing legacy rows. Document bulk-collision rendering for fresh-adopt operators; consider a `--auto-match` switch (size or name) for providers without a content hash. |
 
 ## Low — guards and UX
 
