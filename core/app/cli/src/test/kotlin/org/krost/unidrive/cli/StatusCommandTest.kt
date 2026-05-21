@@ -1,7 +1,9 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.model.SyncEntry
 import picocli.CommandLine
+import java.nio.file.Files
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -111,5 +113,71 @@ class StatusCommandTest {
         val buckets = computeLocalSizeBuckets(entries)
         assertEquals(0L, buckets.hydratedBytes)
         assertEquals(0L, buckets.pendingBytes)
+    }
+
+    // ── discoverProfilesFromRaw — `status --all` enumeration ────────────────
+
+    @Test
+    fun `discoverProfilesFromRaw enumerates two same-type profiles in declaration order`() {
+        // Reproduces the BACKLOG scenario: two Internxt profiles configured
+        // with the first declared as `[providers.internxt]` and the second
+        // as `[providers.gernot_krost_internxt_pst]`. status --all must
+        // surface BOTH, in declaration order (file top-to-bottom), not
+        // alphabetical order and not just the second one.
+        val toml =
+            """
+            |[general]
+            |
+            |[providers.internxt]
+            |type = "internxt"
+            |sync_root = "~/Internxt"
+            |
+            |[providers.gernot_krost_internxt_pst]
+            |type = "internxt"
+            |sync_root = "~/InternxtPst"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("status-test-")
+        try {
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+            assertEquals(
+                listOf("internxt", "gernot_krost_internxt_pst"),
+                profiles.map { it.name },
+                "both profiles should be enumerated in declaration order",
+            )
+            assertTrue(profiles.all { it.type == "internxt" }, "both profiles should resolve as type=internxt")
+        } finally {
+            Files.deleteIfExists(baseDir)
+        }
+    }
+
+    @Test
+    fun `discoverProfilesFromRaw preserves declaration order across mixed provider types`() {
+        // Two onedrive profiles + one internxt profile interleaved in file
+        // order: the helper must NOT regroup by type or sort alphabetically.
+        // (Grouping by type happens later in `showMultiProviderStatus`; the
+        // discovery step is purely about completeness + order.)
+        val toml =
+            """
+            |[providers.work_od]
+            |type = "onedrive"
+            |
+            |[providers.personal_inxt]
+            |type = "internxt"
+            |
+            |[providers.archive_od]
+            |type = "onedrive"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("status-test-")
+        try {
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+            assertEquals(
+                listOf("work_od", "personal_inxt", "archive_od"),
+                profiles.map { it.name },
+            )
+        } finally {
+            Files.deleteIfExists(baseDir)
+        }
     }
 }

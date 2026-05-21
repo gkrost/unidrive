@@ -39,7 +39,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | OneDrive `HttpRetryBudget` per-provider override | Constants currently global. |
 | Tracking-set engine: persist delta cursor per profile | Engine currently re-enumerates the full remote every pass. Persist cursor in `tracking.db` so subsequent passes see only changes. Required before tracking-set becomes the default engine. |
 | Tracking-set engine: migration / coexistence with legacy `state.db` | First `ts sync` on a profile with an existing `state.db` runs adopt-on-content-match against live observations rather than importing legacy rows. Document bulk-collision rendering for fresh-adopt operators; consider a `--auto-match` switch (size or name) for providers without a content hash. |
-| `unidrive status --all` enumerates only one profile | With two Internxt profiles configured (e.g. `internxt` and `gernot_krost_internxt_pst`), `status --all` shows ONLY the second and skips the first. Enumerate all configured profiles ordered by `config.toml` declaration; default to a fast read of cached state, no auth. |
 | `unidrive status` must be side-effect-free; no interactive auth | `status --all` triggers an email/password/2FA prompt mid-render when a profile's token has gone stale. Status is a read-only diagnostic; auth happens via `unidrive auth`. Render a stale-state glyph (e.g. `⚠︎ STALE`) for tokens that need refresh and exit cleanly. |
 
 ## Low — guards and UX

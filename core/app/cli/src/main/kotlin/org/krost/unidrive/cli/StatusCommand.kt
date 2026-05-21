@@ -8,6 +8,7 @@ import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.ProfileInfo
+import org.krost.unidrive.sync.RawSyncConfig
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import picocli.CommandLine.Command
@@ -614,10 +615,10 @@ class StatusCommand : Runnable {
     }
 
     /**
-     * Discover all profiles to show in --all mode:
-     * 1. Configured profiles from config.toml [providers.*]
-     * 2. Legacy dirs with state.db not already in config
-     * 3. Fallback to known types if nothing discovered
+     * Discover all profiles to show in --all mode. Delegates to the pure
+     * [discoverProfilesFromRaw] helper for testability — the helper does not
+     * read `config.toml` itself so a unit test can hand it a synthesised
+     * [org.krost.unidrive.sync.RawSyncConfig].
      */
     private fun discoverProfiles(baseDir: Path): List<ProfileInfo> {
         val configFile = baseDir.resolve("config.toml")
@@ -627,52 +628,7 @@ class StatusCommand : Runnable {
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
-
-        val seen = mutableSetOf<String>()
-        val profiles = mutableListOf<ProfileInfo>()
-
-        // 1. Configured profiles (skip unknown provider types gracefully)
-        for (name in raw.providers.keys) {
-            try {
-                profiles.add(SyncConfig.resolveProfile(name, raw))
-                seen.add(name)
-            } catch (_: IllegalArgumentException) {
-                // Provider type not on classpath (e.g. private provider in public CLI), skip
-                seen.add(name)
-            }
-        }
-
-        // 2. Legacy dirs with state.db not in config but with a config section
-        if (Files.isDirectory(baseDir)) {
-            Files.list(baseDir).use { stream ->
-                stream
-                    .filter { Files.isDirectory(it) && Files.exists(it.resolve("state.db")) }
-                    .map { it.fileName.toString() }
-                    .filter { it !in seen && it in raw.providers }
-                    .sorted()
-                    .forEach { dirName ->
-                        try {
-                            val profile = SyncConfig.resolveProfile(dirName, raw)
-                            profiles.add(profile)
-                            seen.add(dirName)
-                        } catch (e: IllegalArgumentException) {
-                            // Config section exists but invalid, skip
-                        }
-                    }
-            }
-        }
-
-        // 3. Fallback: known types not yet seen (only if NO profiles discovered)
-        if (profiles.isEmpty()) {
-            for (type in SyncConfig.KNOWN_TYPES.sorted()) {
-                if (type !in seen) {
-                    profiles.add(SyncConfig.resolveProfile(type, raw))
-                    seen.add(type)
-                }
-            }
-        }
-
-        return profiles
+        return discoverProfilesFromRaw(raw, baseDir)
     }
 
     private fun providerDisplayName(type: String): String {
@@ -701,4 +657,79 @@ class StatusCommand : Runnable {
             }
         }
     }
+}
+
+/**
+ * Pure helper extracted from [StatusCommand.discoverProfiles] so unit tests
+ * can drive it with a synthesised [RawSyncConfig] instead of a real
+ * `config.toml` on disk.
+ *
+ * Returns the profiles to render in `status --all`, in this order:
+ *   1. Every section declared under `[providers.*]`, in `config.toml`
+ *      declaration order. ktoml's `Map<String, RawProvider>` is a
+ *      `LinkedHashMap` so iteration matches file order — verified by the
+ *      `enumerates two same-type profiles in declaration order` test.
+ *      Sections whose `type` is unknown to the provider classpath are
+ *      skipped silently (a private provider not bundled in a public CLI
+ *      build), but still reserved in `seen` so step 2 can't double-count.
+ *   2. Legacy directories under [baseDir] that hold a `state.db` AND are
+ *      declared in `config.toml` but somehow missed step 1. Sorted for
+ *      deterministic output; in practice this step is empty because step 1
+ *      already covers everything `in raw.providers`.
+ *   3. If nothing was discovered at all, fall back to the registered
+ *      provider types so an out-of-the-box `status --all` (no config) still
+ *      shows useful rows.
+ */
+internal fun discoverProfilesFromRaw(
+    raw: RawSyncConfig,
+    baseDir: Path,
+): List<ProfileInfo> {
+    val seen = mutableSetOf<String>()
+    val profiles = mutableListOf<ProfileInfo>()
+
+    // 1. Configured profiles in declaration order. ktoml emits a LinkedHashMap
+    //    so `raw.providers.entries` iterates in file order; we honour that so
+    //    the rendered table reads top-to-bottom the same way the user wrote
+    //    the file.
+    for ((name, _) in raw.providers) {
+        try {
+            profiles.add(SyncConfig.resolveProfile(name, raw))
+            seen.add(name)
+        } catch (_: IllegalArgumentException) {
+            // Provider type not on classpath (e.g. private provider in public CLI), skip
+            seen.add(name)
+        }
+    }
+
+    // 2. Legacy dirs with state.db not in config but with a config section
+    if (Files.isDirectory(baseDir)) {
+        Files.list(baseDir).use { stream ->
+            stream
+                .filter { Files.isDirectory(it) && Files.exists(it.resolve("state.db")) }
+                .map { it.fileName.toString() }
+                .filter { it !in seen && it in raw.providers }
+                .sorted()
+                .forEach { dirName ->
+                    try {
+                        val profile = SyncConfig.resolveProfile(dirName, raw)
+                        profiles.add(profile)
+                        seen.add(dirName)
+                    } catch (_: IllegalArgumentException) {
+                        // Config section exists but invalid, skip
+                    }
+                }
+        }
+    }
+
+    // 3. Fallback: known types not yet seen (only if NO profiles discovered)
+    if (profiles.isEmpty()) {
+        for (type in SyncConfig.KNOWN_TYPES.sorted()) {
+            if (type !in seen) {
+                profiles.add(SyncConfig.resolveProfile(type, raw))
+                seen.add(type)
+            }
+        }
+    }
+
+    return profiles
 }
