@@ -54,7 +54,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 | Dirty-build WARN must ignore mode-only changes | `Main.kt` emits `Build was made from a dirty git worktree` on any uncommitted change including mode-only. Ignore mode-only diffs in the dirtiness check. One-shot: commit current `core/gradlew` chmod. |
 | MDC empty-slot renders as [???????] instead of [--------] | `EventThread` and `DefaultDispatcher-worker-N` sit outside the per-scan MDC scope, so the build slot is unset. Today emits `[???????]`; convention uses `[--------]` for empty. |
 | Repo-root docs outside bounded doc surface | `internxt-boosters-analysis.md` and `opencode-review.md` sit at repo root outside the bounded doc surface defined in AGENTS.md. Fold into `BOOSTERS.md` / `docs/audits/` or add as explicit exceptions. |
-| Audit code/comment drift on hydration filtering | `SyncEngine.kt:527-528` claims "LocalScanner now skips unhydrated rows" — implementation does not. Grep for similar "now does X" assertions whose code contradicts the comment; either land the missing code or remove the misleading comment. |
 
 ## Cross-cutting
 

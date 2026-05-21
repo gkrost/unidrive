@@ -639,8 +639,11 @@ class Reconciler(
                     //
                     // Folders are not handled here; isHydrated semantics for folders
                     // are different (they represent on-disk directory presence, not
-                    // file content), and the folder-placeholder recovery is out of
-                    // scope for UD-225a.
+                    // file content). Unhydrated folder rows whose path is missing
+                    // on disk fall through to DeleteRemote below; the
+                    // post-detectMoves dropUnhydratedFolderDeletes filter strips
+                    // those actions once move-detection has had a chance to pair
+                    // them with a matching CreateRemoteFolder destination.
                     entry != null && !entry.isHydrated && !entry.isFolder -> {
                         val item =
                             remoteItem ?: CloudItem(

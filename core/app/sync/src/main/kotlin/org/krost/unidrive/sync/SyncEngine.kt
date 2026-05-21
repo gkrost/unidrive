@@ -524,9 +524,12 @@ class SyncEngine(
         // needs to download — refusing to run there blocks the UD-225
         // recovery loop from doing its job. The original concern (mass
         // DeleteRemote when sync_root is mis-pointed) only applies when
-        // hydrated entries are missing locally; LocalScanner now skips
-        // unhydrated rows in its deletion-detection loop, so the only
-        // way to generate Delete actions here is via hydrated rows.
+        // hydrated entries are missing locally; the Reconciler rewrites
+        // unhydrated-FILE DELETED localChanges into DownloadContent via
+        // its UD-225a recovery downgrade, and drops DeleteRemote actions
+        // for unhydrated-FOLDER rows in a post-detectMoves filter, so
+        // the only way DeleteRemote reaches the apply phase is via
+        // hydrated rows.
         // Live repro 2026-05-20: 171 386 file rows all is_hydrated=0,
         // sync_root empty, old guard refused with a misleading
         // "--force-delete" hint that would have catastrophically wiped
