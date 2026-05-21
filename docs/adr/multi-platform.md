@@ -28,6 +28,7 @@ This supersedes `linux-only.md` and `shipping-surface.md`. Their historical cont
 ## Consequences
 
 - **A new module boundary is needed.** The sync engine has to be usable from both the background daemon and from in-process platform apps, without the latter inheriting the daemon's IPC, systemd, and config-file conventions. The tracking-set engine landing as the structural-safety fix is the right moment to draw that boundary.
+- **Provider SPI contract is unchanged.** [`capability-contract.md`](capability-contract.md) continues to govern how providers declare supported and unsupported methods; the contract was already engine-agnostic and survives the surface expansion without amendment.
 - **Virtual filesystem layer (placeholders) is no longer indefinitely deferred.** The Windows desktop surface requires Cloud Files API placeholders; the Linux UI requires FUSE-backed file-on-demand. Each gets its own platform tier; the core grows the hydration / pin primitives those tiers need.
 - **Smoke target stays per-surface.** The current 5+5+2 target was sized for the Linux daemon. Each new surface gets its own smoke set; defer those until that surface has working code rather than writing speculative ones now.
 - **CI matrix grows lazily.** One Linux runner today. Windows + Android runners come online as those tiers gain code, not preemptively.

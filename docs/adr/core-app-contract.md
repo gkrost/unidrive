@@ -12,7 +12,7 @@
 
 - **Surface** — a deployable platform tier, per `multi-platform.md`. The Linux daemon is one surface; Windows desktop, Android, Linux UI are three more.
 - **Engine** — the sync logic, state model, provider adapters, auth, HTTP, configuration *schema*. Today: `core/app/{sync,sync-tracking,core,config,providers/*}`.
-- **Client** — anything that presents the engine to a human or consumes its events. Today the CLI is the only client and lives at `core/app/cli/` inside the core repo. Graphical clients will live outside per `multi-platform.md`.
+- **Client** — anything that presents the engine to a human or consumes its events. The CLI is a client that lives inside the core repo as the headless reference; future graphical clients (Windows desktop, Android, Linux UI) will live outside per `multi-platform.md`. The engine/client distinction is a logical boundary, not a spatial one — what makes the CLI a client is its responsibilities, not its directory.
 
 A surface = engine + one or more clients. The Linux daemon surface = engine + CLI client. A future Windows desktop surface = engine + a Windows-specific client (Cloud Files API integration, Explorer overlay).
 
