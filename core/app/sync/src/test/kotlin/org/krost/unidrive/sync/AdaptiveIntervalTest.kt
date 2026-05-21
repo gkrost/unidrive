@@ -50,4 +50,45 @@ class AdaptiveIntervalTest {
         assertEquals("NORMAL", pollStateName(idleCycles = 7))
         assertEquals("IDLE", pollStateName(idleCycles = 8))
     }
+
+    // ── computePollIntervalWithWs — WS-healthy collapse to max ─────────────
+
+    @Test
+    fun `wsHealthy collapses ACTIVE state to max interval`() {
+        // Without WS we'd sit on min (10s). With WS healthy the heartbeat
+        // cadence is the configured max — operators tune via max_poll_interval.
+        assertEquals(
+            300,
+            computePollIntervalWithWs(idleCycles = 0, min = 10, normal = 60, max = 300, wsHealthy = true),
+        )
+    }
+
+    @Test
+    fun `wsHealthy collapses NORMAL state to max interval`() {
+        assertEquals(
+            300,
+            computePollIntervalWithWs(idleCycles = 5, min = 10, normal = 60, max = 300, wsHealthy = true),
+        )
+    }
+
+    @Test
+    fun `wsHealthy keeps IDLE state at max interval`() {
+        assertEquals(
+            300,
+            computePollIntervalWithWs(idleCycles = 20, min = 10, normal = 60, max = 300, wsHealthy = true),
+        )
+    }
+
+    @Test
+    fun `wsHealthy false matches the original adaptive ladder`() {
+        // Behaviour-preserving fallback — every idleCycle value matches what
+        // the legacy [computePollInterval] returns when WS is not healthy.
+        for (cycles in -2..20) {
+            assertEquals(
+                computePollInterval(cycles, min = 10, normal = 60, max = 300),
+                computePollIntervalWithWs(cycles, min = 10, normal = 60, max = 300, wsHealthy = false),
+                "idleCycles=$cycles should fall back to the original adaptive ladder",
+            )
+        }
+    }
 }
