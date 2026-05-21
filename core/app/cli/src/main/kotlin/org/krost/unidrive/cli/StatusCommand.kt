@@ -328,12 +328,21 @@ class StatusCommand : Runnable {
      * the real quota: enumerated DriveItem sizes don't include revision
      * history, recycle bin, or OneNote metadata. Field-observed delta on
      * `onedrive-test`: 164 GB enumerated vs 349 GB real (~46 % shortfall).
+     *
+     * Side-effect contract: status is a read-only diagnostic. We never call
+     * `provider.authenticateAndLog()` against a profile whose offline health
+     * check isn't `Ok` — for Internxt that path would prompt for email /
+     * password / 2FA mid-render, which is the wrong UX for a status query.
+     * Interactive auth happens via `unidrive auth`; here a non-Ok health
+     * just returns null and the caller renders the cached state with the
+     * stale glyph from [buildAccountRow].
      */
     private fun fetchQuotaUsedIfSupported(
         profile: ProfileInfo,
         configDir: Path,
-    ): Long? =
-        try {
+    ): Long? {
+        if (!shouldProbeRemoteForStatus(parent.checkCredentialHealth(profile, configDir))) return null
+        return try {
             val provider = parent.createProviderFor(profile, configDir)
             if (Capability.QuotaExact !in provider.capabilities()) return null
             runBlocking {
@@ -346,6 +355,7 @@ class StatusCommand : Runnable {
             // falls back to enumerated sum which is at least non-null.
             null
         }
+    }
 
     private fun buildAccountRow(
         profile: ProfileInfo,
@@ -368,7 +378,6 @@ class StatusCommand : Runnable {
             health is org.krost.unidrive.CredentialHealth.Ok ||
                 health is org.krost.unidrive.CredentialHealth.ExpiresIn
         val isExpiring = health is org.krost.unidrive.CredentialHealth.ExpiresIn
-        val expiryMessage = (health as? org.krost.unidrive.CredentialHealth.ExpiresIn)?.message
 
         if (!hasDb && !effectiveCanAuth) {
             return AccountRow(
@@ -384,7 +393,14 @@ class StatusCommand : Runnable {
         }
 
         if (!hasDb && effectiveCanAuth) {
-            val statusLabel = if (isExpiring) GlyphRenderer.warnLabel(expiryMessage ?: "expiring") else GlyphRenderer.okLabel()
+            // ExpiresIn means the persisted token is past its expiry: render
+            // the stale glyph so the user sees `[⚠ STALE]` and knows to run
+            // `unidrive auth`. We deliberately don't echo the full expiry
+            // message into the STATUS column — the column is 10 chars wide,
+            // long messages truncate, and the BACKLOG entry's worked example
+            // calls out `⚠︎ STALE` as the rendering. The full expiry
+            // message lives in `health.message` for `--check-auth` output.
+            val statusLabel = if (isExpiring) GlyphRenderer.warnLabel("STALE") else GlyphRenderer.okLabel()
             return AccountRow(
                 profileName = label,
                 status = if (isExpiring) "warn" else "ok",
@@ -430,7 +446,7 @@ class StatusCommand : Runnable {
                     lastSync = lastSyncFormatted,
                 )
             } else {
-                val statusLabel = if (isExpiring) GlyphRenderer.warnLabel(expiryMessage ?: "expiring") else GlyphRenderer.okLabel()
+                val statusLabel = if (isExpiring) GlyphRenderer.warnLabel("STALE") else GlyphRenderer.okLabel()
                 return AccountRow(
                     profileName = label,
                     status = if (isExpiring) "warn" else "ok",
@@ -658,6 +674,26 @@ class StatusCommand : Runnable {
         }
     }
 }
+
+/**
+ * Pure side-effect-gate for `unidrive status`. The status command is a
+ * read-only diagnostic; the network probe must never be attempted against
+ * a profile whose offline credential health says the persisted token is
+ * missing, stale, or otherwise won't authenticate without interaction.
+ *
+ * For Internxt specifically, calling `provider.authenticateAndLog()` on a
+ * profile with an expired JWT drops into `authService.authenticateInteractive()`
+ * which prompts for email / password / 2FA on stdin — completely the wrong
+ * UX mid-status-render. Interactive auth happens via `unidrive auth`; here
+ * a non-Ok health just returns null from the quota probe and the caller
+ * renders the cached state with a stale glyph.
+ *
+ * The only health value that licenses a network round-trip is [CredentialHealth.Ok].
+ * [CredentialHealth.ExpiresIn] explicitly does not — it's the "token is past
+ * expiry" signal that the BACKLOG entry wants visible in the STATUS column
+ * as `[⚠ STALE]`, not silently fixed-up via an interactive auth prompt.
+ */
+internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
 
 /**
  * Pure helper extracted from [StatusCommand.discoverProfiles] so unit tests
