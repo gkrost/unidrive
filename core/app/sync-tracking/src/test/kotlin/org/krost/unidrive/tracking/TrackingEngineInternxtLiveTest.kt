@@ -34,48 +34,48 @@ import kotlin.test.assertTrue
 class TrackingEngineInternxtLiveTest {
     companion object {
         private val shouldRun = System.getenv("UNIDRIVE_INTEGRATION_TESTS")?.toBoolean() ?: false
-
-        /**
-         * Returns null when the test can run, or a human-readable reason string
-         * otherwise. Reason is surfaced via `assumeTrue` so a skipped run reports
-         * SKIPPED with the cause visible in the JUnit XML / Gradle test report,
-         * rather than silently early-returning as PASSED.
-         */
-        private fun skipReason(): String? {
-            if (!shouldRun) {
-                return "UNIDRIVE_INTEGRATION_TESTS env var is not 'true' " +
-                    "(set it before launching gradle; PowerShell: \$env:UNIDRIVE_INTEGRATION_TESTS = 'true')"
-            }
-            val config = InternxtConfig()
-            val credFile = config.tokenPath.resolve("credentials.json")
-            if (!Files.exists(credFile)) {
-                return "Internxt credentials not found at $credFile " +
-                    "(run `unidrive -p <profile> auth` first)"
-            }
-            return null
-        }
     }
 
     @Test
     fun `tracking engine against live Internxt — lemma holds, plan is downloads-only`() {
-        val reason = skipReason()
-        if (reason != null) {
-            // Mirror the skip reason to stdout so showStandardStreams=true
-            // surfaces it in the gradle console (the XML report has it via
-            // the AssumptionViolatedException message, but stdout is what
-            // most operators actually look at).
+        // Gate 1 — env var must be enabled. SKIPPED with reason on miss.
+        if (!shouldRun) {
+            val reason = "UNIDRIVE_INTEGRATION_TESTS env var is not 'true' " +
+                "(set it before launching gradle; PowerShell: \$env:UNIDRIVE_INTEGRATION_TESTS = 'true')"
             println("TrackingEngineInternxtLiveTest: SKIPPED — $reason")
+            assumeTrue("Live Internxt test skipped: $reason", false)
+            return
         }
-        assumeTrue("Live Internxt test skipped: $reason", reason == null)
+
+        // Gate 2 — provider must actually authenticate. Doesn't pre-check
+        // credentials.json existence: credentials may live in the vault
+        // rather than as a plain file. The legacy file-existence check
+        // misses vault-stored profiles entirely (the user's `internxt`
+        // profile works for `unidrive status` because state.db has cached
+        // metadata, even when credentials.json is absent because the vault
+        // holds the real credentials). Attempting authenticate() lets the
+        // provider's own credential lookup decide.
+        val provider = InternxtProvider()
+        try {
+            runBlocking { provider.authenticate() }
+        } catch (e: Exception) {
+            val reason = "InternxtProvider.authenticate() failed: " +
+                "${e.message ?: e::class.java.simpleName}. " +
+                "If credentials are vault-stored, the no-arg InternxtProvider() " +
+                "may not pick them up — `unidrive -p internxt auth` writes " +
+                "credentials.json at the default path which the no-arg constructor reads. " +
+                "Default path: ${InternxtConfig().tokenPath.resolve("credentials.json")}"
+            println("TrackingEngineInternxtLiveTest: SKIPPED — $reason")
+            assumeTrue("Live Internxt test skipped: $reason", false)
+            return
+        }
 
         val workDir = createTempDirectory("ts-internxt-live")
         val syncRoot = workDir.resolve("sync-root").also { Files.createDirectories(it) }
         val dbPath = workDir.resolve("tracking.db")
 
-        val provider = InternxtProvider()
         val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
         try {
-            runBlocking { provider.authenticate() }
             val engine = TrackingEngine(provider, tracking, syncRoot, dryRun = true)
             val report = engine.syncOnce()
 
