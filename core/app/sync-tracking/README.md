@@ -279,7 +279,8 @@ core/app/sync-tracking/
     TrackingCli.kt          # picocli @Command tree + CliExtension entry
   src/main/resources/META-INF/services/org.krost.unidrive.cli.ext.CliExtension
   src/test/kotlin/org/krost/unidrive/tracking/
-    FakeTrackingProvider.kt           # in-memory CloudProvider for tests
-    TrackingReconcilerTest.kt         # case-table unit tests + BatchGuard
-    TrackingEngineIntegrationTest.kt  # .safe/ regression + lemma + happy paths
+    FakeTrackingProvider.kt              # in-memory CloudProvider for tests
+    TrackingReconcilerTest.kt            # case-table unit tests + BatchGuard
+    TrackingEngineIntegrationTest.kt     # .safe/ regression + lemma + happy paths
+    TrackingEngineInternxtLiveTest.kt    # lemma + downloads-only invariant against live Internxt
 ```

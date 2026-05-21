@@ -20,6 +20,10 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
+    // Live-integration test pointing the engine at a real Internxt provider.
+    // The test itself skips cleanly when UNIDRIVE_INTEGRATION_TESTS != true,
+    // so this dep is dormant for developers without an Internxt account.
+    testImplementation(project(":providers:internxt"))
 }
 
 tasks.test {
