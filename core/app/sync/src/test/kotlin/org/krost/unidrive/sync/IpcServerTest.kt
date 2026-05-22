@@ -349,4 +349,78 @@ class IpcServerTest {
             Files.deleteIfExists(syncSocket)
         }
     }
+
+    // ── Helpers for request/reply tests ──────────────────────────────────────
+
+    private fun tempSocket(): Path = socketDir.resolve("handler-${System.nanoTime()}.sock")
+
+    private suspend fun waitForSocket(path: Path, timeoutMs: Long = 3000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.exists(path)) {
+                try {
+                    SocketChannel.open(StandardProtocolFamily.UNIX).use { ch ->
+                        ch.connect(UnixDomainSocketAddress.of(path))
+                    }
+                    return
+                } catch (_: Exception) {}
+            }
+            delay(20)
+        }
+        error("Socket $path did not become available within ${timeoutMs}ms")
+    }
+
+    /** Opens a UDS connection, writes [request] + newline, reads one reply line. */
+    private suspend fun clientRoundTrip(path: Path, request: String): String {
+        val ch = SocketChannel.open(StandardProtocolFamily.UNIX)
+        ch.connect(UnixDomainSocketAddress.of(path))
+        ch.configureBlocking(false)
+        // Write request
+        val out = (request + "\n").toByteArray(Charsets.UTF_8)
+        val wbuf = ByteBuffer.wrap(out)
+        val writeDeadline = System.nanoTime() + 5_000_000_000L
+        while (wbuf.hasRemaining()) {
+            ch.write(wbuf)
+            if (wbuf.hasRemaining()) {
+                if (System.nanoTime() > writeDeadline) error("clientRoundTrip: write timeout")
+                delay(10)
+            }
+        }
+        // Read one reply line
+        val sb = StringBuilder()
+        val rbuf = ByteBuffer.allocate(8192)
+        val readDeadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < readDeadline) {
+            rbuf.clear()
+            val n = ch.read(rbuf)
+            if (n > 0) {
+                rbuf.flip()
+                val bytes = ByteArray(rbuf.remaining())
+                rbuf.get(bytes)
+                sb.append(String(bytes, Charsets.UTF_8))
+                if (sb.contains('\n')) break
+            }
+            delay(20)
+        }
+        ch.close()
+        return sb.toString()
+    }
+
+    @Test
+    fun `registered handler receives a client request and replies on the same connection`() = runBlocking {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("ping") { json -> """{"reply":"pong","echo":$json}""" }
+
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        val reply = clientRoundTrip(sockPath, """{"verb":"ping","arg":42}""")
+
+        assertEquals("""{"reply":"pong","echo":{"verb":"ping","arg":42}}""", reply.trim())
+
+        scope.cancel()
+        srv.close()
+    }
 }

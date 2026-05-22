@@ -57,9 +57,23 @@ class IpcServer(
     private val log = LoggerFactory.getLogger(IpcServer::class.java)
     private val clients = CopyOnWriteArrayList<SocketChannel>()
     private val channel = Channel<String>(capacity = 256)
+    private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String) -> String>()
     private var serverChannel: ServerSocketChannel? = null
     private var acceptJob: Job? = null
     private var broadcastJob: Job? = null
+
+    /**
+     * Register an inbound-verb handler. The handler receives the raw JSON
+     * line (excluding the trailing newline) and returns the JSON reply line
+     * (the server appends the newline). Verb dispatch keys on a top-level
+     * "verb" field in the request JSON. Throws IllegalArgumentException on
+     * duplicate registration (registration is one-shot per verb).
+     */
+    fun registerHandler(verb: String, handler: suspend (String) -> String) {
+        require(handlers.putIfAbsent(verb, handler) == null) {
+            "Handler for verb '$verb' is already registered"
+        }
+    }
 
     fun updateState(state: SyncState) {
         syncState = state
@@ -99,6 +113,31 @@ class IpcServer(
                         clients.add(client)
                         log.debug("IPC: client connected (total={})", clients.size)
                         flushStateDump(client)
+                        scope.launch(Dispatchers.IO) {
+                            val buf = ByteBuffer.allocate(MAX_REQUEST_BYTES)
+                            val pending = StringBuilder()
+                            try {
+                                while (isActive) {
+                                    buf.clear()
+                                    val n = client.read(buf)
+                                    if (n < 0) break  // client closed
+                                    if (n == 0) { delay(20); continue }
+                                    buf.flip()
+                                    val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
+                                    pending.append(String(bytes, Charsets.UTF_8))
+                                    // Split on \n; dispatch each complete line.
+                                    var idx = pending.indexOf('\n')
+                                    while (idx >= 0) {
+                                        val line = pending.substring(0, idx)
+                                        pending.delete(0, idx + 1)
+                                        dispatchRequest(client, line)
+                                        idx = pending.indexOf('\n')
+                                    }
+                                }
+                            } catch (e: IOException) {
+                                log.debug("IPC: client reader closed: {}", e.message)
+                            }
+                        }
                     } catch (_: java.nio.channels.AsynchronousCloseException) {
                         break
                     } catch (e: IOException) {
@@ -221,6 +260,43 @@ class IpcServer(
         return sb.toString()
     }
 
+    private suspend fun dispatchRequest(client: SocketChannel, line: String) {
+        val verb = parseVerb(line) ?: run {
+            log.warn("IPC: request without 'verb' field, dropping: {}", line.take(80))
+            return
+        }
+        val handler = handlers[verb] ?: run {
+            log.warn("IPC: no handler for verb '{}'", verb)
+            return
+        }
+        val reply = try {
+            handler(line)
+        } catch (e: Exception) {
+            log.error("IPC: handler '$verb' threw", e)
+            """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
+        }
+        runCatching {
+            writeNonBlocking(client, ByteBuffer.wrap((reply + "\n").toByteArray(Charsets.UTF_8)))
+        }
+    }
+
+    private fun parseVerb(line: String): String? {
+        // Minimal JSON probe — looks for "verb"\s*:\s*"..." at top level. Avoids
+        // pulling a full JSON parser into IpcServer for one field.
+        val key = "\"verb\""
+        val k = line.indexOf(key)
+        if (k < 0) return null
+        val colon = line.indexOf(':', k + key.length)
+        if (colon < 0) return null
+        val q1 = line.indexOf('"', colon)
+        if (q1 < 0) return null
+        val q2 = line.indexOf('"', q1 + 1)
+        if (q2 < 0) return null
+        return line.substring(q1 + 1, q2)
+    }
+
+    private fun escapeJson(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
     private fun writeNonBlocking(
         client: SocketChannel,
         buf: ByteBuffer,
@@ -241,6 +317,7 @@ class IpcServer(
         private const val MAX_CLIENTS = 10
         private const val WRITE_TIMEOUT_NS = 5_000_000_000L // 5 seconds
         private const val MAX_SOCKET_PATH_LENGTH = 90
+        private const val MAX_REQUEST_BYTES = 64 * 1024
 
         fun socketBaseName(profileName: String): String {
             val base = "unidrive-$profileName.sock"
