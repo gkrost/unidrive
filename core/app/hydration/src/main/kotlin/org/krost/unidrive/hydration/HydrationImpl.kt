@@ -35,7 +35,8 @@ class HydrationImpl(
             // SyncEngine, not part of the Hydration SPI contract.
             _events.emit(HydrationEvent.Hydrating(path))
             val p = syncEngine.ensureHydrated(path)
-            _events.emit(HydrationEvent.Hydrated(path, entry.remoteSize))
+            val bytes = java.nio.file.Files.size(p)
+            _events.emit(HydrationEvent.Hydrated(path, bytes))
             p
         } catch (e: Exception) {
             val err = HydrationError.Generic(e.message ?: "download failed")

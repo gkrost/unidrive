@@ -295,13 +295,6 @@ class SyncEngine(
     }
 
     /**
-     * Resolve the hydration cache path for a remote [path].
-     * Layout: `<effectiveCacheRoot>/unidrive/hydration/<providerId>/<path>`.
-     */
-    // Task 11 (Hydration SPI plan) will add a public `cachePathFor(path)`
-    // helper here that `HydrationImpl.dehydrate` calls to delete the cache
-    // file before flipping is_hydrated=0 in state.db.
-    /**
      * Resolves the cache file path for a given path within the hydration cache.
      * Exposed so test fixtures and the future `app:hydration` dehydrate cleanup hook
      * can resolve the same paths without duplicating layout logic.
