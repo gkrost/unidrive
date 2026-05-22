@@ -105,7 +105,7 @@ internal class MinimalFakeProvider(
  * - [hydration] — the [HydrationImpl] under test
  */
 internal class HydrationTestEnv {
-    private val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
+    val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
     private val fakeProvider = MinimalFakeProvider()
 
@@ -180,6 +180,22 @@ internal class HydrationTestEnv {
 
         /** Returns the content most recently uploaded to [path] via uploadFromCache. */
         fun remoteContentSeen(path: String): String? = fakeProvider.uploadedContent(path)
+
+        /**
+         * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.
+         * Used to pre-populate the cache for warm-path tests (already-hydrated scenarios).
+         */
+        fun seedCacheContent(path: String, content: String) {
+            // Mirror SyncEngine.resolveCachePath layout:
+            // cacheRoot/unidrive/hydration/{providerId}/{path}
+            // providerId defaults to "" in SyncEngine, so effective providerId is "default"
+            val cachePath = cacheRoot
+                .resolve("unidrive/hydration")
+                .resolve("default")
+                .resolve(path.trimStart('/'))
+            Files.createDirectories(cachePath.parent)
+            Files.write(cachePath, content.toByteArray())
+        }
     }
 }
 
@@ -249,5 +265,28 @@ class HydrationImplTest {
         val cacheFile2 = env.tempDir.resolve("world.txt").also { java.nio.file.Files.writeString(it, "reopen") }
         val reopen = env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile2)
         assertTrue(reopen is OpenResult.Ok)
+    }
+
+    @Test
+    fun `explicit hydrate on already-hydrated path is a noop ok`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        env.syncEngine.seedCacheContent("/foo.txt", "hello")
+
+        val r = env.hydration.hydrate("/foo.txt")
+
+        assertEquals(HydrateResult.Ok, r)
+    }
+
+    @Test
+    fun `explicit hydrate on unhydrated path downloads and returns ok`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/foo.txt", "hello")
+
+        val r = env.hydration.hydrate("/foo.txt")
+
+        assertEquals(HydrateResult.Ok, r)
+        assertEquals(true, env.stateDb.isHydrated("/foo.txt"))
     }
 }

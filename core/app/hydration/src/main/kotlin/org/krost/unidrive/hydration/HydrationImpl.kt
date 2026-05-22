@@ -68,7 +68,19 @@ class HydrationImpl(
     override suspend fun closeHandle(connectionId: String, handleId: String) {
         openSets[connectionId]?.remove(handleId)
     }
-    override suspend fun hydrate(path: String): HydrateResult = TODO("Task 10")
+    override suspend fun hydrate(path: String): HydrateResult {
+        return try {
+            _events.emit(HydrationEvent.Hydrating(path))
+            val cachePath = syncEngine.ensureHydrated(path)
+            val bytes = java.nio.file.Files.size(cachePath)
+            _events.emit(HydrationEvent.Hydrated(path, bytes))
+            HydrateResult.Ok
+        } catch (e: Exception) {
+            val err = HydrationError.Generic(e.message ?: "hydrate failed")
+            _events.emit(HydrationEvent.Failed(path, err))
+            HydrateResult.Failed(err)
+        }
+    }
     override suspend fun dehydrate(path: String): DehydrateResult = TODO("Task 11")
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
