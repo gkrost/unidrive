@@ -462,6 +462,17 @@ class StateDatabase(
         }
     }
 
+    /** Mark a path as no longer locally cached (is_hydrated = 0). */
+    @Synchronized
+    fun markUnhydrated(path: String) {
+        conn.prepareStatement(
+            "UPDATE sync_entries SET is_hydrated = 0 WHERE path = ? AND status = 'EXISTS'",
+        ).use { stmt ->
+            stmt.setString(1, path)
+            stmt.executeUpdate()
+        }
+    }
+
     @Synchronized
     fun getAllEntries(): List<SyncEntry> {
         conn.createStatement().use { stmt ->

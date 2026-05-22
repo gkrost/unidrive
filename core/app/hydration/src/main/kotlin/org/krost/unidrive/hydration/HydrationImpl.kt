@@ -81,7 +81,25 @@ class HydrationImpl(
             HydrateResult.Failed(err)
         }
     }
-    override suspend fun dehydrate(path: String): DehydrateResult = TODO("Task 11")
+    override suspend fun dehydrate(path: String): DehydrateResult {
+        // Check the open-set across ALL connections
+        val anyOpen = openSets.values.any { perConn -> perConn.containsValue(path) }
+        if (anyOpen) return DehydrateResult.Busy
+
+        return try {
+            val cachePath = syncEngine.resolveCachePath(path)
+            if (java.nio.file.Files.exists(cachePath)) {
+                java.nio.file.Files.delete(cachePath)
+            }
+            stateDb.markUnhydrated(path)
+            _events.emit(HydrationEvent.Dehydrated(path))
+            DehydrateResult.Ok
+        } catch (e: Exception) {
+            val err = HydrationError.Generic(e.message ?: "dehydrate failed")
+            _events.emit(HydrationEvent.Failed(path, err))
+            DehydrateResult.Failed(err)
+        }
+    }
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }

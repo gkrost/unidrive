@@ -286,4 +286,49 @@ class HydrationImplTest {
         assertEquals(HydrateResult.Ok, r)
         assertEquals(true, env.stateDb.isHydrated("/foo.txt"))
     }
+
+    @Test
+    fun `dehydrate refuses while a handle is open across any connection`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        env.syncEngine.seedCacheContent("/foo.txt", "hello")
+
+        env.hydration.openForRead("conn1", "h1", "/foo.txt")
+
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))
+    }
+
+    @Test
+    fun `dehydrate succeeds once all handles are closed`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        env.syncEngine.seedCacheContent("/foo.txt", "hello")
+
+        env.hydration.openForRead("conn1", "h1", "/foo.txt")
+        env.hydration.openForRead("conn2", "h1", "/foo.txt")  // different connection, same handle-id
+
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))
+        env.hydration.closeHandle("conn1", "h1")
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))  // still conn2
+        env.hydration.closeHandle("conn2", "h1")
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/foo.txt"))
+    }
+
+    @Test
+    fun `ipc disconnect clears that connection's open set entirely`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/a.txt", localSize = 1)
+        env.stateDb.insertHydratedEntry("/b.txt", localSize = 1)
+        env.syncEngine.seedCacheContent("/a.txt", "x")
+        env.syncEngine.seedCacheContent("/b.txt", "y")
+
+        env.hydration.openForRead("conn1", "h1", "/a.txt")
+        env.hydration.openForRead("conn1", "h2", "/b.txt")
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/a.txt"))
+
+        env.hydration.onConnectionClosed("conn1")
+
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/a.txt"))
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/b.txt"))
+    }
 }
