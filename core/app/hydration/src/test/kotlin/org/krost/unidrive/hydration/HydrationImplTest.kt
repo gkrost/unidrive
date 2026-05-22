@@ -238,5 +238,16 @@ class HydrationImplTest {
 
         assertTrue(r is OpenResult.Ok)
         assertEquals("world", env.syncEngine.remoteContentSeen("/foo.txt"))
+
+        // Verify the handle is tracked: close it and re-open with the same id; must succeed.
+        // If openForWrite never registered the handle, closeHandle would be a no-op on a missing
+        // entry, and the re-open would silently succeed even if registration code was wrong.
+        // But if registration DOES work, closing then re-opening with the same id exactly mirrors
+        // the close-then-reuse cycle tested in `close_handle removes the handle from its connection's open set`,
+        // so both registration AND closeHandle must work correctly.
+        env.hydration.closeHandle("conn1", "h1")
+        val cacheFile2 = env.tempDir.resolve("world.txt").also { java.nio.file.Files.writeString(it, "reopen") }
+        val reopen = env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile2)
+        assertTrue(reopen is OpenResult.Ok)
     }
 }

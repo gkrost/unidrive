@@ -64,6 +64,7 @@ class HydrationImpl(
             OpenResult.Failed(err)
         }
     }
+
     override suspend fun closeHandle(connectionId: String, handleId: String) {
         openSets[connectionId]?.remove(handleId)
     }
