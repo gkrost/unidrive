@@ -4,7 +4,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -347,6 +350,181 @@ class IpcServerTest {
         } finally {
             testServer.close()
             Files.deleteIfExists(syncSocket)
+        }
+    }
+
+    // ── Helpers for request/reply tests ──────────────────────────────────────
+
+    private fun tempSocket(): Path = socketDir.resolve("handler-${System.nanoTime()}.sock")
+
+    private suspend fun waitForSocket(path: Path, timeoutMs: Long = 3000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.exists(path)) {
+                try {
+                    SocketChannel.open(StandardProtocolFamily.UNIX).use { ch ->
+                        ch.connect(UnixDomainSocketAddress.of(path))
+                    }
+                    return
+                } catch (_: Exception) {}
+            }
+            delay(20)
+        }
+        error("Socket $path did not become available within ${timeoutMs}ms")
+    }
+
+    /** Opens a UDS connection, writes [request] + newline, reads one reply line. */
+    private suspend fun clientRoundTrip(path: Path, request: String): String {
+        val ch = SocketChannel.open(StandardProtocolFamily.UNIX)
+        ch.connect(UnixDomainSocketAddress.of(path))
+        ch.configureBlocking(false)
+        // Write request
+        val out = (request + "\n").toByteArray(Charsets.UTF_8)
+        val wbuf = ByteBuffer.wrap(out)
+        val writeDeadline = System.nanoTime() + 5_000_000_000L
+        while (wbuf.hasRemaining()) {
+            ch.write(wbuf)
+            if (wbuf.hasRemaining()) {
+                if (System.nanoTime() > writeDeadline) error("clientRoundTrip: write timeout")
+                delay(10)
+            }
+        }
+        // Read one reply line
+        val sb = StringBuilder()
+        val rbuf = ByteBuffer.allocate(8192)
+        val readDeadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < readDeadline) {
+            rbuf.clear()
+            val n = ch.read(rbuf)
+            if (n > 0) {
+                rbuf.flip()
+                val bytes = ByteArray(rbuf.remaining())
+                rbuf.get(bytes)
+                sb.append(String(bytes, Charsets.UTF_8))
+                if (sb.contains('\n')) break
+            }
+            delay(20)
+        }
+        ch.close()
+        return sb.toString()
+    }
+
+    @Test
+    fun `registered handler receives a client request and replies on the same connection`() = runBlocking(Dispatchers.IO) {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("ping") { _, json -> """{"reply":"pong","echo":$json}""" }
+
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        val reply = clientRoundTrip(sockPath, """{"verb":"ping","arg":42}""")
+
+        assertEquals("""{"reply":"pong","echo":{"verb":"ping","arg":42}}""", reply.trim())
+
+        scope.cancel()
+        srv.close()
+    }
+
+    @Test
+    fun `registerHandler throws on duplicate registration`() {
+        val srv = IpcServer(tempSocket())
+        srv.registerHandler("ping") { _, _ -> """{"ok":true}""" }
+        assertFailsWith<IllegalArgumentException> {
+            srv.registerHandler("ping") { _, _ -> """{"ok":false}""" }
+        }
+    }
+
+    @Test
+    fun `handler exception produces error JSON reply`() = runBlocking(Dispatchers.IO) {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("boom") { _, _ -> throw RuntimeException("kaboom") }
+
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        val reply = clientRoundTrip(sockPath, """{"verb":"boom"}""")
+
+        assertTrue(reply.contains("\"error\":\"handler_threw\""), "Expected handler_threw in: $reply")
+        assertTrue(reply.contains("\"verb\":\"boom\""), "Expected verb in: $reply")
+        assertTrue(reply.contains("kaboom"), "Expected exception message in: $reply")
+
+        scope.cancel()
+        srv.close()
+    }
+
+    @Test
+    fun `concurrent broadcast and RPC reply produce valid NDJSON lines`() = runBlocking(Dispatchers.IO) {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("echo") { _, json -> """{"reply":"ok","echo":$json}""" }
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        // One persistent listener client collects broadcast lines.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val listener = scope.launch {
+            java.nio.channels.SocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { sc ->
+                sc.connect(java.net.UnixDomainSocketAddress.of(sockPath))
+                sc.configureBlocking(false)
+                val buf = java.nio.ByteBuffer.allocate(4096)
+                val sb = StringBuilder()
+                while (isActive) {
+                    buf.clear()
+                    val n = sc.read(buf)
+                    if (n < 0) break
+                    if (n == 0) { delay(10); continue }
+                    buf.flip()
+                    sb.append(java.nio.charset.StandardCharsets.UTF_8.decode(buf).toString())
+                    var idx = sb.indexOf('\n')
+                    while (idx >= 0) {
+                        received.add(sb.substring(0, idx))
+                        sb.delete(0, idx + 1)
+                        idx = sb.indexOf('\n')
+                    }
+                }
+            }
+        }
+
+        // Give the listener time to subscribe before hammering.
+        val deadline = System.currentTimeMillis() + 3000
+        while (srv.clientCount < 1 && System.currentTimeMillis() < deadline) delay(20)
+
+        // Fire 50 broadcasts + 50 RPC round-trips (batched 8 at a time so MAX_CLIENTS=10
+        // is not exceeded: 1 persistent listener + up to 8 in-flight RPC clients = 9 max).
+        // RPC calls are wrapped in runCatching because a concurrent broadcast may close a
+        // client connection mid-write under load; the assertion below catches NDJSON interleaving
+        // on the persistent listener which is the invariant under test.
+        repeat(7) { batch ->
+            coroutineScope {
+                repeat(8) { i ->
+                    val n = batch * 8 + i
+                    launch { srv.emit("""{"event":"tick","n":$n}""") }
+                    launch { runCatching { clientRoundTrip(sockPath, """{"verb":"echo","n":$n}""") } }
+                }
+            }
+        }
+        // Remaining 2 (indices 56..57 — just ensure we issued at least 50 total)
+        coroutineScope {
+            repeat(2) { i ->
+                launch { srv.emit("""{"event":"tick","n":${56 + i}}""") }
+                launch { runCatching { clientRoundTrip(sockPath, """{"verb":"echo","n":${56 + i}}""") } }
+            }
+        }
+
+        delay(500) // drain
+        listener.cancel()
+        scope.cancel()
+        srv.close()
+
+        // Every received line must be valid JSON: starts with { and ends with }.
+        assertTrue(received.size >= 50, "Should have received at least the broadcasts, got ${received.size}")
+        for (line in received) {
+            assertTrue(line.startsWith("{") && line.endsWith("}"), "Garbled NDJSON: '$line'")
         }
     }
 }

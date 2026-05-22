@@ -8,6 +8,7 @@ import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
@@ -15,6 +16,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -97,6 +99,10 @@ class SyncEngine(
     // shape — the channel + executor coroutine wiring lands separately.
     // Default false; flipped by the CLI flag + TOML key.
     private val streamingReconciliation: Boolean = false,
+    // Root directory for the hydration cache used by ensureHydrated /
+    // uploadFromCache. Null means resolve via XDG_CACHE_HOME (or ~/.cache).
+    // Injected in tests so the cache stays inside the temp directory.
+    private val cacheRoot: Path? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -162,6 +168,148 @@ class SyncEngine(
             echoUnsuppress?.invoke(path)
         }
     }
+
+    // ── Hydration SPI — public hooks for app:hydration ───────────────────────
+
+    /**
+     * Hydrate a single remote path into the local hydration cache. Idempotent —
+     * if the path is already hydrated and the cache file exists, returns the
+     * existing cache path without re-downloading. Throws on unrecoverable errors
+     * (e.g. [PermanentDownloadFailureException] for a 404; IO errors; unknown
+     * path).
+     *
+     * Cache layout: `<cacheRoot>/unidrive/hydration/<providerId>/<path>` where
+     * `cacheRoot` is [cacheRoot] when set, otherwise `XDG_CACHE_HOME` or
+     * `~/.cache`.
+     *
+     * Integrity failure throws (not warns) because FUSE-passthrough exposes the
+     * cache directly to userspace reads — a silently accepted corrupt file would
+     * be immediately visible to the user, unlike [applyDownload]'s
+     * local-placeholder path where a warning is recoverable on the next sync.
+     */
+    suspend fun ensureHydrated(path: String): Path {
+        val entry = db.getEntry(path)
+            ?: throw IllegalArgumentException("Unknown remote path: $path")
+        val cachePath = resolveCachePath(path)
+        if (entry.isHydrated && Files.exists(cachePath)) {
+            return cachePath
+        }
+        // Construct a minimal CloudItem so downloadByIdOrPath can route by id
+        // (fast path) or fall back to path-based (when remoteId is null).
+        val remoteItem = CloudItem(
+            id = entry.remoteId ?: "",
+            name = path.substringAfterLast("/"),
+            path = path,
+            size = entry.remoteSize,
+            isFolder = false,
+            modified = entry.remoteModified ?: Instant.now(),
+            created = entry.remoteModified ?: Instant.now(),
+            hash = entry.remoteHash,
+            mimeType = null,
+        )
+        Files.createDirectories(cachePath.parent)
+        downloadByIdOrPath(remoteItem, path, cachePath)
+        if (verifyIntegrity) {
+            val verified = HashVerifier.verify(cachePath, entry.remoteHash, algorithm = provider.hashAlgorithm())
+            if (!verified) {
+                Files.deleteIfExists(cachePath)
+                throw IllegalStateException("Integrity check failed for hydration cache: $path")
+            }
+        }
+        db.upsertEntry(
+            (db.getEntry(path) ?: entry).copy(
+                isHydrated = true,
+                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                localSize = Files.size(cachePath),
+                lastSynced = Instant.now(),
+            ),
+        )
+        return cachePath
+    }
+
+    /**
+     * Upload the local cache file at [cachePath] as the content for remote
+     * [path]. Used by the hydration write-through path when a FUSE RELEASE
+     * indicates the cache content changed. Updates the DB row with the new
+     * remote metadata (id, hash, size, mtime).
+     */
+    suspend fun uploadFromCache(
+        path: String,
+        cachePath: Path,
+    ) {
+        require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
+        val existingEntry = db.getEntry(path)
+        val prevHash = existingEntry?.remoteHash
+        val existingRemoteId = existingEntry?.remoteId
+        val sizeForLog = Files.size(cachePath)
+        val result =
+            try {
+                provider.upload(cachePath, path, existingRemoteId = existingRemoteId) { transferred, total ->
+                    reporter.onTransferProgress(path, transferred, total)
+                }
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Upload",
+                    path = path,
+                    size = sizeForLog,
+                    oldHash = prevHash,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
+        val mtime = Files.getLastModifiedTime(cachePath).toMillis()
+        val size = Files.size(cachePath)
+        val existing = db.getEntry(path)
+        db.upsertEntry(
+            existing?.copy(
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ) ?: SyncEntry(
+                path = path,
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+        auditLog?.emit(
+            action = "Upload",
+            path = path,
+            size = size,
+            oldHash = prevHash,
+            newHash = result.hash,
+            result = "success",
+        )
+    }
+
+    /**
+     * Resolves the cache file path for a given path within the hydration cache.
+     * Exposed so test fixtures and the future `app:hydration` dehydrate cleanup hook
+     * can resolve the same paths without duplicating layout logic.
+     */
+    fun resolveCachePath(path: String): Path {
+        val effectiveRoot = cacheRoot
+            ?: (System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
+                ?: Paths.get(System.getProperty("user.home"), ".cache"))
+        return effectiveRoot
+            .resolve("unidrive/hydration")
+            .resolve(providerId.ifBlank { "default" })
+            .resolve(path.trimStart('/'))
+    }
+
+    // ── End Hydration SPI ─────────────────────────────────────────────────────
 
     suspend fun syncOnce(
         dryRun: Boolean = false,
@@ -524,9 +672,12 @@ class SyncEngine(
         // needs to download — refusing to run there blocks the UD-225
         // recovery loop from doing its job. The original concern (mass
         // DeleteRemote when sync_root is mis-pointed) only applies when
-        // hydrated entries are missing locally; LocalScanner now skips
-        // unhydrated rows in its deletion-detection loop, so the only
-        // way to generate Delete actions here is via hydrated rows.
+        // hydrated entries are missing locally; the Reconciler rewrites
+        // unhydrated-FILE DELETED localChanges into DownloadContent via
+        // its UD-225a recovery downgrade, and drops DeleteRemote actions
+        // for unhydrated-FOLDER rows in a post-detectMoves filter, so
+        // the only way DeleteRemote reaches the apply phase is via
+        // hydrated rows.
         // Live repro 2026-05-20: 171 386 file rows all is_hydrated=0,
         // sync_root empty, old guard refused with a misleading
         // "--force-delete" hint that would have catastrophically wiped
@@ -562,6 +713,7 @@ class SyncEngine(
             } else {
                 reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
             }
+        logUnhydratedFolderSkips()
 
         // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
@@ -940,6 +1092,9 @@ class SyncEngine(
                                         } catch (e: CancellationException) {
                                             restoreToPlaceholder(action.path, action.remoteItem)
                                             throw e
+                                        } catch (e: PermanentDownloadFailureException) {
+                                            handlePermanentDownloadFailure(action, e)
+                                            transferFailures.incrementAndGet()
                                         } catch (e: Exception) {
                                             // UD-253: class name + throwable (SLF4J stack trace).
                                             log.warn(
@@ -1331,6 +1486,10 @@ class SyncEngine(
                 } catch (e: CancellationException) {
                     restoreToPlaceholder(action.path, action.remoteItem)
                     throw e
+                } catch (e: PermanentDownloadFailureException) {
+                    handlePermanentDownloadFailure(action, e)
+                    transferFailures.incrementAndGet()
+                    executedPaths.add(action.path)
                 } catch (e: Exception) {
                     log.warn(
                         "Streaming download failed for {}: {}: {}",
@@ -1899,7 +2058,13 @@ class SyncEngine(
      * Empty `item.id` falls through to path-based download — defensive for
      * synthesized CloudItems where `entry.remoteId` was null.
      */
-    private suspend fun downloadByIdOrPath(
+    /**
+     * Visibility relaxed to `internal` so [ensureHydrated] (the app:hydration
+     * integration point) can download directly to the hydration cache path
+     * rather than the syncRoot placeholder path. No other cross-module callers
+     * are intended.
+     */
+    internal suspend fun downloadByIdOrPath(
         item: CloudItem,
         remotePath: String,
         destination: java.nio.file.Path,
@@ -2385,6 +2550,16 @@ class SyncEngine(
                     remoteSize = item.size,
                     remoteModified = item.modified,
                     lastSynced = Instant.now(),
+                    // A fresh delta event for a previously-quarantined row
+                    // means the cloud is reporting it alive again — drop the
+                    // quarantine and let the next reconcile re-emit the
+                    // download. Belt-and-braces with
+                    // StateDatabase.clearDownloadQuarantine below: that call
+                    // wins on the canonical SQL UPDATE; this copy ensures
+                    // any consumer reading the merged value inside this loop
+                    // sees the cleared state too.
+                    downloadQuarantined = false,
+                    lastErrorAt = null,
                     // preserve localMtime, localSize, isHydrated, isFolder
                 ) ?: SyncEntry(
                     path = path,
@@ -2400,6 +2575,13 @@ class SyncEngine(
                     lastSynced = Instant.now(),
                 )
             db.upsertEntry(merged)
+            // Belt-and-braces (matches the .copy() above): explicitly clear
+            // the quarantine flag on the canonical row in case a future
+            // upsertEntry call path mutates the row without going through
+            // the merged.copy() construction above.
+            if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
+                db.clearDownloadQuarantine(existing.remoteId)
+            }
         }
     }
 
@@ -2551,6 +2733,57 @@ class SyncEngine(
             )
         }
         return kept
+    }
+
+    /**
+     * Permanent-download-failure handler. The provider has signalled that
+     * the remote object is gone (stable 404), so we mark the row's
+     * `download_quarantined` flag and stop retrying — without this, the
+     * UD-225 recovery loop re-emits a DownloadContent on every pass and
+     * the engine burns cycles forever (live evidence: 1,248 retries of a
+     * single zero-byte file over 8 hours). The flag clears automatically
+     * when a fresh delta event re-reports the same remote_id via
+     * [updateRemoteEntries] → [StateDatabase.clearDownloadQuarantine].
+     */
+    private fun handlePermanentDownloadFailure(
+        action: SyncAction.DownloadContent,
+        e: PermanentDownloadFailureException,
+    ) {
+        log.warn(
+            "Permanent download failure for {}: {}: {} — quarantining row",
+            action.path,
+            e.javaClass.simpleName,
+            e.message,
+        )
+        reporter.onWarning("Permanent failure: ${action.path} - ${e.message}")
+        logFailure(action, e)
+        restoreToPlaceholder(action.path, action.remoteItem)
+        val remoteId = action.remoteItem.id
+        if (remoteId.isNotEmpty()) {
+            db.setDownloadQuarantine(remoteId, Instant.now())
+        }
+    }
+
+    /**
+     * Audit-log surface for `DeleteRemote` actions that the reconciler
+     * dropped because the target was an unhydrated folder row. The
+     * Reconciler strips those actions for safety (see
+     * `Reconciler.dropUnhydratedFolderDeletes`); the engine reads the
+     * dropped paths from `reconciler.lastUnhydratedFolderDeletes` and
+     * writes them to `skipped-ops.jsonl` so operators can see what was
+     * suppressed, matching the audit shape UD-264 uses for the
+     * top-level-never-hydrated guard.
+     */
+    private fun logUnhydratedFolderSkips() {
+        val skipped = reconciler.lastUnhydratedFolderDeletes
+        if (skipped.isEmpty()) return
+        for (path in skipped) {
+            logSkippedOp(SyncAction.DeleteRemote(path), "unhydrated_folder")
+        }
+        log.warn(
+            "skipped {} del-remote action(s) for unhydrated folder rows (see skipped-ops.jsonl)",
+            skipped.size,
+        )
     }
 
     // UD-264: append a JSON line to skipped-ops.jsonl. Goes through

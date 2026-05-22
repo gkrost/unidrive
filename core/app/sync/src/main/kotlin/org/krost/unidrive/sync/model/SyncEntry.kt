@@ -21,6 +21,17 @@ data class SyncEntry(
     // cloud parent isn't known yet.
     val parentUuid: String? = null,
     val status: EntryStatus = EntryStatus.EXISTS,
+    // Permanent-failure quarantine flag. True when a download against this
+    // row's remote_id returned a stable 404 ("object is gone, retry won't
+    // recover it"). The recovery loops in Reconciler skip quarantined rows
+    // so the engine doesn't burn cycles retrying the same dead identifier;
+    // the next delta event that re-reports the same remote_id clears the
+    // flag (handled in updateRemoteEntries).
+    val downloadQuarantined: Boolean = false,
+    // Timestamp of the last permanent failure that set [downloadQuarantined].
+    // Recorded for operator audit; not currently used as input to any
+    // policy decision.
+    val lastErrorAt: Instant? = null,
 )
 
 /**

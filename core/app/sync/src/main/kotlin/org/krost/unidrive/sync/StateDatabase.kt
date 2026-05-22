@@ -111,20 +111,22 @@ class StateDatabase(
             stmt.executeUpdate(
                 """
                 CREATE TABLE IF NOT EXISTS sync_entries (
-                    remote_id       TEXT PRIMARY KEY,
-                    parent_uuid     TEXT,
-                    path            TEXT NOT NULL,
-                    remote_hash     TEXT,
-                    remote_size     INTEGER NOT NULL DEFAULT 0,
-                    remote_modified TEXT,
-                    local_mtime     INTEGER,
-                    local_size      INTEGER,
-                    is_folder       INTEGER NOT NULL DEFAULT 0,
-                    is_pinned       INTEGER NOT NULL DEFAULT 0,
-                    is_hydrated     INTEGER NOT NULL DEFAULT 0,
-                    last_synced     TEXT NOT NULL,
-                    status          TEXT NOT NULL DEFAULT 'EXISTS'
-                                    CHECK (status IN ('EXISTS','TRASHED','DELETED'))
+                    remote_id            TEXT PRIMARY KEY,
+                    parent_uuid          TEXT,
+                    path                 TEXT NOT NULL,
+                    remote_hash          TEXT,
+                    remote_size          INTEGER NOT NULL DEFAULT 0,
+                    remote_modified      TEXT,
+                    local_mtime          INTEGER,
+                    local_size           INTEGER,
+                    is_folder            INTEGER NOT NULL DEFAULT 0,
+                    is_pinned            INTEGER NOT NULL DEFAULT 0,
+                    is_hydrated          INTEGER NOT NULL DEFAULT 0,
+                    last_synced          TEXT NOT NULL,
+                    status               TEXT NOT NULL DEFAULT 'EXISTS'
+                                         CHECK (status IN ('EXISTS','TRASHED','DELETED')),
+                    download_quarantined INTEGER NOT NULL DEFAULT 0,
+                    last_error_at        TEXT
                 )
             """,
             )
@@ -224,6 +226,22 @@ class StateDatabase(
             if (!columnExists("scan_staging", "reconciled")) {
                 stmt.executeUpdate(
                     "ALTER TABLE scan_staging ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+            // Permanent-failure quarantine columns on `sync_entries`. Mirrors
+            // the additive-column pattern used for `scan_staging.reconciled`
+            // — no schema_version bump because the columns carry safe
+            // defaults (0 / NULL) so any pre-quarantine row reads as
+            // "not quarantined", which is the correct initial state. The
+            // CREATE TABLE above already includes them for fresh installs.
+            if (!columnExists("sync_entries", "download_quarantined")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN download_quarantined INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+            if (!columnExists("sync_entries", "last_error_at")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN last_error_at TEXT",
                 )
             }
         }
@@ -342,8 +360,9 @@ class StateDatabase(
                 """
             INSERT OR REPLACE INTO sync_entries
                 (remote_id, parent_uuid, path, remote_hash, remote_size, remote_modified,
-                 local_mtime, local_size, is_folder, is_pinned, is_hydrated, last_synced, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 local_mtime, local_size, is_folder, is_pinned, is_hydrated, last_synced, status,
+                 download_quarantined, last_error_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             ).use { stmt ->
                 val storedId = entry.remoteId ?: pickSyntheticIdForPath(entry.path)
@@ -360,6 +379,8 @@ class StateDatabase(
                 stmt.setInt(11, if (entry.isHydrated) 1 else 0)
                 stmt.setString(12, entry.lastSynced.toString())
                 stmt.setString(13, entry.status.name)
+                stmt.setInt(14, if (entry.downloadQuarantined) 1 else 0)
+                stmt.setString(15, entry.lastErrorAt?.toString())
                 stmt.executeUpdate()
             }
     }
@@ -438,6 +459,17 @@ class StateDatabase(
             val rs = stmt.executeQuery("SELECT COUNT(*) FROM alive_entries WHERE is_hydrated = 1")
             rs.next()
             return rs.getInt(1)
+        }
+    }
+
+    /** Mark a path as no longer locally cached (is_hydrated = 0). */
+    @Synchronized
+    fun markUnhydrated(path: String) {
+        conn.prepareStatement(
+            "UPDATE sync_entries SET is_hydrated = 0 WHERE path = ? AND status = 'EXISTS'",
+        ).use { stmt ->
+            stmt.setString(1, path)
+            stmt.executeUpdate()
         }
     }
 
@@ -537,6 +569,51 @@ class StateDatabase(
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET status='TRASHED' WHERE remote_id=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, remoteId)
+                return stmt.executeUpdate() == 1
+            }
+    }
+
+    /**
+     * Mark a row as permanently-failed for download, keyed by `remote_id`.
+     * Triggered when `applyDownload` catches a stable 404 (object is gone,
+     * retry won't recover it — see [PermanentDownloadFailureException]).
+     * The reconciler skips quarantined rows in its UD-225 recovery loop;
+     * the flag clears automatically when a delta event re-reports the same
+     * remote_id via [clearDownloadQuarantine]. Returns true if exactly one
+     * row was flipped.
+     */
+    @Synchronized
+    fun setDownloadQuarantine(
+        remoteId: String,
+        at: Instant,
+    ): Boolean {
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET download_quarantined=1, last_error_at=? " +
+                    "WHERE remote_id=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, at.toString())
+                stmt.setString(2, remoteId)
+                return stmt.executeUpdate() == 1
+            }
+    }
+
+    /**
+     * Clear the permanent-failure quarantine flag on a row. Called when a
+     * fresh delta event reports the same `remote_id` as alive — that's the
+     * cloud telling us "the object is back" (or "it was never gone, the
+     * 404 was a transient cluster-level fault"), so we drop the
+     * quarantine and let the next reconcile re-emit the download.
+     * Idempotent — a no-op on rows that aren't quarantined.
+     */
+    @Synchronized
+    fun clearDownloadQuarantine(remoteId: String): Boolean {
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET download_quarantined=0, last_error_at=NULL " +
+                    "WHERE remote_id=? AND download_quarantined=1",
             ).use { stmt ->
                 stmt.setString(1, remoteId)
                 return stmt.executeUpdate() == 1
@@ -963,6 +1040,8 @@ class StateDatabase(
             isHydrated = getInt("is_hydrated") == 1,
             lastSynced = Instant.parse(getString("last_synced")),
             status = EntryStatus.valueOf(getString("status")),
+            downloadQuarantined = getInt("download_quarantined") == 1,
+            lastErrorAt = getString("last_error_at")?.let { Instant.parse(it) },
         )
     }
 

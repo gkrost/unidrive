@@ -45,13 +45,34 @@ val generateBuildInfo =
                 }.standardOutput.asText
                 .map { it.trim() }
         // UD-733: GIT_DIRTY surfaces uncommitted-build warnings at startup so
-        // users don't file bug reports against transient WIP state. `git
-        // status --porcelain` is empty iff the worktree is clean; output
-        // length collapses to a single boolean.
-        val gitDirty =
+        // users don't file bug reports against transient WIP state. Mode-only
+        // diffs (e.g. a chmod +x on a tracked script) don't change file
+        // contents and CAN be reproduced from main — they must not flip the
+        // build dirty. `git diff HEAD --numstat` reports added/deleted line
+        // counts per tracked path; mode-only changes show `0\t0\t<path>`.
+        // Binary diffs show `-\t-\t<path>` and count as dirty. Untracked
+        // files (not under HEAD) are detected separately.
+        val gitContentDiff =
             providers
                 .exec {
-                    commandLine("git", "status", "--porcelain")
+                    commandLine("git", "diff", "HEAD", "--numstat")
+                }.standardOutput.asText
+                .map { out ->
+                    out.lineSequence().any { line ->
+                        if (line.isBlank()) return@any false
+                        val parts = line.split('\t')
+                        if (parts.size < 2) return@any false
+                        val added = parts[0]
+                        val deleted = parts[1]
+                        // Binary file changes: treat as dirty.
+                        if (added == "-" || deleted == "-") return@any true
+                        (added.toIntOrNull() ?: 0) > 0 || (deleted.toIntOrNull() ?: 0) > 0
+                    }
+                }
+        val gitUntracked =
+            providers
+                .exec {
+                    commandLine("git", "ls-files", "--others", "--exclude-standard")
                 }.standardOutput.asText
                 .map { it.trim().isNotEmpty() }
 
@@ -64,7 +85,7 @@ val generateBuildInfo =
                 }
             val dirty =
                 try {
-                    gitDirty.get()
+                    gitContentDiff.get() || gitUntracked.get()
                 } catch (_: Exception) {
                     false
                 }
@@ -384,6 +405,7 @@ dependencies {
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
     implementation(project(":app:sync"))
+    implementation(project(":app:hydration"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.slf4j) // UD-212: MDCContext for profile MDC propagation

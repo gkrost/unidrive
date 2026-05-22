@@ -36,6 +36,18 @@ class Reconciler(
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
+    /**
+     * DeleteRemote actions that the last [reconcile] / [finalizeStreaming]
+     * call dropped because the target row is an unhydrated folder
+     * placeholder. The engine reads this after each reconcile pass and
+     * writes the entries to `skipped-ops.jsonl` for operator audit (same
+     * channel the UD-264 top-level-never-hydrated guard uses). Reset at
+     * the start of each reconcile call. Mirrors [LocalScanner.lastScanSkipped]
+     * in shape.
+     */
+    var lastUnhydratedFolderDeletes: List<String> = emptyList()
+        private set
+
     fun reconcile(
         remoteChanges: Map<String, CloudItem>,
         localChanges: Map<String, ChangeState>,
@@ -230,6 +242,14 @@ class Reconciler(
             // UD-901a: respect syncPath scope; orphans outside the user's requested
             // subtree must NOT be silently surfaced.
             if (!pathInSyncScope(entry.path, syncPath)) continue
+            // Permanent-failure quarantine: skip rows whose last download
+            // returned a stable 404 ("Bucket entry … not found"). Without
+            // this guard, UD-225 recovery re-emits a DownloadContent every
+            // pass and the engine burns cycles retrying the same dead
+            // identifier (live evidence: 1,248 retries over 8h). The flag
+            // clears automatically when a fresh delta event re-reports the
+            // same remote_id via SyncEngine.updateRemoteEntries.
+            if (entry.downloadQuarantined) continue
             val remoteItem =
                 remoteChanges[entry.path] ?: CloudItem(
                     id = entry.remoteId ?: "",
@@ -307,6 +327,7 @@ class Reconciler(
 
         detectMoves(actions, entryByPath)
         detectRemoteRenames(actions, remoteChanges, entryByRemoteId)
+        lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
         val sorted = sortActions(actions)
         log.info(
@@ -508,6 +529,7 @@ class Reconciler(
         // per-page detection would miss renames that span page boundaries.
         detectMoves(actions, entryByPath)
         detectRemoteRenames(actions, fullRemote, entryByRemoteId)
+        lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
         return sortActions(actions)
     }
@@ -625,22 +647,34 @@ class Reconciler(
                     //
                     // Folders are not handled here; isHydrated semantics for folders
                     // are different (they represent on-disk directory presence, not
-                    // file content), and the folder-placeholder recovery is out of
-                    // scope for UD-225a.
+                    // file content). Unhydrated folder rows whose path is missing
+                    // on disk fall through to DeleteRemote below; the
+                    // post-detectMoves dropUnhydratedFolderDeletes filter strips
+                    // those actions once move-detection has had a chance to pair
+                    // them with a matching CreateRemoteFolder destination.
                     entry != null && !entry.isHydrated && !entry.isFolder -> {
-                        val item =
-                            remoteItem ?: CloudItem(
-                                id = entry.remoteId ?: "",
-                                name = path.substringAfterLast('/'),
-                                path = path,
-                                size = entry.remoteSize,
-                                isFolder = false,
-                                modified = entry.remoteModified,
-                                created = null,
-                                hash = entry.remoteHash,
-                                mimeType = null,
-                            )
-                        SyncAction.DownloadContent(path, item)
+                        // Sibling skip to the UD-225 recovery loop above: a
+                        // quarantined row has already burned through the
+                        // recovery cycle once and was confirmed permanently
+                        // gone. Drop the action; the next delta event
+                        // clears the flag.
+                        if (entry.downloadQuarantined) {
+                            null
+                        } else {
+                            val item =
+                                remoteItem ?: CloudItem(
+                                    id = entry.remoteId ?: "",
+                                    name = path.substringAfterLast('/'),
+                                    path = path,
+                                    size = entry.remoteSize,
+                                    isFolder = false,
+                                    modified = entry.remoteModified,
+                                    created = null,
+                                    hash = entry.remoteHash,
+                                    mimeType = null,
+                                )
+                            SyncAction.DownloadContent(path, item)
+                        }
                     }
                     // Otherwise: real user delete on a hydrated row → propagate.
                     else -> SyncAction.DeleteRemote(path)
@@ -668,6 +702,48 @@ class Reconciler(
             if (path.startsWith("/$prefix") || path.startsWith(prefix)) return policy
         }
         return defaultPolicy
+    }
+
+    /**
+     * Drops surviving `DeleteRemote` actions whose DB row is an unhydrated
+     * folder. An unhydrated folder row is a planned-but-unfulfilled
+     * placeholder — the remote folder was enumerated into `state.db` but
+     * the user never visited it, so it never materialised on disk. A
+     * missing-from-disk signal for such a row is the EXPECTED state, not
+     * a user delete; propagating it as `DeleteRemote` would plan deletion
+     * of every cloud folder the user never visited on a sparse-hydration
+     * profile.
+     *
+     * Runs AFTER [detectMoves] so that legitimate folder moves — where
+     * `DeleteRemote(source)` + `CreateRemoteFolder(destination)` pair into
+     * `MoveRemote` — are still detected even when the source row is
+     * unhydrated. Only DeleteRemote actions that survive move-detection
+     * (no matching CreateRemoteFolder destination) are dropped here.
+     *
+     * Returns the paths that were dropped so the engine can write them to
+     * `skipped-ops.jsonl` for operator audit (same channel UD-264's guard
+     * uses for top-level-never-hydrated drops).
+     */
+    private fun dropUnhydratedFolderDeletes(
+        actions: MutableList<SyncAction>,
+        entryByPath: Map<String, SyncEntry>,
+    ): List<String> {
+        val dropped = mutableListOf<String>()
+        actions.removeAll { action ->
+            if (action !is SyncAction.DeleteRemote) return@removeAll false
+            val entry = entryByPath[action.path] ?: return@removeAll false
+            val match = entry.isFolder && !entry.isHydrated
+            if (match) dropped.add(action.path)
+            match
+        }
+        if (dropped.isNotEmpty()) {
+            log.warn(
+                "Dropped {} DeleteRemote action(s) for unhydrated folder rows: {}",
+                dropped.size,
+                dropped.take(5).joinToString(",") + if (dropped.size > 5) ",… (${dropped.size - 5} more)" else "",
+            )
+        }
+        return dropped
     }
 
     private fun detectMoves(

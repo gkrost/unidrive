@@ -2,6 +2,7 @@ package org.krost.unidrive.sync
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
 import java.nio.file.Files
 import java.nio.file.Path
@@ -984,10 +985,18 @@ class SyncEngineTest {
     )
 
     @Test
-    fun `UD-264 del-remote for never-hydrated top-level is skipped`() =
+    fun `del-remote for unhydrated folder rows is skipped and audited`() =
         runTest {
             // Three unhydrated folders under /Documents; sync_root has one file
             // so UD-297 doesn't preempt. Provider returns no delta.
+            //
+            // The Reconciler drops DeleteRemote actions for unhydrated folder
+            // rows before they reach the action executor — a sparse-hydration
+            // profile would otherwise plan destruction of every cloud folder
+            // the user never visited (the 2026-05-16 incident shape on
+            // `inxt_gernot_krost_posteo`). The engine writes the dropped paths
+            // to `skipped-ops.jsonl` for operator audit; this test pins both
+            // halves of that contract.
             seedUnhydratedFolders("/Documents", count = 3)
             Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
             provider.deltaItems = emptyList()
@@ -1005,7 +1014,7 @@ class SyncEngineTest {
             assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written")
             val logBody = Files.readString(logPath)
             assertTrue(
-                logBody.contains("top_level_never_hydrated"),
+                logBody.contains("unhydrated_folder"),
                 "skipped-ops.jsonl should record the reason, got: $logBody",
             )
             assertTrue(
@@ -1046,48 +1055,74 @@ class SyncEngineTest {
     }
 
     @Test
-    fun `UD-264 del-remote for top-level WITH hydrated descendant is propagated`() =
+    fun `del-remote for hydrated row under hydrated top-level is propagated`() =
         runTest {
-            // Three unhydrated folders under /Documents, PLUS one hydrated
-            // descendant file. The hydrated descendant is the user signal
-            // that this subtree IS known to unidrive — guard must allow
-            // delete propagation through.
-            seedUnhydratedFolders("/Documents", count = 3)
-            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A hydrated file row is locally missing — the user deleted it
+            // from disk while the remote still has it. The Reconciler emits
+            // DeleteRemote (hydrated rows ARE legitimate user-delete signals).
+            // The unhydrated-folder filter does not fire because the row is a
+            // file. UD-264's top-level guard does not fire because the row
+            // itself is a hydrated descendant under its top-level. Result:
+            // del-remote flows through.
+            //
+            // Pre-fix this test paired unhydrated folder rows with one
+            // hydrated descendant and asserted del-remote for the unhydrated
+            // folders flowed through; that was the data-risk case (Reconciler
+            // now drops unhydrated folder deletes regardless of sibling
+            // hydration). The replacement uses a hydrated file row, which is
+            // the only legitimate del-remote signal in this corner.
+            val now = Instant.parse("2026-03-28T12:00:00Z")
+            // Seed the DB row with the hash and remoteId the cloudItem helper
+            // will report, so the second scan sees remoteState=UNCHANGED for
+            // the delta item.
+            val filePath = "/Documents/hydrated-file.txt"
+            val item = cloudItem(filePath, size = 100)
             db.upsertEntry(
                 org.krost.unidrive.sync.model.SyncEntry(
-                    path = "/Documents/hydrated-file.txt",
-                    remoteId = "id-hyd",
-                    remoteHash = "h",
-                    remoteSize = 100,
-                    remoteModified = now,
+                    path = filePath,
+                    remoteId = item.id,
+                    remoteHash = item.hash,
+                    remoteSize = item.size,
+                    remoteModified = item.modified,
                     localMtime = now.toEpochMilli(),
-                    localSize = 100,
+                    localSize = item.size,
                     isFolder = false,
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = now,
                 ),
             )
-            // Place the hydrated file on disk so reconciler doesn't propose
-            // a separate DeleteRemote for it.
+            // No file on disk → LocalScanner reports DELETED. The remote still
+            // has the file (provider delta reports it), so remoteState is
+            // UNCHANGED and Reconciler emits DeleteRemote rather than the
+            // (DELETED, DELETED) RemoveEntry cleanup path.
             Files.createDirectories(syncRoot.resolve("Documents"))
-            Files.writeString(syncRoot.resolve("Documents/hydrated-file.txt"), "x".repeat(100))
-            provider.deltaItems = emptyList()
+            Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/Documents", isFolder = true),
+                    item,
+                )
 
             val reporter = RecordingReporter()
             engineWithGuards(reporter = reporter).syncOnce(dryRun = true)
 
-            // del-remote for /Documents/sub-* must show up — guard did not strip them.
+            // del-remote for the hydrated row must flow through.
             assertTrue(
-                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents/sub-") },
-                "expected del-remote for /Documents/sub-* to flow through, got: ${reporter.actions}",
+                reporter.actions.any { it.label == "del-remote" && it.path == "/Documents/hydrated-file.txt" },
+                "expected del-remote for /Documents/hydrated-file.txt, got: ${reporter.actions}",
             )
         }
 
     @Test
-    fun `UD-264 --ignore-top-level-guard lets the delete through and still logs`() =
+    fun `--ignore-top-level-guard does not override the unhydrated folder filter`() =
         runTest {
+            // The opt-out flag covers UD-264's top-level-never-hydrated guard
+            // ONLY. Unhydrated-folder DeleteRemote actions are dropped at the
+            // Reconciler layer and are not subject to the opt-out — the
+            // data-risk is too large to expose behind a CLI knob. The audit
+            // log still captures the drops under the `unhydrated_folder`
+            // reason.
             seedUnhydratedFolders("/Documents", count = 3)
             Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
             provider.deltaItems = emptyList()
@@ -1100,17 +1135,17 @@ class SyncEngineTest {
                 skippedOpsLogPath = logPath,
             ).syncOnce(dryRun = true)
 
-            // Opt-out keeps the deletes in the plan.
+            // Opt-out does NOT keep unhydrated-folder deletes in the plan.
             assertTrue(
-                reporter.actions.any { it.label == "del-remote" && it.path.startsWith("/Documents") },
-                "ignore-top-level-guard should let del-remote flow, got: ${reporter.actions}",
+                reporter.actions.none { it.label == "del-remote" && it.path.startsWith("/Documents") },
+                "unhydrated-folder filter should drop the deletes regardless of opt-out, got: ${reporter.actions}",
             )
-            // ... but still logs them for audit.
-            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written even on opt-out")
+            // Audit log still records the drops.
+            assertTrue(Files.exists(logPath), "skipped-ops.jsonl should be written")
             val logBody = Files.readString(logPath)
             assertTrue(
-                logBody.contains("top_level_never_hydrated"),
-                "opt-out path still writes the audit line, got: $logBody",
+                logBody.contains("unhydrated_folder"),
+                "audit line should use the unhydrated_folder reason, got: $logBody",
             )
         }
 
@@ -1994,6 +2029,12 @@ class SyncEngineTest {
         var deltaFailCount = 0
         var authFailOnDownload = false
 
+        // Paths for which downloadById / download should throw the
+        // permanent-failure signal (e.g. Internxt "Bucket entry … not found").
+        // Mirrors the live 1,248-retry incident shape — the engine must
+        // quarantine the row instead of retrying forever.
+        val permanentDownloadFailurePaths: MutableSet<String> = mutableSetOf()
+
         override suspend fun authenticate() {}
 
         override suspend fun logout() {}
@@ -2007,6 +2048,11 @@ class SyncEngineTest {
             destination: Path,
         ): Long {
             if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (remotePath in permanentDownloadFailurePaths) {
+                throw org.krost.unidrive.PermanentDownloadFailureException(
+                    "Bucket entry for $remotePath not found",
+                )
+            }
             if (downloadFailCount > 0) {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
@@ -2031,6 +2077,11 @@ class SyncEngineTest {
             destination: Path,
         ): Long {
             if (authFailOnDownload) throw AuthenticationException("Token expired")
+            if (remotePath in permanentDownloadFailurePaths) {
+                throw org.krost.unidrive.PermanentDownloadFailureException(
+                    "Bucket entry for $remotePath not found",
+                )
+            }
             if (downloadFailCount > 0) {
                 downloadFailCount--
                 throw ProviderException("Network timeout on download")
@@ -2366,6 +2417,75 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `permanent download failure quarantines row and stops retry on next pass`() =
+        runTest {
+            // Live evidence motivating the quarantine flag: a single zero-byte
+            // file (`/Annika.txt`, bucket entry 69ee2e863da99643eebb3b8a) was
+            // retried 1,248 times over 8 hours after the user deleted it from
+            // Internxt. The 404 body is the stable `{"error":"Bucket entry …
+            // not found"}` shape; treating it as transient meant the UD-225
+            // recovery loop re-emitted a DownloadContent on every pass.
+            //
+            // Smoke: fake provider returns the permanent-failure signal on
+            // first download. Assert the engine records the failure exactly
+            // once on attempt 1 and emits ZERO Download actions on attempt 2
+            // for the same row.
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.permanentDownloadFailurePaths.add("/dead.txt")
+
+            // First pass: the engine tries to download, the provider throws,
+            // the engine quarantines the row.
+            val reporter1 = RecordingReporter()
+            engineWithGuards(reporter = reporter1).syncOnce()
+
+            assertEquals(
+                1,
+                reporter1.actions.count { it.label == "down" && it.path == "/dead.txt" },
+                "first pass must attempt exactly one download, got: ${reporter1.actions}",
+            )
+            val quarantined = db.getEntry("/dead.txt")
+            assertNotNull(quarantined, "row should still exist (quarantined, not removed)")
+            assertTrue(quarantined.downloadQuarantined, "row must be quarantined after permanent failure")
+            assertNotNull(quarantined.lastErrorAt, "lastErrorAt must be stamped")
+
+            // Second pass with no new delta — the recovery loop must NOT
+            // resurrect the quarantined row. The cursor has not advanced (the
+            // failure does not promote it), so deltaFromLatest may be called
+            // again on supportsFastBootstrap providers; counting reporter
+            // actions for the quarantined path is the load-bearing assertion.
+            val reporter2 = RecordingReporter()
+            engineWithGuards(reporter = reporter2).syncOnce()
+
+            assertEquals(
+                0,
+                reporter2.actions.count { it.label == "down" && it.path == "/dead.txt" },
+                "second pass must NOT re-emit Download for the quarantined row, got: ${reporter2.actions}",
+            )
+        }
+
+    @Test
+    fun `fresh delta event clears download quarantine`() =
+        runTest {
+            // Establish quarantine.
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.permanentDownloadFailurePaths.add("/dead.txt")
+            engineWithGuards().syncOnce()
+            assertTrue(db.getEntry("/dead.txt")!!.downloadQuarantined)
+
+            // Cloud reports the row alive again (fresh delta event) — clear the
+            // flag so the next reconcile re-emits the download.
+            provider.permanentDownloadFailurePaths.clear()
+            provider.deltaItems = listOf(cloudItem("/dead.txt", size = 100))
+            provider.deltaCursor = "cursor-revived"
+            engineWithGuards().syncOnce()
+
+            assertFalse(
+                db.getEntry("/dead.txt")!!.downloadQuarantined,
+                "fresh delta event should clear the quarantine flag",
+            )
+        }
+
+    @Test
     fun `cloud-delete flip site 2 — applyDeleteLocal flips status to TRASHED on remote-reports-deleted`() =
         runTest {
             // Establish the alive row first.
@@ -2386,5 +2506,359 @@ class SyncEngineTest {
             val trashed = db.recovery.trashedEntries()
             assertEquals(1, trashed.size)
             assertEquals("/will-vanish.txt", trashed.single().path)
+        }
+
+    // ── Hydration SPI: ensureHydrated / uploadFromCache ───────────────────────
+
+    @Test
+    fun `ensureHydrated downloads a missing file and returns the local cache path`() =
+        runTest {
+            // Use a dedicated temp cache root so the test does not pollute ~/.cache.
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            // Seed remote content and an unhydrated DB entry.
+            provider.files["/foo.txt"] = "hello".toByteArray()
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = "id-/foo.txt",
+                    remoteHash = "hash-/foo.txt",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            val cachePath = engineWithCache.ensureHydrated("/foo.txt")
+
+            assertTrue(Files.exists(cachePath), "cache file must exist after ensureHydrated")
+            assertEquals(5L, Files.size(cachePath), "cache file must contain the remote content")
+            assertEquals(true, db.getEntry("/foo.txt")?.isHydrated, "DB row must be marked hydrated")
+        }
+
+    @Test
+    fun `ensureHydrated is idempotent — warm path skips re-download`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            provider.files["/bar.txt"] = "world".toByteArray()
+            // Pre-create the cache file and mark as hydrated — warm path.
+            val expectedCachePath = cacheRoot.resolve("unidrive/hydration/default/bar.txt")
+            Files.createDirectories(expectedCachePath.parent)
+            Files.writeString(expectedCachePath, "world")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/bar.txt",
+                    remoteId = "id-/bar.txt",
+                    remoteHash = "hash-/bar.txt",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+            val callsBefore = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+
+            val cachePath = engineWithCache.ensureHydrated("/bar.txt")
+
+            assertEquals(expectedCachePath, cachePath)
+            val callsAfter = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+            assertEquals(
+                callsBefore,
+                callsAfter,
+                "warm path must not call the provider download at all",
+            )
+        }
+
+    @Test
+    fun `uploadFromCache uploads the cache file and updates state`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            // Create a local cache file.
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            // Seed the DB entry (hydrated, has a remoteId).
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            engineWithCache.uploadFromCache("/foo.txt", cacheFile)
+
+            assertTrue(
+                provider.uploadedPaths.contains("/foo.txt"),
+                "provider must have received the upload; got: ${provider.uploadedPaths}",
+            )
+            assertEquals(
+                "hello",
+                String(provider.files["/foo.txt"] ?: ByteArray(0)),
+                "remote content must match the cache file",
+            )
+            val entry = db.getEntry("/foo.txt")
+            assertNotNull(entry, "DB entry must exist after uploadFromCache")
+            assertTrue(entry.isHydrated, "DB row must remain hydrated after upload")
+        }
+
+    @Test
+    fun `uploadFromCache emits audit log on success`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val auditDir = Files.createTempDirectory("unidrive-audit-test")
+            val auditLog = AuditLog(auditDir, profileName = "test")
+            val engineWithAudit =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    auditLog = auditLog,
+                )
+
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            engineWithAudit.uploadFromCache("/foo.txt", cacheFile)
+
+            // Verify that exactly one audit entry was written to today's file.
+            val auditFile = auditLog.pathForToday()
+            assertTrue(Files.exists(auditFile), "audit file must exist after uploadFromCache")
+            val lines = Files.readAllLines(auditFile).filter { it.isNotBlank() }
+            assertEquals(1, lines.size, "exactly one audit entry must be emitted on success")
+            assertTrue(lines[0].contains("\"Upload\""), "audit entry must record action=Upload")
+            assertTrue(lines[0].contains("/foo.txt"), "audit entry must record the path")
+            assertTrue(lines[0].contains("\"success\""), "audit entry must record result=success")
+        }
+
+    @Test
+    fun `uploadFromCache emits audit log when provider throws`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val auditDir = Files.createTempDirectory("unidrive-audit-test")
+            val auditLog = AuditLog(auditDir, profileName = "test")
+            val engineWithAudit =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    auditLog = auditLog,
+                )
+
+            provider.uploadFailCount = 1
+
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            assertFailsWith<Exception> {
+                engineWithAudit.uploadFromCache("/foo.txt", cacheFile)
+            }
+
+            val auditFile = auditLog.pathForToday()
+            assertTrue(Files.exists(auditFile), "audit file must exist after failed uploadFromCache")
+            val lines = Files.readAllLines(auditFile).filter { it.isNotBlank() }
+            assertEquals(1, lines.size, "exactly one audit entry must be emitted on failure")
+            assertTrue(lines[0].contains("\"Upload\""), "audit entry must record action=Upload")
+            assertTrue(lines[0].contains("/foo.txt"), "audit entry must record the path")
+            assertTrue(lines[0].contains("\"result\":\"failed:"), "audit entry must record a failed result")
+        }
+
+    @Test
+    fun `ensureHydrated rejects a corrupted download when verifyIntegrity is enabled`() =
+        runTest {
+            // Minimal CloudProvider that returns Sha256Hex as its hash algorithm so
+            // the integrity check is active, and serves fixed "hello" bytes on download.
+            val corruptContent = "hello".toByteArray()
+            val hashingProvider =
+                object : CloudProvider {
+                    override val id = "fake-hashing"
+                    override val displayName = "Fake Hashing"
+                    override var isAuthenticated = true
+
+                    override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
+
+                    override fun hashAlgorithm(): HashAlgorithm? = HashAlgorithm.Sha256Hex
+
+                    override suspend fun authenticate() {}
+
+                    override suspend fun logout() {}
+
+                    override suspend fun listChildren(path: String) = emptyList<CloudItem>()
+
+                    override suspend fun getMetadata(path: String) =
+                        CloudItem(
+                            id = "id-$path",
+                            name = path.substringAfterLast("/"),
+                            path = path,
+                            size = corruptContent.size.toLong(),
+                            isFolder = false,
+                            modified = Instant.now(),
+                            created = Instant.now(),
+                            hash = null,
+                            mimeType = null,
+                        )
+
+                    override suspend fun download(
+                        remotePath: String,
+                        destination: Path,
+                    ): Long {
+                        Files.createDirectories(destination.parent)
+                        Files.write(destination, corruptContent)
+                        return corruptContent.size.toLong()
+                    }
+
+                    override suspend fun downloadById(
+                        remoteId: String,
+                        remotePath: String,
+                        destination: Path,
+                    ): Long = download(remotePath, destination)
+
+                    override suspend fun upload(
+                        localPath: Path,
+                        remotePath: String,
+                        existingRemoteId: String?,
+                        onProgress: ((Long, Long) -> Unit)?,
+                    ): CloudItem = getMetadata(remotePath)
+
+                    override suspend fun delete(remotePath: String) {}
+
+                    override suspend fun createFolder(path: String): CloudItem = getMetadata(path)
+
+                    override suspend fun move(
+                        fromPath: String,
+                        toPath: String,
+                    ): CloudItem = getMetadata(toPath)
+
+                    override suspend fun delta(
+                        cursor: String?,
+                        onPageProgress: ((Int) -> Unit)?,
+                        scanContext: org.krost.unidrive.ScanContext?,
+                    ) = DeltaPage(items = emptyList(), cursor = "c", hasMore = false)
+
+                    override suspend fun quota() = QuotaInfo(total = 0, used = 0, remaining = 0)
+                }
+
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithIntegrity =
+                SyncEngine(
+                    provider = hashingProvider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    verifyIntegrity = true,
+                )
+
+            // Remote content is "hello" but the DB entry records a bogus expected hash
+            // that will never match the actual SHA-256 of "hello".
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/corrupt.txt",
+                    remoteId = "id-/corrupt.txt",
+                    remoteHash = "000000000000000000000000000000000000000000000000000000000000dead",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            val expectedCachePath = cacheRoot.resolve("unidrive/hydration/default/corrupt.txt")
+
+            assertFailsWith<IllegalStateException>(
+                "ensureHydrated must throw when the downloaded file fails the integrity check",
+            ) {
+                engineWithIntegrity.ensureHydrated("/corrupt.txt")
+            }
+            assertFalse(
+                Files.exists(expectedCachePath),
+                "corrupted cache file must be deleted after integrity failure",
+            )
         }
 }

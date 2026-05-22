@@ -222,7 +222,17 @@ class InternxtProvider(
         remotePath: String,
         destination: Path,
     ): Long {
-        val fileMeta = api.getFileMeta(fileUuid)
+        val fileMeta =
+            try {
+                api.getFileMeta(fileUuid)
+            } catch (e: InternxtApiException) {
+                // The 404-bucket-entry-not-found shape can also surface from
+                // getFileMeta if the file metadata has been hard-deleted
+                // upstream. Classify identically to the bridge-side 404 so
+                // the engine quarantines the row instead of retrying forever.
+                if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
+                throw e
+            }
         val bucket = fileMeta.bucket ?: throw ProviderException("File has no bucket: $remotePath")
         val fileId = fileMeta.fileId ?: throw ProviderException("File has no fileId: $remotePath")
 
@@ -254,7 +264,22 @@ class InternxtProvider(
         return retryShardCommit {
             // 1. Get encryption index from bridge (fresh per attempt — picks up
             // a new presigned shard URL if the prior one expired).
-            val bridgeInfo = api.getBridgeFileInfo(bucket, fileId)
+            val bridgeInfo =
+                try {
+                    api.getBridgeFileInfo(bucket, fileId)
+                } catch (e: InternxtApiException) {
+                    // Live evidence: a single zero-byte file
+                    // (`/Annika.txt`) was retried 1,248 times over 8h after
+                    // the user deleted it from Internxt. The 404 body is the
+                    // stable `{"error":"Bucket entry … not found"}` shape; the
+                    // bridge returns the same shape for any hard-deleted
+                    // bucket entry. Treating it as permanent (rather than
+                    // transient) lets the engine quarantine the row and stop
+                    // burning download attempts; the next delta event for the
+                    // same remote_id clears the flag.
+                    if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
+                    throw e
+                }
             val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
             val iv = indexBytes.copyOfRange(0, 16)
 
@@ -315,6 +340,38 @@ class InternxtProvider(
             }
         }
     }
+
+    /**
+     * Recognise the Internxt 404 shape that means "the bucket entry is
+     * permanently gone, retry won't recover it". The bridge returns
+     * `{"error":"Bucket entry … not found"}` with HTTP 404 when the upstream
+     * record has been hard-deleted; the wrapper's `checkResponse` packs that
+     * body into the exception's message. We match on (statusCode=404) AND
+     * the literal substring so a different 404 path doesn't accidentally
+     * quarantine a transient miss.
+     */
+    private fun isBucketEntryNotFound(e: InternxtApiException): Boolean {
+        if (e.statusCode != 404) return false
+        val msg = e.message ?: return false
+        return msg.contains("Bucket entry") && msg.contains("not found")
+    }
+
+    /**
+     * Build the permanent-download-failure exception the engine catches.
+     * The original [cause] is attached so the audit log retains the
+     * underlying bridge / metadata diagnostic; the message wraps it in a
+     * shape the operator can grep for.
+     */
+    private fun permanentDownloadFailure(
+        remotePath: String,
+        cause: InternxtApiException,
+    ): PermanentDownloadFailureException =
+        PermanentDownloadFailureException(
+            "Internxt bucket entry for $remotePath is permanently gone (404). " +
+                "Quarantining the row; a fresh delta event clears it. Cause: ${cause.message}",
+            cause = cause,
+            requestId = cause.requestId,
+        )
 
     /**
      * Destructive-overwrite guard: rename the file at [existingRemoteId] to
