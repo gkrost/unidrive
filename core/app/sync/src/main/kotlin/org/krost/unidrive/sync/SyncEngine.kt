@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -180,6 +181,11 @@ class SyncEngine(
      * Cache layout: `<cacheRoot>/unidrive/hydration/<providerId>/<path>` where
      * `cacheRoot` is [cacheRoot] when set, otherwise `XDG_CACHE_HOME` or
      * `~/.cache`.
+     *
+     * Integrity failure throws (not warns) because FUSE-passthrough exposes the
+     * cache directly to userspace reads — a silently accepted corrupt file would
+     * be immediately visible to the user, unlike [applyDownload]'s
+     * local-placeholder path where a warning is recoverable on the next sync.
      */
     suspend fun ensureHydrated(path: String): Path {
         val entry = db.getEntry(path)
@@ -232,8 +238,9 @@ class SyncEngine(
         cachePath: Path,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
-        val prevHash = db.getEntry(path)?.remoteHash
-        val existingRemoteId = db.getEntry(path)?.remoteId
+        val existingEntry = db.getEntry(path)
+        val prevHash = existingEntry?.remoteHash
+        val existingRemoteId = existingEntry?.remoteId
         val sizeForLog = Files.size(cachePath)
         val result =
             try {
@@ -291,10 +298,13 @@ class SyncEngine(
      * Resolve the hydration cache path for a remote [path].
      * Layout: `<effectiveCacheRoot>/unidrive/hydration/<providerId>/<path>`.
      */
+    // Task 11 (Hydration SPI plan) will add a public `cachePathFor(path)`
+    // helper here that `HydrationImpl.dehydrate` calls to delete the cache
+    // file before flipping is_hydrated=0 in state.db.
     private fun resolveCachePath(path: String): Path {
         val effectiveRoot = cacheRoot
-            ?: (System.getenv("XDG_CACHE_HOME")?.let { java.nio.file.Paths.get(it) }
-                ?: java.nio.file.Paths.get(System.getProperty("user.home"), ".cache"))
+            ?: (System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
+                ?: Paths.get(System.getProperty("user.home"), ".cache"))
         return effectiveRoot
             .resolve("unidrive/hydration")
             .resolve(providerId.ifBlank { "default" })

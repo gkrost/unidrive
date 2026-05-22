@@ -2695,6 +2695,56 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `uploadFromCache emits audit log when provider throws`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val auditDir = Files.createTempDirectory("unidrive-audit-test")
+            val auditLog = AuditLog(auditDir, profileName = "test")
+            val engineWithAudit =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    auditLog = auditLog,
+                )
+
+            provider.uploadFailCount = 1
+
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            assertFailsWith<Exception> {
+                engineWithAudit.uploadFromCache("/foo.txt", cacheFile)
+            }
+
+            val auditFile = auditLog.pathForToday()
+            assertTrue(Files.exists(auditFile), "audit file must exist after failed uploadFromCache")
+            val lines = Files.readAllLines(auditFile).filter { it.isNotBlank() }
+            assertEquals(1, lines.size, "exactly one audit entry must be emitted on failure")
+            assertTrue(lines[0].contains("\"Upload\""), "audit entry must record action=Upload")
+            assertTrue(lines[0].contains("/foo.txt"), "audit entry must record the path")
+            assertTrue(lines[0].contains("\"result\":\"failed:"), "audit entry must record a failed result")
+        }
+
+    @Test
     fun `ensureHydrated rejects a corrupted download when verifyIntegrity is enabled`() =
         runTest {
             // Minimal CloudProvider that returns Sha256Hex as its hash algorithm so
