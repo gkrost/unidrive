@@ -301,7 +301,12 @@ class SyncEngine(
     // Task 11 (Hydration SPI plan) will add a public `cachePathFor(path)`
     // helper here that `HydrationImpl.dehydrate` calls to delete the cache
     // file before flipping is_hydrated=0 in state.db.
-    private fun resolveCachePath(path: String): Path {
+    /**
+     * Resolves the cache file path for a given path within the hydration cache.
+     * Exposed so test fixtures and the future `app:hydration` dehydrate cleanup hook
+     * can resolve the same paths without duplicating layout logic.
+     */
+    fun resolveCachePath(path: String): Path {
         val effectiveRoot = cacheRoot
             ?: (System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
                 ?: Paths.get(System.getProperty("user.home"), ".cache"))

@@ -128,7 +128,7 @@ internal class HydrationTestEnv {
         )
 
         stateDb = StateDatabaseFacade(db)
-        syncEngine = SyncEngineFacade(fakeProvider)
+        syncEngine = SyncEngineFacade(fakeProvider, engine)
         hydration = HydrationImpl(syncEngine = engine, stateDb = db)
     }
 
@@ -173,7 +173,10 @@ internal class HydrationTestEnv {
             db.getEntry(path)?.isHydrated ?: false
     }
 
-    inner class SyncEngineFacade internal constructor(private val fakeProvider: MinimalFakeProvider) {
+    inner class SyncEngineFacade internal constructor(
+        private val fakeProvider: MinimalFakeProvider,
+        private val syncEngine: SyncEngine,
+    ) {
         fun seedRemoteContent(path: String, content: String) {
             fakeProvider.seedContent(path, content)
         }
@@ -186,15 +189,9 @@ internal class HydrationTestEnv {
          * Used to pre-populate the cache for warm-path tests (already-hydrated scenarios).
          */
         fun seedCacheContent(path: String, content: String) {
-            // Mirror SyncEngine.resolveCachePath layout:
-            // cacheRoot/unidrive/hydration/{providerId}/{path}
-            // providerId defaults to "" in SyncEngine, so effective providerId is "default"
-            val cachePath = cacheRoot
-                .resolve("unidrive/hydration")
-                .resolve("default")
-                .resolve(path.trimStart('/'))
+            val cachePath = syncEngine.resolveCachePath(path)
             Files.createDirectories(cachePath.parent)
-            Files.write(cachePath, content.toByteArray())
+            Files.writeString(cachePath, content)
         }
     }
 }
