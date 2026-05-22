@@ -1,6 +1,8 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
@@ -32,6 +34,9 @@ internal class MinimalFakeProvider(
     // Records content uploaded via uploadFromCache for assertion in write tests.
     private val uploadedFiles: MutableMap<String, ByteArray> = mutableMapOf()
 
+    // Throw-injection for testing error paths
+    private var nextThrowable: Throwable? = null
+
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
 
     override suspend fun authenticate() {}
@@ -48,8 +53,13 @@ internal class MinimalFakeProvider(
         return content.size.toLong()
     }
 
-    override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long =
-        download(remotePath, destination)
+    override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long {
+        nextThrowable?.also {
+            nextThrowable = null
+            throw it
+        }
+        return download(remotePath, destination)
+    }
 
     override suspend fun upload(
         localPath: Path,
@@ -93,6 +103,11 @@ internal class MinimalFakeProvider(
 
     /** Returns the content most recently uploaded to [path], or null if never uploaded. */
     fun uploadedContent(path: String): String? = uploadedFiles[path]?.toString(Charsets.UTF_8)
+
+    /** Configure the next downloadById call to throw the given exception. */
+    fun makeNextDownloadThrow(throwable: Throwable) {
+        nextThrowable = throwable
+    }
 }
 
 /**
@@ -195,6 +210,11 @@ internal class HydrationTestEnv {
             val cachePath = syncEngine.resolveCachePath(path)
             Files.createDirectories(cachePath.parent)
             Files.writeString(cachePath, content)
+        }
+
+        /** Configure the next downloadById call to throw the given exception. */
+        fun makeNextDownloadThrow(throwable: Throwable) {
+            fakeProvider.makeNextDownloadThrow(throwable)
         }
     }
 }
@@ -340,5 +360,49 @@ class HydrationImplTest {
         assertEquals(false, env.stateDb.isHydrated("/a.txt"))
         assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/b.txt"))
         assertEquals(false, env.stateDb.isHydrated("/b.txt"))
+    }
+
+    @Test
+    fun `events flow emits Hydrating then Hydrated for successful open_read`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/foo.txt", "hello")
+
+        val collected = mutableListOf<HydrationEvent>()
+        val job = launch { env.hydration.events.collect { collected += it } }
+
+        // Yield to ensure the collector coroutine has subscribed before we emit
+        yield()
+
+        env.hydration.openForRead("conn1", "h1", "/foo.txt")
+
+        // Yield long enough for the SharedFlow to deliver
+        yield(); yield()
+        job.cancel()
+
+        assertEquals(2, collected.size)
+        assertTrue(collected[0] is HydrationEvent.Hydrating)
+        assertTrue(collected[1] is HydrationEvent.Hydrated)
+    }
+
+    @Test
+    fun `events flow emits Failed when download throws`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+        env.syncEngine.makeNextDownloadThrow(RuntimeException("boom"))
+
+        val collected = mutableListOf<HydrationEvent>()
+        val job = launch { env.hydration.events.collect { collected += it } }
+
+        // Yield to ensure the collector coroutine has subscribed before we emit
+        yield()
+
+        val r = env.hydration.openForRead("conn1", "h1", "/foo.txt")
+
+        yield(); yield()
+        job.cancel()
+
+        assertTrue(r is OpenResult.Failed)
+        assertTrue(collected.any { it is HydrationEvent.Failed })
     }
 }
