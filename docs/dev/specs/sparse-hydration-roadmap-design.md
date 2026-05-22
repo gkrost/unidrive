@@ -100,10 +100,10 @@ Module-boundary rules inherited from the multi-platform ADR
 | Component | Purpose |
 |---|---|
 | `Hydration` interface | Defines six verbs: `openForRead`, `openForWrite`, `closeHandle`, `hydrate`, `dehydrate`, `events: Flow<HydrationEvent>`. Package `org.krost.unidrive.hydration`. |
-| `HydrationImpl` | Wires verbs to existing `SyncEngine` and `StateDatabase`. No new persistence. Reads `is_hydrated`, triggers existing download/upload paths, emits events on transitions. Maintains an in-memory `openSet: Map<handle_id, path>` derived from `openForRead`/`openForWrite`/`closeHandle` calls; `dehydrate` consults this to refuse if any handle is open. |
-| `HydrationEvent` sealed class | Variants: `Hydrating(path)`, `Hydrated(path, bytes)`, `Dehydrated(path)`, `Failed(path, error)`. |
+| `HydrationImpl` | Wires verbs to existing `SyncEngine` and `StateDatabase`. No new persistence. Reads `is_hydrated`, triggers existing download/upload paths, emits events on transitions. Maintains an in-memory **connection-scoped** open-set: `openSets: Map<ipc_connection_id, Map<handle_id, path>>`, populated by `openForRead` / `openForWrite` / `closeHandle` calls. `dehydrate` consults the union across all connections to refuse if any handle is open. **IPC-connection drop** (e.g. co-daemon crash): JVM clears that connection's entries automatically — no client cooperation needed; protects against crashes permanently blocking dehydrate. |
+| `HydrationEvent` sealed class | Variants: `Hydrating(path)`, `Hydrated(path, bytes)`, `Dehydrated(path)`, `Failed(path, error: HydrationError)`. The `HydrationError` sealed interface starts with a single variant `Generic(message: String)`; Phase 3 adds discriminants (`Transient`, `Permanent`, `QuotaExhausted`, `Busy`) as the icon-overlay UX surfaces them. Extension point pinned now to avoid a Phase-3 wire-format break. |
 | `HydrationIpcHandler` | Six message types added to existing `IpcServer`: `hydration.open_read`, `hydration.open_write`, `hydration.close_handle`, `hydration.hydrate`, `hydration.dehydrate`, `hydration.subscribe`. JSON-line wire format, matching the existing protocol. |
-| Tests | Six unit tests + one live-integration smoke (`hydrate-then-read`, gated by `UNIDRIVE_INTEGRATION_TESTS=true`; fills out the third sync smoke in the 5+5+2 target). |
+| Tests | Unit tests covering cold/warm read, dehydrate refusal, event emission, `close_handle` robustness, IPC-disconnect cleanup, and JSON-line wire format, plus one live-integration smoke (`hydrate-then-read`, gated by `UNIDRIVE_INTEGRATION_TESTS=true`; fills the third sync smoke in the 5+5+2 target). |
 
 Explicit non-features for Phase 1: no `PlaceholderCatalog` domain
 object, no `HydrationOrchestrator`, no reactive UI state model. Grow
@@ -160,10 +160,13 @@ co-daemon ◄── open(cache_path), FUSE_PASSTHROUGH ioctl
 
 ### Warm read
 
-Same shape, but co-daemon hits LocalCache, skips IPC for `open_read`,
-opens the cache file directly and applies passthrough. Still issues
-`close_handle` on RELEASE so the JVM's open-set tracks the FUSE
-handle correctly.
+Same shape as cold read: co-daemon still calls `hydration.open_read`
+(cheap, because `is_hydrated=1` — JVM checks the cache file exists
+and returns `{cache_path, handle_id}` without triggering download).
+Co-daemon opens the cache file, applies `FUSE_PASSTHROUGH` ioctl,
+issues `close_handle(handle_id)` on RELEASE. The performance fast
+path is `FUSE_PASSTHROUGH` itself (reads bypass userspace), not
+skipping the open-time IPC.
 
 ### Write-through
 
@@ -183,13 +186,18 @@ JVM           HydrationImpl.openForWrite
               ─► SyncEngine.upload(cache_path) (existing path)
               ─► on success: emit HydrationEvent.Hydrated(path, bytes)
               ─► on failure: emit HydrationEvent.Failed(path, error)
-              ─► state.db row already is_hydrated=1; mtime/size
-                  on the row are updated → next regular sync would
-                  re-detect anyway (belt + braces)
+              ─► state.db row's mtime/size updated for book-keeping
 ```
 
+This `open_write` IPC at FUSE RELEASE is the **only** write-trigger.
+The engine deliberately does NOT sync-scan its own FUSE mount —
+walking `~/Internxt/` would call back through FUSE → IPC → JVM,
+introducing a loopback the engine has no reason to incur. The cache
+tree at `~/.cache/unidrive/hydration/` is not in any sync_root either;
+the engine learns about cache changes only via the IPC chain.
+
 If upload fails (network drop, 5xx, quota): cache file stays with the
-new content; the existing engine retry policy + transient-failure
+new content; the existing engine retry queue + transient-failure
 handling applies. The user's `close(2)` already returned 0 — the
 failure surfaces asynchronously via `HydrationEvent.Failed`, consumed
 by Phase 3 (icon overlay) or the CLI `--watch-events` mode.
@@ -217,17 +225,31 @@ single "events lost" sentinel rather than block writers.
 - **Mid-hydrate** (co-daemon dies during download): cache file is a
   partial. state.db still `is_hydrated=0`. Next open re-downloads;
   partial gets overwritten.
-- **Mid-upload** (write-through fails): cache file has new content,
-  state.db `is_hydrated=1` with stale `last_synced`. **Load-bearing
-  assumption**: the existing engine's modification-detector
-  (mtime + size, optionally hash) picks up the passthrough-written
-  file on the next reconcile and re-uploads. If this assumption
-  breaks, write-through gets stuck — the most important Phase 2
-  smoke test pins it.
-- **Co-daemon crash mid-mount**: JVM state intact. `unidrive mount`
-  CLI exits with the supervisor; mount becomes inert (kernel still
-  has the FUSE mount but no userspace to handle it). User runs
+- **Mid-upload** (`open_write` IPC fired, upload itself fails):
+  cache file has new content; engine has the upload request and
+  its existing retry queue + transient/permanent-failure handling
+  apply. No fresh scan needed.
+- **Co-daemon crashes BETWEEN FUSE RELEASE and `open_write` IPC**:
+  cache file has new content; the engine doesn't know. On
+  co-daemon restart, the binary scans LocalCache and issues
+  `open_write` for any file whose mtime is newer than the JVM's
+  last-known sync watermark for that path. The JVM exposes a
+  watermark query (`hydration.last_synced(path)`) for this. Recovery
+  is automatic; user sees one delayed upload per affected file.
+- **Co-daemon crash mid-mount with open handles**: JVM state intact;
+  JVM detects the IPC disconnect via the existing `IpcServer`
+  connection lifecycle and clears the connection's `openSets`
+  entries (see Phase-1 Component table). `unidrive mount` CLI
+  exits with the supervisor; mount becomes inert (kernel still has
+  the FUSE mount but no userspace to handle it). User runs
   `fusermount3 -u <path>` to clear. No `--respawn` by default.
+
+**Load-bearing assumption** (rephrased from an earlier framing):
+every FUSE RELEASE that flushed writes to a cache file triggers a
+matching `open_write` IPC, OR the next co-daemon restart's
+LocalCache scan replays it. The most important Phase 2 smoke test
+pins this — open, write, close, kill the co-daemon, restart, assert
+the deferred `open_write` arrives within the recovery window.
 
 ## Error handling
 
@@ -240,7 +262,8 @@ single "events lost" sentinel rather than block writers.
 | IPC connection lost (JVM dies) | Co-daemon | Outstanding RPCs fail with `EIO`. New `open(2)` on placeholders fail with `EIO`. Already-hydrated files keep working (passthrough is kernel-direct). Co-daemon retries IPC every 5 s up to 60 s; logs to `~/.local/share/unidrive/unidrive-mount.log`. |
 | Co-daemon dies | JVM CLI | `unidrive mount` supervisor (parent process) detects exit, logs to stderr, exits non-zero. Does NOT auto-restart by default — the user explicitly chose to mount. |
 | Mount path already mounted | Co-daemon | Refuse at startup. No heuristic `fusermount3 -u`; user must clear first. |
-| Dehydrate while file is open | JVM | JVM's `openSet` (maintained by `open_read` / `open_write` / `close_handle`) sees the conflict; returns `HydrationError.Busy`. Caller renders the error. No silent failure. |
+| Dehydrate while file is open | JVM | JVM's connection-scoped `openSets` (maintained by `open_read` / `open_write` / `close_handle`) sees the conflict; returns `HydrationError.Busy`. Caller renders the error. No silent failure. |
+| Co-daemon crash with open handles | JVM | JVM detects IPC disconnect via the existing `IpcServer` connection lifecycle; clears the connection's `openSets` entries. Dehydrate becomes possible on those paths immediately — no leaked block. |
 | Cache disk full during cold read | JVM | Existing download error path (insufficient-space). Co-daemon translates the IPC error to `ENOSPC` on the FUSE response. |
 | Cache file truncated externally (user `rm`'s it) | Co-daemon | Detected on next `open` via `stat`. Treat as cache miss; trigger fresh hydrate. State.db `is_hydrated=1` becomes incorrect transiently — JVM's existing local-modification detector flips it back on the next reconcile. |
 
@@ -278,6 +301,7 @@ following error surfaces unchanged:
 | `HydrationImplTest.dehydrate_with_open_handle_refuses` | `openSet` coordination. Two open handles, dehydrate refuses; close one, refuses; close other, succeeds. |
 | `HydrationImplTest.hydration_events_emitted_on_transitions` | Event-flow correctness: `Hydrating → Hydrated`, `Hydrating → Failed`. |
 | `HydrationImplTest.close_handle_unknown_id_is_noop` | Robustness against duplicate or stale `close_handle` calls. |
+| `HydrationImplTest.ipc_disconnect_clears_open_set` | Connection-scoped cleanup: open two handles on one IPC connection, drop the connection, assert `dehydrate` succeeds on both paths immediately afterward. |
 | `HydrationIpcHandlerTest.verbs_round_trip_through_json_line` | IPC wire-format compatibility with the existing `IpcServer`. |
 | Smoke (live integration) — `hydrate-then-read` against a real Internxt profile, gated by `UNIDRIVE_INTEGRATION_TESTS=true`. | Fills the third sync smoke in the 5+5+2 target. |
 
@@ -288,8 +312,9 @@ following error surfaces unchanged:
 | `tests/kernel_floor.rs` | Refuses to start on a faked-old kernel-string. |
 | `tests/cold_read.rs` | Mount + `cat /mnt/foo.txt` → IPC sees `hydration.open_read` → returns a cache path → cat succeeds. Fake JVM IPC server. |
 | `tests/warm_read.rs` | Pre-populate cache; mount; `cat` reads via passthrough without IPC traffic. Assert via IPC-trace. |
-| `tests/write_through.rs` | `echo hi > /mnt/foo.txt` → IPC sees `hydration.open_write` with the cache path → close returns 0. **Load-bearing test** pinning the modification-detector assumption. |
+| `tests/write_through.rs` | `echo hi > /mnt/foo.txt` → IPC sees `hydration.open_write` with the cache path → close returns 0. **Load-bearing test** pinning the FUSE-RELEASE → `open_write` IPC chain reliability. Engine does NOT sync-scan the FUSE mount; the IPC is the only write-trigger. |
 | `tests/dehydrate_while_open.rs` | Open `/mnt/foo.txt`, request dehydrate, expect `EBUSY` / `HydrationError.Busy`. |
+| `tests/crash_recovery_replay.rs` | Open, write, close; intercept the `open_write` IPC and drop it; kill co-daemon; restart. Assert the restart-time LocalCache scan finds the file (mtime > JVM watermark) and issues the deferred `open_write`. Pins the second half of the load-bearing assumption. |
 | `tests/ipc_reconnect.rs` | Kill JVM mid-operation; assert co-daemon retries, opens return `EIO` while disconnected, recover once JVM is back. |
 | Smoke (live integration) — mount a real `~/Internxt`, `ls`, `cat` a couple of files, `vim ; :w` one, `umount`. ~5 smokes mirroring the existing provider smoke shape. |
 
