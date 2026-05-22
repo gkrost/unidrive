@@ -343,6 +343,14 @@ class HydrationImplTest {
     }
 
     @Test
+    fun `dehydrate on unknown path returns Failed not Ok`() = runTest {
+        val env = HydrationTestEnv()
+        val r = env.hydration.dehydrate("/never-existed.txt")
+        assertTrue(r is DehydrateResult.Failed)
+        assertTrue(r.error.message.startsWith("Unknown path:"))
+    }
+
+    @Test
     fun `ipc disconnect clears that connection's open set entirely`() = runTest {
         val env = HydrationTestEnv()
         env.stateDb.insertHydratedEntry("/a.txt", localSize = 1)

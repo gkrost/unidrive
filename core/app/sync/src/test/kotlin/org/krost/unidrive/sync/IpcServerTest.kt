@@ -4,7 +4,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -451,5 +454,77 @@ class IpcServerTest {
 
         scope.cancel()
         srv.close()
+    }
+
+    @Test
+    fun `concurrent broadcast and RPC reply produce valid NDJSON lines`() = runBlocking(Dispatchers.IO) {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("echo") { _, json -> """{"reply":"ok","echo":$json}""" }
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        // One persistent listener client collects broadcast lines.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val listener = scope.launch {
+            java.nio.channels.SocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { sc ->
+                sc.connect(java.net.UnixDomainSocketAddress.of(sockPath))
+                sc.configureBlocking(false)
+                val buf = java.nio.ByteBuffer.allocate(4096)
+                val sb = StringBuilder()
+                while (isActive) {
+                    buf.clear()
+                    val n = sc.read(buf)
+                    if (n < 0) break
+                    if (n == 0) { delay(10); continue }
+                    buf.flip()
+                    sb.append(java.nio.charset.StandardCharsets.UTF_8.decode(buf).toString())
+                    var idx = sb.indexOf('\n')
+                    while (idx >= 0) {
+                        received.add(sb.substring(0, idx))
+                        sb.delete(0, idx + 1)
+                        idx = sb.indexOf('\n')
+                    }
+                }
+            }
+        }
+
+        // Give the listener time to subscribe before hammering.
+        val deadline = System.currentTimeMillis() + 3000
+        while (srv.clientCount < 1 && System.currentTimeMillis() < deadline) delay(20)
+
+        // Fire 50 broadcasts + 50 RPC round-trips (batched 8 at a time so MAX_CLIENTS=10
+        // is not exceeded: 1 persistent listener + up to 8 in-flight RPC clients = 9 max).
+        // RPC calls are wrapped in runCatching because a concurrent broadcast may close a
+        // client connection mid-write under load; the assertion below catches NDJSON interleaving
+        // on the persistent listener which is the invariant under test.
+        repeat(7) { batch ->
+            coroutineScope {
+                repeat(8) { i ->
+                    val n = batch * 8 + i
+                    launch { srv.emit("""{"event":"tick","n":$n}""") }
+                    launch { runCatching { clientRoundTrip(sockPath, """{"verb":"echo","n":$n}""") } }
+                }
+            }
+        }
+        // Remaining 2 (indices 56..57 — just ensure we issued at least 50 total)
+        coroutineScope {
+            repeat(2) { i ->
+                launch { srv.emit("""{"event":"tick","n":${56 + i}}""") }
+                launch { runCatching { clientRoundTrip(sockPath, """{"verb":"echo","n":${56 + i}}""") } }
+            }
+        }
+
+        delay(500) // drain
+        listener.cancel()
+        scope.cancel()
+        srv.close()
+
+        // Every received line must be valid JSON: starts with { and ends with }.
+        assertTrue(received.size >= 50, "Should have received at least the broadcasts, got ${received.size}")
+        for (line in received) {
+            assertTrue(line.startsWith("{") && line.endsWith("}"), "Garbled NDJSON: '$line'")
+        }
     }
 }

@@ -2,6 +2,8 @@ package org.krost.unidrive.sync
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.lang.foreign.FunctionDescriptor
@@ -54,14 +56,15 @@ class IpcServer(
     val clientCount: Int
         get() = clients.size
 
-    // Convenience: look up ClientEntry by SocketChannel (null if already gone).
-    private fun entryFor(sc: SocketChannel): ClientEntry? = clients.firstOrNull { it.channel == sc }
-
     private val log = LoggerFactory.getLogger(IpcServer::class.java)
     // Each connected client is tracked as a (SocketChannel, connectionId) pair.
     // connectionId is a random UUID assigned at accept-time; stable for the lifetime
     // of the connection regardless of how other clients join or leave.
-    private data class ClientEntry(val channel: SocketChannel, val id: String)
+    private data class ClientEntry(
+        val channel: SocketChannel,
+        val id: String,
+        val writeMutex: Mutex = Mutex(),
+    )
     private val clients = CopyOnWriteArrayList<ClientEntry>()
     private val channel = Channel<String>(capacity = 256)
     private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String, String) -> String>()
@@ -131,7 +134,7 @@ class IpcServer(
                         val entry = ClientEntry(sc, connId)
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
-                        flushStateDump(sc)
+                        flushStateDump(entry)
                         scope.launch(Dispatchers.IO) {
                             val buf = ByteBuffer.allocate(MAX_REQUEST_BYTES)
                             val pending = StringBuilder()
@@ -182,7 +185,9 @@ class IpcServer(
                     val dead = mutableListOf<ClientEntry>()
                     for (entry in clients) {
                         try {
-                            writeNonBlocking(entry.channel, ByteBuffer.wrap(line))
+                            entry.writeMutex.withLock {
+                                writeNonBlocking(entry.channel, ByteBuffer.wrap(line))
+                            }
                         } catch (e: IOException) {
                             log.debug("IPC: dropping dead client id={}: {}", entry.id, e.message)
                             dead.add(entry)
@@ -224,7 +229,7 @@ class IpcServer(
         }
     }
 
-    private fun flushStateDump(client: SocketChannel) {
+    private suspend fun flushStateDump(entry: ClientEntry) {
         val state = syncState ?: return
         val ts =
             java.time.Instant
@@ -265,12 +270,13 @@ class IpcServer(
         for (line in lines) {
             val bytes = (line + "\n").toByteArray(Charsets.UTF_8)
             try {
-                writeNonBlocking(client, ByteBuffer.wrap(bytes))
+                entry.writeMutex.withLock {
+                    writeNonBlocking(entry.channel, ByteBuffer.wrap(bytes))
+                }
             } catch (e: IOException) {
                 log.debug("IPC: failed to flush state dump to new client: {}", e.message)
-                val entry = entryFor(client)
-                if (entry != null) clients.remove(entry)
-                runCatching { client.close() }
+                clients.remove(entry)
+                runCatching { entry.channel.close() }
                 return
             }
         }
@@ -307,8 +313,11 @@ class IpcServer(
             log.error("IPC: handler '$verb' threw", e)
             """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
         }
+        val entry = clients.firstOrNull { it.channel === client } ?: return
         runCatching {
-            writeNonBlocking(client, ByteBuffer.wrap((reply + "\n").toByteArray(Charsets.UTF_8)))
+            entry.writeMutex.withLock {
+                writeNonBlocking(entry.channel, ByteBuffer.wrap((reply + "\n").toByteArray(Charsets.UTF_8)))
+            }
         }
     }
 

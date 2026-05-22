@@ -83,6 +83,9 @@ class HydrationImpl(
         }
     }
     override suspend fun dehydrate(path: String): DehydrateResult {
+        stateDb.getEntry(path)
+            ?: return DehydrateResult.Failed(HydrationError.Generic("Unknown path: $path"))
+
         // Check the open-set across ALL connections
         val anyOpen = openSets.values.any { perConn -> perConn.containsValue(path) }
         if (anyOpen) return DehydrateResult.Busy
