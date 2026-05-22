@@ -2506,4 +2506,143 @@ class SyncEngineTest {
             assertEquals(1, trashed.size)
             assertEquals("/will-vanish.txt", trashed.single().path)
         }
+
+    // ── Hydration SPI: ensureHydrated / uploadFromCache ───────────────────────
+
+    @Test
+    fun `ensureHydrated downloads a missing file and returns the local cache path`() =
+        runTest {
+            // Use a dedicated temp cache root so the test does not pollute ~/.cache.
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            // Seed remote content and an unhydrated DB entry.
+            provider.files["/foo.txt"] = "hello".toByteArray()
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = "id-/foo.txt",
+                    remoteHash = "hash-/foo.txt",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            val cachePath = engineWithCache.ensureHydrated("/foo.txt")
+
+            assertTrue(Files.exists(cachePath), "cache file must exist after ensureHydrated")
+            assertEquals(5L, Files.size(cachePath), "cache file must contain the remote content")
+            assertEquals(true, db.getEntry("/foo.txt")?.isHydrated, "DB row must be marked hydrated")
+        }
+
+    @Test
+    fun `ensureHydrated is idempotent — warm path skips re-download`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            provider.files["/bar.txt"] = "world".toByteArray()
+            // Pre-create the cache file and mark as hydrated — warm path.
+            val expectedCachePath = cacheRoot.resolve("unidrive/hydration/default/bar.txt")
+            Files.createDirectories(expectedCachePath.parent)
+            Files.writeString(expectedCachePath, "world")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/bar.txt",
+                    remoteId = "id-/bar.txt",
+                    remoteHash = "hash-/bar.txt",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+            val callsBefore = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+
+            val cachePath = engineWithCache.ensureHydrated("/bar.txt")
+
+            assertEquals(expectedCachePath, cachePath)
+            val callsAfter = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+            assertEquals(
+                callsBefore,
+                callsAfter,
+                "warm path must not call the provider download at all",
+            )
+        }
+
+    @Test
+    fun `uploadFromCache uploads the cache file and updates state`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithCache =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            // Create a local cache file.
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            // Seed the DB entry (hydrated, has a remoteId).
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            engineWithCache.uploadFromCache("/foo.txt", cacheFile)
+
+            assertTrue(
+                provider.uploadedPaths.contains("/foo.txt"),
+                "provider must have received the upload; got: ${provider.uploadedPaths}",
+            )
+            assertEquals(
+                "hello",
+                String(provider.files["/foo.txt"] ?: ByteArray(0)),
+                "remote content must match the cache file",
+            )
+            val entry = db.getEntry("/foo.txt")
+            assertNotNull(entry, "DB entry must exist after uploadFromCache")
+            assertTrue(entry.isHydrated, "DB row must remain hydrated after upload")
+        }
 }

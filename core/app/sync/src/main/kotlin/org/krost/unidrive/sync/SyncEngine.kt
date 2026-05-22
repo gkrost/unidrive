@@ -98,6 +98,10 @@ class SyncEngine(
     // shape — the channel + executor coroutine wiring lands separately.
     // Default false; flipped by the CLI flag + TOML key.
     private val streamingReconciliation: Boolean = false,
+    // Root directory for the hydration cache used by ensureHydrated /
+    // uploadFromCache. Null means resolve via XDG_CACHE_HOME (or ~/.cache).
+    // Injected in tests so the cache stays inside the temp directory.
+    private val cacheRoot: Path? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -163,6 +167,112 @@ class SyncEngine(
             echoUnsuppress?.invoke(path)
         }
     }
+
+    // ── Hydration SPI — public hooks for app:hydration ───────────────────────
+
+    /**
+     * Hydrate a single remote path into the local hydration cache. Idempotent —
+     * if the path is already hydrated and the cache file exists, returns the
+     * existing cache path without re-downloading. Throws on unrecoverable errors
+     * (e.g. [PermanentDownloadFailureException] for a 404; IO errors; unknown
+     * path).
+     *
+     * Cache layout: `<cacheRoot>/unidrive/hydration/<providerId>/<path>` where
+     * `cacheRoot` is [cacheRoot] when set, otherwise `XDG_CACHE_HOME` or
+     * `~/.cache`.
+     */
+    suspend fun ensureHydrated(path: String): Path {
+        val entry = db.getEntry(path)
+            ?: throw IllegalArgumentException("Unknown remote path: $path")
+        val cachePath = resolveCachePath(path)
+        if (entry.isHydrated && Files.exists(cachePath)) {
+            return cachePath
+        }
+        // Construct a minimal CloudItem so downloadByIdOrPath can route by id
+        // (fast path) or fall back to path-based (when remoteId is null).
+        val remoteItem = CloudItem(
+            id = entry.remoteId ?: "",
+            name = path.substringAfterLast("/"),
+            path = path,
+            size = entry.remoteSize,
+            isFolder = false,
+            modified = entry.remoteModified ?: Instant.now(),
+            created = entry.remoteModified ?: Instant.now(),
+            hash = entry.remoteHash,
+            mimeType = null,
+        )
+        Files.createDirectories(cachePath.parent)
+        downloadByIdOrPath(remoteItem, path, cachePath)
+        db.upsertEntry(
+            (db.getEntry(path) ?: entry).copy(
+                isHydrated = true,
+                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                localSize = Files.size(cachePath),
+                lastSynced = Instant.now(),
+            ),
+        )
+        return cachePath
+    }
+
+    /**
+     * Upload the local cache file at [cachePath] as the content for remote
+     * [path]. Used by the hydration write-through path when a FUSE RELEASE
+     * indicates the cache content changed. Updates the DB row with the new
+     * remote metadata (id, hash, size, mtime).
+     */
+    suspend fun uploadFromCache(
+        path: String,
+        cachePath: Path,
+    ) {
+        require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
+        val existingRemoteId = db.getEntry(path)?.remoteId
+        val result = provider.upload(cachePath, path, existingRemoteId = existingRemoteId) { transferred, total ->
+            reporter.onTransferProgress(path, transferred, total)
+        }
+        val mtime = Files.getLastModifiedTime(cachePath).toMillis()
+        val size = Files.size(cachePath)
+        val existing = db.getEntry(path)
+        db.upsertEntry(
+            existing?.copy(
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ) ?: SyncEntry(
+                path = path,
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
+
+    /**
+     * Resolve the hydration cache path for a remote [path].
+     * Layout: `<effectiveCacheRoot>/unidrive/hydration/<providerId>/<path>`.
+     */
+    private fun resolveCachePath(path: String): Path {
+        val effectiveRoot = cacheRoot
+            ?: (System.getenv("XDG_CACHE_HOME")?.let { java.nio.file.Paths.get(it) }
+                ?: java.nio.file.Paths.get(System.getProperty("user.home"), ".cache"))
+        return effectiveRoot
+            .resolve("unidrive/hydration")
+            .resolve(providerId.ifBlank { "default" })
+            .resolve(path.trimStart('/'))
+    }
+
+    // ── End Hydration SPI ─────────────────────────────────────────────────────
 
     suspend fun syncOnce(
         dryRun: Boolean = false,
@@ -1911,7 +2021,13 @@ class SyncEngine(
      * Empty `item.id` falls through to path-based download — defensive for
      * synthesized CloudItems where `entry.remoteId` was null.
      */
-    private suspend fun downloadByIdOrPath(
+    /**
+     * Visibility relaxed to `internal` so [ensureHydrated] (the app:hydration
+     * integration point) can download directly to the hydration cache path
+     * rather than the syncRoot placeholder path. No other cross-module callers
+     * are intended.
+     */
+    internal suspend fun downloadByIdOrPath(
         item: CloudItem,
         remotePath: String,
         destination: java.nio.file.Path,
