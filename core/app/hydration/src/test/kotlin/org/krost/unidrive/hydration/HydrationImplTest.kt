@@ -184,6 +184,9 @@ internal class HydrationTestEnv {
         /** Returns the content most recently uploaded to [path] via uploadFromCache. */
         fun remoteContentSeen(path: String): String? = fakeProvider.uploadedContent(path)
 
+        /** Resolves a path to its cache location. */
+        fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
+
         /**
          * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.
          * Used to pre-populate the cache for warm-path tests (already-hydrated scenarios).
@@ -296,6 +299,8 @@ class HydrationImplTest {
         env.hydration.openForRead("conn1", "h1", "/foo.txt")
 
         assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))
+        // Busy must not have side-effects: cache must still be there for the open handle.
+        assertTrue(java.nio.file.Files.exists(env.syncEngine.resolveCachePath("/foo.txt")))
     }
 
     @Test
@@ -312,6 +317,9 @@ class HydrationImplTest {
         assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))  // still conn2
         env.hydration.closeHandle("conn2", "h1")
         assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/foo.txt"))
+        // Verify the side-effects of dehydrate(Ok) actually landed.
+        assertEquals(false, env.stateDb.isHydrated("/foo.txt"))
+        assertTrue(java.nio.file.Files.notExists(env.syncEngine.resolveCachePath("/foo.txt")))
     }
 
     @Test
@@ -329,6 +337,8 @@ class HydrationImplTest {
         env.hydration.onConnectionClosed("conn1")
 
         assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/a.txt"))
+        assertEquals(false, env.stateDb.isHydrated("/a.txt"))
         assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/b.txt"))
+        assertEquals(false, env.stateDb.isHydrated("/b.txt"))
     }
 }

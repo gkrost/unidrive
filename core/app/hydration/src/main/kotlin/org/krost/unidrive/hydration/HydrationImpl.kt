@@ -88,9 +88,7 @@ class HydrationImpl(
 
         return try {
             val cachePath = syncEngine.resolveCachePath(path)
-            if (java.nio.file.Files.exists(cachePath)) {
-                java.nio.file.Files.delete(cachePath)
-            }
+            java.nio.file.Files.deleteIfExists(cachePath)
             stateDb.markUnhydrated(path)
             _events.emit(HydrationEvent.Dehydrated(path))
             DehydrateResult.Ok
