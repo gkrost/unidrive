@@ -29,6 +29,9 @@ internal class MinimalFakeProvider(
     override val displayName = "Fake (hydration test)"
     override var isAuthenticated = true
 
+    // Records content uploaded via uploadFromCache for assertion in write tests.
+    private val uploadedFiles: MutableMap<String, ByteArray> = mutableMapOf()
+
     override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
 
     override suspend fun authenticate() {}
@@ -53,7 +56,21 @@ internal class MinimalFakeProvider(
         remotePath: String,
         existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
-    ): CloudItem = error("upload not used in hydration cold-path tests")
+    ): CloudItem {
+        val bytes = Files.readAllBytes(localPath)
+        uploadedFiles[remotePath] = bytes
+        return CloudItem(
+            id = "uploaded-$remotePath",
+            name = remotePath.substringAfterLast('/'),
+            path = remotePath,
+            size = bytes.size.toLong(),
+            isFolder = false,
+            modified = java.time.Instant.now(),
+            created = null,
+            hash = bytes.size.toString(),
+            mimeType = null,
+        )
+    }
 
     override suspend fun delete(remotePath: String) = error("delete not used")
 
@@ -73,6 +90,9 @@ internal class MinimalFakeProvider(
     fun seedContent(path: String, content: String) {
         remoteFiles[path] = content.toByteArray()
     }
+
+    /** Returns the content most recently uploaded to [path], or null if never uploaded. */
+    fun uploadedContent(path: String): String? = uploadedFiles[path]?.toString(Charsets.UTF_8)
 }
 
 /**
@@ -88,6 +108,9 @@ internal class HydrationTestEnv {
     private val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
     private val fakeProvider = MinimalFakeProvider()
+
+    /** Staging area for cache files written by write-path tests. */
+    val tempDir: Path = Files.createTempDirectory("unidrive-hydration-tmp")
 
     val stateDb: StateDatabaseFacade
     val syncEngine: SyncEngineFacade
@@ -128,6 +151,24 @@ internal class HydrationTestEnv {
             )
         }
 
+        fun insertHydratedEntry(path: String, localSize: Long) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = "id-$path",
+                    remoteHash = "hash-$path",
+                    remoteSize = localSize,
+                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(),
+                    localSize = localSize,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+
         fun isHydrated(path: String): Boolean =
             db.getEntry(path)?.isHydrated ?: false
     }
@@ -136,6 +177,9 @@ internal class HydrationTestEnv {
         fun seedRemoteContent(path: String, content: String) {
             fakeProvider.seedContent(path, content)
         }
+
+        /** Returns the content most recently uploaded to [path] via uploadFromCache. */
+        fun remoteContentSeen(path: String): String? = fakeProvider.uploadedContent(path)
     }
 }
 
@@ -182,5 +226,17 @@ class HydrationImplTest {
         env.hydration.closeHandle("conn1", "h1")
         val r = env.hydration.openForRead("conn1", "h1", "/a.txt")
         assertTrue(r is OpenResult.Ok)
+    }
+
+    @Test
+    fun `open_for_write triggers upload-from-cache and registers the handle`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("foo.txt").also { java.nio.file.Files.writeString(it, "world") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile)
+
+        assertTrue(r is OpenResult.Ok)
+        assertEquals("world", env.syncEngine.remoteContentSeen("/foo.txt"))
     }
 }

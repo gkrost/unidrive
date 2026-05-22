@@ -47,9 +47,23 @@ class HydrationImpl(
         return OpenResult.Ok(cachePath)
     }
 
-    // Stubs for verbs not yet implemented — fail fast so missed tests show up
-    override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path) =
-        TODO("Task 9")
+    override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
+        stateDb.getEntry(path)
+            ?: return OpenResult.Failed(HydrationError.Generic("Unknown path: $path"))
+
+        return try {
+            _events.emit(HydrationEvent.Hydrating(path))
+            syncEngine.uploadFromCache(path, cachePath)
+            val bytes = java.nio.file.Files.size(cachePath)
+            _events.emit(HydrationEvent.Hydrated(path, bytes))
+            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
+            OpenResult.Ok(cachePath)
+        } catch (e: Exception) {
+            val err = HydrationError.Generic(e.message ?: "upload failed")
+            _events.emit(HydrationEvent.Failed(path, err))
+            OpenResult.Failed(err)
+        }
+    }
     override suspend fun closeHandle(connectionId: String, handleId: String) {
         openSets[connectionId]?.remove(handleId)
     }
