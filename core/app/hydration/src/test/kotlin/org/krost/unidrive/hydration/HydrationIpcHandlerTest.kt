@@ -41,4 +41,54 @@ class HydrationIpcHandlerTest {
 
         assertEquals("""{"ok":true}""", reply.trim())
     }
+
+    @Test
+    fun `open_read without handle_id returns missing_handle_id error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_read","path":"/foo.txt"}""")
+
+        assertEquals("""{"ok":false,"error":"missing_handle_id"}""", reply.trim())
+    }
+
+    @Test
+    fun `open_read without path returns missing_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_read","handle_id":"h1"}""")
+
+        assertEquals("""{"ok":false,"error":"missing_path"}""", reply.trim())
+    }
+
+    @Test
+    fun `open_write without cache_path returns missing_cache_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write","handle_id":"h1","path":"/foo.txt"}""")
+
+        assertEquals("""{"ok":false,"error":"missing_cache_path"}""", reply.trim())
+    }
+
+    @Test
+    fun `open_write with empty cache_path returns missing_cache_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write","handle_id":"h1","path":"/foo.txt","cache_path":""}""")
+
+        assertEquals("""{"ok":false,"error":"missing_cache_path"}""", reply.trim())
+    }
+
+    @Test
+    fun `unknown verb returns unknown_verb error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.no_such_verb"}""")
+
+        assertEquals("""{"ok":false,"error":"unknown_verb"}""", reply.trim())
+    }
 }

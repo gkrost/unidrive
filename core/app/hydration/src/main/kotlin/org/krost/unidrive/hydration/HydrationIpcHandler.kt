@@ -46,6 +46,7 @@ class HydrationIpcHandler(
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
                 val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
+                if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${json(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
