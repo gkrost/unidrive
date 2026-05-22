@@ -17,6 +17,10 @@ class HydrationImpl(
     override val events: Flow<HydrationEvent> = _events.asSharedFlow()
 
     // connectionId -> handleId -> path
+    // TODO(Task 8): when closeHandle and openForWrite land, two coroutines for
+    // the same connectionId may race on the inner map. Switch to
+    // `ConcurrentHashMap<String, ConcurrentMap<String, String>>` (or guard inner
+    // mutations with a connection-scoped lock) before this becomes load-bearing.
     private val openSets =
         ConcurrentHashMap<String, MutableMap<String, String>>()
 
@@ -25,13 +29,18 @@ class HydrationImpl(
             ?: return OpenResult.Failed(HydrationError.Generic("Unknown path: $path"))
 
         val cachePath = try {
+            // Always emit Hydrating + Hydrated, even when SyncEngine returns a warm cache
+            // without downloading: subscribers should see a consistent event stream
+            // regardless of cache state; the cache layer is an implementation detail of
+            // SyncEngine, not part of the Hydration SPI contract.
             _events.emit(HydrationEvent.Hydrating(path))
             val p = syncEngine.ensureHydrated(path)
             _events.emit(HydrationEvent.Hydrated(path, entry.remoteSize))
             p
         } catch (e: Exception) {
-            _events.emit(HydrationEvent.Failed(path, HydrationError.Generic(e.message ?: "download failed")))
-            return OpenResult.Failed(HydrationError.Generic(e.message ?: "download failed"))
+            val err = HydrationError.Generic(e.message ?: "download failed")
+            _events.emit(HydrationEvent.Failed(path, err))
+            return OpenResult.Failed(err)
         }
 
         openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path

@@ -2,7 +2,6 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.Capability
-import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
@@ -85,7 +84,7 @@ internal class MinimalFakeProvider(
  * - [syncEngine] — exposes seedRemoteContent
  * - [hydration] — the [HydrationImpl] under test
  */
-class HydrationTestEnv {
+internal class HydrationTestEnv {
     private val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
     private val fakeProvider = MinimalFakeProvider()
@@ -110,7 +109,7 @@ class HydrationTestEnv {
         hydration = HydrationImpl(syncEngine = engine, stateDb = db)
     }
 
-    inner class StateDatabaseFacade(private val db: StateDatabase) {
+    internal inner class StateDatabaseFacade(private val db: StateDatabase) {
         fun insertUnhydratedEntry(path: String, remoteSize: Long) {
             db.upsertEntry(
                 SyncEntry(
