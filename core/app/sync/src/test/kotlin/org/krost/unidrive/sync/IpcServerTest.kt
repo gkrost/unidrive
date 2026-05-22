@@ -407,7 +407,7 @@ class IpcServerTest {
     }
 
     @Test
-    fun `registered handler receives a client request and replies on the same connection`() = runBlocking {
+    fun `registered handler receives a client request and replies on the same connection`() = runBlocking(Dispatchers.IO) {
         val sockPath = tempSocket()
         val srv = IpcServer(sockPath)
         srv.registerHandler("ping") { json -> """{"reply":"pong","echo":$json}""" }
@@ -419,6 +419,35 @@ class IpcServerTest {
         val reply = clientRoundTrip(sockPath, """{"verb":"ping","arg":42}""")
 
         assertEquals("""{"reply":"pong","echo":{"verb":"ping","arg":42}}""", reply.trim())
+
+        scope.cancel()
+        srv.close()
+    }
+
+    @Test
+    fun `registerHandler throws on duplicate registration`() {
+        val srv = IpcServer(tempSocket())
+        srv.registerHandler("ping") { """{"ok":true}""" }
+        assertFailsWith<IllegalArgumentException> {
+            srv.registerHandler("ping") { """{"ok":false}""" }
+        }
+    }
+
+    @Test
+    fun `handler exception produces error JSON reply`() = runBlocking(Dispatchers.IO) {
+        val sockPath = tempSocket()
+        val srv = IpcServer(sockPath)
+        srv.registerHandler("boom") { throw RuntimeException("kaboom") }
+
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        srv.start(scope)
+        waitForSocket(sockPath)
+
+        val reply = clientRoundTrip(sockPath, """{"verb":"boom"}""")
+
+        assertTrue(reply.contains("\"error\":\"handler_threw\""), "Expected handler_threw in: $reply")
+        assertTrue(reply.contains("\"verb\":\"boom\""), "Expected verb in: $reply")
+        assertTrue(reply.contains("kaboom"), "Expected exception message in: $reply")
 
         scope.cancel()
         srv.close()

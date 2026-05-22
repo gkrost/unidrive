@@ -124,6 +124,11 @@ class IpcServer(
                                     if (n == 0) { delay(20); continue }
                                     buf.flip()
                                     val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
+                                    if (pending.length + bytes.size > MAX_REQUEST_BYTES) {
+                                        log.warn("IPC: request too large (pending={} + read={}), closing client", pending.length, bytes.size)
+                                        runCatching { client.close() }
+                                        break
+                                    }
                                     pending.append(String(bytes, Charsets.UTF_8))
                                     // Split on \n; dispatch each complete line.
                                     var idx = pending.indexOf('\n')
@@ -136,6 +141,10 @@ class IpcServer(
                                 }
                             } catch (e: IOException) {
                                 log.debug("IPC: client reader closed: {}", e.message)
+                            } finally {
+                                clients.remove(client)
+                                runCatching { client.close() }
+                                log.debug("IPC: reader exited, client removed (total={})", clients.size)
                             }
                         }
                     } catch (_: java.nio.channels.AsynchronousCloseException) {
@@ -283,9 +292,14 @@ class IpcServer(
     private fun parseVerb(line: String): String? {
         // Minimal JSON probe — looks for "verb"\s*:\s*"..." at top level. Avoids
         // pulling a full JSON parser into IpcServer for one field.
+        // Top-level anchoring: the char before "verb" (skipping whitespace) must be { or ,.
         val key = "\"verb\""
         val k = line.indexOf(key)
         if (k < 0) return null
+        // Walk left skipping whitespace to find the previous non-whitespace character.
+        var prev = k - 1
+        while (prev >= 0 && line[prev].isWhitespace()) prev--
+        if (prev < 0 || (line[prev] != '{' && line[prev] != ',')) return null
         val colon = line.indexOf(':', k + key.length)
         if (colon < 0) return null
         val q1 = line.indexOf('"', colon)
