@@ -38,7 +38,7 @@ class HydrationIpcHandler(
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
                 val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.openForRead(connectionId, handleId, path)) {
-                    is OpenResult.Ok -> """{"ok":true,"cache_path":${json(r.cachePath.toString())}}"""
+                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -48,7 +48,7 @@ class HydrationIpcHandler(
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
-                    is OpenResult.Ok -> """{"ok":true,"cache_path":${json(r.cachePath.toString())}}"""
+                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -81,9 +81,7 @@ class HydrationIpcHandler(
     }
 
     private fun reply(ok: Boolean, error: String? = null): String =
-        if (ok) """{"ok":true}""" else """{"ok":false,"error":${json(error ?: "unknown")}}"""
-
-    private fun json(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        if (ok) """{"ok":true}""" else """{"ok":false,"error":${jsonEsc(error ?: "unknown")}}"""
 
     // Minimal JSON pluck — works for flat top-level string fields. Sufficient
     // for our verb messages; we don't accept arbitrary client JSON shapes.

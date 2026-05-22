@@ -24,6 +24,9 @@ import org.krost.unidrive.sync.SyncDirection
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.ThrottledProvider
 import org.krost.unidrive.sync.TrashManager
+import org.krost.unidrive.hydration.HydrationImpl
+import org.krost.unidrive.hydration.HydrationIpcHandler
+import org.krost.unidrive.hydration.serialiseHydrationEvent
 import org.krost.unidrive.sync.computePollIntervalWithWs
 import org.krost.unidrive.sync.pollStateName
 import org.slf4j.LoggerFactory
@@ -450,8 +453,8 @@ open class SyncCommand : Runnable {
                 ipcServer.start(this)
 
                 // Wire Phase-1 hydration SPI as IpcServer handlers.
-                val hydration = org.krost.unidrive.hydration.HydrationImpl(engine, db)
-                val hydrationIpc = org.krost.unidrive.hydration.HydrationIpcHandler(hydration)
+                val hydration = HydrationImpl(engine, db)
+                val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in listOf(
                     "hydration.open_read", "hydration.open_write", "hydration.close_handle",
                     "hydration.hydrate", "hydration.dehydrate", "hydration.subscribe",
@@ -466,7 +469,7 @@ open class SyncCommand : Runnable {
                 // Fan out hydration events to all IPC subscribers via the broadcast channel.
                 launch {
                     hydration.events.collect { event ->
-                        ipcServer.emit(org.krost.unidrive.hydration.serialiseHydrationEvent(event))
+                        ipcServer.emit(serialiseHydrationEvent(event))
                     }
                 }
 

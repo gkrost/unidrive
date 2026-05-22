@@ -204,6 +204,7 @@ class IpcServer(
         runCatching { serverChannel?.close() }
         for (entry in clients) {
             runCatching { entry.channel.close() }
+            closeListeners.forEach { it(entry.id) }
         }
         clients.clear()
         runCatching { Files.deleteIfExists(socketPath) }
