@@ -50,8 +50,12 @@ class HydrationImpl(
     // Stubs for verbs not yet implemented — fail fast so missed tests show up
     override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path) =
         TODO("Task 9")
-    override suspend fun closeHandle(connectionId: String, handleId: String) = TODO("Task 8")
+    override suspend fun closeHandle(connectionId: String, handleId: String) {
+        openSets[connectionId]?.remove(handleId)
+    }
     override suspend fun hydrate(path: String): HydrateResult = TODO("Task 10")
     override suspend fun dehydrate(path: String): DehydrateResult = TODO("Task 11")
-    override fun onConnectionClosed(connectionId: String) { TODO("Task 8") }
+    override fun onConnectionClosed(connectionId: String) {
+        openSets.remove(connectionId)
+    }
 }

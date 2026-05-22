@@ -165,4 +165,22 @@ class HydrationImplTest {
         assertTrue(error is HydrationError.Generic)
         assertTrue(error.message.contains("does-not-exist.txt"))
     }
+
+    @Test
+    fun `close_handle on unknown id is a noop`() = runTest {
+        val env = HydrationTestEnv()
+        env.hydration.closeHandle("conn-never-opened", "h-never-existed")
+        env.hydration.closeHandle("conn1", "h1")
+    }
+
+    @Test
+    fun `close_handle removes the handle from its connection's open set`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/a.txt", remoteSize = 1)
+        env.syncEngine.seedRemoteContent("/a.txt", "x")
+        env.hydration.openForRead("conn1", "h1", "/a.txt")
+        env.hydration.closeHandle("conn1", "h1")
+        val r = env.hydration.openForRead("conn1", "h1", "/a.txt")
+        assertTrue(r is OpenResult.Ok)
+    }
 }
