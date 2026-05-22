@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import org.krost.unidrive.AuthenticationException
@@ -447,6 +448,28 @@ open class SyncCommand : Runnable {
             // B in UD-254a's body and out of scope for this single-file fix.
             runBlocking {
                 ipcServer.start(this)
+
+                // Wire Phase-1 hydration SPI as IpcServer handlers.
+                val hydration = org.krost.unidrive.hydration.HydrationImpl(engine, db)
+                val hydrationIpc = org.krost.unidrive.hydration.HydrationIpcHandler(hydration)
+                for (verb in listOf(
+                    "hydration.open_read", "hydration.open_write", "hydration.close_handle",
+                    "hydration.hydrate", "hydration.dehydrate", "hydration.subscribe",
+                )) {
+                    ipcServer.registerHandler(verb) { connId, json ->
+                        hydrationIpc.handle(connectionId = connId, jsonRequest = json)
+                    }
+                }
+                ipcServer.registerConnectionCloseListener { connId ->
+                    hydration.onConnectionClosed(connId)
+                }
+                // Fan out hydration events to all IPC subscribers via the broadcast channel.
+                launch {
+                    hydration.events.collect { event ->
+                        ipcServer.emit(org.krost.unidrive.hydration.serialiseHydrationEvent(event))
+                    }
+                }
+
                 provider.authenticateAndLog()
 
                 // Ensure webhook subscription if configured

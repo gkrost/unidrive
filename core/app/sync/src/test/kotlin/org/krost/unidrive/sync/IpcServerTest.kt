@@ -410,7 +410,7 @@ class IpcServerTest {
     fun `registered handler receives a client request and replies on the same connection`() = runBlocking(Dispatchers.IO) {
         val sockPath = tempSocket()
         val srv = IpcServer(sockPath)
-        srv.registerHandler("ping") { json -> """{"reply":"pong","echo":$json}""" }
+        srv.registerHandler("ping") { _, json -> """{"reply":"pong","echo":$json}""" }
 
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         srv.start(scope)
@@ -427,9 +427,9 @@ class IpcServerTest {
     @Test
     fun `registerHandler throws on duplicate registration`() {
         val srv = IpcServer(tempSocket())
-        srv.registerHandler("ping") { """{"ok":true}""" }
+        srv.registerHandler("ping") { _, _ -> """{"ok":true}""" }
         assertFailsWith<IllegalArgumentException> {
-            srv.registerHandler("ping") { """{"ok":false}""" }
+            srv.registerHandler("ping") { _, _ -> """{"ok":false}""" }
         }
     }
 
@@ -437,7 +437,7 @@ class IpcServerTest {
     fun `handler exception produces error JSON reply`() = runBlocking(Dispatchers.IO) {
         val sockPath = tempSocket()
         val srv = IpcServer(sockPath)
-        srv.registerHandler("boom") { throw RuntimeException("kaboom") }
+        srv.registerHandler("boom") { _, _ -> throw RuntimeException("kaboom") }
 
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         srv.start(scope)

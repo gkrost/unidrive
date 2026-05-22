@@ -106,3 +106,17 @@ class HydrationIpcHandler(
         return null
     }
 }
+
+/**
+ * Serialise a HydrationEvent to a JSON-line string suitable for broadcast
+ * via IpcServer.emit(). Called by the daemon startup glue (Task 14) in the
+ * event-fan-out coroutine.
+ */
+fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
+    is HydrationEvent.Hydrating  -> """{"event":"hydrating","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
+    is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Failed     -> """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}}"""
+}
+
+private fun jsonEsc(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""

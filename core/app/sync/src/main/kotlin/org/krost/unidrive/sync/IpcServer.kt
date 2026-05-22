@@ -54,25 +54,42 @@ class IpcServer(
     val clientCount: Int
         get() = clients.size
 
+    // Convenience: look up ClientEntry by SocketChannel (null if already gone).
+    private fun entryFor(sc: SocketChannel): ClientEntry? = clients.firstOrNull { it.channel == sc }
+
     private val log = LoggerFactory.getLogger(IpcServer::class.java)
-    private val clients = CopyOnWriteArrayList<SocketChannel>()
+    // Each connected client is tracked as a (SocketChannel, connectionId) pair.
+    // connectionId is a random UUID assigned at accept-time; stable for the lifetime
+    // of the connection regardless of how other clients join or leave.
+    private data class ClientEntry(val channel: SocketChannel, val id: String)
+    private val clients = CopyOnWriteArrayList<ClientEntry>()
     private val channel = Channel<String>(capacity = 256)
-    private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String) -> String>()
+    private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String, String) -> String>()
+    private val closeListeners = CopyOnWriteArrayList<(String) -> Unit>()
     private var serverChannel: ServerSocketChannel? = null
     private var acceptJob: Job? = null
     private var broadcastJob: Job? = null
 
     /**
-     * Register an inbound-verb handler. The handler receives the raw JSON
-     * line (excluding the trailing newline) and returns the JSON reply line
-     * (the server appends the newline). Verb dispatch keys on a top-level
+     * Register an inbound-verb handler. The handler receives the connection ID
+     * (a per-client UUID, stable for the life of the connection) and the raw
+     * JSON line (excluding the trailing newline), and returns the JSON reply
+     * line (the server appends the newline). Verb dispatch keys on a top-level
      * "verb" field in the request JSON. Throws IllegalArgumentException on
      * duplicate registration (registration is one-shot per verb).
      */
-    fun registerHandler(verb: String, handler: suspend (String) -> String) {
+    fun registerHandler(verb: String, handler: suspend (connectionId: String, json: String) -> String) {
         require(handlers.putIfAbsent(verb, handler) == null) {
             "Handler for verb '$verb' is already registered"
         }
+    }
+
+    /**
+     * Register a listener invoked when a client disconnects (EOF or IOException).
+     * Called with the same connectionId that was passed to registered handlers.
+     */
+    fun registerConnectionCloseListener(listener: (connectionId: String) -> Unit) {
+        closeListeners.add(listener)
     }
 
     fun updateState(state: SyncState) {
@@ -103,30 +120,32 @@ class IpcServer(
             scope.launch(Dispatchers.IO) {
                 while (isActive) {
                     try {
-                        val client = server.accept()
+                        val sc = server.accept()
                         if (clients.size >= MAX_CLIENTS) {
                             log.warn("IPC: max clients ({}) reached, rejecting connection", MAX_CLIENTS)
-                            runCatching { client.close() }
+                            runCatching { sc.close() }
                             continue
                         }
-                        client.configureBlocking(false)
-                        clients.add(client)
-                        log.debug("IPC: client connected (total={})", clients.size)
-                        flushStateDump(client)
+                        sc.configureBlocking(false)
+                        val connId = java.util.UUID.randomUUID().toString()
+                        val entry = ClientEntry(sc, connId)
+                        clients.add(entry)
+                        log.debug("IPC: client connected id={} (total={})", connId, clients.size)
+                        flushStateDump(sc)
                         scope.launch(Dispatchers.IO) {
                             val buf = ByteBuffer.allocate(MAX_REQUEST_BYTES)
                             val pending = StringBuilder()
                             try {
                                 while (isActive) {
                                     buf.clear()
-                                    val n = client.read(buf)
+                                    val n = sc.read(buf)
                                     if (n < 0) break  // client closed
                                     if (n == 0) { delay(20); continue }
                                     buf.flip()
                                     val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
                                     if (pending.length + bytes.size > MAX_REQUEST_BYTES) {
                                         log.warn("IPC: request too large (pending={} + read={}), closing client", pending.length, bytes.size)
-                                        runCatching { client.close() }
+                                        runCatching { sc.close() }
                                         break
                                     }
                                     pending.append(String(bytes, Charsets.UTF_8))
@@ -135,16 +154,17 @@ class IpcServer(
                                     while (idx >= 0) {
                                         val line = pending.substring(0, idx)
                                         pending.delete(0, idx + 1)
-                                        dispatchRequest(client, line)
+                                        dispatchRequest(sc, connId, line)
                                         idx = pending.indexOf('\n')
                                     }
                                 }
                             } catch (e: IOException) {
                                 log.debug("IPC: client reader closed: {}", e.message)
                             } finally {
-                                clients.remove(client)
-                                runCatching { client.close() }
-                                log.debug("IPC: reader exited, client removed (total={})", clients.size)
+                                clients.remove(entry)
+                                runCatching { sc.close() }
+                                log.debug("IPC: reader exited, client removed id={} (total={})", connId, clients.size)
+                                closeListeners.forEach { it(connId) }
                             }
                         }
                     } catch (_: java.nio.channels.AsynchronousCloseException) {
@@ -159,18 +179,19 @@ class IpcServer(
             scope.launch(Dispatchers.IO) {
                 for (json in channel) {
                     val line = (json + "\n").toByteArray(Charsets.UTF_8)
-                    val dead = mutableListOf<SocketChannel>()
-                    for (client in clients) {
+                    val dead = mutableListOf<ClientEntry>()
+                    for (entry in clients) {
                         try {
-                            writeNonBlocking(client, ByteBuffer.wrap(line))
+                            writeNonBlocking(entry.channel, ByteBuffer.wrap(line))
                         } catch (e: IOException) {
-                            log.debug("IPC: dropping dead client: {}", e.message)
-                            dead.add(client)
+                            log.debug("IPC: dropping dead client id={}: {}", entry.id, e.message)
+                            dead.add(entry)
                         }
                     }
-                    for (c in dead) {
-                        clients.remove(c)
-                        runCatching { c.close() }
+                    for (entry in dead) {
+                        clients.remove(entry)
+                        runCatching { entry.channel.close() }
+                        closeListeners.forEach { it(entry.id) }
                     }
                 }
             }
@@ -181,8 +202,8 @@ class IpcServer(
         acceptJob?.cancel()
         broadcastJob?.cancel()
         runCatching { serverChannel?.close() }
-        for (c in clients) {
-            runCatching { c.close() }
+        for (entry in clients) {
+            runCatching { entry.channel.close() }
         }
         clients.clear()
         runCatching { Files.deleteIfExists(socketPath) }
@@ -246,7 +267,8 @@ class IpcServer(
                 writeNonBlocking(client, ByteBuffer.wrap(bytes))
             } catch (e: IOException) {
                 log.debug("IPC: failed to flush state dump to new client: {}", e.message)
-                clients.remove(client)
+                val entry = entryFor(client)
+                if (entry != null) clients.remove(entry)
                 runCatching { client.close() }
                 return
             }
@@ -269,7 +291,7 @@ class IpcServer(
         return sb.toString()
     }
 
-    private suspend fun dispatchRequest(client: SocketChannel, line: String) {
+    private suspend fun dispatchRequest(client: SocketChannel, connId: String, line: String) {
         val verb = parseVerb(line) ?: run {
             log.warn("IPC: request without 'verb' field, dropping: {}", line.take(80))
             return
@@ -279,7 +301,7 @@ class IpcServer(
             return
         }
         val reply = try {
-            handler(line)
+            handler(connId, line)
         } catch (e: Exception) {
             log.error("IPC: handler '$verb' threw", e)
             """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""

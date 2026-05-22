@@ -405,6 +405,7 @@ dependencies {
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
     implementation(project(":app:sync"))
+    implementation(project(":app:hydration"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.slf4j) // UD-212: MDCContext for profile MDC propagation
