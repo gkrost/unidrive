@@ -203,6 +203,13 @@ class SyncEngine(
         )
         Files.createDirectories(cachePath.parent)
         downloadByIdOrPath(remoteItem, path, cachePath)
+        if (verifyIntegrity) {
+            val verified = HashVerifier.verify(cachePath, entry.remoteHash, algorithm = provider.hashAlgorithm())
+            if (!verified) {
+                Files.deleteIfExists(cachePath)
+                throw IllegalStateException("Integrity check failed for hydration cache: $path")
+            }
+        }
         db.upsertEntry(
             (db.getEntry(path) ?: entry).copy(
                 isHydrated = true,
@@ -225,10 +232,24 @@ class SyncEngine(
         cachePath: Path,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
+        val prevHash = db.getEntry(path)?.remoteHash
         val existingRemoteId = db.getEntry(path)?.remoteId
-        val result = provider.upload(cachePath, path, existingRemoteId = existingRemoteId) { transferred, total ->
-            reporter.onTransferProgress(path, transferred, total)
-        }
+        val sizeForLog = Files.size(cachePath)
+        val result =
+            try {
+                provider.upload(cachePath, path, existingRemoteId = existingRemoteId) { transferred, total ->
+                    reporter.onTransferProgress(path, transferred, total)
+                }
+            } catch (e: Exception) {
+                auditLog?.emit(
+                    action = "Upload",
+                    path = path,
+                    size = sizeForLog,
+                    oldHash = prevHash,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
@@ -255,6 +276,14 @@ class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
             ),
+        )
+        auditLog?.emit(
+            action = "Upload",
+            path = path,
+            size = size,
+            oldHash = prevHash,
+            newHash = result.hash,
+            result = "success",
         )
     }
 

@@ -2,6 +2,7 @@ package org.krost.unidrive.sync
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
 import java.nio.file.Files
 import java.nio.file.Path
@@ -2644,5 +2645,170 @@ class SyncEngineTest {
             val entry = db.getEntry("/foo.txt")
             assertNotNull(entry, "DB entry must exist after uploadFromCache")
             assertTrue(entry.isHydrated, "DB row must remain hydrated after upload")
+        }
+
+    @Test
+    fun `uploadFromCache emits audit log on success`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val auditDir = Files.createTempDirectory("unidrive-audit-test")
+            val auditLog = AuditLog(auditDir, profileName = "test")
+            val engineWithAudit =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    auditLog = auditLog,
+                )
+
+            val cacheFile = cacheRoot.resolve("foo.txt")
+            Files.writeString(cacheFile, "hello")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/foo.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            engineWithAudit.uploadFromCache("/foo.txt", cacheFile)
+
+            // Verify that exactly one audit entry was written to today's file.
+            val auditFile = auditLog.pathForToday()
+            assertTrue(Files.exists(auditFile), "audit file must exist after uploadFromCache")
+            val lines = Files.readAllLines(auditFile).filter { it.isNotBlank() }
+            assertEquals(1, lines.size, "exactly one audit entry must be emitted on success")
+            assertTrue(lines[0].contains("\"Upload\""), "audit entry must record action=Upload")
+            assertTrue(lines[0].contains("/foo.txt"), "audit entry must record the path")
+            assertTrue(lines[0].contains("\"success\""), "audit entry must record result=success")
+        }
+
+    @Test
+    fun `ensureHydrated rejects a corrupted download when verifyIntegrity is enabled`() =
+        runTest {
+            // Minimal CloudProvider that returns Sha256Hex as its hash algorithm so
+            // the integrity check is active, and serves fixed "hello" bytes on download.
+            val corruptContent = "hello".toByteArray()
+            val hashingProvider =
+                object : CloudProvider {
+                    override val id = "fake-hashing"
+                    override val displayName = "Fake Hashing"
+                    override var isAuthenticated = true
+
+                    override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
+
+                    override fun hashAlgorithm(): HashAlgorithm? = HashAlgorithm.Sha256Hex
+
+                    override suspend fun authenticate() {}
+
+                    override suspend fun logout() {}
+
+                    override suspend fun listChildren(path: String) = emptyList<CloudItem>()
+
+                    override suspend fun getMetadata(path: String) =
+                        CloudItem(
+                            id = "id-$path",
+                            name = path.substringAfterLast("/"),
+                            path = path,
+                            size = corruptContent.size.toLong(),
+                            isFolder = false,
+                            modified = Instant.now(),
+                            created = Instant.now(),
+                            hash = null,
+                            mimeType = null,
+                        )
+
+                    override suspend fun download(
+                        remotePath: String,
+                        destination: Path,
+                    ): Long {
+                        Files.createDirectories(destination.parent)
+                        Files.write(destination, corruptContent)
+                        return corruptContent.size.toLong()
+                    }
+
+                    override suspend fun downloadById(
+                        remoteId: String,
+                        remotePath: String,
+                        destination: Path,
+                    ): Long = download(remotePath, destination)
+
+                    override suspend fun upload(
+                        localPath: Path,
+                        remotePath: String,
+                        existingRemoteId: String?,
+                        onProgress: ((Long, Long) -> Unit)?,
+                    ): CloudItem = getMetadata(remotePath)
+
+                    override suspend fun delete(remotePath: String) {}
+
+                    override suspend fun createFolder(path: String): CloudItem = getMetadata(path)
+
+                    override suspend fun move(
+                        fromPath: String,
+                        toPath: String,
+                    ): CloudItem = getMetadata(toPath)
+
+                    override suspend fun delta(
+                        cursor: String?,
+                        onPageProgress: ((Int) -> Unit)?,
+                        scanContext: org.krost.unidrive.ScanContext?,
+                    ) = DeltaPage(items = emptyList(), cursor = "c", hasMore = false)
+
+                    override suspend fun quota() = QuotaInfo(total = 0, used = 0, remaining = 0)
+                }
+
+            val cacheRoot = Files.createTempDirectory("unidrive-cache-test")
+            val engineWithIntegrity =
+                SyncEngine(
+                    provider = hashingProvider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = org.krost.unidrive.sync.model.ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    verifyIntegrity = true,
+                )
+
+            // Remote content is "hello" but the DB entry records a bogus expected hash
+            // that will never match the actual SHA-256 of "hello".
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/corrupt.txt",
+                    remoteId = "id-/corrupt.txt",
+                    remoteHash = "000000000000000000000000000000000000000000000000000000000000dead",
+                    remoteSize = 5L,
+                    remoteModified = java.time.Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            val expectedCachePath = cacheRoot.resolve("unidrive/hydration/default/corrupt.txt")
+
+            assertFailsWith<IllegalStateException>(
+                "ensureHydrated must throw when the downloaded file fails the integrity check",
+            ) {
+                engineWithIntegrity.ensureHydrated("/corrupt.txt")
+            }
+            assertFalse(
+                Files.exists(expectedCachePath),
+                "corrupted cache file must be deleted after integrity failure",
+            )
         }
 }
