@@ -2930,5 +2930,14 @@ class SyncEngine(
                     put("path", kotlinx.serialization.json.JsonPrimitive(path))
                     put("reason", kotlinx.serialization.json.JsonPrimitive(reason))
                 }.toString()
+
+        fun defaultHydrationCacheRoot(): Path =
+            System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
+                ?: Paths.get(System.getProperty("user.home"), ".cache")
+
+        fun hydrationCacheRoot(cacheRoot: Path, providerId: String): Path =
+            cacheRoot
+                .resolve("unidrive/hydration")
+                .resolve(providerId.ifBlank { "default" })
     }
 }
