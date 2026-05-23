@@ -171,7 +171,15 @@ Four tests are required. The first three are existing-behavior smoke (the green 
 
 **T1 — existing IPC integration suite still passes.** No change to `IpcServerTest`, `IpcClientTest`, `IpcProgressReporterTest`. If any break, the fix has changed observable semantics and that's a bug.
 
-**T2 — handler-dispatcher offload is observable.** A new test registers a verb whose handler returns `Thread.currentThread().name`. Drive the verb over a real `IpcServer` with the default constructor and assert the returned name matches the JVM IO pool naming pattern (`DefaultDispatcher-worker-N` or whichever pattern `kotlinx.coroutines` uses on this JVM) and does **not** start with `ipc-io-`. Records the invariant: handlers run off the transport pool.
+**T2 — handler-dispatcher offload is observable.** Register two probe verbs against a real `IpcServer` (default constructor):
+- `transport_probe`: returns `Thread.currentThread().name` *without* being wrapped in `withContext` — captures the transport thread's name.
+- `handler_probe`: returns `Thread.currentThread().name` — runs through the normal `dispatchRequest` path with `withContext(handlerDispatcher)`.
+
+Call `transport_probe` to capture `transportName`. Call `handler_probe` to capture `handlerName`. Assert:
+- `handlerName.startsWith("ipc-io-")` is **false** (handler isn't running on the transport pool).
+- `handlerName != transportName` (handler isn't running on the same thread that read the request).
+
+This avoids coupling the test to `kotlinx.coroutines` internal naming (`DefaultDispatcher-worker-N` is implementation detail and varies by version/JDK vendor). Records the invariant: handler invocation is offloaded off the transport pool. Note: the test fixture needs a hook to register a "raw" verb that bypasses the `withContext` wrap — the simplest shape is to expose the transport-thread name via the server itself (e.g. a debug-only accessor populated by the accept loop) rather than adding a backdoor verb. Concrete shape to be settled in the implementation plan.
 
 **T3 — transport pool is named and bounded.** After `start()`, assert that `Thread.getAllStackTraces().keys` contains at least one thread whose name starts with `ipc-io-` and that no more than 4 such threads exist. After `close()`, assert all `ipc-io-` threads exit within 5 seconds (`awaitTermination` budget).
 
@@ -200,7 +208,9 @@ This step is documented in the spec so the plan-mode implementation doesn't clai
 
 **R1 — Test T4 may be flaky on CI under load.** A 1-second wall-clock budget for the fast-client reply is generous on a developer laptop but could tighten on a shared CI runner. Mitigation: budget is 1s, expected response is ~10ms; 100x headroom should be enough. If it flakes, raise to 3s — still proves the invariant.
 
-**R2 — Pool size of 4 may be wrong.** With `MAX_CLIENTS=10` and `writeMutex` serialising per-client, the worst case is 10 concurrent broadcasts (the broadcast loop iterates clients sequentially, so realistically 1). The accept loop + reader loops are mostly blocked on `read()` or `delay(20)`, not CPU-bound. 4 threads is a guess; we'll know better after a few weeks of production runs. The pool size could become configurable later if data demands it.
+**R2 — Pool size of 4 may be wrong.** With `MAX_CLIENTS=10` and `writeMutex` serialising per-client, the worst case is 10 concurrent broadcasts (the broadcast loop iterates clients sequentially, so realistically 1). The accept loop + reader loops are mostly blocked on `read()` or `delay(20)`, not CPU-bound. 4 threads is a guess.
+
+**Concrete trigger for re-tuning** (so the answer to "is 4 enough?" isn't perpetually "we don't know"): instrument the `Executors.newFixedThreadPool(4)` as a `ThreadPoolExecutor` and sample `queue.size()` at the existing daemon-heartbeat tick. If `queue.size() > 0` is observed for more than 100ms in a window during normal (non-boot, non-mount-startup) operation, log a `WARN` line `IPC: transport pool queue depth %d sustained for %dms — consider raising pool size` and file a tuning entry in the BACKLOG. Until that signal fires, leave the pool at 4. (The instrumentation lives in this change; the BACKLOG follow-up that consumes it is filed when the WARN actually fires.) Pool size could also become env-tunable later via `UNIDRIVE_IPC_TRANSPORT_POOL_SIZE` if data demands it — YAGNI for now.
 
 **R3 — `awaitTermination(5s)` could leak threads in pathological close paths.** If a thread is stuck in `writeNonBlocking` on a half-dead socket, `close()`'s socket teardown should kick it out via `IOException` within one `Thread.sleep(10)` tick. If somehow it doesn't, we'd see a "thread leak" warning in long-running test suites. Decision: tolerate this for now; add `shutdownNow()` after the await only if we observe leaks. (YAGNI.)
 
@@ -212,4 +222,4 @@ This step is documented in the spec so the plan-mode implementation doesn't clai
 - Existing IPC test suites unchanged and green.
 - Manual live smoke in §3.5 passes against the `posteo_onedrive` profile.
 - BACKLOG entry for "IPC write-timeout drops Phase 2 mount clients during heavy concurrent sync load" moves to `CLOSED.md` in the same commit that lands the fix.
-- New constant `UNIDRIVE_IPC_WRITE_TIMEOUT_MS` env var documented in the daemon's environment-variables reference (wherever those are tracked — to be confirmed in plan).
+- New `UNIDRIVE_IPC_WRITE_TIMEOUT_MS` env var documented in `docs/env-vars.md` (the file is created as part of this change — there was no operator-facing env-var reference before).
