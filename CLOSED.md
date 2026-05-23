@@ -4,6 +4,7 @@ Things that were done before this branch started. Append new entries when items 
 
 ## Pre-slim
 
+- Hydration SPI: `hydration.last_synced(path)` watermark query landed; reads `entry.localMtime` from `StateDatabase`; JSON-line RPC `{"verb":"hydration.last_synced","path":"/foo"}` → `{"ok":true,"mtime_ms":...}` / `{"ok":false,"error":"unknown_path"}`; load-bearing for the Phase 2 FUSE co-daemon's crash-recovery replay
 - Reconciler O(D×U) syscall storm replaced with bySize prepass
 - CLI verification matrix captured
 - LocalWatcher atomic-save coalescing (vim, JetBrains write-tmp-and-rename debounce)

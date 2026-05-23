@@ -102,6 +102,11 @@ class HydrationImpl(
             DehydrateResult.Failed(err)
         }
     }
+    override suspend fun lastSynced(path: String): LastSyncedResult {
+        val entry = stateDb.getEntry(path) ?: return LastSyncedResult.Unknown("unknown_path")
+        val mtime = entry.localMtime ?: return LastSyncedResult.Unknown("no_mtime")
+        return LastSyncedResult.Ok(mtime)
+    }
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }

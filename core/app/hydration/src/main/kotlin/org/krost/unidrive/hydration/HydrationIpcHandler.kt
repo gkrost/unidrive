@@ -72,6 +72,13 @@ class HydrationIpcHandler(
                     is DehydrateResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
+            "hydration.last_synced" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.lastSynced(path)) {
+                    is LastSyncedResult.Ok -> """{"ok":true,"mtime_ms":${r.mtimeEpochMillis}}"""
+                    is LastSyncedResult.Unknown -> reply(ok = false, error = r.reason)
+                }
+            }
             "hydration.subscribe" -> {
                 // event-stream wiring lands in daemon startup glue (Task 14)
                 reply(ok = true)
