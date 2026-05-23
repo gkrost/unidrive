@@ -105,6 +105,31 @@ class IpcServer(
         }
     }
 
+    /**
+     * Write a single JSON line to one specific connection (newline is appended
+     * server-side). Used by the hydration subscriber pipeline to push events to
+     * just the connections that ran `hydration.subscribe`, instead of fanning out
+     * via the shared broadcast channel. Returns false when the connection is
+     * unknown or the write failed (dead client is then removed and close-listeners
+     * fire — same shape as the broadcast loop's dead-client cleanup).
+     */
+    suspend fun writeToConnection(connectionId: String, json: String): Boolean {
+        val entry = clients.firstOrNull { it.id == connectionId } ?: return false
+        val bytes = (json + "\n").toByteArray(Charsets.UTF_8)
+        return try {
+            entry.writeMutex.withLock {
+                writeNonBlocking(entry.channel, ByteBuffer.wrap(bytes))
+            }
+            true
+        } catch (e: IOException) {
+            log.debug("IPC: writeToConnection failed for id={}: {}", entry.id, e.message)
+            clients.remove(entry)
+            runCatching { entry.channel.close() }
+            closeListeners.forEach { it(entry.id) }
+            false
+        }
+    }
+
     fun start(scope: CoroutineScope) {
         reclaimStaleSocket()
 
