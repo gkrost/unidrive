@@ -527,6 +527,31 @@ class StateDatabase(
             }
     }
 
+    /**
+     * Direct children (one level only) of [parentPath] from the alive view.
+     * `parentPath = ""` selects root-level rows (paths like `/foo`); any
+     * non-empty prefix selects rows whose path is exactly `<prefix>/<name>`
+     * with no further slashes. Path-based, not parent_uuid-based: the
+     * hydration SPI's caller (FUSE co-daemon) addresses everything by path
+     * and folder rows aren't always populated when leaf rows are.
+     */
+    @Synchronized
+    fun listDirectChildren(parentPath: String): List<SyncEntry> {
+        val likeBase = if (parentPath.isEmpty()) "/" else "${escapeLike(parentPath)}/"
+        val sliceFrom = if (parentPath.isEmpty()) 2 else parentPath.length + 2
+        conn.prepareStatement(
+            "SELECT * FROM alive_entries WHERE path LIKE ? ESCAPE '\\' " +
+                "AND instr(substr(path, ?), '/') = 0",
+        ).use { stmt ->
+            stmt.setString(1, "$likeBase%")
+            stmt.setInt(2, sliceFrom)
+            val rs = stmt.executeQuery()
+            val entries = mutableListOf<SyncEntry>()
+            while (rs.next()) entries.add(rs.toSyncEntry())
+            return entries
+        }
+    }
+
     @Synchronized
     fun getEntriesByPrefix(prefix: String): List<SyncEntry> {
         conn.prepareStatement("SELECT * FROM alive_entries WHERE path LIKE ? ESCAPE '\\'").use { stmt ->

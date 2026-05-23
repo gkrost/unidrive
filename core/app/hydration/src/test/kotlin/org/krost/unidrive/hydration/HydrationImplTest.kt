@@ -184,6 +184,24 @@ internal class HydrationTestEnv {
             )
         }
 
+        fun insertFolderEntry(path: String) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = "id-$path",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(),
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+
         fun isHydrated(path: String): Boolean =
             db.getEntry(path)?.isHydrated ?: false
     }
@@ -422,6 +440,97 @@ class HydrationImplTest {
         val r = env.hydration.lastSynced("/foo.txt")
 
         assertTrue(r is LastSyncedResult.Unknown)
+    }
+
+    @Test
+    fun `list returns direct children of prefix only`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/foo.txt", localSize = 5)
+        env.stateDb.insertHydratedEntry("/Documents/bar.txt", localSize = 7)
+        env.stateDb.insertFolderEntry("/Documents/sub")
+        // Deeper descendant must NOT be returned.
+        env.stateDb.insertHydratedEntry("/Documents/sub/deep.txt", localSize = 3)
+        // Sibling at root must NOT be returned.
+        env.stateDb.insertHydratedEntry("/other.txt", localSize = 2)
+
+        val r = env.hydration.list("/Documents")
+
+        assertTrue(r is ListResult.Ok)
+        val paths = (r as ListResult.Ok).entries.map { it.path }.toSet()
+        assertEquals(setOf("/Documents/foo.txt", "/Documents/bar.txt", "/Documents/sub"), paths)
+    }
+
+    @Test
+    fun `list returns empty for prefix with no children`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Empty")
+
+        val r = env.hydration.list("/Empty")
+
+        assertTrue(r is ListResult.Ok)
+        assertEquals(emptyList(), (r as ListResult.Ok).entries)
+    }
+
+    @Test
+    fun `list normalises trailing slash on prefix`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/foo.txt", localSize = 5)
+
+        val withSlash = env.hydration.list("/Documents/")
+        val withoutSlash = env.hydration.list("/Documents")
+
+        assertTrue(withSlash is ListResult.Ok)
+        assertTrue(withoutSlash is ListResult.Ok)
+        assertEquals(
+            (withSlash as ListResult.Ok).entries.map { it.path },
+            (withoutSlash as ListResult.Ok).entries.map { it.path },
+        )
+    }
+
+    @Test
+    fun `list returns root children for prefix slash`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/a.txt", localSize = 1)
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/foo.txt", localSize = 5)
+
+        val r = env.hydration.list("/")
+
+        assertTrue(r is ListResult.Ok)
+        val paths = (r as ListResult.Ok).entries.map { it.path }.toSet()
+        assertEquals(setOf("/a.txt", "/Documents"), paths)
+    }
+
+    @Test
+    fun `list returns both files and folders with correct isFolder flag`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/file.txt", localSize = 5)
+        env.stateDb.insertFolderEntry("/Documents/subdir")
+
+        val r = env.hydration.list("/Documents")
+
+        assertTrue(r is ListResult.Ok)
+        val byPath = (r as ListResult.Ok).entries.associateBy { it.path }
+        assertEquals(false, byPath.getValue("/Documents/file.txt").isFolder)
+        assertEquals(true, byPath.getValue("/Documents/subdir").isFolder)
+    }
+
+    @Test
+    fun `list returns size and mtime from state db`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/foo.txt", localSize = 42)
+
+        val r = env.hydration.list("/Documents")
+
+        assertTrue(r is ListResult.Ok)
+        val e = (r as ListResult.Ok).entries.single { it.path == "/Documents/foo.txt" }
+        assertEquals(42L, e.size)
+        assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), e.mtimeEpochMillis)
+        assertEquals(true, e.isHydrated)
     }
 
     @Test

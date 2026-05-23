@@ -185,6 +185,13 @@ class HydrationIpcHandler(
                     is LastSyncedResult.Unknown -> reply(ok = false, error = r.reason)
                 }
             }
+            "hydration.list" -> {
+                val prefix = pluck(jsonRequest, "prefix") ?: return reply(ok = false, error = "missing_prefix")
+                when (val r = hydration.list(prefix)) {
+                    is ListResult.Ok -> serialiseListEntries(r.entries)
+                    is ListResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
             "hydration.subscribe" -> {
                 registerSubscriber(connectionId)
                 reply(ok = true)
@@ -222,6 +229,21 @@ class HydrationIpcHandler(
  * Serialise a HydrationEvent to a JSON-line string. Called by the
  * per-subscriber writer coroutine inside HydrationIpcHandler.
  */
+private fun serialiseListEntries(entries: List<ListResult.Entry>): String {
+    val sb = StringBuilder("""{"ok":true,"entries":[""")
+    for ((i, e) in entries.withIndex()) {
+        if (i > 0) sb.append(',')
+        sb.append("{\"path\":").append(jsonEsc(e.path))
+            .append(",\"size\":").append(e.size)
+            .append(",\"mtime_ms\":").append(e.mtimeEpochMillis)
+            .append(",\"hydrated\":").append(e.isHydrated)
+            .append(",\"folder\":").append(e.isFolder)
+            .append('}')
+    }
+    sb.append("]}")
+    return sb.toString()
+}
+
 fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrating  -> """{"event":"hydrating","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
