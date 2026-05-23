@@ -23,7 +23,15 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 class IpcServer(
     private val socketPath: Path,
+    private val transportDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
+    private val handlerDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+    writeTimeoutMs: Long = readWriteTimeoutFromEnv(),
 ) {
+    // Captured at construction so a later companion-object change can't accidentally
+    // re-read the env var mid-flight. Multiply once into nanos so writeNonBlocking
+    // does no per-call arithmetic.
+    private val writeTimeoutNs: Long = writeTimeoutMs * 1_000_000L
+
     data class SyncState(
         val profile: String,
         val phase: String? = null,
@@ -72,6 +80,7 @@ class IpcServer(
     private var serverChannel: ServerSocketChannel? = null
     private var acceptJob: Job? = null
     private var broadcastJob: Job? = null
+    private var ownedTransport: java.util.concurrent.ExecutorService? = null
 
     /**
      * Register an inbound-verb handler. The handler receives the connection ID
@@ -144,8 +153,22 @@ class IpcServer(
         }
         serverChannel = server
 
+        val transport: kotlinx.coroutines.CoroutineDispatcher = transportDispatcher ?: run {
+            val es = java.util.concurrent.Executors.newFixedThreadPool(
+                TRANSPORT_POOL_SIZE,
+                ipcIoThreadFactory(),
+            )
+            ownedTransport = es
+            es.asCoroutineDispatcher()
+        }
+        log.info(
+            "IPC: transport pool size={} write_timeout_ms={}",
+            TRANSPORT_POOL_SIZE,
+            writeTimeoutNs / 1_000_000L,
+        )
+
         acceptJob =
-            scope.launch(Dispatchers.IO) {
+            scope.launch(transport) {
                 while (isActive) {
                     try {
                         val sc = server.accept()
@@ -160,7 +183,7 @@ class IpcServer(
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
                         flushStateDump(entry)
-                        scope.launch(Dispatchers.IO) {
+                        scope.launch(transport) {
                             val buf = ByteBuffer.allocate(MAX_REQUEST_BYTES)
                             val pending = StringBuilder()
                             try {
@@ -204,7 +227,7 @@ class IpcServer(
             }
 
         broadcastJob =
-            scope.launch(Dispatchers.IO) {
+            scope.launch(transport) {
                 for (json in channel) {
                     val line = (json + "\n").toByteArray(Charsets.UTF_8)
                     val dead = mutableListOf<ClientEntry>()
@@ -238,6 +261,13 @@ class IpcServer(
         }
         clients.clear()
         runCatching { Files.deleteIfExists(socketPath) }
+        ownedTransport?.let { es ->
+            es.shutdown()
+            runCatching {
+                es.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+            }
+            ownedTransport = null
+        }
     }
 
     private fun reclaimStaleSocket() {
@@ -333,7 +363,7 @@ class IpcServer(
             return
         }
         val reply = try {
-            handler(connId, line)
+            kotlinx.coroutines.withContext(handlerDispatcher) { handler(connId, line) }
         } catch (e: Exception) {
             log.error("IPC: handler '$verb' threw", e)
             """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
@@ -372,7 +402,7 @@ class IpcServer(
         client: SocketChannel,
         buf: ByteBuffer,
     ) {
-        val deadline = System.nanoTime() + WRITE_TIMEOUT_NS
+        val deadline = System.nanoTime() + writeTimeoutNs
         while (buf.hasRemaining()) {
             val written = client.write(buf)
             if (written == 0) {
@@ -386,9 +416,28 @@ class IpcServer(
 
     companion object {
         private const val MAX_CLIENTS = 10
-        private const val WRITE_TIMEOUT_NS = 5_000_000_000L // 5 seconds
         private const val MAX_SOCKET_PATH_LENGTH = 90
         private const val MAX_REQUEST_BYTES = 64 * 1024
+        private const val TRANSPORT_POOL_SIZE = 4
+
+        // Pure-function overload for testing the parse + clamp logic without
+        // touching System.getenv. Production path delegates here.
+        internal fun parseWriteTimeoutMs(raw: String?): Long {
+            if (raw == null) return 5_000L
+            return raw.toLongOrNull()?.takeIf { it in 100L..600_000L } ?: 5_000L
+        }
+
+        internal fun readWriteTimeoutFromEnv(): Long =
+            parseWriteTimeoutMs(System.getenv("UNIDRIVE_IPC_WRITE_TIMEOUT_MS"))
+
+        private fun ipcIoThreadFactory(): java.util.concurrent.ThreadFactory {
+            val counter = java.util.concurrent.atomic.AtomicInteger(0)
+            return java.util.concurrent.ThreadFactory { r ->
+                Thread(r, "ipc-io-${counter.incrementAndGet()}").apply {
+                    isDaemon = true
+                }
+            }
+        }
 
         fun socketBaseName(profileName: String): String {
             val base = "unidrive-$profileName.sock"
