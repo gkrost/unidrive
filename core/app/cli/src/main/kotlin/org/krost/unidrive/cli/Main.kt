@@ -30,6 +30,7 @@ import java.nio.file.Paths
         BackupCommand::class,
         LogoutCommand::class,
         SyncCommand::class,
+        MountCommand::class,
         // Git-style three-verb split — refresh = sync without byte
         // transfers; apply = drain pending transfers without re-fetching deltas.
         RefreshCommand::class,
