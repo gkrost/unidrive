@@ -157,15 +157,25 @@ Add a new method `flushStateDumpTo(connectionId: String)` that does what `flushS
  * that subscribers see context for the in-progress sync, but
  * non-subscribers (e.g. the FUSE co-daemon, request-reply clients)
  * never receive these unsolicited bytes on their socket.
+ *
+ * Must be public (not internal): the only caller is `SyncCommand` in the
+ * `:app:cli` Gradle module, while `IpcServer` lives in `:app:sync`.
+ * `internal` does not cross module boundaries in the composite build.
+ * Mirrors the existing public `writeToConnection`.
  */
-suspend fun flushStateDumpTo(connectionId: String) {
+public suspend fun flushStateDumpTo(connectionId: String) {
     val state = syncState ?: return
-    val entry = clients.firstOrNull { it.id == connectionId } ?: return
+    val entry = clients.firstOrNull { it.id == connectionId } ?: run {
+        log.warn("IPC: flushStateDumpTo called for unknown connection id={}", connectionId)
+        return
+    }
     // … same body as today's flushStateDump but operating on `entry` ...
 }
 ```
 
 (The existing private `flushStateDump(entry: ClientEntry)` can be renamed or its body refactored. The simplest landing is to keep one method, rename it to `flushStateDumpTo`, and accept a `connectionId` instead of an entry — match the existing `writeToConnection` shape.)
+
+The unknown-connection log is at WARN (not DEBUG): the only legitimate way `flushStateDumpTo` runs against a missing connection is if the client closes between the `sync.subscribe` request parse and the handler body execution. That's a rare timing window worth surfacing in logs so a future operator investigating ghost-subscribe traffic has a breadcrumb.
 
 ### 3.3 SyncCommand changes
 
@@ -173,8 +183,16 @@ Register the new verb handler immediately after the existing hydration handler r
 
 ```kotlin
 ipcServer.registerHandler("sync.subscribe") { connId, _ ->
-    ipcServer.registerSyncSubscriber(connId)
+    // ORDER MATTERS: state dump first, subscribe second. The broadcast
+    // loop runs concurrently on the transport pool. If we registered
+    // the subscriber first, a `SyncEngine.emit(...)` firing between the
+    // two calls could deliver a NEW event before the state dump, leaving
+    // the subscriber's first observed line out of chronological order.
+    // The handler body is synchronous within its withContext(handlerDispatcher)
+    // block; by the time registerSyncSubscriber runs, the state-dump bytes
+    // have already been written to the socket.
     ipcServer.flushStateDumpTo(connId)
+    ipcServer.registerSyncSubscriber(connId)
     """{"ok":true}"""
 }
 ```
@@ -189,7 +207,7 @@ Three-line addition; the `flushStateDumpTo` call is where the state-dump replay 
 
 Four tests pin the invariants. All live in a new test class `IpcSyncSubscriberSetTest.kt` alongside `IpcDispatcherIsolationTest`.
 
-**T1 — A non-subscribed connection receives no sync-progress bytes.** The contract test. Connect a client. Issue `emit("foo")` on the server. Wait 200ms (real wall-clock — the broadcast loop iterates the channel within tens of ms). Assert: the client's socket read returns no data (`read` returns 0 from a non-blocking socket, or `select` times out). The client never called `sync.subscribe`, so it must receive nothing. **This is the test that protects against regression of the exact Phase 2 bug.**
+**T1 — A non-subscribed connection receives no sync-progress bytes.** The contract test. Construct `IpcServer` with `transportDispatcher = StandardTestDispatcher(testScheduler)` (the test-injection seam landed in commit `309a5b3` exactly for this kind of deterministic stepping). Connect a client. Issue `server.emit("foo")`. Advance virtual time: `testScheduler.advanceUntilIdle()`. Assert: the client's socket read returns zero bytes — there is no `sync.subscribe` outstanding, so the broadcast loop must have skipped this client. Zero wall-clock waits, no flakiness window. **This is the test that protects against regression of the exact Phase 2 bug.**
 
 **T2 — A subscribed connection receives sync-progress events.** Connect a client, send `{"verb":"sync.subscribe"}`, read the `{"ok":true}` reply, then issue `emit("foo")` on the server. Assert the client reads `"foo"` (with the broadcast loop's newline-appended framing) within 1s.
 
@@ -221,7 +239,7 @@ Same shape as the IPC-transport fix's §3.5 smoke (per the corrected plan in `91
 
 **R2 — Other broadcast-listening consumers.** `grep -rn "server\.emit\|ipcServer\.emit" core/` returns exactly one production caller: `IpcProgressReporter.kt:23`. Verified before writing this design. No other internal callers exist, so the surface is fully accounted for on the JVM side.
 
-**R3 — Race: emit between subscribe and state dump.** If `SyncEngine` calls `emit(json)` between the moment a subscriber is registered and the moment `flushStateDumpTo` finishes, the subscriber could receive (a) the new event, (b) the state dump, in that order — out of chronological order. Mitigation: the state-dump events are explicitly tagged with the original timestamp on the `SyncState` they reflect; consumers that care about ordering already need to use the `timestamp` field. Not worth synchronising the subscribe-then-dump as an atomic unit — the JSON event stream is, by design, an at-least-once-in-eventual-order stream. Documented but not gated.
+**R3 — Race: emit between subscribe and state dump.** Naive ordering (`registerSyncSubscriber` then `flushStateDumpTo`) admits a window where the broadcast loop delivers a fresh event before the state dump, leaving the subscriber's first observed line out of chronological order. **Addressed by §3.3 handler ordering:** state dump first, subscribe-set membership second. The handler body is synchronous within its `withContext(handlerDispatcher)` block — by the time `registerSyncSubscriber` runs, the state-dump bytes are already in the socket. After this swap, every event the subscriber receives is strictly newer (or equal-to) the dumped state. No locking required.
 
 **R4 — Double-subscribe.** A client that calls `sync.subscribe` twice on the same connection adds the connId once (it's a `Set.add`) but receives the state dump twice. Harmless idempotency on the membership side; mild noise on the state-dump side. Could be fixed by gating `flushStateDumpTo` on "first subscribe wins" but that complicates the handler for a non-real-world scenario. Document and ignore.
 

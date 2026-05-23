@@ -24,7 +24,7 @@ for IPC client` log lines on a system with known socket back-pressure
 (e.g. laptop sleep cycles, kernel-side throttling, intermittently slow
 filesystem on the receiving side). Do not raise it to mask
 `Dispatchers.IO` saturation — that's a structural bug, not a tuning
-problem. See `docs/superpowers/specs/ipc-transport-dispatcher-isolation-design.md`
+problem. See `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`
 for the history.
 
 ## Other env vars in use (not yet documented in this file)

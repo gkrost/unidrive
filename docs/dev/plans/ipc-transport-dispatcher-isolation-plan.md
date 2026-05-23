@@ -8,7 +8,7 @@
 
 **Tech Stack:** Kotlin (JVM 21), kotlinx.coroutines 1.8.x, `java.nio.channels.ServerSocketChannel`/`SocketChannel` (Unix domain), `java.util.concurrent.Executors`/`ThreadPoolExecutor`, JUnit 5 via `kotlin.test`. Build via Gradle composite — `cd core && ./gradlew :app:sync:test -q` is the local feedback loop.
 
-**Spec:** `docs/superpowers/specs/ipc-transport-dispatcher-isolation-design.md`
+**Spec:** `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`
 
 ---
 
@@ -84,7 +84,7 @@ import kotlin.test.assertTrue
 import kotlin.test.fail
 
 /**
- * Protects the invariants from `docs/superpowers/specs/ipc-transport-dispatcher-isolation-design.md`.
+ * Protects the invariants from `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`.
  *
  * If any of these tests are deleted or loosened, the corresponding invariant
  * silently regresses and the Phase 2 IPC write-timeout bug returns under
@@ -466,7 +466,7 @@ Structural fix:
   range 100-600000).
 - close() shuts the pool down with awaitTermination(5s).
 
-Spec: docs/superpowers/specs/ipc-transport-dispatcher-isolation-design.md
+Spec: docs/dev/specs/ipc-transport-dispatcher-isolation-design.md
 Contract test: IpcDispatcherIsolationTest.fast_client_is_not_blocked_by_saturated_handler_dispatcher
 EOF
 )"
@@ -825,7 +825,7 @@ These are documented here so a future reader knows they were considered and inte
 
 ## Self-review pass (writer-side)
 
-Checked against `docs/superpowers/specs/ipc-transport-dispatcher-isolation-design.md`:
+Checked against `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`:
 
 - **§3.2.1 constructor signature**: Task 2.1.
 - **§3.2.2 pool lifecycle**: Tasks 2.2 (factory), 2.3 (start), 2.6 (close).
