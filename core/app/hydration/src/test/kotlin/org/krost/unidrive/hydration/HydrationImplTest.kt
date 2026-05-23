@@ -394,6 +394,37 @@ class HydrationImplTest {
     }
 
     @Test
+    fun `lastSynced returns Ok with mtime for hydrated path`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+
+        val r = env.hydration.lastSynced("/foo.txt")
+
+        assertTrue(r is LastSyncedResult.Ok)
+        assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), (r as LastSyncedResult.Ok).mtimeEpochMillis)
+    }
+
+    @Test
+    fun `lastSynced returns Unknown for unknown path`() = runTest {
+        val env = HydrationTestEnv()
+
+        val r = env.hydration.lastSynced("/never-existed.txt")
+
+        assertTrue(r is LastSyncedResult.Unknown)
+        assertEquals("unknown_path", (r as LastSyncedResult.Unknown).reason)
+    }
+
+    @Test
+    fun `lastSynced returns Unknown for unhydrated path`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+
+        val r = env.hydration.lastSynced("/foo.txt")
+
+        assertTrue(r is LastSyncedResult.Unknown)
+    }
+
+    @Test
     fun `events flow emits Failed when download throws`() = runTest {
         val env = HydrationTestEnv()
         env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)

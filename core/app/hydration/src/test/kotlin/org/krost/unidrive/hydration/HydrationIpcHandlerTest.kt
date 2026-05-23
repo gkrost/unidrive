@@ -83,6 +83,28 @@ class HydrationIpcHandlerTest {
     }
 
     @Test
+    fun `last_synced verb round-trips through JSON-line`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.last_synced","path":"/foo.txt"}""")
+
+        assertTrue(reply.contains("\"ok\":true"))
+        assertTrue(reply.contains("\"mtime_ms\":"))
+    }
+
+    @Test
+    fun `last_synced for unknown path returns unknown_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.last_synced","path":"/nope.txt"}""")
+
+        assertEquals("""{"ok":false,"error":"unknown_path"}""", reply.trim())
+    }
+
+    @Test
     fun `unknown verb returns unknown_verb error`() = runTest {
         val env = HydrationTestEnv()
         val handler = HydrationIpcHandler(env.hydration)

@@ -20,6 +20,7 @@ interface Hydration {
     suspend fun closeHandle(connectionId: String, handleId: String)
     suspend fun hydrate(path: String): HydrateResult
     suspend fun dehydrate(path: String): DehydrateResult
+    suspend fun lastSynced(path: String): LastSyncedResult
 
     val events: Flow<HydrationEvent>
 
@@ -41,4 +42,9 @@ sealed class DehydrateResult {
     data object Ok : DehydrateResult()
     data object Busy : DehydrateResult()
     data class Failed(val error: HydrationError) : DehydrateResult()
+}
+
+sealed class LastSyncedResult {
+    data class Ok(val mtimeEpochMillis: Long) : LastSyncedResult()
+    data class Unknown(val reason: String) : LastSyncedResult()
 }
