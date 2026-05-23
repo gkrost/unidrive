@@ -85,6 +85,22 @@ echo "  ${INSTALL_BIN}/unidrive"
 # Log directory
 mkdir -p "${LOG_DIR}"
 
+# Co-daemon (unidrive-mount Rust binary) — placeholder
+# Phase 2 of the sparse-hydration roadmap ships a separate Rust co-daemon
+# that mounts the cache as a FUSE filesystem. No release tarball exists
+# yet; once one lands on github.com/gkrost/unidrive-mount-linux this
+# section will download + SHA256-verify it into ${INSTALL_LIB}.
+MOUNT_BIN="${INSTALL_LIB}/unidrive-mount"
+if [[ ! -x "${MOUNT_BIN}" ]]; then
+    echo ""
+    echo "Co-daemon download skipped: the unidrive-mount binary has not yet been released."
+    echo "Once the first release tarball lands on github.com/gkrost/unidrive-mount-linux,"
+    echo "install.sh will download and verify it. Until then, build manually:"
+    echo "  cd <repo>/unidrive-mount-linux && cargo build --release \\"
+    echo "    && cp target/release/unidrive-mount ${INSTALL_LIB}/"
+    echo ""
+fi
+
 # Systemd user unit
 mkdir -p "${SYSTEMD_DIR}"
 cp "${SCRIPT_DIR}/unidrive.service" "${SYSTEMD_DIR}/unidrive.service"
