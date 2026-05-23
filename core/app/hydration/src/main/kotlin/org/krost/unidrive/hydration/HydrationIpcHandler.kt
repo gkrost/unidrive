@@ -1,6 +1,12 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import java.nio.file.Paths
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Translates IpcServer JSON-line requests to Hydration verb calls
@@ -24,13 +30,113 @@ import java.nio.file.Paths
  *   subscribe   reply:    {"ok":true} — and from then on, the connection becomes a one-way
  *                         event stream (server-pushed NDJSON of HydrationEvent serializations)
  *
- * The subscribe verb is registered but its event-push side is wired up
- * by the daemon startup glue (Task 14) — Phase 1 ships the verb call;
- * full stream delivery is exercised by the smoke test in Task 15.
+ * Subscribe pipeline: each subscribed connection gets its own bounded queue
+ * (capacity 64). The single fan-out site (dispatchEvent) deals events to all
+ * subscribers; per-subscriber writer coroutines drain their queue and push
+ * NDJSON lines via the writer function. When a subscriber's queue is full the
+ * dispatcher drops the OLDEST queued event and bumps a per-subscriber lost
+ * counter; the writer emits one `{"event":"lost","since_last":N}` sentinel
+ * line ahead of the next deliverable event and resets the counter. The whole
+ * registry plus writer-coroutine teardown is owned by this handler;
+ * onSubscriberDisconnect(connectionId) is the production hook called from
+ * IpcServer's connection-close listener.
  */
 class HydrationIpcHandler(
     private val hydration: Hydration,
 ) {
+    private data class Subscriber(
+        val queue: Channel<HydrationEvent>,
+        val dropped: AtomicInteger,
+        val job: Job,
+    )
+
+    private val subscribers = ConcurrentHashMap<String, Subscriber>()
+    private var subscriberScope: CoroutineScope? = null
+    private var subscriberWriter: (suspend (String, String) -> Boolean)? = null
+
+    /**
+     * Production wiring entry point. Stores the scope used to launch per-subscriber
+     * writer coroutines and the function used to write a single NDJSON line to a
+     * given connection. The daemon also registers onSubscriberDisconnect on the
+     * IpcServer's connection-close listener so subscribers tear down when their
+     * UDS connection drops.
+     */
+    fun start(scope: CoroutineScope, writer: suspend (connectionId: String, line: String) -> Boolean) {
+        subscriberScope = scope
+        subscriberWriter = writer
+    }
+
+    /**
+     * Fan an event out to every registered subscriber. Non-suspending: each
+     * subscriber's bounded queue is fed via trySend; on overflow the oldest
+     * unsent event is drained and the subscriber's dropped counter increments.
+     * The single collector at the caller site drains hydration.events into here.
+     */
+    fun dispatchEvent(event: HydrationEvent) {
+        for (sub in subscribers.values) {
+            offerWithDropOldest(sub, event)
+        }
+    }
+
+    private fun offerWithDropOldest(sub: Subscriber, event: HydrationEvent) {
+        while (true) {
+            val r = sub.queue.trySend(event)
+            if (r.isSuccess) return
+            if (r.isClosed) return
+            // Buffer full: drain one (the oldest) and retry. A concurrent writer
+            // drain shrinks the buffer too — either path frees a slot.
+            val drained = sub.queue.tryReceive()
+            if (drained.isSuccess) sub.dropped.incrementAndGet()
+            // If tryReceive itself failed (race with writer just emptied it), loop
+            // and retry trySend — the buffer now has room.
+        }
+    }
+
+    /**
+     * Tear down a subscriber: cancel its writer coroutine, close its queue, drop
+     * the registry entry. Idempotent — disconnect for a non-subscribed connection
+     * is a no-op (broadcast clients trigger close listeners too, and only some of
+     * them are subscribers).
+     */
+    fun onSubscriberDisconnect(connectionId: String) {
+        val sub = subscribers.remove(connectionId) ?: return
+        sub.job.cancel()
+        sub.queue.close()
+    }
+
+    private fun registerSubscriber(connectionId: String) {
+        val scope = subscriberScope ?: return  // pre-start() subscribe: caller didn't wire the pipeline
+        val writer = subscriberWriter ?: return
+        // Repeat-subscribe on the same connection: tear down the prior subscriber first
+        // so we never have two writer coroutines competing on the same connection.
+        subscribers.remove(connectionId)?.let { it.job.cancel(); it.queue.close() }
+        val queue = Channel<HydrationEvent>(capacity = SUBSCRIBER_QUEUE_CAPACITY)
+        val dropped = AtomicInteger(0)
+        val job = scope.launch {
+            try {
+                for (event in queue) {
+                    val lost = dropped.getAndSet(0)
+                    if (lost > 0) {
+                        val ok = writer(connectionId, """{"event":"lost","since_last":$lost}""")
+                        if (!ok) break
+                    }
+                    val ok = writer(connectionId, serialiseHydrationEvent(event))
+                    if (!ok) break
+                }
+            } finally {
+                subscribers.remove(connectionId)
+                queue.close()
+            }
+        }
+        subscribers[connectionId] = Subscriber(queue, dropped, job)
+    }
+
+    companion object {
+        // Per-subscriber bounded queue capacity. Matches the MutableSharedFlow's
+        // extraBufferCapacity in HydrationImpl; the SharedFlow is the upstream
+        // source and the queue is the per-subscriber smoothing layer.
+        const val SUBSCRIBER_QUEUE_CAPACITY = 64
+    }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
         val verb = pluck(jsonRequest, "verb") ?: return reply(ok = false, error = "missing_verb")
         return when (verb) {
@@ -80,7 +186,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.subscribe" -> {
-                // event-stream wiring lands in daemon startup glue (Task 14)
+                registerSubscriber(connectionId)
                 reply(ok = true)
             }
             else -> reply(ok = false, error = "unknown_verb")
@@ -113,9 +219,8 @@ class HydrationIpcHandler(
 }
 
 /**
- * Serialise a HydrationEvent to a JSON-line string suitable for broadcast
- * via IpcServer.emit(). Called by the daemon startup glue (Task 14) in the
- * event-fan-out coroutine.
+ * Serialise a HydrationEvent to a JSON-line string. Called by the
+ * per-subscriber writer coroutine inside HydrationIpcHandler.
  */
 fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrating  -> """{"event":"hydrating","path":${jsonEsc(e.path)}}"""

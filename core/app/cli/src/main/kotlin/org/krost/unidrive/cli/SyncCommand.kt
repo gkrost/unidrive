@@ -466,12 +466,11 @@ open class SyncCommand : Runnable {
                 ipcServer.registerConnectionCloseListener { connId ->
                     hydration.onConnectionClosed(connId)
                 }
-                // Fan out hydration events to all IPC subscribers via the broadcast channel.
-                launch {
-                    hydration.events.collect { event ->
-                        ipcServer.emit(serialiseHydrationEvent(event))
-                    }
-                }
+                // Fan hydration events out only to connections that ran hydration.subscribe,
+                // with a bounded queue + drop-oldest+sentinel backpressure per subscriber.
+                hydrationIpc.start(this, ipcServer::writeToConnection)
+                ipcServer.registerConnectionCloseListener { connId -> hydrationIpc.onSubscriberDisconnect(connId) }
+                launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
 
                 provider.authenticateAndLog()
 
