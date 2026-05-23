@@ -136,6 +136,21 @@ class HydrationIpcHandler(
         // extraBufferCapacity in HydrationImpl; the SharedFlow is the upstream
         // source and the queue is the per-subscriber smoothing layer.
         const val SUBSCRIBER_QUEUE_CAPACITY = 64
+
+        // Single source of truth for the verbs this handler answers. The daemon
+        // (SyncCommand) iterates this list to wire each verb on IpcServer via
+        // registerHandler. The dispatch table in `handle()` below must stay in
+        // lockstep — there's a unit test pinning the two together.
+        val VERBS: List<String> = listOf(
+            "hydration.open_read",
+            "hydration.open_write",
+            "hydration.close_handle",
+            "hydration.hydrate",
+            "hydration.dehydrate",
+            "hydration.subscribe",
+            "hydration.last_synced",
+            "hydration.list",
+        )
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
         val verb = pluck(jsonRequest, "verb") ?: return reply(ok = false, error = "missing_verb")
