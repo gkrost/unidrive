@@ -53,6 +53,7 @@ class HydrationSubscribeTest {
             override suspend fun hydrate(path: String): HydrateResult = HydrateResult.Failed(HydrationError.Generic("unused"))
             override suspend fun dehydrate(path: String): DehydrateResult = DehydrateResult.Failed(HydrationError.Generic("unused"))
             override suspend fun lastSynced(path: String): LastSyncedResult = LastSyncedResult.Unknown("unused")
+            override suspend fun list(prefix: String): ListResult = ListResult.Ok(emptyList())
             override val events = kotlinx.coroutines.flow.MutableSharedFlow<HydrationEvent>()
             override fun onConnectionClosed(connectionId: String) {}
         }

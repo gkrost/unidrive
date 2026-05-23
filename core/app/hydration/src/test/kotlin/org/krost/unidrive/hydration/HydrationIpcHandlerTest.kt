@@ -105,6 +105,38 @@ class HydrationIpcHandlerTest {
     }
 
     @Test
+    fun `list verb round-trips through JSON-line`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Documents")
+        env.stateDb.insertHydratedEntry("/Documents/foo.txt", localSize = 42)
+        env.stateDb.insertFolderEntry("/Documents/sub")
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.list","prefix":"/Documents"}""")
+
+        assertTrue(reply.contains("\"ok\":true"), "reply was $reply")
+        assertTrue(reply.contains("\"entries\":["), "reply was $reply")
+        assertTrue(reply.contains("\"path\":\"/Documents/foo.txt\""), "reply was $reply")
+        assertTrue(reply.contains("\"size\":42"), "reply was $reply")
+        assertTrue(reply.contains("\"mtime_ms\":"), "reply was $reply")
+        assertTrue(reply.contains("\"hydrated\":true"), "reply was $reply")
+        assertTrue(reply.contains("\"folder\":false"), "reply was $reply")
+        assertTrue(reply.contains("\"path\":\"/Documents/sub\""), "reply was $reply")
+        assertTrue(reply.contains("\"folder\":true"), "reply was $reply")
+    }
+
+    @Test
+    fun `list verb returns empty array for empty prefix`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertFolderEntry("/Empty")
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.list","prefix":"/Empty"}""")
+
+        assertEquals("""{"ok":true,"entries":[]}""", reply.trim())
+    }
+
+    @Test
     fun `unknown verb returns unknown_verb error`() = runTest {
         val env = HydrationTestEnv()
         val handler = HydrationIpcHandler(env.hydration)

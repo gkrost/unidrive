@@ -21,6 +21,7 @@ interface Hydration {
     suspend fun hydrate(path: String): HydrateResult
     suspend fun dehydrate(path: String): DehydrateResult
     suspend fun lastSynced(path: String): LastSyncedResult
+    suspend fun list(prefix: String): ListResult
 
     val events: Flow<HydrationEvent>
 
@@ -47,4 +48,17 @@ sealed class DehydrateResult {
 sealed class LastSyncedResult {
     data class Ok(val mtimeEpochMillis: Long) : LastSyncedResult()
     data class Unknown(val reason: String) : LastSyncedResult()
+}
+
+sealed class ListResult {
+    data class Ok(val entries: List<Entry>) : ListResult()
+    data class Failed(val error: HydrationError) : ListResult()
+
+    data class Entry(
+        val path: String,
+        val size: Long,
+        val mtimeEpochMillis: Long,
+        val isHydrated: Boolean,
+        val isFolder: Boolean,
+    )
 }

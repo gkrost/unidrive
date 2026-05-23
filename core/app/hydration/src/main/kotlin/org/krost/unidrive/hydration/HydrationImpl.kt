@@ -107,6 +107,27 @@ class HydrationImpl(
         val mtime = entry.localMtime ?: return LastSyncedResult.Unknown("no_mtime")
         return LastSyncedResult.Ok(mtime)
     }
+    override suspend fun list(prefix: String): ListResult {
+        // Normalise: "/" and "" both mean root; trailing slash equiv to no trailing slash.
+        val normalised = prefix.trimEnd('/').let { if (it == "") "" else it }
+        return try {
+            val rows = stateDb.listDirectChildren(normalised)
+            ListResult.Ok(
+                rows.map { e ->
+                    val size = if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize
+                    ListResult.Entry(
+                        path = e.path,
+                        size = size,
+                        mtimeEpochMillis = e.localMtime ?: e.lastSynced.toEpochMilli(),
+                        isHydrated = e.isHydrated,
+                        isFolder = e.isFolder,
+                    )
+                },
+            )
+        } catch (e: Exception) {
+            ListResult.Failed(HydrationError.Generic(e.message ?: "list failed"))
+        }
+    }
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }
