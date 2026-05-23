@@ -145,4 +145,27 @@ class HydrationIpcHandlerTest {
 
         assertEquals("""{"ok":false,"error":"unknown_verb"}""", reply.trim())
     }
+
+    @Test
+    fun `every verb in VERBS is dispatched by handle (not unknown_verb)`() = runTest {
+        // Regression test for the bug where SyncCommand's IpcServer registration loop
+        // listed six verbs while HydrationIpcHandler.handle dispatched eight. Two verbs
+        // (hydration.last_synced, hydration.list) were unreachable over IPC despite
+        // passing unit tests that called handler.handle directly.
+        //
+        // This test pins the contract: every verb declared in VERBS must be a known
+        // case in handle's `when`. The handler may reject the request body (missing
+        // required field), but it MUST NOT return the "unknown_verb" sentinel — that
+        // would indicate VERBS and handle's dispatch table have drifted apart.
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        for (verb in HydrationIpcHandler.VERBS) {
+            val reply = handler.handle("conn1", """{"verb":"$verb"}""")
+            assertTrue(
+                !reply.contains("\"error\":\"unknown_verb\""),
+                "Verb '$verb' declared in VERBS but handle returned unknown_verb: $reply",
+            )
+        }
+    }
 }

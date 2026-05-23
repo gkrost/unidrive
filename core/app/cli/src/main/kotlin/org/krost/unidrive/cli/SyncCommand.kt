@@ -455,10 +455,7 @@ open class SyncCommand : Runnable {
                 // Wire Phase-1 hydration SPI as IpcServer handlers.
                 val hydration = HydrationImpl(engine, db)
                 val hydrationIpc = HydrationIpcHandler(hydration)
-                for (verb in listOf(
-                    "hydration.open_read", "hydration.open_write", "hydration.close_handle",
-                    "hydration.hydrate", "hydration.dehydrate", "hydration.subscribe",
-                )) {
+                for (verb in HydrationIpcHandler.VERBS) {
                     ipcServer.registerHandler(verb) { connId, json ->
                         hydrationIpc.handle(connectionId = connId, jsonRequest = json)
                     }
