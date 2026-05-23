@@ -178,4 +178,61 @@ class IpcDispatcherIsolationTest {
                 serverScope.cancel()
             }
         }
+
+    /**
+     * Proves the transport pool is named ipc-io-N, bounded at 4, and shuts
+     * down cleanly on close(). The thread count assertion is on
+     * `ipc-io-`-prefixed threads only — other test infrastructure (JUnit
+     * runner, build daemon) won't pollute the count.
+     */
+    @Test
+    fun transport_pool_is_capped_at_four_threads_and_shuts_down_on_close() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                val s = IpcServer(socketPath)
+                server = s
+                // Touch verb so the pool sees real work, ensuring all threads spin up
+                // (FixedThreadPool lazily creates threads as tasks arrive).
+                s.registerHandler("ping") { _, _ -> """{"event":"pong"}""" }
+                s.start(serverScope)
+
+                // Force at least 4 concurrent in-flight tasks so the pool grows to its
+                // configured size. Each connectClient + sendVerb keeps a reader busy
+                // momentarily.
+                val clients = (1..8).map { connectClient() }
+                for (c in clients) sendVerb(c, "ping")
+                // Drain the replies so the test doesn't block on dangling reads.
+                for (c in clients) readOneLine(c, timeoutMs = 1_000)
+
+                val ipcThreads = Thread.getAllStackTraces().keys
+                    .filter { it.name.startsWith("ipc-io-") }
+                assertTrue(ipcThreads.isNotEmpty(), "No ipc-io- threads found after activity")
+                assertTrue(
+                    ipcThreads.size <= 4,
+                    "Expected ≤4 ipc-io- threads, found ${ipcThreads.size}: ${ipcThreads.map { it.name }}",
+                )
+
+                clients.forEach { runCatching { it.close() } }
+                s.close()
+                server = null  // prevent double-close in tearDown
+
+                // After close(): wait up to the spec's 5s awaitTermination budget plus
+                // a small slack, then assert no ipc-io- threads remain.
+                val deadline = System.currentTimeMillis() + 6_000
+                var remaining: List<Thread>
+                do {
+                    remaining = Thread.getAllStackTraces().keys
+                        .filter { it.name.startsWith("ipc-io-") && it.isAlive }
+                    if (remaining.isEmpty()) break
+                    delay(100)
+                } while (System.currentTimeMillis() < deadline)
+                assertTrue(
+                    remaining.isEmpty(),
+                    "ipc-io- threads survived close()+6s: ${remaining.map { it.name }}",
+                )
+            } finally {
+                serverScope.cancel()
+            }
+        }
 }
