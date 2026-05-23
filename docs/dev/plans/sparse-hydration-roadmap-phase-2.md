@@ -32,6 +32,15 @@ Cross-references from spec §Phase 2 to plan tasks:
 
 Spec §Error handling table: errors map to tasks by which path they occur in. Spec §Crash semantics (223-252) is owned by Task 3 (the LocalCache scan-on-startup is the load-bearing recovery).
 
+## Inherited JVM-side limits
+
+Phase 2 inherits four hard limits from the existing JVM `IpcServer`. Any of these silently mis-handled means runtime breakage no test in this plan will catch unless the limit is honoured by construction:
+
+- **Socket path length ≤ 90 chars** (`IpcServer.kt:390` `MAX_SOCKET_PATH_LENGTH`). The JVM falls back to a SHA-1-hashed name + `.meta` sidecar for over-90-char paths. Phase 2 mount binary must reuse the JVM's `defaultSocketPath(profileName)` result rather than re-derive the path (Task 4 enforces this).
+- **Inbound request line ≤ 64 KiB** (`IpcServer.kt:391` `MAX_REQUEST_BYTES`). The JVM disconnects the client mid-request on overflow; reply will not arrive. The Rust `IpcClient.round_trip` enforces this client-side before write (Task 1.3 code).
+- **Max concurrent IPC clients = 10** (`IpcServer.kt:388` `MAX_CLIENTS`). One `unidrive-mount` instance consumes at most one connection (the verb-call connection) + one for the subscribe stream when Phase 3 lands; that's 2 max. Headroom is fine — but multiple co-mounted profiles share the JVM's IPC pool, document if Phase 3 ever surfaces contention.
+- **JSON wire format is one-line NDJSON** (`IpcServer.kt:164-180` framing loop). Newlines inside a request line are treated as record terminators by the JVM. `serde_json`'s default `to_string()` produces no internal newlines — safe — but agents customising the request format must verify.
+
 ---
 
 ## File structure
@@ -73,7 +82,7 @@ In the sibling repo `unidrive-mount-linux/`:
 
 **Created in Task 4 (JVM-side wiring) — in THIS unidrive repo, NOT the sibling:**
 
-- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/MountCommand.kt` — new `MountCommand` extending the existing Picocli `Command` pattern (read `SyncCommand.kt` for the established pattern). Subcommand: `unidrive mount <path> [--profile <name>]`. Resolves the co-daemon binary path (`~/.local/lib/unidrive/unidrive-mount`), spawns it with `--mount <path> --ipc <socket>`, supervises until child exits or SIGTERM/SIGINT received. On signal: send SIGTERM to child, wait for clean exit (timeout 10 s), then return.
+- `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/MountCommand.kt` — new `MountCommand` extending the existing Picocli `Command` pattern (read `SyncCommand.kt` for the established pattern). Subcommand: `unidrive mount <path> [--profile <name>]`. Resolves the co-daemon binary path (`~/.local/lib/unidrive/unidrive-mount`), **resolves the IPC socket path via `IpcServer.defaultSocketPath(profileName)`** (NOT a hardcoded path — `IpcServer.kt:419-441` resolves to `/run/user/$UID/` on Linux with a tempdir fallback, and applies a SHA-1-hashed fallback name plus a `.meta` sidecar when the resolved path would exceed `MAX_SOCKET_PATH_LENGTH = 90` chars; reusing `defaultSocketPath` is the only way to stay in lockstep with that logic). Spawns the binary with `--mount <path> --ipc <socket>` where `<socket>` is the resolved path, supervises until child exits or SIGTERM/SIGINT received. On signal: send SIGTERM to child, wait for clean exit (timeout 10 s), then return.
 - `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/Main.kt` — register `MountCommand` on the root command (read the existing `Main.kt` for the pattern; the registration is a one-liner).
 - `core/app/cli/src/test/kotlin/org/krost/unidrive/cli/MountCommandTest.kt` — unit tests: arg parsing, binary-not-found error, supervisor-handles-child-exit, supervisor-forwards-SIGTERM. Mock the `ProcessBuilder` invocation.
 - `dist/install.sh` — modify: add a co-daemon download step (download tarball from GitHub Releases of `unidrive-mount-linux`, verify SHA256, drop binary at `~/.local/lib/unidrive/unidrive-mount`). The SHA256 is baked into install.sh. Empty/stub initially — there's no released binary yet; the install.sh edit can be a placeholder that prints a "co-daemon download skipped, see [link]" message and exits non-fatal. Real download lands in a follow-up commit on this repo once `unidrive-mount-linux` ships a release.
@@ -361,11 +370,15 @@ async fn open_read_round_trips() {
 
 Replicate the test shape for the other seven verbs: `open_write`, `close_handle`, `hydrate`, `dehydrate`, `subscribe`, `last_synced`, `list`. Reply shapes for each verb are pinned in `../unidrive/core/app/hydration/src/main/kotlin/org/krost/unidrive/hydration/HydrationIpcHandler.kt` lines 14-25 (the doc-comment) and the verb-handling `when` block.
 
-Specifically:
+Specifically (verified against the current Kotlin source `HydrationIpcHandler.kt` lines 134-95 for verb dispatch and lines 208+ for `pluck` — both moved post-Phase-1-gap-#9 landing; agents MUST re-verify line numbers before quoting them in commit messages):
+- `open_read` request `{"verb":"hydration.open_read","handle_id":"…","path":"/foo"}` → reply `{"ok":true,"cache_path":"…"}` or `{"ok":false,"error":"…"}`.
+- `open_write` request `{"verb":"hydration.open_write","handle_id":"…","path":"/foo","cache_path":"…"}` — three required fields, NOT two. Reply same shape as `open_read`. The `cache_path` field tells the JVM where on disk to find the modified bytes; semantically post-tense (called AT FUSE RELEASE after writes have flushed to the cache file). The Rust client method takes `(handle_id, path, cache_path)`.
+- `close_handle` request `{"verb":"hydration.close_handle","handle_id":"…"}` → reply `{"ok":true}` always (per the Kotlin Hydration interface, `closeHandle` returns Unit; the handler always replies ok).
+- `hydrate` / `dehydrate` request `{"verb":"hydration.{verb}","path":"…"}` → reply `{"ok":true/false, error?:…}`.
 - `dehydrate` returning `{"ok":false,"error":"busy"}` MUST surface to the caller as a distinct `IpcError::Busy` variant (so Task 3's dehydrate-while-open test can assert `EBUSY` propagation).
-- `subscribe` opens a one-way stream — its reply is `{"ok":true}` AND the connection then stays open for server-pushed events. The Task 1 test covers only the handshake reply; Phase 3 tests cover the stream (out of scope for Phase 2).
-- `last_synced` Unknown reply: `{"ok":false,"error":"unknown_path"}` or `{"ok":false,"error":"no_mtime"}` per the gap-#6 PR. Test asserts both error strings surface as `IpcError::Unknown`.
-- `list` reply shape: `{"ok":true,"entries":[{"path":"…","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool}, …]}`. Test asserts deserialisation into `Vec<ListEntry>` round-trips.
+- `subscribe` opens a one-way stream — its reply is `{"ok":true}` AND the connection then stays open for server-pushed events. The Task 1 test covers only the handshake reply; Phase 3 tests cover the stream (out of scope for Phase 2). The reconnect wrapper that lands in Task 3 must NOT auto-reconnect a subscribe connection (the server-pushed event stream is stateful — a reconnect would silently re-issue subscribe and the caller would miss whatever events fired during the disconnect window). Document this in the wrapper: subscribe gets a dedicated long-lived connection NOT wrapped in retry logic; verb calls get the retried connection.
+- `last_synced` Unknown reply: `{"ok":false,"error":"<reason>"}` where `<reason>` is a dynamic string set by the JVM-side `LastSyncedResult.Unknown(reason: String)` data class. Current Kotlin emits `"unknown_path"` (no row in state.db) or `"no_mtime"` (row exists but `localMtime` is null), but the contract guarantees only "any non-empty reason string." The test asserts: (a) the reply maps to a dedicated client-side variant (rename `IpcError::Unknown` to `IpcError::Unknown { reason: String }` if you want to expose the reason; the client surface decision is the agent's). It MUST NOT assert on the exact reason literal — that would couple the Rust test to JVM-side wording.
+- `list` reply shape: `{"ok":true,"entries":[{"path":"…","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool}, …]}`. Test asserts deserialisation into `Vec<ListEntry>` round-trips. The reply size scales linearly with the number of direct children under `prefix` — at 195k-file scale the worst case is the cloud root with thousands of top-level entries, which is why the 4 MiB inbound cap in `round_trip` exists.
 
 - [ ] **Run `cargo test --test ipc_client`.** Expected: FAIL (`IpcClient` doesn't exist).
 
@@ -415,53 +428,60 @@ impl IpcClient {
     }
 
     pub async fn open_read(&mut self, handle_id: &str, path: &str) -> Result<OpenReadReply, IpcError> {
-        let req = format!(
-            r#"{{"verb":"hydration.open_read","handle_id":{},"path":{}}}"#,
-            json_str(handle_id), json_str(path)
-        );
-        let reply = self.round_trip(&req).await?;
-        let cache = extract_string(&reply, "cache_path")
-            .ok_or_else(|| IpcError::Malformed(reply.clone()))?;
+        let req = serde_json::json!({
+            "verb": "hydration.open_read",
+            "handle_id": handle_id,
+            "path": path,
+        });
+        let reply: serde_json::Value = self.round_trip(&req).await?;
+        if !reply["ok"].as_bool().unwrap_or(false) {
+            return Err(server_error(&reply));
+        }
+        let cache = reply["cache_path"].as_str()
+            .ok_or_else(|| IpcError::Malformed(reply.to_string()))?;
         Ok(OpenReadReply { cache_path: PathBuf::from(cache) })
     }
 
-    // ... one method per verb. Each follows the same pattern: build JSON line,
-    //     round_trip, parse reply, map server-error variants.
+    // ... one method per verb. Each follows the same pattern: serde_json::json!
+    //     build, round_trip, dispatch on reply["ok"], read fields with as_str/as_i64/etc.
 
-    async fn round_trip(&mut self, req: &str) -> Result<String, IpcError> {
-        self.writer.write_all(req.as_bytes()).await?;
+    async fn round_trip(&mut self, req: &serde_json::Value) -> Result<serde_json::Value, IpcError> {
+        let line = req.to_string();
+        // Enforce the same MAX_REQUEST_BYTES = 64 * 1024 cap the JVM IpcServer
+        // imposes on its inbound buffer (IpcServer.kt:391). Going past it would
+        // cause the JVM to disconnect mid-request rather than reply.
+        if line.len() + 1 > 64 * 1024 {
+            return Err(IpcError::Malformed(format!("request {} bytes exceeds 64 KiB JVM cap", line.len())));
+        }
+        self.writer.write_all(line.as_bytes()).await?;
         self.writer.write_all(b"\n").await?;
         self.writer.flush().await?;
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line).await?;
+        // Bound the inbound line too: the JVM's `list` reply can be sizeable for
+        // populous prefixes but the spec doesn't permit unbounded subscribers
+        // either. Cap reads at 4 MiB and surface anything larger as Malformed.
+        let mut line = String::with_capacity(1024);
+        let n = (&mut self.reader).take(4 * 1024 * 1024).read_line(&mut line).await?;
         if n == 0 { return Err(IpcError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))); }
-        Ok(line.trim_end_matches('\n').to_string())
+        let trimmed = line.trim_end_matches('\n');
+        serde_json::from_str(trimmed).map_err(|e| IpcError::Malformed(format!("{e}: {trimmed}")))
     }
 }
 
-fn json_str(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn extract_string(json: &str, key: &str) -> Option<String> {
-    // Match Phase 1's `pluck()` helper at HydrationIpcHandler.kt:88-105.
-    let needle = format!("\"{key}\"");
-    let k = json.find(&needle)?;
-    let colon = json[k + needle.len()..].find(':')? + k + needle.len();
-    let q1 = json[colon..].find('"')? + colon + 1;
-    let mut out = String::new();
-    let mut chars = json[q1..].chars();
-    while let Some(c) = chars.next() {
-        if c == '"' { return Some(out); }
-        if c == '\\' { if let Some(esc) = chars.next() { out.push(esc); } continue; }
-        out.push(c);
+fn server_error(reply: &serde_json::Value) -> IpcError {
+    let err = reply["error"].as_str().unwrap_or("unknown");
+    match err {
+        "busy" => IpcError::Busy,
+        // last_synced returns dynamic reasons ("unknown_path", "no_mtime", …); the
+        // canonical shape on this verb is "ok=false with any non-empty reason".
+        // Callers checking for Unknown should match IpcError::Unknown { .. },
+        // not on a specific message — the JVM-side gap-#6 PR explicitly chose a
+        // dynamic-string contract (Hydration.kt: LastSyncedResult.Unknown(reason)).
+        _ => IpcError::ServerError(err.to_string()),
     }
-    None
 }
 ```
 
-The dispatched agent fills in the remaining verb methods using the same shape. The minimal-JSON-pluck approach matches Phase 1's deliberate choice not to pull in a JSON library for hot-path code; the heavier `serde_json` is in the dependency list for tests and for the `list` reply, which has a non-trivial nested array.
+The dispatched agent fills in the remaining verb methods using the same `serde_json::json!` build + `round_trip` + ok-dispatch shape. Phase 1's Kotlin handler uses a hand-rolled `pluck()` because the JVM side wanted zero new dependencies; Phase 2's Rust client unconditionally depends on `serde_json` (it's required for the `list` reply's nested array regardless), so using `Value` throughout is cheaper than a second hand-rolled parser. Two JVM-side limits are inherited and enforced here at the client: `MAX_REQUEST_BYTES = 64 KiB` (`IpcServer.kt:391`) caps outbound; an internal 4 MiB cap on inbound prevents an unbounded `list` reply from causing OOM. Subscribe is the streaming exception — see Step 1.3's verb-list note below for how `subscribe` deviates from the round-trip shape (the subscribe verb's reply IS a round-trip but the connection stays open for server-pushed events afterward; the client must NOT reuse `round_trip` for the post-subscribe event stream).
 
 - [ ] **Implement `mount/src/fake_jvm.rs`** to make the integration tests pass. Read `../unidrive/core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt` to confirm the line-framing. The fake JVM listens on a temp UDS, accepts one connection at a time, reads NDJSON lines, looks up the verb in the replies map, writes the reply line + `\n`, records each request.
 
@@ -572,7 +592,7 @@ git commit -m "docs(backlog): close foundation entry; seed entries for FUSE read
 1. **Read SyncCommand.kt + Main.kt** to understand the Picocli pattern. No commit; this is the "read three nearby source files" rule from AGENTS.md.
 2. **Add the BACKLOG entry on THIS repo** (one commit, docs-only): "Phase 2 JVM wiring: `unidrive mount` CLI subcommand + dist/install.sh co-daemon placeholder" under High tier.
 3. **Write `MountCommandTest.kt`** — failing tests for: arg parsing (`mount /tmp/foo`), profile parameter (`mount --profile X /tmp/foo`), binary-not-found error path, supervisor handles child exit cleanly, supervisor forwards SIGTERM. One commit (the failing tests).
-4. **Implement `MountCommand.kt`** + register in `Main.kt`. Tests pass. One commit. Body explains the spawn/supervise loop: resolves binary at `~/.local/lib/unidrive/unidrive-mount`, builds a UDS socket path under `~/.local/share/unidrive/<profile>.sock`, spawns the binary with `--mount <path> --ipc <socket>`, waits on its exit code, propagates back. SIGTERM/SIGINT in the supervisor sends SIGTERM to child and waits up to 10s.
+4. **Implement `MountCommand.kt`** + register in `Main.kt`. Tests pass. One commit. Body explains the spawn/supervise loop: resolves binary at `~/.local/lib/unidrive/unidrive-mount`, resolves UDS socket path via `IpcServer.defaultSocketPath(profileName)` (this honours the Linux `/run/user/$UID/` resolution, the tempdir fallback, the `MAX_SOCKET_PATH_LENGTH = 90` hashed-name fallback, AND writes the `.meta` sidecar — none of which Phase 2 should re-derive), spawns the binary with `--mount <path> --ipc <socket>`, waits on its exit code, propagates back. SIGTERM/SIGINT in the supervisor sends SIGTERM to child and waits up to 10s.
 5. **Modify `dist/install.sh`** — add a "co-daemon download" stub section that prints a message ("co-daemon download is a follow-up; see [URL of the new BACKLOG entry]") and exits non-fatal. One commit.
 6. **BACKLOG → CLOSED move** for "Phase 2 JVM wiring: …" entry, simultaneously add new entry "Cut the first `unidrive-mount-linux` release tarball + wire `dist/install.sh` to download + SHA256-verify it" (High tier — this is the follow-up that lights up the install.sh placeholder once the sibling repo has a shippable artefact). Same commit as the dist/install.sh edit OR a separate one; agent's call. AGENTS.md says one BACKLOG item per commit — so SEPARATE commit for the BACKLOG move.
 
