@@ -235,4 +235,23 @@ class IpcDispatcherIsolationTest {
                 serverScope.cancel()
             }
         }
+
+    @Test
+    fun write_timeout_env_var_parses_and_clamps() {
+        // Null (env var unset) → default
+        assertTrue(IpcServer.parseWriteTimeoutMs(null) == 5_000L)
+        // Valid in-range value honored
+        assertTrue(IpcServer.parseWriteTimeoutMs("30000") == 30_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("100") == 100L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("600000") == 600_000L)
+        // Out-of-range clamps to default (we don't silently saturate)
+        assertTrue(IpcServer.parseWriteTimeoutMs("0") == 5_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("99") == 5_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("600001") == 5_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("-1") == 5_000L)
+        // Unparseable → default
+        assertTrue(IpcServer.parseWriteTimeoutMs("") == 5_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("not-a-number") == 5_000L)
+        assertTrue(IpcServer.parseWriteTimeoutMs("12.5") == 5_000L)
+    }
 }

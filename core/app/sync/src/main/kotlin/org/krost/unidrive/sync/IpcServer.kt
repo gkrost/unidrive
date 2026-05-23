@@ -420,10 +420,15 @@ class IpcServer(
         private const val MAX_REQUEST_BYTES = 64 * 1024
         private const val TRANSPORT_POOL_SIZE = 4
 
-        private fun readWriteTimeoutFromEnv(): Long {
-            val raw = System.getenv("UNIDRIVE_IPC_WRITE_TIMEOUT_MS") ?: return 5_000L
+        // Pure-function overload for testing the parse + clamp logic without
+        // touching System.getenv. Production path delegates here.
+        internal fun parseWriteTimeoutMs(raw: String?): Long {
+            if (raw == null) return 5_000L
             return raw.toLongOrNull()?.takeIf { it in 100L..600_000L } ?: 5_000L
         }
+
+        internal fun readWriteTimeoutFromEnv(): Long =
+            parseWriteTimeoutMs(System.getenv("UNIDRIVE_IPC_WRITE_TIMEOUT_MS"))
 
         private fun ipcIoThreadFactory(): java.util.concurrent.ThreadFactory {
             val counter = java.util.concurrent.atomic.AtomicInteger(0)
