@@ -763,21 +763,26 @@ git commit -m "docs(backlog): close IPC write-timeout entry"
 The spec is explicit: the fix has to be validated the same way the bug was found. **Do not skip.** Per AGENTS.md "Smoke test on the actual target."
 
 ```bash
-# 1. Build a snapshot of the daemon with the fix.
+# 1. Build + deploy the fix to ~/.local/lib/unidrive/unidrive-0.0.1.jar
+#    (this is the canonical local-deploy task — :app:cli:deploy depends
+#    on shadowJar, copies the fat jar, and updates ~/.local/bin/unidrive).
+#    Earlier drafts of this plan named :app:sync:installDist here; that
+#    task does not exist (sync is a library module).
 cd /home/gernot/dev/git/unidrive/core
-./gradlew :app:sync:installDist -q
+./gradlew :app:cli:deploy -q
 
-# 2. Restart the daemon for the posteo_onedrive profile under the new build.
-#    (Exact command depends on how the user's daemon is supervised. If it's
-#    the systemd-user-unit `unidrive-sync@posteo_onedrive.service`, restart
-#    via `systemctl --user restart unidrive-sync@posteo_onedrive`. If the
-#    user runs it from a terminal, kill and respawn.)
-#
-#    User-confirmable step: ask the user how to restart the daemon if not
-#    obvious from the unit files and profile config.
+# 2. Restart the daemon for the posteo_onedrive profile under the new
+#    build. The supervisor varies by setup: if a systemd-user-unit exists,
+#    `systemctl --user restart unidrive-sync@posteo_onedrive`; otherwise
+#    kill any running `java … -p posteo_onedrive sync --watch` process and
+#    relaunch it in a terminal:
+#      unidrive -p posteo_onedrive sync --watch
+#    Note: -p is the TOP-LEVEL flag (before `sync`), not a `sync` subflag.
+#    User-confirmable step if neither path matches the local setup.
 
-# 3. Mount.
-unidrive mount /tmp/onedrive-smoke
+# 3. Mount. The mountpoint directory must exist before `mount` runs.
+mkdir -p /tmp/onedrive-smoke
+unidrive -p posteo_onedrive mount /tmp/onedrive-smoke
 
 # 4. While SyncEngine is mid-download (logs show "Download: ... (NN MB)"),
 #    read a small file.
