@@ -14,6 +14,7 @@ import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -136,6 +137,43 @@ class IpcDispatcherIsolationTest {
                 assertTrue(elapsed < 1_000, "Fast client took ${elapsed}ms (expected <1000ms)")
                 slowClients.forEach { runCatching { it.close() } }
                 fast.close()
+            } finally {
+                serverScope.cancel()
+            }
+        }
+
+    /**
+     * Proves the handler offload mechanism: handler invocation runs on a
+     * different thread than the transport. Without coupling to
+     * kotlinx.coroutines internal naming.
+     */
+    @Test
+    fun handler_invocation_is_offloaded_off_transport_pool() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                val handlerThreadName = java.util.concurrent.atomic.AtomicReference<String?>()
+                val s = IpcServer(socketPath)
+                server = s
+                s.registerHandler("probe") { _, _ ->
+                    handlerThreadName.set(Thread.currentThread().name)
+                    """{"event":"probe_done"}"""
+                }
+                s.start(serverScope)
+
+                val client = connectClient()
+                sendVerb(client, "probe")
+                val reply = readOneLine(client, timeoutMs = 2_000)
+                assertTrue(reply != null && reply.contains("probe_done"), "probe never replied: $reply")
+
+                val name = handlerThreadName.get()
+                    ?: fail("Handler did not record its thread name")
+                assertTrue(
+                    !name.startsWith("ipc-io-"),
+                    "Handler ran on transport pool thread '$name'; expected off-pool. " +
+                        "withContext(handlerDispatcher) likely missing from dispatchRequest.",
+                )
+                client.close()
             } finally {
                 serverScope.cancel()
             }
