@@ -24,6 +24,9 @@ dependencies {
     // The test itself skips cleanly when UNIDRIVE_INTEGRATION_TESTS != true,
     // so this dep is dormant for developers without an Internxt account.
     testImplementation(project(":providers:internxt"))
+    // Live-integration test pointing the engine at a real OneDrive profile.
+    // Same skip-cleanly gating as the Internxt live test.
+    testImplementation(project(":providers:onedrive"))
 }
 
 tasks.test {
