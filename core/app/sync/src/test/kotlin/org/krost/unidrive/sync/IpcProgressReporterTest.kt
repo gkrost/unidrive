@@ -101,6 +101,44 @@ class IpcProgressReporterTest {
         return sb.toString().lines().filter { it.isNotBlank() }
     }
 
+    /**
+     * Issue `sync.subscribe` on `client` and drain the {"ok":true} reply
+     * line plus any subsequent state-dump lines. Production code registers
+     * this verb in SyncCommand; tests must register it themselves on the
+     * IpcServer they constructed. Idempotent across tests within a run.
+     *
+     * Returns after the post-reply state-dump has completed and the
+     * connection is registered in IpcServer.syncSubscribers.
+     */
+    private suspend fun subscribeSync(client: SocketChannel) {
+        runCatching {
+            server!!.registerHandler("sync.subscribe") { connId, _ ->
+                server!!.scheduleAfterReply(connId) {
+                    server!!.flushStateDumpTo(connId)
+                    server!!.registerSyncSubscriber(connId)
+                }
+                """{"ok":true}"""
+            }
+            server!!.registerConnectionCloseListener { connId ->
+                server!!.unregisterSyncSubscriber(connId)
+            }
+        }
+        val req = """{"verb":"sync.subscribe"}""" + "\n"
+        val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+        while (w.hasRemaining()) client.write(w)
+        // Drain reply + any state-dump lines.
+        readLines(client, timeoutMs = 250, minLines = 1)
+        // Wait for the afterReply callback to complete and register
+        // the subscriber. Without this, the test might update state
+        // and the delayed flushStateDumpTo might dump that new state.
+        // The afterReply hook runs in the handlerDispatcher coroutine
+        // after writeNonBlocking returns, so there's a window where
+        // the reply has been read but the subscriber isn't registered yet.
+        // Use Thread.sleep not delay() — the server runs on real threads
+        // while runTest uses virtual time.
+        Thread.sleep(100)
+    }
+
     private fun parseJson(line: String): JsonObject = Json.decodeFromString(JsonObject.serializer(), line)
 
     @Test
@@ -111,6 +149,7 @@ class IpcProgressReporterTest {
 
             val client = connectClient()
             awaitClientCount(server!!)
+            subscribeSync(client)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.onScanProgress("remote", 42)
@@ -133,6 +172,7 @@ class IpcProgressReporterTest {
 
             val client = connectClient()
             awaitClientCount(server!!)
+            subscribeSync(client)
 
             val reporter = IpcProgressReporter(server!!, "work")
             reporter.onActionProgress(3, 10, "DownloadFile", "/docs/report.pdf")
@@ -158,6 +198,7 @@ class IpcProgressReporterTest {
 
             val client = connectClient()
             awaitClientCount(server!!)
+            subscribeSync(client)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.onSyncComplete(downloaded = 5, uploaded = 3, conflicts = 1, durationMs = 12345)
@@ -191,6 +232,7 @@ class IpcProgressReporterTest {
 
             val client = connectClient()
             awaitClientCount(server!!)
+            subscribeSync(client)
 
             val reporter = IpcProgressReporter(server!!, "personal")
             reporter.emitSyncError("line1\nline2\nline3")
@@ -214,6 +256,7 @@ class IpcProgressReporterTest {
 
             val client = connectClient()
             awaitClientCount(server!!)
+            subscribeSync(client)
 
             val reporter = IpcProgressReporter(server!!, "myprofile")
             reporter.emitSyncStarted()

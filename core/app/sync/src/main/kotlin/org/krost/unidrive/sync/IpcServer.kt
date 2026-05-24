@@ -82,6 +82,19 @@ class IpcServer(
     private var broadcastJob: Job? = null
     private var ownedTransport: java.util.concurrent.ExecutorService? = null
 
+    // Connections that issued `sync.subscribe`. Filtered by the broadcast loop
+    // (§3.2.5) so request-reply-only clients (e.g. FUSE co-daemon) never
+    // receive unsolicited sync-progress bytes. Cleanup is via the close-
+    // listener registered externally by SyncCommand (§3.3 of the spec).
+    private val syncSubscribers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // One-shot per-connection slot for an action that runs AFTER the current
+    // request's reply is written to the socket. See scheduleAfterReply()
+    // and the post-reply hook in dispatchRequest. Single in-flight request
+    // per connection (the per-client reader processes lines sequentially),
+    // so a per-connId slot is sufficient — no queue.
+    private val pendingPostReply = java.util.concurrent.ConcurrentHashMap<String, suspend () -> Unit>()
+
     /**
      * Register an inbound-verb handler. The handler receives the connection ID
      * (a per-client UUID, stable for the life of the connection) and the raw
@@ -139,6 +152,59 @@ class IpcServer(
         }
     }
 
+    /**
+     * Mark a connection as a sync-progress subscriber. After this call, the
+     * connection receives sync-progress events from `emit(...)` until it
+     * disconnects (cleanup via `unregisterSyncSubscriber`, called from a
+     * connection-close listener registered externally by `SyncCommand` for
+     * stylistic parity with the existing hydration close listeners).
+     *
+     * Symmetric with `HydrationIpcHandler.registerSubscriber` at the wire
+     * level; the two subscriber sets are independent (a client may
+     * subscribe to one, both, or neither).
+     */
+    fun registerSyncSubscriber(connectionId: String) {
+        syncSubscribers.add(connectionId)
+    }
+
+    /**
+     * Remove a connection from the sync-progress subscriber set. Idempotent;
+     * called from the connection-close listener `SyncCommand` registers
+     * and from the broadcast loop's dead-subscriber cleanup path.
+     */
+    fun unregisterSyncSubscriber(connectionId: String) {
+        syncSubscribers.remove(connectionId)
+    }
+
+    /**
+     * Schedule a one-shot action to run AFTER the current request's reply
+     * is written to the socket. Used by `sync.subscribe` to push the state
+     * dump and subscriber-set registration only after the {"ok":true} reply
+     * is on the wire — so the subscriber's first observed line is always
+     * the reply, never an event.
+     *
+     * Must be called from inside a verb handler running under
+     * dispatchRequest's withContext(handlerDispatcher) block. Calling
+     * outside a handler is a no-op (the action will never fire because
+     * the next dispatchRequest call clears the slot at the top).
+     *
+     * The action fires only on the successful-reply path. If the handler
+     * threw and dispatchRequest wrote an error envelope, the scheduled
+     * action is discarded (R7 in the spec).
+     */
+    fun scheduleAfterReply(connectionId: String, action: suspend () -> Unit) {
+        pendingPostReply[connectionId] = action
+    }
+
+    /**
+     * Test-only accessor used by IpcSyncSubscriberSetTest to assert that
+     * disconnected connections are removed from the subscriber set (T4 in
+     * the spec). Same-module visibility is sufficient — `internal` works
+     * for tests living in `:app:sync`.
+     */
+    internal val syncSubscribersSnapshot: Set<String>
+        get() = syncSubscribers.toSet()
+
     fun start(scope: CoroutineScope) {
         reclaimStaleSocket()
 
@@ -182,7 +248,6 @@ class IpcServer(
                         val entry = ClientEntry(sc, connId)
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
-                        flushStateDump(entry)
                         scope.launch(transport) {
                             val buf = ByteBuffer.allocate(MAX_REQUEST_BYTES)
                             val pending = StringBuilder()
@@ -232,12 +297,13 @@ class IpcServer(
                     val line = (json + "\n").toByteArray(Charsets.UTF_8)
                     val dead = mutableListOf<ClientEntry>()
                     for (entry in clients) {
+                        if (entry.id !in syncSubscribers) continue
                         try {
                             entry.writeMutex.withLock {
                                 writeNonBlocking(entry.channel, ByteBuffer.wrap(line))
                             }
                         } catch (e: IOException) {
-                            log.debug("IPC: dropping dead client id={}: {}", entry.id, e.message)
+                            log.debug("IPC: dropping dead sync-subscriber id={}: {}", entry.id, e.message)
                             dead.add(entry)
                         }
                     }
@@ -260,6 +326,8 @@ class IpcServer(
             closeListeners.forEach { it(entry.id) }
         }
         clients.clear()
+        syncSubscribers.clear()
+        pendingPostReply.clear()
         runCatching { Files.deleteIfExists(socketPath) }
         ownedTransport?.let { es ->
             es.shutdown()
@@ -284,8 +352,39 @@ class IpcServer(
         }
     }
 
-    private suspend fun flushStateDump(entry: ClientEntry) {
+    /**
+     * Replay the current SyncState as initial state-dump events to a
+     * single subscriber connection. Called from the `sync.subscribe`
+     * post-reply hook (see scheduleAfterReply) so that subscribers see
+     * context for the in-progress sync, but non-subscribers (e.g. the
+     * FUSE co-daemon, request-reply clients) never receive these
+     * unsolicited bytes on their socket.
+     *
+     * If `syncState` is null (no sync in progress at subscribe time),
+     * this is a no-op. If the connection has closed between subscribe
+     * and the post-reply hook firing, logs a WARN and returns —
+     * surfacing the rare timing window for future operator debugging.
+     *
+     * Public for the same module-boundary reason as `registerSyncSubscriber`
+     * (called from `SyncCommand` in `:app:cli`; `IpcServer` is in `:app:sync`).
+     *
+     * On partial-write failure, the subscriber receives a truncated state
+     * dump and then nothing further from this method. The connection's
+     * subsequent dead-client cleanup (via the broadcast loop's dropping
+     * path or the per-client reader's IOException path) handles the
+     * unhealthy connection. Subscribers should validate they receive
+     * expected event shapes rather than assume the dump completed.
+     */
+    suspend fun flushStateDumpTo(connectionId: String) {
         val state = syncState ?: return
+        val entry = clients.firstOrNull { it.id == connectionId } ?: run {
+            log.warn(
+                "IPC: flushStateDumpTo called for unknown connection id={}; " +
+                    "client likely closed between sync.subscribe parse and post-reply hook",
+                connectionId,
+            )
+            return
+        }
         val ts =
             java.time.Instant
                 .now()
@@ -298,7 +397,7 @@ class IpcServer(
                     "scan_progress",
                     state.profile,
                     ts,
-                    """"phase":"${state.phase}","count":${state.scanCount}""",
+                    """"phase":${escapeJson(state.phase ?: "")},"count":${state.scanCount}""",
                 ),
             )
         }
@@ -318,7 +417,7 @@ class IpcServer(
                     "action_progress",
                     state.profile,
                     ts,
-                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":"${state.lastAction}","path":"${state.lastPath ?: ""}"""",
+                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":${escapeJson(state.lastAction ?: "")},"path":${escapeJson(state.lastPath ?: "")}""",
                 ),
             )
         }
@@ -329,9 +428,10 @@ class IpcServer(
                     writeNonBlocking(entry.channel, ByteBuffer.wrap(bytes))
                 }
             } catch (e: IOException) {
-                log.debug("IPC: failed to flush state dump to new client: {}", e.message)
+                log.debug("IPC: failed to flush state dump to subscriber: {}", e.message)
                 clients.remove(entry)
                 runCatching { entry.channel.close() }
+                syncSubscribers.remove(connectionId)
                 return
             }
         }
@@ -344,16 +444,22 @@ class IpcServer(
         extra: String? = null,
     ): String {
         val sb = StringBuilder()
-        sb.append("""{"event":"$event","profile":"$profile"""")
+        sb.append("""{"event":${escapeJson(event)},"profile":${escapeJson(profile)}""")
         if (extra != null) {
             sb.append(",")
             sb.append(extra)
         }
-        sb.append(""","timestamp":"$timestamp"}""")
+        sb.append(""","timestamp":${escapeJson(timestamp)}}""")
         return sb.toString()
     }
 
     private suspend fun dispatchRequest(client: SocketChannel, connId: String, line: String) {
+        // R8: defensive clear at the top — any stale entry from a prior request
+        // that errored on this connection is removed before this request runs.
+        // No-op on the happy path (the entry was already consumed at the end
+        // of the prior successful request).
+        pendingPostReply.remove(connId)
+
         val verb = parseVerb(line) ?: run {
             log.warn("IPC: request without 'verb' field, dropping: {}", line.take(80))
             return
@@ -362,9 +468,11 @@ class IpcServer(
             log.warn("IPC: no handler for verb '{}'", verb)
             return
         }
+        var handlerThrew = false
         val reply = try {
             kotlinx.coroutines.withContext(handlerDispatcher) { handler(connId, line) }
         } catch (e: Exception) {
+            handlerThrew = true
             log.error("IPC: handler '$verb' threw", e)
             """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
         }
@@ -372,6 +480,16 @@ class IpcServer(
         runCatching {
             entry.writeMutex.withLock {
                 writeNonBlocking(entry.channel, ByteBuffer.wrap((reply + "\n").toByteArray(Charsets.UTF_8)))
+            }
+        }
+        // R7: post-reply hook fires ONLY on the successful-reply path.
+        // If the handler threw, the scheduled action (if any) is discarded.
+        val pending = pendingPostReply.remove(connId)
+        if (!handlerThrew && pending != null) {
+            runCatching {
+                kotlinx.coroutines.withContext(handlerDispatcher) { pending() }
+            }.onFailure { e ->
+                log.warn("IPC: post-reply hook for connId={} threw: {}", connId, e.message)
             }
         }
     }
