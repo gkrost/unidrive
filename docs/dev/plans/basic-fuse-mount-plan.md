@@ -116,8 +116,21 @@ Locate the `class ProcessLock(...)` declaration (around line 17). Inside the cla
         }
     }
 
-    /** Pid + mode of a lock's current holder, returned by [readHolderInfo]. */
-    data class HolderInfo(val pid: Long, val mode: Mode)
+    /**
+     * Pid + mode of a lock's current holder, returned by [readHolderInfo].
+     *
+     * [mode] is `null` when the sidecar carries a mode token this version
+     * does not recognise (forward-compat path per spec §3.1: "readers
+     * parse the second token literally and MountCommand/SyncCommand
+     * refuse with a message identifying the unknown mode"). In that case
+     * [rawMode] carries the raw token verbatim so the contention message
+     * can name it.
+     *
+     * Legacy pid-only sidecars (no mode token, pre-fix daemons) yield
+     * `mode = Mode.SYNC, rawMode = null` — that path is the intentional
+     * backwards-compat default per spec §3.1 ("read as `<pid> sync`").
+     */
+    data class HolderInfo(val pid: Long, val mode: Mode?, val rawMode: String? = null)
 ```
 
 - [ ] **Step 1.2: Add the new `tryLock(Mode, Duration)` overload + keep the legacy overload**
@@ -218,8 +231,26 @@ After the closing brace of `readHolderPid` (line 97 area), add:
             if (raw.isEmpty()) return@runCatching null
             val parts = raw.split(Regex("\\s+"), limit = 2)
             val pid = parts.getOrNull(0)?.toLongOrNull() ?: return@runCatching null
-            val mode = parts.getOrNull(1)?.let { Mode.fromWireToken(it) } ?: Mode.SYNC
-            HolderInfo(pid, mode)
+            val modeToken = parts.getOrNull(1)
+            when (modeToken) {
+                null -> {
+                    // Legacy pid-only sidecar (pre-fix daemon). Spec §3.1:
+                    // "read as `<pid> sync`" — backwards-compat default.
+                    HolderInfo(pid, Mode.SYNC, rawMode = null)
+                }
+                else -> {
+                    val parsed = Mode.fromWireToken(modeToken)
+                    if (parsed != null) {
+                        HolderInfo(pid, parsed, rawMode = null)
+                    } else {
+                        // Forward-compat: unknown token (e.g. "mirror" from a
+                        // future version). Carry the raw token so the
+                        // contention error message can name it accurately.
+                        // Per spec §3.1: do NOT silently default to SYNC.
+                        HolderInfo(pid, mode = null, rawMode = modeToken)
+                    }
+                }
+            }
         }.getOrNull()
 ```
 
@@ -228,7 +259,7 @@ After the closing brace of `readHolderPid` (line 97 area), add:
 Open `/home/gernot/dev/git/unidrive/core/app/sync/src/test/kotlin/org/krost/unidrive/sync/ProcessLockTest.kt`. After the existing tests (the file already has `UD-272` PID tests; locate the end of the class), append:
 
 ```kotlin
-    // -- Spec mount-sync-mode-mutex T1/T2/T3 -----------------------------------
+    // -- Spec mount-sync-mode-mutex T1/T2/T3/T3a -------------------------------
 
     @Test
     fun lock_pid_file_carries_mode_after_tryLock() {
@@ -309,6 +340,36 @@ Open `/home/gernot/dev/git/unidrive/core/app/sync/src/test/kotlin/org/krost/unid
                 info.mode,
                 "legacy format must default to SYNC (the only mode that existed before)",
             )
+            assertEquals(null, info.rawMode, "legacy format must NOT set rawMode")
+        } finally {
+            Files.deleteIfExists(pidFile)
+            Files.deleteIfExists(lockFile)
+        }
+    }
+
+    @Test
+    fun unknown_mode_token_yields_holder_info_with_null_mode_and_raw_token() {
+        // Forward-compat per spec §3.1: a future version writes `<pid> mirror`.
+        // This (older) binary must NOT silently coerce to SYNC; it must surface
+        // the unknown token so the factory error message can name it.
+        val lockFile = Files.createTempFile("unknown-mode", ".lock")
+        val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
+        Files.writeString(pidFile, "67890 mirror\n")
+        try {
+            val reader = ProcessLock(lockFile)
+            val info = reader.readHolderInfo()
+            assertNotNull(info, "unknown-mode file must still parse the pid")
+            assertEquals(67890L, info!!.pid)
+            assertEquals(
+                null,
+                info.mode,
+                "unknown mode token must yield null mode (not silent SYNC default)",
+            )
+            assertEquals(
+                "mirror",
+                info.rawMode,
+                "unknown mode token must be preserved verbatim in rawMode",
+            )
         } finally {
             Files.deleteIfExists(pidFile)
             Files.deleteIfExists(lockFile)
@@ -374,6 +435,8 @@ In `/home/gernot/dev/git/unidrive/core/app/cli/src/main/kotlin/org/krost/unidriv
      * success. If another unidrive process holds the lock, prints a mode-
      * specific message and exits with code 1.
      */
+    // NOTE: error wording is duplicated in ProfileLockFactoryTest.renderSyncFactoryContention
+    // (Task 2.4). Keep both in sync when editing — drift here means stale test assertions.
     fun acquireProfileLock(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
         java.nio.file.Files.createDirectories(lockFile.parent)
@@ -381,12 +444,17 @@ In `/home/gernot/dev/git/unidrive/core/app/cli/src/main/kotlin/org/krost/unidriv
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.SYNC)) {
             val profile = resolveCurrentProfile()
             val holder = lock.readHolderInfo()
-            val holderDesc = when (holder?.mode) {
-                org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
+            val holderDesc = when {
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"
-                org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
                     "Profile '${profile.name}' is currently FUSE-mounted by `unidrive mount`"
-                null ->
+                holder != null && holder.mode == null && holder.rawMode != null ->
+                    // Forward-compat per spec §3.1: name the unknown mode rather than
+                    // silently defaulting to SYNC.
+                    "Profile '${profile.name}' is held by an unidrive process running in " +
+                        "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+                else ->
                     "Another unidrive process is using profile '${profile.name}'"
             }
             val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
@@ -419,6 +487,8 @@ Immediately after `acquireProfileLock()`, add:
      * if another process holds the lock (typically `unidrive sync --watch`
      * for the same profile). See docs/dev/specs/mount-sync-mode-mutex-design.md.
      */
+    // NOTE: error wording is duplicated in ProfileLockFactoryTest.renderMountFactoryContention
+    // (Task 2.4). Keep both in sync when editing — drift here means stale test assertions.
     fun acquireProfileLockForMount(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
         java.nio.file.Files.createDirectories(lockFile.parent)
@@ -426,12 +496,15 @@ Immediately after `acquireProfileLock()`, add:
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.MOUNT)) {
             val profile = resolveCurrentProfile()
             val holder = lock.readHolderInfo()
-            val holderDesc = when (holder?.mode) {
-                org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
+            val holderDesc = when {
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is mirroring profile '${profile.name}'"
-                org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
                     "Another `unidrive mount` already serves profile '${profile.name}'"
-                null ->
+                holder != null && holder.mode == null && holder.rawMode != null ->
+                    "Profile '${profile.name}' is held by an unidrive process running in " +
+                        "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+                else ->
                     "Another unidrive process is using profile '${profile.name}'"
             }
             val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
@@ -570,13 +643,18 @@ class ProfileLockFactoryTest {
      * without invoking System.exit (the factory is too tied to Main + picocli
      * to call directly; we exercise the equivalent logic inline).
      */
+    // MUST mirror Main.acquireProfileLockForMount byte-for-byte. If the factory
+    // wording drifts, update both sides together.
     private fun renderMountFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
-        val holderDesc = when (holder?.mode) {
-            ProcessLock.Mode.SYNC ->
+        val holderDesc = when {
+            holder?.mode == ProcessLock.Mode.SYNC ->
                 "Another `unidrive sync` is mirroring profile '$profileName'"
-            ProcessLock.Mode.MOUNT ->
+            holder?.mode == ProcessLock.Mode.MOUNT ->
                 "Another `unidrive mount` already serves profile '$profileName'"
-            null ->
+            holder != null && holder.mode == null && holder.rawMode != null ->
+                "Profile '$profileName' is held by an unidrive process running in " +
+                    "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+            else ->
                 "Another unidrive process is using profile '$profileName'"
         }
         val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
@@ -588,13 +666,18 @@ class ProfileLockFactoryTest {
         }
     }
 
+    // MUST mirror Main.acquireProfileLock byte-for-byte. If the factory
+    // wording drifts, update both sides together.
     private fun renderSyncFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
-        val holderDesc = when (holder?.mode) {
-            ProcessLock.Mode.SYNC ->
+        val holderDesc = when {
+            holder?.mode == ProcessLock.Mode.SYNC ->
                 "Another `unidrive sync` is running for profile '$profileName'"
-            ProcessLock.Mode.MOUNT ->
+            holder?.mode == ProcessLock.Mode.MOUNT ->
                 "Profile '$profileName' is currently FUSE-mounted by `unidrive mount`"
-            null ->
+            holder != null && holder.mode == null && holder.rawMode != null ->
+                "Profile '$profileName' is held by an unidrive process running in " +
+                    "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+            else ->
                 "Another unidrive process is using profile '$profileName'"
         }
         val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
@@ -747,6 +830,13 @@ object StaleMountDetector {
         val fstype = parts[2]
         if (fstype != "fuse" && !fstype.startsWith("fuse.")) return null
         if (device != "unidrive") return null
+        // NOTE: paths containing spaces / tabs / newlines appear here in
+        // octal-escaped form (e.g. `/tmp/my\040mount` for `/tmp/my mount`).
+        // We return the line as-is; the operator-facing WARN message in
+        // SyncCommand prints it verbatim. If a future caller needs to
+        // pass this back to `fusermount3 -u`, the caller is responsible
+        // for un-escaping. Known Linux FUSE limitation; not a goal of
+        // this change to handle paths-with-whitespace.
         return mountpoint
     }
 }
@@ -1501,327 +1591,358 @@ Per spec hydration-namespace-verbs-design.md §§3.6-3.8 + §3.9.
 - [ ] **Step 7.1: Add IpcClient methods for the three verbs**
 
 In `/home/gernot/dev/git/unidrive-mount-linux/mount/src/ipc.rs`, after the existing
-`hydrate(...)` / `open_for_write(...)` methods on `IpcClient`, add:
+`hydrate(...)` / `open_for_write(...)` methods on `IpcClient`, add — matching the
+existing reply-parsing idiom from spec §3.6 byte-for-byte:
 
 ```rust
 impl IpcClient {
     pub async fn mkdir(&mut self, path: &str) -> Result<(), IpcError> {
-        let req = serde_json::json!({
-            "verb": "hydration.mkdir",
-            "path": path,
-        });
-        let resp = self.send_request(req).await?;
-        if resp["status"] == "ok" {
-            Ok(())
-        } else {
-            Err(IpcError::Verb {
-                error: resp["error"].as_str().unwrap_or("unknown").to_string(),
-                message: resp["message"].as_str().unwrap_or("").to_string(),
-            })
+        let req = serde_json::json!({"verb": "hydration.mkdir", "path": path});
+        let reply = self.round_trip(&req).await?;
+        if !reply["ok"].as_bool().unwrap_or(false) {
+            return Err(server_error(&reply));
         }
+        Ok(())
     }
 
     pub async fn unlink(&mut self, path: &str) -> Result<(), IpcError> {
-        let req = serde_json::json!({
-            "verb": "hydration.unlink",
-            "path": path,
-        });
-        let resp = self.send_request(req).await?;
-        if resp["status"] == "ok" {
-            Ok(())
-        } else {
-            Err(IpcError::Verb {
-                error: resp["error"].as_str().unwrap_or("unknown").to_string(),
-                message: resp["message"].as_str().unwrap_or("").to_string(),
-            })
+        let req = serde_json::json!({"verb": "hydration.unlink", "path": path});
+        let reply = self.round_trip(&req).await?;
+        if !reply["ok"].as_bool().unwrap_or(false) {
+            return Err(server_error(&reply));
         }
+        Ok(())
     }
 
     pub async fn rmdir(&mut self, path: &str) -> Result<(), IpcError> {
-        let req = serde_json::json!({
-            "verb": "hydration.rmdir",
-            "path": path,
-        });
-        let resp = self.send_request(req).await?;
-        if resp["status"] == "ok" {
-            Ok(())
-        } else {
-            Err(IpcError::Verb {
-                error: resp["error"].as_str().unwrap_or("unknown").to_string(),
-                message: resp["message"].as_str().unwrap_or("").to_string(),
-            })
+        let req = serde_json::json!({"verb": "hydration.rmdir", "path": path});
+        let reply = self.round_trip(&req).await?;
+        if !reply["ok"].as_bool().unwrap_or(false) {
+            return Err(server_error(&reply));
         }
+        Ok(())
     }
 }
 ```
 
-Notes:
-- The `IpcError::Verb { error, message }` variant must already exist; if it doesn't, add it alongside the existing variants in the same file. The `error` field is the wire-contract string (`path_is_folder` / `path_is_file` / `not_empty` / `not_found` / `provider_error`); the `message` field is the human-readable detail string.
-- `send_request` returns `serde_json::Value`. If your existing helper differs, adapt the body but keep the wire shape.
+**Wire-contract notes — read these before editing:**
+
+- The JVM's `HydrationIpcHandler.reply()` helper emits `{"ok":true}` on success and
+  `{"ok":false,"error":"<msg>"}` on failure (verified against
+  `core/app/hydration/src/main/kotlin/org/krost/unidrive/hydration/HydrationIpcHandler.kt`
+  ~line 218). The Rust side MUST check `reply["ok"].as_bool()`, NOT `reply["status"]`.
+  An earlier draft of this plan checked `resp["status"] == "ok"` — that field does
+  not exist in the JVM reply and every call would silently fall through to EIO.
+- The `round_trip(&req)` helper is the existing method on `IpcClient`
+  (`ipc.rs` around the existing hydrate/open_for_write call sites). It returns
+  `Result<serde_json::Value, IpcError>` — the same type the existing methods
+  use. If your local `IpcClient` exposes a differently-named helper (e.g.
+  `send_request`, `request_response`), substitute it — but do not change the
+  return-type semantics; the existing methods are the authority.
+- The `server_error(&reply)` helper is documented in spec §3.6 ("`ipc.rs:200-208`
+  maps the `error` field of the reply to an `IpcError::ServerError`"). Use it as-is.
+  Do NOT introduce a new `IpcError::Verb { error, message }` variant — the existing
+  `IpcError::ServerError(String)` already carries the wire-contract error string
+  verbatim, and `map_ipc_err_to_errno` (Step 7.3) matches on it directly.
+- If, after reading `ipc.rs`, you find that neither `round_trip` nor `server_error`
+  exists, this is a precondition failure for the spec: stop and surface to the
+  human reviewer. Both helpers are explicitly named as existing infrastructure
+  in spec §3.6 — they should be there from prior work (the existing
+  `hydrate(...)` / `open_for_write(...)` methods use them).
 
 - [ ] **Step 7.2: Add ReconnectingIpcClient wrappers**
 
 In `/home/gernot/dev/git/unidrive-mount-linux/mount/src/reconnect.rs`, after the existing
-`hydrate` / `open_for_write` wrappers, add:
+`hydrate` / `open_for_write` wrappers, add — using the spec §3.7 retry-on-`Io` shape
+(retry only on transport errors; let `ServerError` propagate without retry since
+`path_is_folder` / `not_empty` etc. are deterministic refusals):
 
 ```rust
 impl ReconnectingIpcClient {
-    pub async fn mkdir(&self, path: &str) -> Result<(), IpcError> {
-        let mut guard = self.inner.lock().await;
-        match guard.as_mut() {
-            Some(client) => client.mkdir(path).await,
-            None => Err(IpcError::Disconnected),
+    pub async fn mkdir(&mut self, path: &str) -> Result<(), IpcError> {
+        loop {
+            self.ensure_connected().await?;
+            let c = self.inner.as_mut().expect("ensure_connected guarantees Some");
+            match c.mkdir(path).await {
+                Ok(v) => return Ok(v),
+                Err(IpcError::Io(_)) => { self.inner = None; }
+                Err(e) => return Err(e),
+            }
         }
     }
 
-    pub async fn unlink(&self, path: &str) -> Result<(), IpcError> {
-        let mut guard = self.inner.lock().await;
-        match guard.as_mut() {
-            Some(client) => client.unlink(path).await,
-            None => Err(IpcError::Disconnected),
+    pub async fn unlink(&mut self, path: &str) -> Result<(), IpcError> {
+        loop {
+            self.ensure_connected().await?;
+            let c = self.inner.as_mut().expect("ensure_connected guarantees Some");
+            match c.unlink(path).await {
+                Ok(v) => return Ok(v),
+                Err(IpcError::Io(_)) => { self.inner = None; }
+                Err(e) => return Err(e),
+            }
         }
     }
 
-    pub async fn rmdir(&self, path: &str) -> Result<(), IpcError> {
-        let mut guard = self.inner.lock().await;
-        match guard.as_mut() {
-            Some(client) => client.rmdir(path).await,
-            None => Err(IpcError::Disconnected),
+    pub async fn rmdir(&mut self, path: &str) -> Result<(), IpcError> {
+        loop {
+            self.ensure_connected().await?;
+            let c = self.inner.as_mut().expect("ensure_connected guarantees Some");
+            match c.rmdir(path).await {
+                Ok(v) => return Ok(v),
+                Err(IpcError::Io(_)) => { self.inner = None; }
+                Err(e) => return Err(e),
+            }
         }
     }
 }
 ```
 
-Match the locking pattern used by the existing wrappers exactly — if `hydrate` uses a different guard / retry shape, mirror it. The wrappers must NOT add their own retry loop; reconnection is handled by the existing transport layer.
+Match the existing `open_read` / `open_write` / `close_handle` wrappers' shape
+exactly. If they use a different mutex-guard idiom (e.g. `tokio::sync::Mutex`),
+mirror it. The wrappers retry only on `IpcError::Io` (transport failure) —
+`ServerError` is a deterministic refusal and must not be retried.
 
 - [ ] **Step 7.3: Implement map_ipc_err_to_errno helper**
 
 In `/home/gernot/dev/git/unidrive-mount-linux/mount/src/fuse_fs.rs`, near the top of the
-file (after imports, before the `Filesystem` impl), add:
+file (after imports, before the `Filesystem` impl), add — matching spec §3.8 exactly:
 
 ```rust
-fn map_ipc_err_to_errno(err: &IpcError) -> i32 {
-    match err {
-        IpcError::Verb { error, .. } => match error.as_str() {
-            "path_is_folder" => libc::EISDIR,
-            "path_is_file" => libc::ENOTDIR,
-            "not_empty" => libc::ENOTEMPTY,
-            "not_found" => libc::ENOENT,
-            "provider_error" => libc::EIO,
-            _ => libc::EIO,
-        },
-        IpcError::Disconnected => libc::EIO,
-        IpcError::Io(_) => libc::EIO,
-        _ => libc::EIO,
+fn map_ipc_err_to_errno(e: IpcError) -> Errno {
+    match e {
+        IpcError::ServerError(msg) if msg == "path_is_folder" => Errno::from(libc::EISDIR),
+        IpcError::ServerError(msg) if msg == "path_is_file" => Errno::from(libc::ENOTDIR),
+        IpcError::ServerError(msg) if msg == "not_empty" => Errno::from(libc::ENOTEMPTY),
+        IpcError::Io(_) => Errno::from(libc::EIO),
+        _ => Errno::from(libc::EIO),
     }
 }
 ```
 
-If the variants of `IpcError` differ in your code, adapt the match arms but keep the
-five wire-contract error-string cases exact.
+**Wire-contract notes:**
+
+- The three named arms (`path_is_folder` → EISDIR, `path_is_file` → ENOTDIR,
+  `not_empty` → ENOTEMPTY) map the wire-contract error strings the JVM's
+  `HydrationIpcHandler` emits (Task 6). The strings must match byte-for-byte;
+  drift means silent EIO instead of the kernel-correct errno.
+- There is intentionally NO `"not_found"` arm: spec R3 explicitly defers
+  parent-missing-ENOENT mapping to a follow-up, and the JVM currently emits raw
+  provider error messages ("Unknown path: /foo") for the not-found case. Those
+  fall through to the catch-all `_ => EIO` arm. If a future change adds a
+  contract for `"not_found"` JVM-side, add the corresponding arm here in the
+  same commit.
+- There is intentionally NO `"provider_error"` arm: the JVM does not emit a
+  literal `"provider_error"` string; it emits the raw provider message. Those
+  also fall through to `_ => EIO`. Per spec §3.8 the catch-all suffices for
+  the "basic FUSE stuff working" session goal.
+- `Errno` and `IpcError` come from the existing fuser + co-daemon types.
+  Adapt the import path if the existing `IpcError` enum lives in a different
+  module than `fuse_fs.rs` imports from today.
 
 - [ ] **Step 7.4: Implement FUSE `mkdir`**
 
 In `/home/gernot/dev/git/unidrive-mount-linux/mount/src/fuse_fs.rs`, replace the existing
-`mkdir` stub (currently returning `ENOSYS`) on the `Filesystem` impl with:
+`mkdir` stub (currently returning `ENOSYS`) on the `Filesystem` impl. Mirror the spec
+§3.8 shape using `.map_err(map_ipc_err_to_errno)?` so the error path is one liner that
+flows through the helper from Step 7.3:
 
 ```rust
 async fn mkdir(
     &self,
-    _req: RequestInfo,
-    parent: u64,
+    _req: Request,
+    parent_inode: u64,
     name: &OsStr,
     _mode: u32,
     _umask: u32,
-) -> fuser::Result<fuser::ReplyEntry> {
-    let parent_path = self.path_for_inode(parent).ok_or(libc::ENOENT)?;
-    let name_str = name.to_str().ok_or(libc::EINVAL)?;
-    let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name_str);
-
-    match self.ipc.mkdir(&full_path).await {
-        Ok(()) => {
-            // Allocate inode for the new folder; populate attr cache.
-            let new_ino = self.allocate_inode(&full_path, FileKind::Directory).await;
-            let attr = self.folder_attr(new_ino);
-            Ok(fuser::ReplyEntry {
-                ttl: TTL,
-                attr,
-                generation: 0,
-            })
-        }
-        Err(e) => {
-            tracing::warn!(path = %full_path, error = ?e, "mkdir failed");
-            Err(map_ipc_err_to_errno(&e))
-        }
-    }
+) -> Result<ReplyEntry> {
+    let parent_path = self.path_for_inode(parent_inode)
+        .ok_or_else(|| Errno::from(libc::ENOENT))?;
+    let child_path = format!("{}/{}",
+        parent_path.trim_end_matches('/'),
+        name.to_string_lossy(),
+    );
+    let mut ipc = self.ipc.lock().await;
+    ipc.mkdir(&child_path).await.map_err(map_ipc_err_to_errno)?;
+    drop(ipc);
+    // Allocate an inode for the new folder via the path-map and return
+    // its attrs. Symmetric with `lookup`'s allocation path.
+    let new_ino = self.allocate_inode(&child_path, FileKind::Directory).await;
+    let attr = self.folder_attr(new_ino);
+    Ok(ReplyEntry { ttl: TTL, attr, generation: 0 })
 }
 ```
 
 Notes:
-- `path_for_inode`, `allocate_inode`, `folder_attr`, `TTL`, and `FileKind` are project-local helpers — adapt names to match the existing inode/attr management in this file. If the existing `lookup` / `getattr` use a different shape, mirror it.
-- `RequestInfo` and `ReplyEntry` come from your fuser version; adjust signature to match the existing `mkdir` stub exactly.
+- `path_for_inode`, `allocate_inode`, `folder_attr`, `TTL`, `FileKind`, and the
+  `Request` / `ReplyEntry` / `Result` types are project-local — adapt to whatever
+  the existing `lookup` / `getattr` impls use. The shape above mirrors spec §3.8
+  byte-for-byte; if the existing FUSE ops use a sync (not `async`) signature or
+  a different `Result` alias, mirror the local idiom rather than the spec's.
+- `self.ipc` is the `Arc<Mutex<ReconnectingIpcClient>>` (or equivalent) used by
+  existing FUSE ops. If the existing pattern is `let mut c = self.ipc.lock().await;
+  c.hydrate(...)`, use the same lock-and-call shape verbatim.
 
 - [ ] **Step 7.5: Implement FUSE `unlink`**
 
 In the same file, replace the `unlink` stub with:
 
 ```rust
-async fn unlink(
-    &self,
-    _req: RequestInfo,
-    parent: u64,
-    name: &OsStr,
-) -> fuser::Result<()> {
-    let parent_path = self.path_for_inode(parent).ok_or(libc::ENOENT)?;
-    let name_str = name.to_str().ok_or(libc::EINVAL)?;
-    let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name_str);
-
-    match self.ipc.unlink(&full_path).await {
-        Ok(()) => {
-            self.invalidate_inode_by_path(&full_path).await;
-            Ok(())
-        }
-        Err(e) => {
-            tracing::warn!(path = %full_path, error = ?e, "unlink failed");
-            Err(map_ipc_err_to_errno(&e))
-        }
-    }
+async fn unlink(&self, _req: Request, parent_inode: u64, name: &OsStr) -> Result<()> {
+    let parent_path = self.path_for_inode(parent_inode)
+        .ok_or_else(|| Errno::from(libc::ENOENT))?;
+    let child_path = format!("{}/{}",
+        parent_path.trim_end_matches('/'),
+        name.to_string_lossy(),
+    );
+    let mut ipc = self.ipc.lock().await;
+    ipc.unlink(&child_path).await.map_err(map_ipc_err_to_errno)?;
+    drop(ipc);
+    self.invalidate_inode_by_path(&child_path).await;
+    Ok(())
 }
 ```
 
-`invalidate_inode_by_path` is the project-local cache-eviction helper; adapt name.
+`invalidate_inode_by_path` is the project-local cache-eviction helper; adapt name to
+whatever the existing write-path uses on file deletion.
 
 - [ ] **Step 7.6: Implement FUSE `rmdir`**
 
 In the same file, replace the `rmdir` stub with:
 
 ```rust
-async fn rmdir(
-    &self,
-    _req: RequestInfo,
-    parent: u64,
-    name: &OsStr,
-) -> fuser::Result<()> {
-    let parent_path = self.path_for_inode(parent).ok_or(libc::ENOENT)?;
-    let name_str = name.to_str().ok_or(libc::EINVAL)?;
-    let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name_str);
-
-    match self.ipc.rmdir(&full_path).await {
-        Ok(()) => {
-            self.invalidate_inode_by_path(&full_path).await;
-            Ok(())
-        }
-        Err(e) => {
-            tracing::warn!(path = %full_path, error = ?e, "rmdir failed");
-            Err(map_ipc_err_to_errno(&e))
-        }
-    }
+async fn rmdir(&self, _req: Request, parent_inode: u64, name: &OsStr) -> Result<()> {
+    let parent_path = self.path_for_inode(parent_inode)
+        .ok_or_else(|| Errno::from(libc::ENOENT))?;
+    let child_path = format!("{}/{}",
+        parent_path.trim_end_matches('/'),
+        name.to_string_lossy(),
+    );
+    let mut ipc = self.ipc.lock().await;
+    ipc.rmdir(&child_path).await.map_err(map_ipc_err_to_errno)?;
+    drop(ipc);
+    self.invalidate_inode_by_path(&child_path).await;
+    Ok(())
 }
 ```
 
-- [ ] **Step 7.7: Write integration tests**
+- [ ] **Step 7.7: Write integration tests T4 + T5 (spec §3.9)**
 
-Create `/home/gernot/dev/git/unidrive-mount-linux/mount/tests/namespace_ops.rs`:
+Per spec §3.9, two integration tests on the Rust side using the existing
+`FakeJvm` fixture in `mount/src/fake_jvm.rs` (precondition; spec §3.9 names it
+explicitly). The fixture already supports per-verb canned replies via
+`spawn_at(socket_path, replies)` — the new verbs plug into that map with no
+fixture-side scaffolding.
+
+**First step: verify FakeJvm exists and inspect its API.**
+
+```bash
+ls /home/gernot/dev/git/unidrive-mount-linux/mount/src/fake_jvm.rs
+grep -n "spawn_at\|with_reply\|fn new\|impl FakeJvm" /home/gernot/dev/git/unidrive-mount-linux/mount/src/fake_jvm.rs | head -20
+```
+Expected: file exists; the `spawn_at` + reply-map API is visible.
+
+If `fake_jvm.rs` does NOT exist or does NOT have a per-verb reply map, surface
+to the human reviewer: this is a precondition gap. Do NOT invent a new harness
+inline — the spec explicitly says the fixture is the precondition.
+
+**Create** `/home/gernot/dev/git/unidrive-mount-linux/mount/tests/namespace_ops.rs`:
 
 ```rust
-//! Integration tests for the three new namespace FUSE ops.
+//! T4 + T5 from unidrive/docs/dev/specs/hydration-namespace-verbs-design.md §3.9.
 //!
-//! These run against a fake IPC server that echoes the wire contract
-//! defined in unidrive/docs/dev/specs/hydration-namespace-verbs-design.md §3.1.
+//! T4 pins the happy path: a {"ok":true} reply yields exit 0 from the FUSE op.
+//! T5 pins the errno mapping: a {"ok":false,"error":"not_empty"} reply yields
+//! ENOTEMPTY at the kernel boundary (visible as rmdir exit 39 / "Directory not
+//! empty" in stderr).
+//!
+//! Both build on the existing FakeJvm fixture in src/fake_jvm.rs. The exact
+//! API differs per project version; adapt the `spawn_at` / `with_reply` calls
+//! to the locally-existing helper.
 
-use std::ffi::OsString;
+use std::process::Command;
+use tempfile::TempDir;
 
-mod common;
-use common::{FakeIpcServer, MountHarness};
+// Project-local fixture module. Path / name may need adjustment to match
+// however existing integration tests import FakeJvm.
+mod fake_jvm_support;
+use fake_jvm_support::{FakeJvm, spawn_unidrive_mount};
 
 #[tokio::test]
-async fn mkdir_happy_path_creates_directory() {
-    let server = FakeIpcServer::new()
-        .with_response("hydration.mkdir", serde_json::json!({
-            "status": "ok",
-            "path": "/foo",
-        }));
-    let mount = MountHarness::start(server).await;
+async fn mkdir_round_trip_returns_zero_on_jvm_ok() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("fake.sock");
+    let mount_path = tmp.path().join("mount");
+    std::fs::create_dir(&mount_path).unwrap();
 
-    let result = mount.mkdir("/foo").await;
+    // Wire shape per spec §3.1: {"ok":true} on success.
+    let _fake = FakeJvm::spawn_at(
+        &socket_path,
+        [("hydration.mkdir", serde_json::json!({"ok": true}))],
+    ).await;
 
-    assert!(result.is_ok(), "mkdir on a fresh path should succeed");
+    let _mount = spawn_unidrive_mount(&socket_path, &mount_path).await;
+    // Wait for FUSE mount to be ready (project-local helper).
+    fake_jvm_support::wait_for_mount(&mount_path).await;
+
+    let status = Command::new("mkdir")
+        .arg(mount_path.join("newfolder"))
+        .status()
+        .expect("mkdir command runs");
+    assert!(status.success(), "mkdir(newfolder) must succeed when JVM replies ok:true; got: {:?}", status);
 }
 
 #[tokio::test]
-async fn mkdir_on_existing_file_returns_eisdir_via_path_is_file() {
-    let server = FakeIpcServer::new()
-        .with_response("hydration.mkdir", serde_json::json!({
-            "status": "error",
-            "error": "path_is_file",
-            "message": "path exists as a file",
-        }));
-    let mount = MountHarness::start(server).await;
+async fn rmdir_returns_enotempty_when_jvm_signals_not_empty() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("fake.sock");
+    let mount_path = tmp.path().join("mount");
+    std::fs::create_dir(&mount_path).unwrap();
 
-    let err = mount.mkdir("/foo").await.unwrap_err();
+    // Wire shape per spec §3.1: {"ok":false,"error":"not_empty"} for the
+    // ENOTEMPTY case. Spec §3.8 map_ipc_err_to_errno translates this to
+    // libc::ENOTEMPTY (39 on Linux).
+    let _fake = FakeJvm::spawn_at(
+        &socket_path,
+        [
+            // lookup/stat may be needed for /full to appear as a folder
+            // before rmdir is attempted; adapt this map to whatever the
+            // existing FUSE-readiness flow requires (project-local).
+            ("hydration.rmdir", serde_json::json!({"ok": false, "error": "not_empty"})),
+        ],
+    ).await;
 
-    assert_eq!(err.raw_os_error(), Some(libc::ENOTDIR),
-        "path_is_file must map to ENOTDIR per spec §3.1");
-}
+    let _mount = spawn_unidrive_mount(&socket_path, &mount_path).await;
+    fake_jvm_support::wait_for_mount(&mount_path).await;
 
-#[tokio::test]
-async fn unlink_on_directory_returns_eisdir() {
-    let server = FakeIpcServer::new()
-        .with_response("hydration.unlink", serde_json::json!({
-            "status": "error",
-            "error": "path_is_folder",
-            "message": "path is a folder",
-        }));
-    let mount = MountHarness::start(server).await;
-
-    let err = mount.unlink("/dir").await.unwrap_err();
-
-    assert_eq!(err.raw_os_error(), Some(libc::EISDIR),
-        "path_is_folder must map to EISDIR per spec §3.1");
-}
-
-#[tokio::test]
-async fn rmdir_on_non_empty_directory_returns_enotempty() {
-    let server = FakeIpcServer::new()
-        .with_response("hydration.rmdir", serde_json::json!({
-            "status": "error",
-            "error": "not_empty",
-            "message": "folder still contains entries",
-        }));
-    let mount = MountHarness::start(server).await;
-
-    let err = mount.rmdir("/full").await.unwrap_err();
-
-    assert_eq!(err.raw_os_error(), Some(libc::ENOTEMPTY),
-        "not_empty must map to ENOTEMPTY per spec §3.1");
-}
-
-#[tokio::test]
-async fn provider_error_maps_to_eio() {
-    let server = FakeIpcServer::new()
-        .with_response("hydration.mkdir", serde_json::json!({
-            "status": "error",
-            "error": "provider_error",
-            "message": "graph 503",
-        }));
-    let mount = MountHarness::start(server).await;
-
-    let err = mount.mkdir("/x").await.unwrap_err();
-
-    assert_eq!(err.raw_os_error(), Some(libc::EIO),
-        "provider_error must map to EIO per spec §3.1");
+    let output = Command::new("rmdir")
+        .arg(mount_path.join("full"))
+        .output()
+        .expect("rmdir command runs");
+    assert!(!output.status.success(), "rmdir of non-empty dir must fail");
+    // Linux coreutils prints "Directory not empty" for ENOTEMPTY.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Directory not empty") || output.status.code() == Some(1),
+        "rmdir must surface ENOTEMPTY (text 'Directory not empty' or exit 1); got: {} / {:?}",
+        stderr, output.status,
+    );
 }
 ```
 
-Notes:
-- `common::FakeIpcServer` and `common::MountHarness` are project-local test helpers.
-  If they don't exist yet, your prior FUSE integration tests must already have a
-  similar harness — reuse / mirror it. If absolutely no harness exists, fall back
-  to a manual `tokio::net::UnixListener` that responds with the JSON object passed
-  to `with_response`.
-- The five tests cover the wire-contract errno mapping. The five tests on the JVM
-  side (Task 4-6 + spec §3.9) cover the JVM-side contract. Together they bracket
-  the IPC boundary.
+**Wire-contract notes:**
+
+- The FakeJvm reply map sends `{"ok":true}` / `{"ok":false,"error":"<msg>"}` —
+  byte-for-byte what `HydrationIpcHandler.reply()` emits JVM-side (Task 6).
+  An earlier draft of this plan used `{"status":"ok"}` — that field name does
+  not exist in the production wire contract; do not introduce it.
+- The integration tests cover the IPC round-trip (T4 = happy path, T5 = errno
+  mapping). The errno-mapping detail (ENOTDIR / EISDIR / ENOTEMPTY) is unit-
+  tested at the `map_ipc_err_to_errno` boundary; if the existing test harness
+  in the project has cheaper unit-test support for that helper, add the
+  three-arm test there instead of triplicating it here.
+- The two named tests match spec §3.9 exactly (`mkdir_round_trip_returns_zero_on_jvm_ok`
+  and `rmdir_returns_enotempty_when_jvm_signals_not_empty`). Do not rename
+  them; the spec's acceptance §5 references them by name.
 
 - [ ] **Step 7.8: Run the Rust test suite**
 
@@ -1950,26 +2071,37 @@ Expected: at least one process matching `unidrive sync ...`.
 
 - [ ] **Step 8.8: Live smoke — Phase 1 mutex**
 
-Per spec mount-sync-mode-mutex-design.md §3.7 happy-path:
+Per spec mount-sync-mode-mutex-design.md §3.7 happy-path. Expected stderr matches the
+factory error rendering from Task 2.1 / 2.2 byte-for-byte.
 
 ```bash
 # Terminal A: sync daemon should already be running on profile posteo_onedrive
 # Terminal B: try to mount the same profile — should refuse.
-unidrive mount posteo_onedrive /tmp/onedrive-smoke
+unidrive -p posteo_onedrive mount /tmp/onedrive-smoke
 ```
-Expected output: `error: profile posteo_onedrive is currently in sync mode (pid <N>)`
-Exit code: non-zero.
+Expected: exit code 1; stderr contains the line
+```
+Another `unidrive sync` is mirroring profile 'posteo_onedrive' (PID <N>).
+```
+followed by:
+```
+Stop the sync watcher first: `kill <N>` (or Ctrl-C its terminal).
+Mount and sync are mutually exclusive per profile (see docs/dev/specs/mount-sync-mode-mutex-design.md).
+```
 
 Then the reverse:
 ```bash
 # Stop the sync daemon (your usual stop method).
 # Start the mount fresh:
-unidrive mount posteo_onedrive /tmp/onedrive-smoke
+unidrive -p posteo_onedrive mount /tmp/onedrive-smoke
 # In another terminal:
-unidrive sync posteo_onedrive
+unidrive -p posteo_onedrive sync
 ```
-Expected: mount runs; second `sync` invocation refuses with
-`error: profile posteo_onedrive is currently in mount mode (pid <N>)`.
+Expected: mount runs; second `sync` invocation exits with code 1 and stderr line
+```
+Profile 'posteo_onedrive' is currently FUSE-mounted by `unidrive mount` (PID <N>).
+Mount and sync are mutually exclusive per profile. Stop the mount first: unmount the FUSE path, or `kill <N>`.
+```
 
 - [ ] **Step 8.9: Live smoke — Phase 2 namespace ops via mounted FS**
 
