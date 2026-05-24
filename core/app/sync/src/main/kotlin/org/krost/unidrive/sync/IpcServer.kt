@@ -326,6 +326,8 @@ class IpcServer(
             closeListeners.forEach { it(entry.id) }
         }
         clients.clear()
+        syncSubscribers.clear()
+        pendingPostReply.clear()
         runCatching { Files.deleteIfExists(socketPath) }
         ownedTransport?.let { es ->
             es.shutdown()
@@ -429,6 +431,7 @@ class IpcServer(
                 log.debug("IPC: failed to flush state dump to subscriber: {}", e.message)
                 clients.remove(entry)
                 runCatching { entry.channel.close() }
+                syncSubscribers.remove(connectionId)
                 return
             }
         }
