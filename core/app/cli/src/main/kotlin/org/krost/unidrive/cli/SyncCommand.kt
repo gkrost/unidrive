@@ -469,6 +469,24 @@ open class SyncCommand : Runnable {
                 ipcServer.registerConnectionCloseListener { connId -> hydrationIpc.onSubscriberDisconnect(connId) }
                 launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
 
+                // Register sync.subscribe verb (spec docs/dev/specs/sync-progress-subscriber-set-design.md).
+                // Symmetric with hydration.subscribe at the wire level: client issues the
+                // verb, reads {"ok":true} as the first line, then receives the state dump
+                // followed by live events. The post-reply hook (mechanism β) defers the
+                // state dump + subscriber-set registration until after dispatchRequest has
+                // written the reply, so subscribers never see events interleaved with the
+                // reply.
+                ipcServer.registerHandler("sync.subscribe") { connId, _ ->
+                    ipcServer.scheduleAfterReply(connId) {
+                        ipcServer.flushStateDumpTo(connId)
+                        ipcServer.registerSyncSubscriber(connId)
+                    }
+                    """{"ok":true}"""
+                }
+                ipcServer.registerConnectionCloseListener { connId ->
+                    ipcServer.unregisterSyncSubscriber(connId)
+                }
+
                 provider.authenticateAndLog()
 
                 // Ensure webhook subscription if configured
