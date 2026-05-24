@@ -211,6 +211,22 @@ open class SyncCommand : Runnable {
         // for paths instead of failing loud.
         syncPath = normalizeSyncPath(syncPath)
         val lock = parent.acquireProfileLock()
+        Runtime.getRuntime().addShutdownHook(Thread { lock.unlock() })
+
+        // Spec mount-sync-mode-mutex §3.4.1: warn-but-do-not-abort if a
+        // stale unidrive FUSE mount survived a kill -9'd MountCommand.
+        val staleMounts = StaleMountDetector.detectStaleFuseUnidriveMounts()
+        if (staleMounts.isNotEmpty()) {
+            System.err.println(
+                "WARNING: detected ${staleMounts.size} stale unidrive FUSE mount(s) " +
+                    "(likely from a kill -9'd `unidrive mount` parent): ${staleMounts.joinToString()}.",
+            )
+            System.err.println(
+                "These mounts no longer serve data. Clean up with " +
+                    "`fusermount3 -u <path>` for each.",
+            )
+        }
+
         val profile = parent.resolveCurrentProfile()
         val rawProvider = parent.createProvider()
         val config = parent.loadSyncConfig()
