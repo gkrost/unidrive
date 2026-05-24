@@ -554,30 +554,82 @@ class Main : Runnable {
     fun providerConfigDir(): Path = baseConfigDir.resolve(resolveCurrentProfile().name)
 
     /**
-     * Acquire the per-profile process lock. Returns the lock on success.
-     * If another unidrive process holds the lock, prints a message and exits.
+     * Acquire the per-profile process lock in SYNC mode. Returns the lock on
+     * success. If another unidrive process holds the lock, prints a mode-
+     * specific message and exits with code 1.
      */
     fun acquireProfileLock(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
-        java.nio.file.Files
-            .createDirectories(lockFile.parent)
-        val lock =
-            org.krost.unidrive.sync
-                .ProcessLock(lockFile)
-        if (!lock.tryLock()) {
+        java.nio.file.Files.createDirectories(lockFile.parent)
+        val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
+        if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.SYNC)) {
             val profile = resolveCurrentProfile()
-            // UD-272: surface the holder's PID + an OS-appropriate kill hint
-            // so the user doesn't have to grep `tasklist | findstr java` to
-            // pick the right one from 3+ JVMs on a typical dev host.
-            val holderPid = lock.readHolderPid()
-            val pidPart = if (holderPid != null) " (PID $holderPid)" else ""
-            System.err.println("Another unidrive process$pidPart is running for profile '${profile.name}'.")
-            if (holderPid != null) {
+            val holder = lock.readHolderInfo()
+            val holderDesc = when {
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
+                    "Another `unidrive sync` is running for profile '${profile.name}'"
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
+                    "Profile '${profile.name}' is currently FUSE-mounted by `unidrive mount`"
+                holder != null && holder.mode == null && holder.rawMode != null ->
+                    "Profile '${profile.name}' is held by an unidrive process running in " +
+                        "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+                else ->
+                    "Another unidrive process is using profile '${profile.name}'"
+            }
+            val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
+            System.err.println("$holderDesc$pidPart.")
+            if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT) {
+                System.err.println(
+                    "Mount and sync are mutually exclusive per profile. " +
+                        "Stop the mount first: unmount the FUSE path, or `kill ${holder.pid}`.",
+                )
+            } else if (holder != null) {
                 val isWindows = System.getProperty("os.name").lowercase().contains("win")
-                val killCmd = if (isWindows) "taskkill /PID $holderPid /F" else "kill $holderPid"
+                val killCmd = if (isWindows) "taskkill /PID ${holder.pid} /F" else "kill ${holder.pid}"
                 System.err.println("Stop it with `$killCmd`, or wait for it to finish.")
             } else {
                 System.err.println("Stop it first, or wait for it to finish.")
+            }
+            System.exit(1)
+        }
+        return lock
+    }
+
+    /**
+     * Acquire the per-profile process lock in MOUNT mode. Refuses with code 1
+     * if another process holds the lock (typically `unidrive sync --watch`
+     * for the same profile). See docs/dev/specs/mount-sync-mode-mutex-design.md.
+     */
+    fun acquireProfileLockForMount(): org.krost.unidrive.sync.ProcessLock {
+        val lockFile = providerConfigDir().resolve(".lock")
+        java.nio.file.Files.createDirectories(lockFile.parent)
+        val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
+        if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.MOUNT)) {
+            val profile = resolveCurrentProfile()
+            val holder = lock.readHolderInfo()
+            val holderDesc = when {
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
+                    "Another `unidrive sync` is mirroring profile '${profile.name}'"
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
+                    "Another `unidrive mount` already serves profile '${profile.name}'"
+                holder != null && holder.mode == null && holder.rawMode != null ->
+                    "Profile '${profile.name}' is held by an unidrive process running in " +
+                        "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
+                else ->
+                    "Another unidrive process is using profile '${profile.name}'"
+            }
+            val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
+            System.err.println("$holderDesc$pidPart.")
+            if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC) {
+                System.err.println(
+                    "Stop the sync watcher first: `kill ${holder.pid}` (or Ctrl-C its terminal).",
+                )
+                System.err.println(
+                    "Mount and sync are mutually exclusive per profile " +
+                        "(see docs/dev/specs/mount-sync-mode-mutex-design.md).",
+                )
+            } else if (holder != null) {
+                System.err.println("Stop it with `kill ${holder.pid}`, or wait for it to exit.")
             }
             System.exit(1)
         }

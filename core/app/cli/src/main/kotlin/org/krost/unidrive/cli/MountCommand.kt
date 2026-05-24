@@ -38,30 +38,39 @@ class MountCommand : Runnable {
             parent.invalidateProfileCaches()
         }
         val profile = parent.resolveCurrentProfile()
-        val socketPath = IpcServer.defaultSocketPath(profile.name)
-        val cacheRoot = SyncEngine.hydrationCacheRoot(
-            SyncEngine.defaultHydrationCacheRoot(),
-            profile.type,
-        )
-        val binary = defaultBinaryPath()
 
-        val existsExit = checkBinaryExists(binary)
-        if (existsExit != 0) {
-            System.err.println(
-                "unidrive mount: co-daemon binary not found at $binary",
+        // Acquire the per-profile mode-mutex. Refuses with a clear message
+        // if `sync` mode already holds it for this profile.
+        val lock = parent.acquireProfileLockForMount()
+
+        try {
+            val socketPath = IpcServer.defaultSocketPath(profile.name)
+            val cacheRoot = SyncEngine.hydrationCacheRoot(
+                SyncEngine.defaultHydrationCacheRoot(),
+                profile.type,
             )
-            System.err.println(
-                "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
-                    "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
-            )
-            System.exit(existsExit)
-            return
+            val binary = defaultBinaryPath()
+
+            val existsExit = checkBinaryExists(binary)
+            if (existsExit != 0) {
+                System.err.println(
+                    "unidrive mount: co-daemon binary not found at $binary",
+                )
+                System.err.println(
+                    "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
+                        "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
+                )
+                System.exit(existsExit)
+                return
+            }
+
+            Files.createDirectories(cacheRoot)
+            val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
+            val exit = superviseProcess(argv)
+            System.exit(exit)
+        } finally {
+            lock.unlock()
         }
-
-        Files.createDirectories(cacheRoot)
-        val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
-        val exit = superviseProcess(argv)
-        System.exit(exit)
     }
 
     companion object {
