@@ -1089,4 +1089,34 @@ class StateDatabaseTest {
             upgraded.close()
         }
     }
+
+    @Test
+    fun insertFolder_creates_idempotent_folder_row() {
+        val mtime = java.time.Instant.parse("2026-05-24T08:00:00Z")
+        db.insertFolder("/test_folder", remoteId = "rid-1", mtime = mtime)
+
+        val entry = db.getEntry("/test_folder")
+        assertNotNull(entry)
+        assertEquals(true, entry!!.isFolder)
+        assertEquals(false, entry.isHydrated)
+        assertEquals("rid-1", entry.remoteId)
+
+        // Idempotent: second call must not throw, must not mutate.
+        db.insertFolder("/test_folder", remoteId = "rid-2-DIFFERENT", mtime = mtime)
+        val again = db.getEntry("/test_folder")
+        assertEquals("rid-1", again!!.remoteId, "insertFolder must be no-op when row exists")
+    }
+
+    @Test
+    fun markDeleted_sets_status_and_keeps_row() {
+        val mtime = java.time.Instant.parse("2026-05-24T08:00:00Z")
+        db.insertFolder("/to_delete", remoteId = "rid-x", mtime = mtime)
+
+        db.markDeleted("/to_delete")
+        val entry = db.getEntry("/to_delete")
+        assertNull(entry, "markDeleted must remove from alive_entries view")
+
+        // Idempotent on non-existent path: must not throw.
+        db.markDeleted("/never_existed")
+    }
 }

@@ -564,6 +564,52 @@ class StateDatabase(
     }
 
     /**
+     * Insert a folder row representing a freshly-created cloud folder.
+     * No-op (idempotent) if a row at [path] already exists. Defaults:
+     * is_folder = true, is_hydrated = false, local_mtime / local_size = null,
+     * remote_size = 0, last_synced = Instant.now(), status = EXISTS.
+     *
+     * The [mtime] argument is the provider-reported creation time
+     * (CloudItem.modified) stored in the remote_modified column.
+     */
+    @Synchronized
+    fun insertFolder(path: String, remoteId: String, mtime: java.time.Instant) {
+        val existing = getEntry(path)
+        if (existing != null) return
+        upsertEntry(
+            SyncEntry(
+                path = path,
+                remoteId = remoteId,
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = mtime,
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = java.time.Instant.now(),
+            ),
+        )
+    }
+
+    /**
+     * Mark the row at [path] as deleted: status = DELETED. The row itself is
+     * NOT removed (preserves deletion-history invariant). No-op if the row
+     * does not exist. Works for both files and folders.
+     */
+    @Synchronized
+    fun markDeleted(path: String) {
+        val existing = getEntry(path) ?: return
+        upsertEntry(
+            existing.copy(
+                status = EntryStatus.DELETED,
+                lastSynced = java.time.Instant.now(),
+            ),
+        )
+    }
+
+    /**
      * Hard-delete an alive row (no tombstone). Use this only for transitions
      * that DO NOT correspond to a cloud-side delete: move-source cleanup
      * (the item moved, didn't disappear) and pending-upload-row cleanup

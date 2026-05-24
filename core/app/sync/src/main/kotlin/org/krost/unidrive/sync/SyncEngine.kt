@@ -311,6 +311,34 @@ class SyncEngine(
 
     // ── End Hydration SPI ─────────────────────────────────────────────────────
 
+    /**
+     * Create a folder on the remote provider and record it in state.db.
+     * Used by the hydration SPI (HydrationImpl.mkdir) to back FUSE mkdir
+     * requests. Separate code path from the legacy applyActions loop.
+     *
+     * Throws ProviderException on cloud-side failure. state.db is only
+     * updated after the provider call succeeds.
+     */
+    suspend fun createRemoteFolder(path: String): CloudItem {
+        val item = provider.createFolder(path)
+        db.insertFolder(path = path, remoteId = item.id, mtime = item.modified!!)
+        return item
+    }
+
+    /**
+     * Delete a path on the remote provider and update state.db.
+     * Handles both files and folders — provider distinguishes by
+     * remoteId/path. Caller (HydrationImpl.unlink or .rmdir) is
+     * responsible for type-checking.
+     *
+     * Throws ProviderException on cloud-side failure. state.db is only
+     * updated after the provider call succeeds.
+     */
+    suspend fun deleteRemote(path: String) {
+        provider.delete(path)
+        db.markDeleted(path)
+    }
+
     suspend fun syncOnce(
         dryRun: Boolean = false,
         forceDelete: Boolean = false,
