@@ -128,6 +128,56 @@ class HydrationImpl(
             ListResult.Failed(HydrationError.Generic(e.message ?: "list failed"))
         }
     }
+
+    override suspend fun mkdir(path: String): MkdirResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        return runCatching {
+            _events.emit(HydrationEvent.Hydrating(normalised))
+            syncEngine.createRemoteFolder(normalised)
+            _events.emit(HydrationEvent.Hydrated(normalised, bytes = 0L))
+            MkdirResult.Ok
+        }.getOrElse { e ->
+            val err = HydrationError.Generic(e.message ?: "mkdir failed")
+            _events.emit(HydrationEvent.Failed(normalised, err))
+            MkdirResult.Failed(err)
+        }
+    }
+
+    override suspend fun unlink(path: String): UnlinkResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val entry = stateDb.getEntry(normalised)
+            ?: return UnlinkResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
+        if (entry.isFolder) return UnlinkResult.PathIsFolder
+
+        return runCatching {
+            syncEngine.deleteRemote(normalised)
+            UnlinkResult.Ok
+        }.getOrElse { e ->
+            UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
+        }
+    }
+
+    override suspend fun rmdir(path: String): RmdirResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val entry = stateDb.getEntry(normalised)
+            ?: return RmdirResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
+        if (!entry.isFolder) return RmdirResult.PathIsFile
+
+        return runCatching {
+            syncEngine.deleteRemote(normalised)
+            RmdirResult.Ok
+        }.getOrElse { e ->
+            val msg = e.message ?: ""
+            if (msg.contains("not empty", ignoreCase = true) ||
+                msg.contains("non-empty", ignoreCase = true)
+            ) {
+                RmdirResult.NotEmpty
+            } else {
+                RmdirResult.Failed(HydrationError.Generic(msg.ifBlank { "rmdir failed" }))
+            }
+        }
+    }
+
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }
