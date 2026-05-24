@@ -26,6 +26,20 @@ import java.util.concurrent.atomic.AtomicInteger
  *   hydrate     reply:    {"ok":true} or {"ok":false,"error":"<message>"}
  *   dehydrate   request:  {"verb":"hydration.dehydrate","path":"/foo"}
  *   dehydrate   reply:    {"ok":true} or {"ok":false,"error":"busy"} or {"ok":false,"error":"<message>"}
+ *   mkdir       request:  {"verb":"hydration.mkdir","path":"/foo"}
+ *               reply:    {"ok":true}  or  {"ok":false,"error":"<msg>"}
+ *
+ *   unlink      request:  {"verb":"hydration.unlink","path":"/foo.txt"}
+ *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"path_is_folder"}     EISDIR
+ *                         {"ok":false,"error":"<msg>"}              EIO
+ *
+ *   rmdir       request:  {"verb":"hydration.rmdir","path":"/foo"}
+ *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"path_is_file"}       ENOTDIR
+ *                         {"ok":false,"error":"not_empty"}          ENOTEMPTY
+ *                         {"ok":false,"error":"<msg>"}              EIO
+ *
  *   subscribe   request:  {"verb":"hydration.subscribe"}
  *   subscribe   reply:    {"ok":true} — and from then on, the connection becomes a one-way
  *                         event stream (server-pushed NDJSON of HydrationEvent serializations)
@@ -150,6 +164,9 @@ class HydrationIpcHandler(
             "hydration.subscribe",
             "hydration.last_synced",
             "hydration.list",
+            "hydration.mkdir",
+            "hydration.unlink",
+            "hydration.rmdir",
         )
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
@@ -205,6 +222,30 @@ class HydrationIpcHandler(
                 when (val r = hydration.list(prefix)) {
                     is ListResult.Ok -> serialiseListEntries(r.entries)
                     is ListResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.mkdir" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.mkdir(path)) {
+                    is MkdirResult.Ok -> reply(ok = true)
+                    is MkdirResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.unlink" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.unlink(path)) {
+                    is UnlinkResult.Ok -> reply(ok = true)
+                    UnlinkResult.PathIsFolder -> reply(ok = false, error = "path_is_folder")
+                    is UnlinkResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.rmdir" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.rmdir(path)) {
+                    is RmdirResult.Ok -> reply(ok = true)
+                    RmdirResult.PathIsFile -> reply(ok = false, error = "path_is_file")
+                    RmdirResult.NotEmpty -> reply(ok = false, error = "not_empty")
+                    is RmdirResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
             "hydration.subscribe" -> {
