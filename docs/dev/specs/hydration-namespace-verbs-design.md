@@ -75,6 +75,14 @@ Three new verbs, parallel shape to the existing hydration verbs:
 
 Replies use the same `{"ok":true/false,"error":...}` JSON shape as the existing hydration verbs (per `HydrationIpcHandler.kt:218-219` `reply()` helper). No new fields.
 
+**Path normalisation (addresses F4 in review):** all three verbs accept the path from the JSON `"path"` field as-is and apply the same normalisation idiom the existing `hydration.list` uses (`HydrationImpl.kt:112`): `path.trimEnd('/').let { if (it == "") "/" else it }`. This collapses trailing slashes (`/foo/` → `/foo`) and rejects nothing else. Specifically:
+
+- **Empty path or "/" only:** treated as the cloud root. Provider-side semantics decide whether mkdir/unlink/rmdir on root is meaningful (typically: provider rejects). The hydration layer does not pre-reject.
+- **Double slashes (`//`) or `..` components:** passed through to the provider as-is. The provider's path-resolver is the canonical authority for what is and is not a valid cloud path. The hydration layer does not attempt to sanitise on its own — sanitising here would silently mask kernel/co-daemon bugs that send malformed paths.
+- **No URL-encoding, no Unicode normalisation, no case-folding.** The wire contract is byte-for-byte UTF-8; what the co-daemon sends, the provider sees.
+
+There is no shared `normalisePath()` helper in `HydrationImpl` today, and this change does not introduce one — three per-verb one-liners are clearer than a helper that hides a one-character operation. If a future change needs more elaborate normalisation, extract the helper at that point.
+
 ### 3.2 SyncEngine entry points
 
 `SyncEngine` already calls `provider.delete(path)` at `:2304` and `provider.createFolder(path)` at `:2360` from inside its action-execution loop. The fix extracts those calls into reusable public entry points that the hydration SPI can invoke:
@@ -118,7 +126,49 @@ suspend fun deleteRemote(path: String) {
 
 The inline calls at `SyncEngine.kt:2304` and `:2360` are NOT refactored to use these entry points in this change — the action-execution loop's surrounding code (logging, error envelope, dry-run handling) is more specific than the on-demand path needs. Refactoring would broaden the scope. Two code paths to the same provider call is acceptable; the BACKLOG already tracks the broader engine retirement.
 
-**On `stateDb.insertFolder` / `stateDb.markDeleted`:** these helpers may not exist on `StateDatabase` today; if not, they're trivial wrappers around the existing insert/update SQL. The plan will check and add them if missing. Per CLAUDE.md "good developer improves code they're working in," adding two single-purpose methods adjacent to the existing schema is in scope.
+**On `stateDb.insertFolder` / `stateDb.markDeleted` (addresses F3 in review):** these helpers may not exist on `StateDatabase` today. The plan will check; if missing, add them adjacent to the existing per-path mutation methods with the following exact signatures and semantics:
+
+```kotlin
+/**
+ * Insert a folder row representing a freshly-created cloud folder.
+ * No-op (idempotent) if a row at `path` already exists; in that case
+ * the existing row is left untouched (caller is expected to detect
+ * "already exists" via the provider's response, not via the DB).
+ *
+ * Defaults for fields the new row does not yet have observable values for:
+ *  - is_folder = true
+ *  - is_hydrated = false (folders are never hydrated; the column applies
+ *    to file content)
+ *  - local_mtime = null  (no local edit, never seen by LocalScanner)
+ *  - local_size = null
+ *  - remote_size = 0     (folders have no byte size on either provider)
+ *  - last_synced = `Instant.now()` at insertion
+ *  - tombstone = false
+ *
+ * The `mtime` argument is the provider-reported creation time
+ * (from `CloudItem.modified`) and is stored in the `remote_mtime`
+ * column for parity with rows inserted by the legacy SyncEngine's
+ * scan path.
+ */
+fun insertFolder(path: String, remoteId: String, mtime: java.time.Instant)
+
+/**
+ * Mark a row as deleted: sets `tombstone = true` and updates
+ * `last_synced = Instant.now()`. The row itself is NOT removed
+ * from the table — keeping the tombstone preserves the engine's
+ * deletion-history invariant (see UD-265 deletion-safeguard) and
+ * lets subsequent reconciliations distinguish "never existed" from
+ * "existed and was deleted." No-op if the row at `path` does not
+ * exist.
+ *
+ * Works for both files and folders. Caller's type-check (file vs.
+ * folder enforcement) lives in `HydrationImpl.unlink` / `.rmdir`,
+ * not here.
+ */
+fun markDeleted(path: String)
+```
+
+If the methods DO exist with different signatures (e.g. different parameter types or names), the plan reconciles to the existing shape — the spec's intent is "two single-purpose mutation methods, idempotent semantics, folder-aware defaults." Per CLAUDE.md "good developer improves code they're working in," adding the methods is in scope for this change; refactoring the existing schema is not.
 
 ### 3.3 Hydration SPI extension
 
@@ -428,7 +478,7 @@ fn map_ipc_err_to_errno(e: IpcError) -> Errno {
 
 ### 3.9 Testing
 
-Four named tests pin the invariants. Two are JVM-side; two are integration tests on the Rust side.
+Five named tests pin the invariants. Three are JVM-side; two are integration tests on the Rust side.
 
 **T1 (JVM) — `mkdir_creates_folder_on_provider_and_inserts_state_db_row`.**
 Mock provider's `createFolder` returns a known `CloudItem`. Call `HydrationImpl.mkdir("/foo")`. Assert provider was called with `/foo`, state.db has a folder row at `/foo`, and the result is `MkdirResult.Ok`.
@@ -436,11 +486,44 @@ Mock provider's `createFolder` returns a known `CloudItem`. Call `HydrationImpl.
 **T2 (JVM) — `unlink_refuses_folder_path_with_PathIsFolder`.**
 Pre-populate state.db with a folder row at `/foo`. Call `HydrationImpl.unlink("/foo")`. Assert result is `UnlinkResult.PathIsFolder` AND `provider.delete` was NOT called. Symmetric test `rmdir_refuses_file_path_with_PathIsFile` for the rmdir case.
 
-**T3 (Rust, integration in `mount/tests/`) — `mkdir_round_trip_returns_zero_on_jvm_ok`.**
+**T3 (JVM, pins provider "not empty" error wording — addresses F2 in review) — `rmdir_detects_provider_not_empty_substring`.**
+Mock provider's `delete` to throw a `ProviderException` carrying each of the known wordings:
+
+```kotlin
+@Test
+fun rmdir_detects_provider_not_empty_substring() = runBlocking {
+    val provider = mockProvider {
+        every { delete(any()) } throws ProviderException(
+            // OneDrive 409 surface, as emitted by GraphApiService.delete
+            // (verified against `core/providers/onedrive/.../GraphApiService.kt`
+            // at the time of writing — if this string changes provider-side,
+            // this test fails loudly and the substring match in HydrationImpl
+            // must be updated in lockstep).
+            "OneDrive responded 409 Conflict: Folder not empty",
+        )
+    }
+    val hydration = HydrationImpl(syncEngineUsing(provider), stateDbWithFolder("/foo"))
+    assertEquals(RmdirResult.NotEmpty, hydration.rmdir("/foo"))
+
+    val provider2 = mockProvider {
+        every { delete(any()) } throws ProviderException(
+            "Internxt API: cannot delete non-empty folder",
+        )
+    }
+    val hydration2 = HydrationImpl(syncEngineUsing(provider2), stateDbWithFolder("/foo"))
+    assertEquals(RmdirResult.NotEmpty, hydration2.rmdir("/foo"))
+}
+```
+
+Two assertions, two providers, two substrings. If either provider changes its error text without the substring matcher being updated, this test fails with a specific message naming which substring matched against which wording. The test is the wire-contract enforcement between `HydrationImpl.rmdir` and the provider's error surface — exactly the brittleness R2 worries about, now caught at build time instead of at runtime.
+
+**T4 (Rust, integration in `mount/tests/`) — `mkdir_round_trip_returns_zero_on_jvm_ok`.**
 Stand up a `FakeJvm` that replies `{"ok":true}` to `hydration.mkdir`. Drive `unidrive-mount` to `mkdir` via the FUSE mount. Assert exit 0.
 
-**T4 (Rust, integration) — `rmdir_returns_enotempty_when_jvm_signals_not_empty`.**
+**T5 (Rust, integration) — `rmdir_returns_enotempty_when_jvm_signals_not_empty`.**
 `FakeJvm` replies `{"ok":false,"error":"not_empty"}`. Drive `rmdir`. Assert `Errno::ENOTEMPTY` propagates to the kernel (visible via `rmdir` exit code 39 or stderr "Directory not empty").
+
+**FakeJvm precondition.** T4 and T5 build on the existing `FakeJvm` test fixture in `../unidrive-mount-linux/mount/src/fake_jvm.rs` (per the closed BACKLOG entry "FUSE write-path + LocalCache crash-recovery scanner" in the sibling repo). `FakeJvm` already supports per-verb canned replies via `spawn_at(socket_path, replies)` — the new verbs (`hydration.mkdir`, `hydration.unlink`, `hydration.rmdir`) plug into the existing reply-map shape with no fixture-side scaffolding. If the fixture does NOT cover a new wire field this design introduces, the plan-stage `cargo test --no-run` build will surface the gap; mitigate by extending the fixture in the same commit as T4/T5.
 
 ### 3.10 Live smoke test (manual, post-merge)
 
@@ -472,11 +555,18 @@ Assumes spec sibling (mode mutex) has landed AND `unidrive -p posteo_onedrive sy
 ## 5. Acceptance
 
 - Spec sibling `mount-sync-mode-mutex-design.md` has landed (or is part of the same plan and lands earlier).
-- All four tests in §3.9 pass:
+- All five tests in §3.9 pass:
   - `mkdir_creates_folder_on_provider_and_inserts_state_db_row` (JVM)
-  - `unlink_refuses_folder_path_with_PathIsFolder` (JVM) + symmetric rmdir-on-file test
+  - `unlink_refuses_folder_path_with_PathIsFolder` (JVM) + symmetric `rmdir_refuses_file_path_with_PathIsFile`
+  - `rmdir_detects_provider_not_empty_substring` (JVM) — pins both OneDrive and Internxt error wordings
   - `mkdir_round_trip_returns_zero_on_jvm_ok` (Rust)
   - `rmdir_returns_enotempty_when_jvm_signals_not_empty` (Rust)
 - Existing JVM `:app:hydration:test`, `:app:sync:test` and Rust `cargo test` suites green.
 - Manual smoke per §3.10 confirms `mkdir`/`unlink`/`rmdir`/error cases against `posteo_onedrive`.
 - BACKLOG entries in `unidrive-mount-linux/BACKLOG.md` ("FUSE `mkdir` not implemented" and "FUSE `unlink` / `rmdir` not implemented") move to `CLOSED.md` in the sibling repo's commit.
+
+**Follow-up BACKLOG entries filed at close-out** (deliberate non-goals of this change, captured so the residuals are tracked):
+
+- **R2 → typed `FolderNotEmpty` exception on the SPI.** Replace the substring match in `HydrationImpl.rmdir` with a typed `ProviderException.FolderNotEmpty` (or sealed-class variant) so future provider error-wording changes are caught at the provider boundary instead of the hydration boundary. T3 protects the current substring-match against silent regression in the meantime.
+- **R3 → `mkdir` parent-missing maps to ENOENT.** Detect "parent not found" from the provider error and map to `MkdirResult.ParentNotFound` → kernel `ENOENT`, matching POSIX. Today it maps to EIO. The cost is provider-side error-introspection that doesn't fit the "basic FUSE stuff working" session goal; file as a follow-up.
+- **R5 → cache-file eviction on unlink/rmdir.** When the JVM unlinks a hydrated file, the cache copy at `~/.cache/unidrive/hydration/<provider>/<path>` is orphaned. Existing cache-eviction can reap it later; until then it's wasted disk. Trivial cleanup-on-unlink would close the leak proactively.

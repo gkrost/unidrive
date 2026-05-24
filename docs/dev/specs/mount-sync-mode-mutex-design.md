@@ -111,7 +111,9 @@ data class HolderInfo(val pid: Long, val mode: Mode)
 
 The existing `tryLock(timeout: Duration)` overload becomes a thin shim that calls `tryLock(Mode.SYNC, timeout)` for backwards compatibility with any test or call site that hasn't migrated. The new code paths use the explicit-mode overload.
 
-`readHolderPid()` (existing, returns `Long?`) stays callable; `readHolderInfo()` is the new richer variant. Both read from the same `.lock.pid` file.
+**Nesting choice.** `Mode` and `HolderInfo` are nested inside `ProcessLock` rather than promoted to top-level types. `ProcessLock` is a regular `class` (not `data class`), so nested types are legal. The nested form keeps `ProcessLock.Mode.SYNC` self-documenting at call sites without polluting the `org.krost.unidrive.sync` namespace with `LockMode` / `LockHolderInfo` siblings. Call-site verbosity is acceptable; if a future caller dislikes the prefix, `import org.krost.unidrive.sync.ProcessLock.Mode` lets them write `Mode.SYNC` inline.
+
+**`readHolderPid()` legacy-compat.** `readHolderPid()` (existing, returns `Long?`) stays callable. It MUST parse only the first whitespace-separated token of `.lock.pid` so that a file written under the new format `<pid> <mode>` still yields the correct PID. Concretely: the implementation becomes `Files.readString(pidFile).trim().substringBefore(' ').toLongOrNull()`. The current implementation reads the whole line into `Long.parseLong`, which throws on the new format — silently swallowing the throw via the existing `runCatching` would lose the legacy diagnostic value. T1 covers the new write format, T3 covers the legacy read path, and a small additional assertion in T2 — `readHolderPid()` on a `<pid> mount` file returns just the pid — keeps the two readers honest about the same file. `readHolderInfo()` is the new richer variant; both read the same `.lock.pid` file.
 
 ### 3.3 `MountCommand` lock acquisition
 
@@ -206,6 +208,31 @@ fun acquireProfileLock(): ProcessLock {
 
 The diagnostic message is the operator's only insight into why the second mode refused; it's worth the extra few lines.
 
+### 3.4.1 Zombie-mount sanity check (addresses §4 R4)
+
+After the lock is acquired in `SyncCommand.run()` (i.e. the kernel reported no holder), the daemon checks for a stale FUSE mount that may have outlived a `kill -9`'d `MountCommand` parent. The check is a single `/proc/self/mounts` scan filtered to `fuse` entries whose mount source matches `unidrive`. If any such mount exists for a path that belongs to this user, print a WARN and a recovery hint, but do NOT abort — the sync starts. The operator can `fusermount3 -u <path>` to clean up the orphan whenever convenient.
+
+```kotlin
+// SyncCommand.run() immediately after parent.acquireProfileLock():
+val staleMounts = detectStaleFuseUnidriveMounts()
+if (staleMounts.isNotEmpty()) {
+    System.err.println(
+        "WARNING: detected ${staleMounts.size} stale unidrive FUSE mount(s) " +
+            "(likely from a kill -9'd `unidrive mount` parent): ${staleMounts.joinToString()}.",
+    )
+    System.err.println(
+        "These mounts no longer serve any data. Clean up with: " +
+            "`fusermount3 -u <path>` for each, then re-run sync.",
+    )
+    // Continue — the sync proceeds; the stale mount is the operator's
+    // problem to clean up, not a reason to refuse to sync.
+}
+```
+
+`detectStaleFuseUnidriveMounts()` lives in a new utility (`core/app/cli/src/main/kotlin/org/krost/unidrive/cli/StaleMountDetector.kt`) — reads `/proc/self/mounts`, splits by whitespace, matches lines where the filesystem-type field is `fuse` and the device field is `unidrive`. The Linux-specific path is acceptable because the mount feature is Linux-only by design (per `unidrive-mount-linux` repo scope).
+
+The mount-side recovery hint (printed by `acquireProfileLockForMount` when the holder is a stale-mount-but-released-lock scenario, which can't actually happen since the lock IS released — but the symmetric concern is "operator killed `mount` JVM and a stale FUSE remains") is handled by `MountCommand.run()` itself before lock acquisition: if a previous mount on the requested mountpoint is still active, `fusermount3` itself refuses with `transport endpoint is not connected`. The operator gets the kernel's error; we don't need to wrap it.
+
 ### 3.5 Crash recovery
 
 The lock relies on the kernel's advisory file-lock semantics: when the holding JVM exits (cleanly OR via SIGKILL / OOM / segfault), the kernel releases the `FileLock`. The next `ProcessLock.tryLock(...)` succeeds. The stale `.lock.pid` sidecar from a crashed prior process is overwritten at acquisition (per `ProcessLock.kt:65-67`'s existing `Files.writeString(pidFile, …)`).
@@ -214,7 +241,7 @@ This means **no manual cleanup is required after a crash** — the next launch o
 
 ### 3.6 Testing
 
-Four named tests pin the invariants. Three are unit tests against `ProcessLock` directly (extend `ProcessLockTest.kt`); one is an integration test against `MountCommand`'s startup behavior (new `MountCommandLockTest.kt`).
+Five named tests pin the invariants. Three are unit tests against `ProcessLock` directly (extend `ProcessLockTest.kt`); two are integration tests against the lock-acquisition factories (new `ProfileLockFactoryTest.kt`).
 
 **T1 — `lock_pid_file_carries_mode_after_tryLock`.** Acquire with `Mode.MOUNT`, read `.lock.pid` content, assert it parses as `<pid> mount`. Acquire with `Mode.SYNC`, repeat with `<pid> sync`. Pins §3.1 wire format.
 
@@ -222,9 +249,9 @@ Four named tests pin the invariants. Three are unit tests against `ProcessLock` 
 
 **T3 — `legacy_pid_only_lock_pid_file_reads_as_sync_mode`.** Write a `.lock.pid` containing just `12345\n` (legacy format, no mode token). Call `readHolderInfo()`. Assert it returns `HolderInfo(pid=12345, mode=SYNC)`. Pins §3.1 backwards compatibility.
 
-**T4 — `mount_command_refuses_when_sync_holds_lock`.** Acquire `Mode.SYNC` on a temp lock file via `ProcessLock`. Invoke `MountCommand.run()` (or its lock-acquisition step in isolation) against the same profile. Assert it exits with code 1 and the stderr message contains "is mirroring profile" + the holder PID. Pins §3.3+§3.4 user-visible behavior.
+**T4 — `mount_command_refuses_when_sync_holds_lock`.** Acquire `Mode.SYNC` on a temp lock file via `ProcessLock`. Invoke `MountCommand.run()`'s lock-acquisition step (via `acquireProfileLockForMount`) against the same profile. Assert it exits with code 1 and the stderr message contains "is mirroring profile" + the holder PID. Pins §3.3+§3.4 mount-side user-visible behavior.
 
-(A symmetric "sync refuses when mount holds lock" test would be nice-to-have but is structurally identical to T4 — it would exercise the same code path through the opposite-mode call site, and the existing `acquireProfileLock` test surface in `ProcessLockTest` already covers sync-vs-sync contention. Skip per YAGNI.)
+**T5 — `sync_command_refuses_when_mount_holds_lock`.** Acquire `Mode.MOUNT` on a temp lock file via `ProcessLock`. Invoke `acquireProfileLock()` (the sync-side factory) against the same profile. Assert it exits with code 1 and the stderr message contains `"is currently FUSE-mounted by"` + the holder PID. Pins the symmetric §3.4 sync-side path. This test is NOT redundant with T4 — the `when (holder?.mode)` branch in `acquireProfileLock` renders different wording than the corresponding branch in `acquireProfileLockForMount`, and the legacy sync-vs-sync coverage in `ProcessLockTest` never exercised the `Mode.MOUNT` arm.
 
 ### 3.7 Live smoke test (manual, post-merge)
 
