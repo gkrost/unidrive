@@ -321,7 +321,7 @@ class SyncEngine(
      */
     suspend fun createRemoteFolder(path: String): CloudItem {
         val item = provider.createFolder(path)
-        db.insertFolder(path = path, remoteId = item.id, mtime = item.modified!!)
+        db.insertFolder(path = path, remoteId = item.id, mtime = item.modified ?: Instant.now())
         return item
     }
 
