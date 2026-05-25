@@ -53,6 +53,21 @@ interface TrackingSet {
 
     /** Count by state — used by `ts status`. */
     fun countsByState(): Map<TrackState, Int>
+
+    /**
+     * The persisted delta cursor for this profile, or null if none stored.
+     * The cursor is opaque — the provider interprets it (OneDrive's
+     * `@odata.deltaLink`, Internxt's offset/updatedAt marker). One value
+     * per db, because `tracking.db` is per-profile.
+     */
+    fun loadDeltaCursor(): String?
+
+    /**
+     * Persist the delta cursor for this profile. Only called after a pass
+     * that enumerated the full inventory (`complete == true`); an
+     * incomplete pass must leave the prior cursor untouched.
+     */
+    fun saveDeltaCursor(cursor: String?)
 }
 
 /**
@@ -70,6 +85,10 @@ class SqliteTrackingSet(
     private val inMemory: Boolean = false,
 ) : TrackingSet {
     private var conn: Connection? = null
+
+    private companion object {
+        const val DELTA_CURSOR_KEY = "delta_cursor"
+    }
 
     @Synchronized
     override fun initialize() {
@@ -119,6 +138,14 @@ class SqliteTrackingSet(
                 """
                 CREATE INDEX IF NOT EXISTS idx_tracking_remote_id
                   ON tracking_entries(remote_file_id)
+                """,
+            )
+            stmt.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS tracking_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                )
                 """,
             )
         }
@@ -223,6 +250,40 @@ class SqliteTrackingSet(
             }
         }
         return out
+    }
+
+    @Synchronized
+    override fun loadDeltaCursor(): String? {
+        val c = conn ?: error("not initialized")
+        c.prepareStatement("SELECT value FROM tracking_meta WHERE key = ?").use { ps ->
+            ps.setString(1, DELTA_CURSOR_KEY)
+            ps.executeQuery().use { rs ->
+                return if (rs.next()) rs.getString(1) else null
+            }
+        }
+    }
+
+    @Synchronized
+    override fun saveDeltaCursor(cursor: String?) {
+        val c = conn ?: error("not initialized")
+        if (cursor == null) {
+            c.prepareStatement("DELETE FROM tracking_meta WHERE key = ?").use { ps ->
+                ps.setString(1, DELTA_CURSOR_KEY)
+                ps.executeUpdate()
+            }
+            return
+        }
+        c.prepareStatement(
+            """
+            INSERT INTO tracking_meta (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+        ).use { ps ->
+            ps.setString(1, DELTA_CURSOR_KEY)
+            ps.setString(2, cursor)
+            ps.executeUpdate()
+        }
     }
 
     @Synchronized

@@ -67,16 +67,10 @@ class TrackingEngine(
 
             for (path in universe) {
                 val l = localObs[path] ?: LocalObservation(exists = false, hash = null, size = null, mtime = null, inode = null)
-                val r =
-                    remoteObs[path] ?: RemoteObservation(
-                        exists = false,
-                        remoteFileId = null,
-                        etag = null,
-                        size = null,
-                        hash = null,
-                        serverMtime = null,
-                    )
                 val t = trackingSet.lookup(path)
+                val r =
+                    remoteObs[path]
+                        ?: absentRemoteObservation(remoteEnum.incremental, t)
 
                 // Adopt before reconcile so adopt-on-content-match doesn't
                 // emit a spurious DownloadRemote on the same pass.
@@ -270,6 +264,50 @@ class TrackingEngine(
 
     // ---- observation helpers ----
 
+    /**
+     * What a path's [RemoteObservation] should be when it is ABSENT from
+     * this pass's `remoteObs` map.
+     *
+     * On a FULL enumeration (`incremental == false`) absence is
+     * authoritative: the remote genuinely has no such item, so we return
+     * `exists = false` — the reconciler may then legitimately
+     * `PropagateRemoteDelete` for a tracked path that vanished.
+     *
+     * On an INCREMENTAL pass (resumed from a persisted cursor) the delta
+     * only carries items that *changed* (or were explicitly deleted).
+     * A tracked path missing from the delta is UNCHANGED-PRESENT, not
+     * gone — so we synthesize its observation from the tracking record
+     * (`exists = true`, etag/size from the snapshot) and the reconciler
+     * yields NoOp. Explicit deletions still arrive as a `deleted`-flagged
+     * delta item, which [enumerateRemote] maps to `exists = false` in
+     * `remoteObs`, so genuine removals still propagate. An untracked path
+     * (`track == null`) can't be in the delta as a no-change item; treat
+     * its absence as `exists = false`, same as the full case.
+     */
+    private fun absentRemoteObservation(
+        incremental: Boolean,
+        track: TrackingRecord?,
+    ): RemoteObservation =
+        if (incremental && track != null) {
+            RemoteObservation(
+                exists = true,
+                remoteFileId = track.remoteFileId,
+                etag = track.remoteEtag,
+                size = track.remoteSize,
+                hash = track.remoteEtag,
+                serverMtime = null,
+            )
+        } else {
+            RemoteObservation(
+                exists = false,
+                remoteFileId = null,
+                etag = null,
+                size = null,
+                hash = null,
+                serverMtime = null,
+            )
+        }
+
     private fun scanLocal(): Map<String, LocalObservation> {
         if (!Files.isDirectory(syncRoot)) return emptyMap()
         val out = mutableMapOf<String, LocalObservation>()
@@ -317,13 +355,17 @@ class TrackingEngine(
             )
             // No remote view at all is treated as incomplete so the caller
             // doesn't interpret zero items seen as a universal-delete signal.
-            return RemoteEnumResult(out, complete = false)
+            return RemoteEnumResult(out, complete = false, incremental = false)
         }
-        var cursor: String? = null
+        // Resume from the cursor the last completed pass ended on (opaque to
+        // the engine; the provider interprets it). Null on the first pass or
+        // after a pass that never completed. A non-null cursor means this is
+        // an INCREMENTAL delta: the provider returns only changed + explicitly-
+        // deleted items, so a tracked path absent from the page is UNCHANGED-
+        // PRESENT, not gone (see absentRemoteObservation).
+        var cursor: String? = trackingSet.loadDeltaCursor()
+        val incremental = cursor != null
         var complete = true
-        // Drain delta pages once. Does not persist a cursor across runs — every
-        // pass is a full enumeration. Cursor persistence is follow-up work for
-        // real-provider integration.
         try {
             do {
                 val page = provider.delta(cursor)
@@ -331,17 +373,32 @@ class TrackingEngine(
                     complete = false
                 }
                 for (item in page.items) {
-                    if (item.deleted) continue
                     if (item.isFolder) continue
                     out[item.path] =
-                        RemoteObservation(
-                            exists = true,
-                            remoteFileId = item.id,
-                            etag = item.hash,
-                            size = item.size,
-                            hash = item.hash,
-                            serverMtime = item.modified,
-                        )
+                        if (item.deleted) {
+                            // Explicit deletion signal (OneDrive maps
+                            // @microsoft.graph.removed / deleted facets onto
+                            // CloudItem.deleted). Record absence so a tracked
+                            // path still produces PropagateRemoteDelete. On a
+                            // full pass this is equivalent to omitting it.
+                            RemoteObservation(
+                                exists = false,
+                                remoteFileId = item.id,
+                                etag = null,
+                                size = null,
+                                hash = null,
+                                serverMtime = null,
+                            )
+                        } else {
+                            RemoteObservation(
+                                exists = true,
+                                remoteFileId = item.id,
+                                etag = item.hash,
+                                size = item.size,
+                                hash = item.hash,
+                                serverMtime = item.modified,
+                            )
+                        }
                 }
                 cursor = page.cursor
             } while (page.hasMore)
@@ -349,7 +406,14 @@ class TrackingEngine(
             log.warn("Remote enumeration failed mid-loop; marking pass incomplete: ${e.message}")
             complete = false
         }
-        return RemoteEnumResult(out, complete)
+        // Only advance the persisted cursor on a pass that saw the full
+        // inventory. An incomplete pass leaves the prior cursor in place so
+        // the next pass re-enumerates safely (preserves the delete-suppression
+        // backup path's safety contract).
+        if (complete) {
+            trackingSet.saveDeltaCursor(cursor)
+        }
+        return RemoteEnumResult(out, complete, incremental)
     }
 
     private suspend fun observeRemote(path: String): RemoteObservation =
@@ -433,4 +497,12 @@ data class PassReport(
 private data class RemoteEnumResult(
     val observations: Map<String, RemoteObservation>,
     val complete: Boolean,
+    /**
+     * True iff this pass resumed from a persisted (non-null) delta cursor —
+     * i.e. the provider returned an INCREMENTAL delta (only changed +
+     * explicitly-deleted items). False on the first pass / post-reset, when
+     * the delta is a FULL enumeration. SEPARATE from [complete]: a pass can
+     * be incremental yet incomplete, or full yet complete.
+     */
+    val incremental: Boolean,
 )

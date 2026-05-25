@@ -32,12 +32,50 @@ class FakeTrackingProvider : CloudProvider {
     val deletedPaths: MutableList<String> = mutableListOf()
 
     /**
+     * Test hook: the cursor passed to every [delta] invocation, in call
+     * order. Lets tests pin that a subsequent pass resumes from the cursor
+     * a prior pass ended on rather than from an empty/initial cursor.
+     */
+    val deltaCursors: MutableList<String?> = mutableListOf()
+
+    /** Test hook: the cursor value the next [delta] page reports. */
+    var nextCursor: String = "fake-cursor"
+
+    /**
      * Test hook: flip to false to simulate a provider whose delta enumeration
      * couldn't gather the full inventory (transient API failure, throttling
      * mid-walk, etc.). The returned [DeltaPage] still carries [files] but
      * marks `complete = false` so the engine knows the view is partial.
      */
     var deltaComplete: Boolean = true
+
+    /**
+     * Test hook: cursor-aware incremental delta. A real provider returns the
+     * FULL inventory only when `delta(null)` is called; once resumed from a
+     * non-null cursor it returns just the items changed (or deleted) since
+     * that cursor.
+     *
+     * When [incrementalAware] is true and [delta] is called with a NON-null
+     * cursor, the page carries ONLY:
+     *   - [incrementalChanges] — paths whose content changed since the cursor
+     *     (these are also written into [files] so a subsequent download/adopt
+     *     round-trips); and
+     *   - [incrementalDeletes] — paths the delta explicitly marks deleted
+     *     (emitted as `CloudItem(deleted = true)`; also removed from [files]).
+     * Every other tracked path is simply OMITTED — exactly the shape that
+     * tricked the pre-fix engine into reading "absent ⇒ remote-gone".
+     *
+     * When [incrementalAware] is false (default) the fake keeps its legacy
+     * behaviour: every [delta] returns the full [files] inventory regardless
+     * of cursor. This keeps the existing full-pass tests untouched.
+     */
+    var incrementalAware: Boolean = false
+
+    /** Path→bytes to report as CHANGED on an incremental (non-null cursor) delta. */
+    val incrementalChanges: MutableMap<String, ByteArray> = mutableMapOf()
+
+    /** Paths to report as DELETED on an incremental (non-null cursor) delta. */
+    val incrementalDeletes: MutableList<String> = mutableListOf()
 
     override fun capabilities(): Set<Capability> =
         setOf(Capability.Delta, Capability.VerifyItem)
@@ -105,8 +143,28 @@ class FakeTrackingProvider : CloudProvider {
         onPageProgress: ((Int) -> Unit)?,
         scanContext: ScanContext?,
     ): DeltaPage {
-        val items = files.entries.map { (path, bytes) -> itemFor(path, bytes) }
-        return DeltaPage(items = items, cursor = "fake-cursor", hasMore = false, complete = deltaComplete)
+        deltaCursors += cursor
+        val items =
+            if (incrementalAware && cursor != null) {
+                // Incremental delta: only changed + explicitly-deleted items.
+                // Apply the seeded mutations to the backing store so a
+                // follow-on download/adopt round-trips faithfully, then emit
+                // exactly those items — every untouched tracked path is omitted.
+                val deletedItems =
+                    incrementalDeletes.map { path ->
+                        val bytes = files.remove(path)
+                        itemFor(path, bytes ?: ByteArray(0)).copy(deleted = true)
+                    }
+                val changedItems =
+                    incrementalChanges.map { (path, bytes) ->
+                        files[path] = bytes
+                        itemFor(path, bytes)
+                    }
+                deletedItems + changedItems
+            } else {
+                files.entries.map { (path, bytes) -> itemFor(path, bytes) }
+            }
+        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = deltaComplete)
     }
 
     override suspend fun quota(): QuotaInfo = QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)

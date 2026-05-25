@@ -316,6 +316,14 @@ class TrackingEngineIntegrationTest {
             Files.delete(syncRoot.resolve("doc.txt"))
             provider.files.remove("/doc.txt")
 
+            // The both-gone NoOp cleanup is only reachable on a FULL pass,
+            // where the remote's absence of the path is authoritative. On an
+            // incremental (cursor-resumed) pass a tracked path absent from the
+            // delta is unchanged-present, not gone — a real removal would
+            // arrive as a deleted-flagged delta item instead. Clear the cursor
+            // so pass 2 full-enumerates (the post-reset / first-pass shape).
+            tracking.saveDeltaCursor(null)
+
             val report = engine(tracking = tracking).syncOnce()
             assertTrue(
                 report.cleanedUp.contains("/doc.txt"),
@@ -330,6 +338,225 @@ class TrackingEngineIntegrationTest {
             assertEquals(0, report.plan.size, "both-gone cleanup must not emit any action; plan=${report.plan}")
         } finally {
             tracking.close()
+        }
+    }
+
+    /**
+     * Cursor persistence: across two passes against the same on-disk
+     * tracking.db, the SECOND pass's first delta() call must receive the
+     * cursor the first (completed) pass ended on — NOT an empty/initial
+     * cursor. Without persistence, every pass re-enumerates the full
+     * remote inventory from scratch (catastrophic at the ~196k Internxt
+     * scale).
+     */
+    @Test
+    fun `completed pass persists delta cursor and next pass resumes from it`() {
+        provider.files["/doc.txt"] = "hello world".toByteArray()
+        provider.nextCursor = "cursor-after-pass-1"
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+        } finally {
+            tracking.close()
+        }
+        assertEquals(
+            listOf<String?>(null),
+            provider.deltaCursors,
+            "first pass should start from an empty cursor",
+        )
+
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking2).syncOnce()
+        } finally {
+            tracking2.close()
+        }
+        assertEquals(
+            "cursor-after-pass-1",
+            provider.deltaCursors[1],
+            "second pass must resume from the cursor the first pass ended on, not an empty cursor",
+        )
+    }
+
+    /**
+     * Cursor-advance gate: when a pass returns complete == false, the
+     * persisted cursor MUST NOT be advanced. The next pass must still
+     * start from the prior cursor (or empty if none was ever stored), so
+     * the enumeration re-runs safely and the delete-suppression backup
+     * path's contract holds.
+     */
+    @Test
+    fun `incomplete pass does not advance persisted delta cursor`() {
+        provider.files["/doc.txt"] = "hello world".toByteArray()
+
+        // Pass 1 completes and stores "cursor-1".
+        provider.nextCursor = "cursor-1"
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals("cursor-1", tracking.loadDeltaCursor())
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2 reports incomplete and would advance to "cursor-2" — must NOT persist it.
+        provider.deltaComplete = false
+        provider.nextCursor = "cursor-2"
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking2).syncOnce()
+            assertEquals(
+                "cursor-1",
+                tracking2.loadDeltaCursor(),
+                "incomplete pass must leave the prior persisted cursor in place",
+            )
+        } finally {
+            tracking2.close()
+        }
+
+        // Pass 3 resumes from the prior cursor ("cursor-1"), not the discarded "cursor-2".
+        provider.deltaComplete = true
+        provider.deltaCursors.clear()
+        val tracking3 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking3).syncOnce()
+            assertEquals(
+                "cursor-1",
+                provider.deltaCursors.first(),
+                "next pass after an incomplete pass must resume from the last completed cursor",
+            )
+        } finally {
+            tracking3.close()
+        }
+    }
+
+    /**
+     * The cursor-resume deletion-cascade guard. This is the invariant the
+     * cursor-persistence feature would otherwise have broken:
+     *
+     * A real provider returns a FULL inventory only on the first delta
+     * (`cursor == null`). Once a pass persists a cursor, the NEXT pass
+     * resumes from it and the provider returns an INCREMENTAL delta —
+     * only items changed/deleted since that cursor. An unchanged tracked
+     * path is simply OMITTED from the incremental page. The pre-fix engine
+     * defaulted every omitted path to `RemoteObservation(exists = false)`,
+     * which the reconciler reads as remote-gone → PropagateRemoteDelete.
+     * That is the deletion cascade the engine exists to prevent.
+     *
+     * Here pass 1 full-enumerates N files (all become TrackedSynced, cursor
+     * persisted). Pass 2 resumes from that cursor with an EMPTY incremental
+     * delta (no changes, no deletes). Assert ZERO deletes: every omitted
+     * tracked path must resolve to NoOp, not PropagateRemoteDelete, even
+     * under a permissive BatchGuard that would otherwise wave the deletes
+     * through.
+     */
+    @Test
+    fun `incremental pass does not delete a tracked path merely absent from the delta`() {
+        for (i in 0 until 5) {
+            provider.files["/file-$i.bin"] = "payload-$i".toByteArray()
+        }
+        provider.nextCursor = "cursor-after-full"
+
+        // Pass 1: full enumeration → 5 TrackedSynced rows, cursor persisted.
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(5, tracking.countsByState()[TrackState.TrackedSynced])
+            assertEquals("cursor-after-full", tracking.loadDeltaCursor())
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2: resume from the cursor with an EMPTY incremental delta —
+        // every tracked path is omitted (unchanged-present), nothing deleted.
+        provider.incrementalAware = true // changes/deletes both empty
+        val permissive = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE)
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report = engine(tracking = tracking2, guard = permissive, dryRun = true).syncOnce()
+
+            // The incremental delta must have actually been exercised: pass 2's
+            // first delta() call resumed from the persisted cursor, not null.
+            assertEquals(
+                "cursor-after-full",
+                provider.deltaCursors.last(),
+                "pass 2 must resume from the persisted cursor (so the delta is incremental)",
+            )
+            // The headline invariant: omitted tracked paths are NEVER deletes.
+            assertEquals(
+                0,
+                report.plan.count {
+                    it is ReconcileAction.PropagateRemoteDelete ||
+                        it is ReconcileAction.PropagateLocalDelete
+                },
+                "tracked paths absent from an incremental delta must resolve to NoOp, not a delete; plan=${report.plan}",
+            )
+            // And they're genuinely NoOp: nothing surfaced in the plan at all.
+            assertEquals(
+                0,
+                report.plan.size,
+                "an empty incremental delta over unchanged tracked paths must emit no actions; plan=${report.plan}",
+            )
+            assertEquals(5, tracking2.paths().size, "no tracked rows should have been cleaned up")
+        } finally {
+            tracking2.close()
+        }
+    }
+
+    /**
+     * The other half of the incremental contract: a genuine remote removal
+     * still propagates. On an incremental pass a tracked path is only
+     * remote-gone when the delta carries an EXPLICIT deleted-flagged item
+     * for it (OneDrive maps `@microsoft.graph.removed` / the `deleted`
+     * facet onto `CloudItem.deleted`). Exactly the flagged path must yield
+     * PropagateRemoteDelete; the others — omitted, hence unchanged-present
+     * — must stay untouched.
+     */
+    @Test
+    fun `incremental pass deletes a tracked path the delta explicitly marks deleted`() {
+        for (i in 0 until 3) {
+            provider.files["/file-$i.bin"] = "payload-$i".toByteArray()
+        }
+        provider.nextCursor = "cursor-after-full"
+
+        // Pass 1: full enumeration → 3 TrackedSynced rows, cursor persisted.
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(3, tracking.countsByState()[TrackState.TrackedSynced])
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2: incremental delta explicitly marks ONE tracked path deleted.
+        provider.incrementalAware = true
+        provider.incrementalDeletes += "/file-1.bin"
+        val permissive = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE)
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report = engine(tracking = tracking2, guard = permissive, dryRun = true).syncOnce()
+
+            val remoteDeletes =
+                report.plan.filterIsInstance<ReconcileAction.PropagateRemoteDelete>().map { it.path }
+            assertEquals(
+                listOf("/file-1.bin"),
+                remoteDeletes,
+                "exactly the deleted-flagged path must propagate a remote delete; got $remoteDeletes",
+            )
+            assertEquals(
+                0,
+                report.plan.count { it is ReconcileAction.PropagateLocalDelete },
+                "no local deletes should be emitted; plan=${report.plan}",
+            )
+            // The two omitted tracked paths are unchanged-present → no action.
+            assertEquals(
+                1,
+                report.plan.size,
+                "only the deleted-flagged path should produce an action; plan=${report.plan}",
+            )
+        } finally {
+            tracking2.close()
         }
     }
 
