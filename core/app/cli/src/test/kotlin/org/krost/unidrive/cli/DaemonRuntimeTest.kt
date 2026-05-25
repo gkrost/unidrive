@@ -134,6 +134,94 @@ class DaemonRuntimeTest {
         daemonJob.join()
     }
 
+    @Test
+    fun refresh_run_emits_terminal_event_after_completing_enumeration() = runBlocking {
+        // Spec T5: subscribe -> refresh.run -> await refresh.done terminal event.
+        // Then re-issue refresh.run; must succeed (not stuck in 'busy').
+        val provider: CloudProvider = StubProvider()
+
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            socketPath = socketPath,
+            providerFactory = { provider },
+        )
+
+        val daemonJob = launch { runtime.start() }
+
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+
+        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        try {
+            // Non-blocking reads so the deadline loop below actually polls the
+            // deadline. With blocking reads, a read with nothing buffered hangs
+            // forever and the test JVM never exits even on assertion failure.
+            channel.configureBlocking(false)
+            // Subscribe first
+            channel.write(ByteBuffer.wrap(("""{"verb":"sync.subscribe"}""" + "\n").toByteArray()))
+            val subReply = readUntil(channel, "\"ok\":true", timeoutMs = 5_000)
+            assertTrue(subReply.contains("\"ok\":true"), "subscribe must succeed; got: $subReply")
+
+            // Issue refresh.run
+            channel.write(ByteBuffer.wrap(("""{"verb":"refresh.run"}""" + "\n").toByteArray()))
+
+            // Read until we see the terminal event "refresh.done"
+            val collected = readUntil(channel, "refresh.done", timeoutMs = 10_000)
+            assertTrue(
+                collected.contains("\"event\":\"refresh.done\""),
+                "expected refresh.done terminal event within 10s; got: $collected",
+            )
+            assertTrue(
+                collected.contains("\"ok\":true"),
+                "expected ok:true on terminal event; got: $collected",
+            )
+
+            // Issue refresh.run again - must NOT be 'busy' since first one completed.
+            channel.write(ByteBuffer.wrap(("""{"verb":"refresh.run"}""" + "\n").toByteArray()))
+            val secondReply = readUntil(channel, "\"job_id\"", timeoutMs = 5_000)
+            assertTrue(
+                secondReply.contains("\"ok\":true"),
+                "second refresh.run must succeed (not busy); got: $secondReply",
+            )
+        } finally {
+            channel.close()
+        }
+
+        runtime.close()
+        daemonJob.join()
+    }
+
+    /**
+     * Poll [channel] (configured non-blocking) into a StringBuilder until either
+     * [needle] appears in collected bytes or [timeoutMs] elapses. Used by T5 to
+     * avoid the blocking-read hang that would otherwise prevent the test JVM
+     * from exiting on assertion failure or daemon stall.
+     */
+    private suspend fun readUntil(
+        channel: SocketChannel,
+        needle: String,
+        timeoutMs: Long,
+    ): String {
+        val collected = StringBuilder()
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline && !collected.contains(needle)) {
+            val buf = ByteBuffer.allocate(4096)
+            val n = channel.read(buf)
+            if (n > 0) {
+                buf.flip()
+                collected.append(String(buf.array(), 0, buf.limit()))
+            } else {
+                delay(20)
+            }
+        }
+        return collected.toString()
+    }
+
     /**
      * Minimal CloudProvider stub. Only authenticateAndLog() (via authenticate())
      * is exercised by T1's happy-path lifecycle; the rest must compile but never

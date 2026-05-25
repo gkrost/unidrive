@@ -137,6 +137,13 @@ class DaemonRuntime(
                     server.unregisterSyncSubscriber(connId)
                 }
 
+                // refresh.run verb (spec §4.2). Pass serveScope so refresh
+                // jobs are cancelled when the daemon shuts down.
+                val refreshHandler = RefreshRpcHandler(server, engine, serveScope)
+                server.registerHandler("refresh.run") { connId, json ->
+                    refreshHandler.handle(connId, json)
+                }
+
                 System.err.println(
                     "daemon ready, pid ${ProcessHandle.current().pid()}, socket $socketPath",
                 )
