@@ -40,6 +40,7 @@ class DaemonRuntime(
     private val profileName: String,
     private val lockFile: Path,
     private val dbPath: Path,
+    private val syncRoot: Path,
     private val socketPath: Path,
     private val providerFactory: () -> CloudProvider,
 ) {
@@ -110,7 +111,7 @@ class DaemonRuntime(
                 server.start(serveScope)
                 startedAtMs = System.currentTimeMillis()
 
-                val engine = SyncEngine(provider, db!!, syncRoot = dbPath.parent)
+                val engine = SyncEngine(provider, db!!, syncRoot = syncRoot)
                 val hydration = HydrationImpl(engine, db!!)
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in HydrationIpcHandler.VERBS) {

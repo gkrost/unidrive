@@ -35,6 +35,7 @@ class DaemonRunCommand : Runnable {
     override fun run() {
         val parent = daemonCmd.parent
         val profile = parent.resolveCurrentProfile()
+        val config = parent.loadSyncConfig()
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val socketPath = IpcServer.defaultSocketPath(profile.name)
@@ -43,6 +44,7 @@ class DaemonRunCommand : Runnable {
             profileName = profile.name,
             lockFile = lockFile,
             dbPath = dbPath,
+            syncRoot = config.syncRoot,
             socketPath = socketPath,
             providerFactory = { parent.createProvider() },
         )

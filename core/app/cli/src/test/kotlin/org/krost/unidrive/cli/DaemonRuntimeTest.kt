@@ -63,6 +63,7 @@ class DaemonRuntimeTest {
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
+            syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { provider },
         )
@@ -103,6 +104,7 @@ class DaemonRuntimeTest {
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
+            syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { provider },
         )
@@ -144,6 +146,7 @@ class DaemonRuntimeTest {
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
+            syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { provider },
         )
@@ -204,6 +207,7 @@ class DaemonRuntimeTest {
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
+            syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { provider },
         )
