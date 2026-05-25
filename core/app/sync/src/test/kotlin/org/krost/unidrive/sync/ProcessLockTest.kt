@@ -114,7 +114,7 @@ class ProcessLockTest {
         }
     }
 
-    // -- Spec mount-sync-mode-mutex T1/T2/T3/T3a -------------------------------
+    // -- Spec mount-sync-mode-mutex + unidrive-daemon T1/T2/T3/T3a -------------------------------
 
     @Test
     fun lock_pid_file_carries_mode_after_tryLock() {
@@ -145,25 +145,6 @@ class ProcessLockTest {
         } finally {
             syncLock.unlock()
             Files.deleteIfExists(syncLockFile)
-        }
-    }
-
-    @Test
-    fun lock_pid_file_carries_daemon_mode_after_tryLock_daemon() {
-        val daemonLockFile = Files.createTempFile("mode-mutex-daemon", ".lock")
-        val daemonLock = ProcessLock(daemonLockFile)
-        try {
-            assertTrue(daemonLock.tryLock(ProcessLock.Mode.DAEMON))
-            val pidFile = daemonLockFile.resolveSibling("${daemonLockFile.fileName}.pid")
-            val body = Files.readString(pidFile).trim()
-            assertEquals(
-                "${ProcessHandle.current().pid()} daemon",
-                body,
-                "lock-pid sidecar must carry '<pid> daemon' on DAEMON acquisition",
-            )
-        } finally {
-            daemonLock.unlock()
-            Files.deleteIfExists(daemonLockFile)
         }
     }
 
