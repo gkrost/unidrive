@@ -196,6 +196,43 @@ class DaemonRuntimeTest {
         daemonJob.join()
     }
 
+    @Test
+    fun daemon_status_returns_uptime_clients_and_refresh_state() = runBlocking {
+        val provider: CloudProvider = StubProvider()
+
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            socketPath = socketPath,
+            providerFactory = { provider },
+        )
+
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound")
+
+        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        channel.configureBlocking(false)
+        try {
+            channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
+            val reply = readUntil(channel, "\"ok\"", timeoutMs = 5_000L)
+            assertTrue(reply.contains("\"ok\":true"), "expected ok:true; got: $reply")
+            assertTrue(reply.contains("\"uptime_ms\""), "expected uptime_ms field; got: $reply")
+            assertTrue(reply.contains("\"clients_connected\""), "expected clients_connected; got: $reply")
+            assertTrue(reply.contains("\"refresh_in_flight\":false"), "expected refresh_in_flight:false; got: $reply")
+            assertTrue(reply.contains("\"refresh_job_id\":null"), "expected refresh_job_id:null; got: $reply")
+        } finally {
+            channel.close()
+        }
+
+        runtime.close()
+        daemonJob.join()
+    }
+
     /**
      * Poll [channel] (configured non-blocking) into a StringBuilder until either
      * [needle] appears in collected bytes or [timeoutMs] elapses. Used by T5 to

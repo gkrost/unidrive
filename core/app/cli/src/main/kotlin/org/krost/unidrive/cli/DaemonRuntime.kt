@@ -49,6 +49,7 @@ class DaemonRuntime(
     private var db: StateDatabase? = null
     private var ipcServer: IpcServer? = null
     private val closeSignal = CompletableDeferred<Unit>()
+    private var startedAtMs: Long = 0
 
     suspend fun start() {
         // 1. Acquire lock (Mode.DAEMON).
@@ -107,6 +108,7 @@ class DaemonRuntime(
             )
             try {
                 server.start(serveScope)
+                startedAtMs = System.currentTimeMillis()
 
                 val engine = SyncEngine(provider, db!!, syncRoot = dbPath.parent)
                 val hydration = HydrationImpl(engine, db!!)
@@ -142,6 +144,16 @@ class DaemonRuntime(
                 val refreshHandler = RefreshRpcHandler(server, engine, serveScope)
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)
+                }
+
+                // daemon.status verb (spec §4.3)
+                server.registerHandler("daemon.status") { _, _ ->
+                    val uptimeMs = System.currentTimeMillis() - startedAtMs
+                    val clientCount = server.clientCount
+                    val refreshInFlight = refreshHandler.isInFlight()
+                    val refreshJobId = refreshHandler.inFlightJobId()
+                    val jobIdJson = if (refreshJobId != null) "\"$refreshJobId\"" else "null"
+                    """{"ok":true,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson}"""
                 }
 
                 System.err.println(
