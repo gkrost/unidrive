@@ -475,10 +475,13 @@ release's section and reformat it into the distro-native format:
 
 - **deb:** rendered into `debian/changelog` syntax (one stanza per release
   with `package (version) distribution; urgency=low` header, timestamped
-  signature, two-space indent).
+  signature, two-space indent). Maintainer identity for both the trailer
+  and the rpm `%changelog` header below is
+  `UniDrive Releases <releases@unidrive.krost.org>`, matching the GPG
+  signing-key identity from §5.
 - **rpm:** rendered into `%changelog` syntax (one stanza per release with
-  `* DAY MON DD YYYY Maintainer <email> - version-release` header, bullet
-  lines prefixed with `-`).
+  `* DAY MON DD YYYY UniDrive Releases <releases@unidrive.krost.org> - version-release`
+  header, bullet lines prefixed with `-`).
 
 The AUR `PKGBUILD` does not carry an in-package changelog — AUR users see
 the matching GitHub release notes (which themselves are generated from the
@@ -527,10 +530,16 @@ other container, including `pkg-server`, can read it.
 
 The unidrive-dist GH Actions release runner:
 
-1. Builds unsigned `.deb`, `.rpm`, AUR source tarball, end-user tarball.
+1. Builds unsigned `.deb`, `.rpm`, AUR source tarball, end-user tarball
+   bundle, and the tarball's `SHA256SUMS` file (the one destined to
+   become `SHA256SUMS.asc` per §4.1).
 2. SSHes to `pkg-signer` (using a separate `SIGNER_DEPLOY_KEY` GH secret —
    distinct from `DIST_DEPLOY_KEY` which only reaches `pkg-server`), pushes
-   the unsigned artefacts into the signer's drop directory.
+   the full set of unsigned artefacts into the signer's drop directory.
+   The set explicitly includes: `.deb` files, `.rpm` files,
+   `SHA256SUMS` (tarball bundle), the apt `Release` / `InRelease`
+   skeleton, and the dnf `repomd.xml`. The signer signs whatever is in
+   the drop directory; nothing is skipped.
 3. Triggers signing (the forced-command shell script signs everything
    queued).
 4. Pulls the signed artefacts back.
@@ -852,7 +861,12 @@ a Docker container:
 
 ### §8.4 End-to-end manual smoke
 
-One-time per first release (and per new distro added to the matrix):
+One-time per first release (and per new distro added to the matrix). This
+is **interactive** by design — `unidrive auth` opens an OAuth browser flow
+(or accepts a manually-pasted token), and a real human at a real machine
+verifies the full user journey. No headless or automated equivalent for
+MVP; the cost of running this once per first-release outweighs the cost of
+automating it.
 
 ```bash
 # On a fresh Ubuntu 24.04 LTS VM (or 26.04 once GA):
