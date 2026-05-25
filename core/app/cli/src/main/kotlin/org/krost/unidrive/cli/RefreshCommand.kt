@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
+import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -31,6 +32,14 @@ class RefreshCommand : Runnable {
     @ParentCommand
     lateinit var parent: Main
 
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
+
     @Option(
         names = ["--reset"],
         description = [
@@ -42,6 +51,7 @@ class RefreshCommand : Runnable {
     var reset: Boolean = false
 
     override fun run() {
+        applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
