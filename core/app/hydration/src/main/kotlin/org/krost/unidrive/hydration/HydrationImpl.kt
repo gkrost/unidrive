@@ -238,6 +238,31 @@ class HydrationImpl(
         }
     }
 
+    private fun prepareEmptyCache(path: String): java.nio.file.Path {
+        val cachePath = syncEngine.resolveCachePath(path)
+        java.nio.file.Files.createDirectories(cachePath.parent)
+        java.nio.file.Files.newByteChannel(
+            cachePath,
+            java.util.EnumSet.of(
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+            ),
+        ).close()
+        return cachePath
+    }
+
+    override suspend fun openWriteBegin(path: String): OpenResult {
+        val entry = stateDb.getEntry(path)
+            ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
+        if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
+        return try {
+            OpenResult.Ok(prepareEmptyCache(path))
+        } catch (e: Exception) {
+            OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
+        }
+    }
+
     override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
@@ -253,20 +278,8 @@ class HydrationImpl(
                 if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
             }
 
-            val cachePath = syncEngine.resolveCachePath(normalised)
             try {
-                java.nio.file.Files.createDirectories(cachePath.parent)
-                // Materialise an empty cache file; truncate if some stray byte
-                // is sitting there from a previous abortive run.
-                java.nio.file.Files.newByteChannel(
-                    cachePath,
-                    java.util.EnumSet.of(
-                        java.nio.file.StandardOpenOption.CREATE,
-                        java.nio.file.StandardOpenOption.WRITE,
-                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-                    ),
-                ).close()
-
+                val cachePath = prepareEmptyCache(normalised)
                 val now = java.time.Instant.now()
                 stateDb.upsertEntry(
                     org.krost.unidrive.sync.model.SyncEntry(
