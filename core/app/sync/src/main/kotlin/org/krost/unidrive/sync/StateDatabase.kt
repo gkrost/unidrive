@@ -672,6 +672,69 @@ class StateDatabase(
     }
 
     /**
+     * Record that a write-back upload failed for the alive row at [path],
+     * keyed by path (the never-uploaded row's `remote_id` is a `local:`
+     * synthetic, so path is the stable key). Stamps `last_error_at` WITHOUT
+     * touching `download_quarantined` — this is an upload condition, and the
+     * reconciler's download-skip on quarantined rows must NOT fire here.
+     * The companion to [countWriteUploadFailed] / [writeUploadFailedPaths],
+     * which `unidrive doctor` reads to surface "written locally but not
+     * uploaded to cloud." Returns true if exactly one row was stamped.
+     */
+    @Synchronized
+    fun markUploadFailed(
+        path: String,
+        at: Instant,
+    ): Boolean {
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET last_error_at=? WHERE path=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, at.toString())
+                stmt.setString(2, path)
+                return stmt.executeUpdate() == 1
+            }
+    }
+
+    /**
+     * Count alive rows that were written locally but never made it to the
+     * cloud: a `local:` synthetic `remote_id` (never uploaded) AND a stamped
+     * `last_error_at` (an upload was attempted and failed). `unidrive doctor`
+     * surfaces this as a WARN so the operator knows N files exist only on disk.
+     */
+    @Synchronized
+    fun countWriteUploadFailed(): Int {
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery(
+                "SELECT COUNT(*) FROM sync_entries WHERE status='EXISTS' " +
+                    "AND remote_id LIKE 'local:%' AND last_error_at IS NOT NULL",
+            )
+            rs.next()
+            return rs.getInt(1)
+        }
+    }
+
+    /**
+     * Paths of alive rows written locally but not uploaded (see
+     * [countWriteUploadFailed]), capped at [limit] for the doctor detail block.
+     */
+    @Synchronized
+    fun writeUploadFailedPaths(limit: Int): List<String> {
+        val out = mutableListOf<String>()
+        conn
+            .prepareStatement(
+                "SELECT path FROM sync_entries WHERE status='EXISTS' " +
+                    "AND remote_id LIKE 'local:%' AND last_error_at IS NOT NULL " +
+                    "ORDER BY path LIMIT ?",
+            ).use { stmt ->
+                stmt.setInt(1, limit)
+                val rs = stmt.executeQuery()
+                while (rs.next()) out += rs.getString(1)
+            }
+        return out
+    }
+
+    /**
      * Clear the permanent-failure quarantine flag on a row. Called when a
      * fresh delta event reports the same `remote_id` as alive — that's the
      * cloud telling us "the object is back" (or "it was never gone, the

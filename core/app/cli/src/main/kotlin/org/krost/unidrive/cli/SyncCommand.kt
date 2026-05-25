@@ -35,6 +35,7 @@ import picocli.CommandLine.ArgGroup
 import picocli.CommandLine.Command
 import picocli.CommandLine.Model.CommandSpec
 import picocli.CommandLine.Option
+import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
 import java.nio.file.Files
@@ -54,6 +55,14 @@ open class SyncCommand : Runnable {
 
     @ParentCommand
     lateinit var parent: Main
+
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
 
     @Option(names = ["--watch", "-w"], description = ["Run continuously, polling for changes (adaptive interval)"])
     var watch: Boolean = false
@@ -166,6 +175,11 @@ open class SyncCommand : Runnable {
     private val log = LoggerFactory.getLogger(SyncCommand::class.java)
 
     override fun run() {
+        // Positional <profile> arg (mirror MountCommand): set parent.provider
+        // before any resolveCurrentProfile() call — including the one
+        // acquireProfileLock() makes on contention — so both
+        // `unidrive -p X sync` and `unidrive sync X` resolve the same profile.
+        applyPositionalProfile(parent, profilePositional)
         // UD-243: parse-time rejection of contradictory flag pairs. The
         // upload-only/download-only mutex is already enforced by the
         // @ArgGroup above; these remaining pairs share `--dry-run` and
@@ -420,6 +434,10 @@ open class SyncCommand : Runnable {
                 maxDeletePerSubtreePercent = config.maxDeletePerSubtreePercent,
                 verifyIntegrity = config.verifyIntegrity,
                 providerId = profile.type,
+                // Cache namespace keyed per-account (profile.name), not per-type:
+                // two accounts of the same provider type must not share one
+                // hydration cache dir and collide on identical remote paths.
+                cacheKey = profile.name,
                 useTrash = config.useTrash,
                 includeShared = profile.rawProvider?.include_shared == true,
                 echoSuppress = watcher?.let { w -> { path: String -> w.suppress(path) } },

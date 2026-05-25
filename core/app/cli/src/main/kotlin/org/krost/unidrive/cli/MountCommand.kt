@@ -45,9 +45,13 @@ class MountCommand : Runnable {
         // running, the co-daemon connection refusal below produces a clear
         // operator-facing error pointing at `unidrive daemon run`.
         val socketPath = IpcServer.defaultSocketPath(profile.name)
+        // Cache namespace MUST match the daemon's SyncEngine cacheKey
+        // (profile.name) so the co-daemon's eviction + crash-recovery scanner
+        // walk the same subtree the JVM hydrates into, and so two accounts of
+        // the same provider type don't collide on identical remote paths.
         val cacheRoot = SyncEngine.hydrationCacheRoot(
             SyncEngine.defaultHydrationCacheRoot(),
-            profile.type,
+            profile.name,
         )
         val binary = defaultBinaryPath()
 
@@ -93,8 +97,8 @@ class MountCommand : Runnable {
                 "unidrive-mount",
             )
 
-        fun hydrationCacheRoot(cacheRoot: Path, providerId: String): Path =
-            SyncEngine.hydrationCacheRoot(cacheRoot, providerId)
+        fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
+            SyncEngine.hydrationCacheRoot(cacheRoot, cacheKey)
 
         fun buildArgv(
             binary: Path,
