@@ -1,56 +1,111 @@
-# unidrive
+# `unidrive`
 
-A cloud-sync core. Today it ships as a Linux daemon syncing **Internxt Drive** and **OneDrive** through a single config, a single CLI, and a single SQLite state DB per profile. Tomorrow it powers a Windows desktop client, an Android app, and a Linux UI as separate platform surfaces. No telemetry, no hidden control plane. Apache-2.0.
+A lean, zero-telemetry, pure JVM multi-cloud synchronization tool for Linux power users.
 
-The Linux daemon is the only currently-shipping surface. See [docs/adr/multi-platform.md](docs/adr/multi-platform.md) for the scope this repo operates under — "multi-platform core" is the direction, not a current capability claim.
+Most commercial cloud sync agents are opaque, resource-heavy binary blobs bundled with aggressive telemetry, proprietary background services, or closed shell integrations. `unidrive` breaks away from this model. It strips out user tracking, cuts out non-standard background runtimes, and provides a fully auditable, decentralized synchronization core that interfaces natively with standard Unix utilities via subcommands, standard streams, and localized control structures.
 
-## Quickstart (Linux daemon)
+---
 
-Build the fat JAR and install:
+## Architectural Principles & Core Claims
 
-```bash
-git clone https://github.com/gkrost/unidrive
-cd unidrive
-( cd core && ./gradlew :app:cli:shadowJar )
-bash dist/install.sh
+* **Zero Telemetry, Pure Sovereignty:** No tracking endpoints, no behavioral analytics, and no remote crash reporting. Your metadata, tokens, and data blocks remain within your defined filesystem boundaries.
+* **Modular Multi-Cloud Interface:** Built over an extensible Service Provider Interface (SPI) framework (`ProviderFactory`). It natively supports decentralized/zero-knowledge cloud endpoints (**Internxt Drive**) alongside mainstream endpoints (**Microsoft OneDrive**) through an identical programmatic interface.
+* **Decoupled Architecture:** Features a clean architectural separation between the multi-platform engine (`core/app/core`), individual client interfaces (`core/app/cli`), and cloud transport mechanisms (`core/providers/*`).
+* **Native Linux Daemon Integration:** Installs locally without system-wide root privileges. Synchronization routines run cleanly via user-space standard `systemd` structures.
+
+---
+
+## Technical Layout
+
+```
+.
+├── core/
+│   ├── app/
+│   │   ├── cli/            # Main entry point and CLI wrapper subcommand mapping
+│   │   ├── core/           # Synchronization engine, cryptographic pipelines, and model sets
+│   │   ├── hydration/      # Local file dehydration/hydration pipeline
+│   │   └── sync-tracking/  # State reconciler and tracking-set engines
+│   └── providers/
+│       ├── internxt/       # End-to-end encrypted AES-GCM zero-knowledge client bridge
+│       └── onedrive/       # Microsoft Graph API protocol client bridge
+└── dist/                   # Non-root user space installation scripts and systemd definitions
+
 ```
 
-Drops the fat JAR into `~/.local/lib/unidrive/`, a wrapper into `~/.local/bin/unidrive`, and a systemd-user unit.
+---
 
-Create a profile (interactive wizard prompts for provider type, credentials), authenticate, sync:
+## Build and Environment
 
-```bash
-unidrive profile add                                # wizard: pick onedrive or internxt
-unidrive -p <profile-name> auth                     # OAuth (browser) or JWT (Internxt)
-unidrive -p <profile-name> sync --watch             # one-shot foreground sync
-systemctl --user enable --now unidrive.service      # auto-start on login (background)
-journalctl --user -u unidrive.service -f            # follow logs
-```
+The project compiles with a modular Gradle structure running on top of modern JVM targets. Code quality constraints are tightly pinned via Ktlint baselines and Static Analysis rules (`semgrep`, `gitleaks`) to minimize security slips or credential leakage across providers.
 
-Config lives at `~/.config/unidrive/config.toml`. Per-profile state (SQLite, OAuth tokens, conflict log) lives at `~/.config/unidrive/<profile>/`. The daemon advertises sync progress over a Unix-domain socket per profile.
+### Compile Requirements:
 
-## Requirements (current ship: Linux daemon)
-
-- Linux. x86_64 or aarch64.
-- Java 21+ runtime on `$PATH`. JRE is enough; JDK only required to build.
-- systemd-user instance (standard on Ubuntu, Fedora, Arch, Debian; absent on minimal containers).
-
-Windows and macOS are not currently supported by the daemon. A Windows desktop client (Cloud Files API placeholders, Explorer overlay) and a Linux UI (FUSE + Dolphin context menus) are planned as separate platform surfaces; neither has shipping code yet. The Android app similarly consumes the core but is not part of this repo's current build.
-
-## Uninstall
+* JDK 21+
+* Linux user-space environment (`systemd --user` availability)
 
 ```bash
-bash dist/uninstall.sh
+# Build the project fat JAR
+./gradlew :core:app:cli:assemble
+
 ```
 
-Removes the binary, wrapper, JAR, and systemd unit. Keeps `~/.config/unidrive/` (profiles + tokens) and `~/.local/share/unidrive/` (logs) — delete them manually for a full wipe.
+---
 
-## Hacking on it / running an agent against it
+## Non-Root Installation
 
-Read [AGENTS.md](AGENTS.md). It is the rulebook for every change to this repo — human or LLM.
+To keep your base system uncontaminated, the installer scripts run in user land and use paths within `~/.local` and `~/.config`:
 
-## License
+```bash
+cd dist/
+./install.sh
 
-Apache-2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE). The author also builds a non-OSS Android app on top of this codebase; Apache 2.0's permissive grant explicitly allows that, and any contributor patches are licensed permissively under the same grant.
+```
 
-Maintainer: Gernot Krost — `unidrive@krost.org`.
+This populates:
+
+* **Binary Execution:** `~/.local/bin/unidrive`
+* **Library Storage:** `~/.local/lib/unidrive/unidrive-<version>.jar`
+* **Process Management:** `~/.config/systemd/user/unidrive.service`
+
+To initialize the sync daemon under your user space context:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now unidrive.service
+
+```
+
+---
+
+## Command Reference
+
+`unidrive` follows a strictly git-inspired subcommand design pattern. The binary maps commands directly to their underlying execution contexts:
+
+### Session & Identity Controls
+
+* `unidrive auth` — Provisions provider profiles, setups OAuth loops or token entries.
+* `unidrive profile` — Manages multi-profile client targets.
+* `unidrive logout` — Destroys current session contexts and cryptographically invalidates local credential store latches.
+
+### Core Synchronisation Pipelines
+
+* `unidrive sync` — Starts tracking-set delta calculation engines, verifying local snapshots against remote cloud state trees.
+* `unidrive status` — Prints structural alignment states, pending transfers, in-flight deduplications, and active exceptions.
+* `unidrive conflicts` — Scans local change tracking states and presents deterministic convergence paths for conflicting hashes.
+
+### Block & Storage Management
+
+* `unidrive pin / get` — Targets exact folders or structures for complete hydration/pinning mechanics.
+* `unidrive free` — Dehydrates structural payloads to sparse markers, saving physical blocks while preserving remote pointers.
+* `unidrive vault` — Controls interactions against secure crypt-boundaries or cloud-vault sub-allocations.
+* `unidrive sweep` — Forces garbage collection of detached index fragments and stale file tombstones.
+
+---
+
+## Verifying Code Mechanics
+
+To ensure everything stays auditable, you can verify how `unidrive` handles state mapping inside the codebase:
+
+1. **SPI Provider Implementations:** Look inside `core/app/core/src/main/kotlin/org/krost/unidrive/ProviderFactory.kt` to see how new remote backends register using standard JVM mechanisms.
+2. **Deterministic Tracking Sets:** Inspect `core/app/sync-tracking/src/main/kotlin/org/krost/unidrive/tracking/TrackingEngine.kt` to trace how local and remote state differences are calculated without central server telemetry tracking.
+3. **Sparse States:** Read through `core/app/hydration/src/main/kotlin/org/krost/unidrive/hydration/HydrationImpl.kt` to analyze the lifecycle of physical payload deletion and reconstruction when using local files.
