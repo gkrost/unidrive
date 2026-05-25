@@ -259,6 +259,40 @@ class HydrationImpl(
         }
     }
 
+    override suspend fun rename(oldPath: String, newPath: String): RenameResult {
+        val oldNorm = oldPath.trimEnd('/').let { if (it == "") "/" else it }
+        val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
+
+        // Pre-flight: source must exist in state.db.
+        stateDb.getEntry(oldNorm)
+            ?: return RenameResult.OldPathNotFound
+
+        // Pre-flight: destination parent must exist (or destination is at root).
+        val newParent = newNorm.substringBeforeLast('/', missingDelimiterValue = "")
+        if (newParent.isNotEmpty()) {
+            val parentEntry = stateDb.getEntry(newParent)
+                ?: return RenameResult.NewParentNotFound
+            if (!parentEntry.isFolder) return RenameResult.NewParentNotFound
+        }
+
+        // Pre-flight: destination must not exist. POSIX rename(2) atomically
+        // replaces the destination if it exists; neither OneDrive's PATCH nor
+        // Internxt's move endpoint supports atomic replace, and emulating it
+        // via delete-then-rename leaves a window where the destination is
+        // missing. Refuse with NewPathExists and let userland do the
+        // unlink-then-rename dance (editors handle this gracefully).
+        if (stateDb.getEntry(newNorm) != null) {
+            return RenameResult.NewPathExists
+        }
+
+        return runCatching {
+            syncEngine.renameRemote(oldNorm, newNorm)
+            RenameResult.Ok
+        }.getOrElse { e ->
+            RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
+        }
+    }
+
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }
