@@ -192,6 +192,56 @@ class HydrationImpl(
         }
     }
 
+    override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (stateDb.getEntry(normalised) != null) return CreateResult.PathExists
+
+        // Parent must exist as a folder row (root "/" / "" is implicit and
+        // always considered present).
+        val parent = normalised.substringBeforeLast('/', missingDelimiterValue = "")
+        if (parent.isNotEmpty()) {
+            val parentEntry = stateDb.getEntry(parent)
+                ?: return CreateResult.ParentNotFound
+            if (!parentEntry.isFolder) return CreateResult.ParentNotFound
+        }
+
+        val cachePath = syncEngine.resolveCachePath(normalised)
+        return try {
+            java.nio.file.Files.createDirectories(cachePath.parent)
+            // Materialise an empty cache file; truncate if some stray byte
+            // is sitting there from a previous abortive run.
+            java.nio.file.Files.newByteChannel(
+                cachePath,
+                java.util.EnumSet.of(
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                ),
+            ).close()
+
+            val now = java.time.Instant.now()
+            stateDb.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = normalised,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 0L,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+            CreateResult.Ok(cachePath = cachePath, handleId = handleId)
+        } catch (e: Exception) {
+            CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
+        }
+    }
+
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }
