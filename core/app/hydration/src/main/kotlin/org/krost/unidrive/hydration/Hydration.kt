@@ -27,6 +27,7 @@ interface Hydration {
     suspend fun unlink(path: String): UnlinkResult
     suspend fun rmdir(path: String): RmdirResult
     suspend fun create(connectionId: String, handleId: String, path: String): CreateResult
+    suspend fun rename(oldPath: String, newPath: String): RenameResult
 
     val events: Flow<HydrationEvent>
 
@@ -92,4 +93,12 @@ sealed class CreateResult {
     data class Failed(val error: HydrationError) : CreateResult()
     data object ParentNotFound : CreateResult()
     data object PathExists : CreateResult()
+}
+
+sealed class RenameResult {
+    data object Ok : RenameResult()
+    data class Failed(val error: HydrationError) : RenameResult()
+    data object OldPathNotFound : RenameResult()
+    data object NewParentNotFound : RenameResult()
+    data object NewPathExists : RenameResult()
 }

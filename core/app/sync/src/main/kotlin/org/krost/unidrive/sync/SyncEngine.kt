@@ -339,6 +339,25 @@ class SyncEngine(
         db.markDeleted(path)
     }
 
+    /**
+     * Rename a remote item from [oldPath] to [newPath] and update state.db.
+     * Used by the hydration SPI (HydrationImpl.rename) to back FUSE rename
+     * requests. Pre-flight checks (source-exists, destination-doesn't-exist,
+     * destination-parent-exists) live in HydrationImpl; this entry point
+     * trusts its caller and performs the remote move plus the state.db
+     * row update unconditionally.
+     *
+     * Throws ProviderException on cloud-side failure. state.db is only
+     * updated after the provider call succeeds. For folders, the path
+     * rewrite also moves all descendant rows under the new prefix
+     * (db.renamePrefix), matching the rename's recursive semantics on
+     * both OneDrive and Internxt.
+     */
+    suspend fun renameRemote(oldPath: String, newPath: String) {
+        provider.move(oldPath, newPath)
+        db.renamePrefix(oldPath, newPath)
+    }
+
     suspend fun syncOnce(
         dryRun: Boolean = false,
         forceDelete: Boolean = false,
