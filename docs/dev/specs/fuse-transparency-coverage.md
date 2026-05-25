@@ -34,8 +34,9 @@ The FUSE mount + hydration SPI deliver online-only/placeholder semantics on Linu
 |---|---|---|
 | POSIX file ops — read/write/open/create/mknod/mkdir/unlink/rmdir/rename/fsync | ✅ implemented | `unidrive-mount-linux` (landed) |
 | **`setattr` — chmod/chown/utimes + truncate/ftruncate** | ⛔ gap | `unidrive-mount-linux` BACKLOG **High** (filed) |
-| Metadata — getattr/timestamps/perms/inodes | ✅ | landed |
-| `statfs` / `nlink` | ⛔→filed | `unidrive-mount-linux` BACKLOG (statfs Medium, nlink Low) |
+| Metadata — getattr / timestamps / inodes | ✅ | landed |
+| Perms + `nlink` — currently **static** (`0o755`/`0o644`, nlink 2/1) | ⚠️ partial | acceptable under the single-user model; dynamic perms fold into the `setattr` gap (mount **High**), `nlink` into the `nlink` gap (mount Low) |
+| `statfs` | ⛔→filed | `unidrive-mount-linux` BACKLOG (Medium) |
 | xattr (get/list/set/remove) | ⛔→filed | `unidrive-mount-linux` BACKLOG Low |
 | Error-code fidelity — `mkdir→ENOENT`, `rmdir→ENOTEMPTY` | ✅ filed | both repos (namespace-verbs R2/R3) |
 | Freshness/liveness — mount reflects remote changes | ✅ filed | unidrive: daemon `--poll-interval`, sync-as-daemon-client, Internxt `/files`-lag, OneDrive delta fixes |
