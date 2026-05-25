@@ -31,12 +31,12 @@ class ProcessLock(
 
     /**
      * Mode of the process holding this lock. SYNC for SyncCommand,
-     * MOUNT for MountCommand. Read alongside the PID from .lock.pid
+     * DAEMON for DaemonCommand. Read alongside the PID from .lock.pid
      * so a contender can name the holder accurately.
      */
     enum class Mode(internal val wireToken: String) {
         SYNC("sync"),
-        MOUNT("mount"),
+        DAEMON("daemon"),
         ;
 
         companion object {

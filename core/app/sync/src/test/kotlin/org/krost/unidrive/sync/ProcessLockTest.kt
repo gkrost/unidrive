@@ -118,21 +118,21 @@ class ProcessLockTest {
 
     @Test
     fun lock_pid_file_carries_mode_after_tryLock() {
-        val mountLockFile = Files.createTempFile("mode-mutex-mount", ".lock")
-        val mountLock = ProcessLock(mountLockFile)
+        val daemonLockFile = Files.createTempFile("mode-mutex-daemon", ".lock")
+        val daemonLock = ProcessLock(daemonLockFile)
         try {
-            assertTrue(mountLock.tryLock(ProcessLock.Mode.MOUNT))
-            val pidFile = mountLockFile.resolveSibling("${mountLockFile.fileName}.pid")
+            assertTrue(daemonLock.tryLock(ProcessLock.Mode.DAEMON))
+            val pidFile = daemonLockFile.resolveSibling("${daemonLockFile.fileName}.pid")
             val body = Files.readString(pidFile).trim()
             assertEquals(
-                "${ProcessHandle.current().pid()} mount",
+                "${ProcessHandle.current().pid()} daemon",
                 body,
-                "lock-pid sidecar must carry '<pid> mount' on MOUNT acquisition",
+                "lock-pid sidecar must carry '<pid> daemon' on DAEMON acquisition",
             )
-            assertEquals(ProcessHandle.current().pid(), mountLock.readHolderPid())
+            assertEquals(ProcessHandle.current().pid(), daemonLock.readHolderPid())
         } finally {
-            mountLock.unlock()
-            Files.deleteIfExists(mountLockFile)
+            daemonLock.unlock()
+            Files.deleteIfExists(daemonLockFile)
         }
 
         val syncLockFile = Files.createTempFile("mode-mutex-sync", ".lock")
@@ -149,16 +149,35 @@ class ProcessLockTest {
     }
 
     @Test
+    fun lock_pid_file_carries_daemon_mode_after_tryLock_daemon() {
+        val daemonLockFile = Files.createTempFile("mode-mutex-daemon", ".lock")
+        val daemonLock = ProcessLock(daemonLockFile)
+        try {
+            assertTrue(daemonLock.tryLock(ProcessLock.Mode.DAEMON))
+            val pidFile = daemonLockFile.resolveSibling("${daemonLockFile.fileName}.pid")
+            val body = Files.readString(pidFile).trim()
+            assertEquals(
+                "${ProcessHandle.current().pid()} daemon",
+                body,
+                "lock-pid sidecar must carry '<pid> daemon' on DAEMON acquisition",
+            )
+        } finally {
+            daemonLock.unlock()
+            Files.deleteIfExists(daemonLockFile)
+        }
+    }
+
+    @Test
     fun read_holder_info_returns_pid_and_mode_for_locked_file() {
         val lockFile = Files.createTempFile("holder-info", ".lock")
         val held = ProcessLock(lockFile)
         try {
-            assertTrue(held.tryLock(ProcessLock.Mode.MOUNT))
+            assertTrue(held.tryLock(ProcessLock.Mode.DAEMON))
             val reader = ProcessLock(lockFile)
             val info = reader.readHolderInfo()
             assertNotNull(info)
             assertEquals(ProcessHandle.current().pid(), info!!.pid)
-            assertEquals(ProcessLock.Mode.MOUNT, info.mode)
+            assertEquals(ProcessLock.Mode.DAEMON, info.mode)
         } finally {
             held.unlock()
             Files.deleteIfExists(lockFile)
