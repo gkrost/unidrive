@@ -184,7 +184,16 @@ class HydrationImplNamespaceTest {
             provider.lastDeletedPath,
             "provider.delete must NOT be called for a never-uploaded file (would 404)",
         )
-        assertEquals(null, stateDb.getEntry("/draft.txt"), "row must be marked deleted")
+        assertEquals(null, stateDb.getEntry("/draft.txt"), "row must no longer be alive")
+        // Hard-delete, not tombstone: a never-uploaded file has no cloud
+        // counterpart, so leaving a TRASHED tombstone would grow sync_entries
+        // unboundedly under create/delete temp-file churn. The row must be gone
+        // from the table entirely (no row of ANY status at that path).
+        assertEquals(
+            emptyList<SyncEntry>(),
+            stateDb.recovery.allEntriesAnyStatus().filter { it.path == "/draft.txt" },
+            "never-uploaded unlink must hard-delete the row, leaving no tombstone",
+        )
     }
 
     @Test

@@ -187,14 +187,22 @@ class HydrationImpl(
         // Never-uploaded file (remote_id is null): the file only ever existed
         // locally — created through the mount, upload not yet done. There is
         // nothing to delete cloud-side, so calling provider.delete would 404
-        // and surface as EIO on `rm`. Skip the provider call entirely; just
-        // mark the row deleted and drop the local cache file.
+        // and surface as EIO on `rm`. Skip the provider call entirely; drop
+        // the local cache file and HARD-DELETE the row.
+        //
+        // Hard-delete, not markDeleted: a tombstone preserves deletion-history
+        // so the reconciler can tell "existed-on-cloud-then-deleted" from
+        // "never-existed". A never-uploaded row has no cloud counterpart, so a
+        // tombstone carries no reconciliation value — and create/delete temp-
+        // file churn through the mount (editor swap files, build artifacts)
+        // would grow sync_entries unboundedly with dead tombstones. deleteEntry
+        // removes the row outright, matching the pending-upload cleanup path.
         if (entry.remoteId == null) {
             return runCatching {
                 runCatching {
                     java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
                 }
-                stateDb.markDeleted(normalised)
+                stateDb.deleteEntry(normalised)
                 UnlinkResult.Ok
             }.getOrElse { e ->
                 UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
