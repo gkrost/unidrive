@@ -74,7 +74,7 @@ class MountCommand : Runnable {
             System.err.println(
                 "unidrive mount: co-daemon exited with code $exit. If the cause was " +
                     "Connection refused, the daemon for profile '${profile.name}' is " +
-                    "not running. Start it with: `unidrive daemon run ${profile.name}`.",
+                    "not running. Start it with: `unidrive -p ${profile.name} daemon run`.",
             )
         }
         System.exit(exit)
