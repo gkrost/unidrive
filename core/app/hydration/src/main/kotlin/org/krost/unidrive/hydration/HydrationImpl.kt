@@ -177,6 +177,23 @@ class HydrationImpl(
             ?: return UnlinkResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
         if (entry.isFolder) return UnlinkResult.PathIsFolder
 
+        // Never-uploaded file (remote_id is null): the file only ever existed
+        // locally — created through the mount, upload not yet done. There is
+        // nothing to delete cloud-side, so calling provider.delete would 404
+        // and surface as EIO on `rm`. Skip the provider call entirely; just
+        // mark the row deleted and drop the local cache file.
+        if (entry.remoteId == null) {
+            return runCatching {
+                runCatching {
+                    java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
+                }
+                stateDb.markDeleted(normalised)
+                UnlinkResult.Ok
+            }.getOrElse { e ->
+                UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
+            }
+        }
+
         return runCatching {
             syncEngine.deleteRemote(normalised)
             UnlinkResult.Ok

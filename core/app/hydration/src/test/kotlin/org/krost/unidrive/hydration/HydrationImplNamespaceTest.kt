@@ -155,6 +155,67 @@ class HydrationImplNamespaceTest {
     }
 
     @Test
+    fun unlink_of_never_uploaded_row_skips_provider_and_succeeds() = runTest {
+        val (impl, provider, stateDb) = freshEnv()
+
+        // A file created through the mount but not yet uploaded: state.db row
+        // with remoteId = null (stored as a `local:` synthetic, surfaced back
+        // as null). It only ever existed locally.
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/draft.txt",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = null,
+                localMtime = Instant.now().toEpochMilli(),
+                localSize = 0L,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+        val result = impl.unlink("/draft.txt")
+
+        assertEquals(UnlinkResult.Ok, result, "rm of a never-uploaded file must succeed, not EIO")
+        assertEquals(
+            null,
+            provider.lastDeletedPath,
+            "provider.delete must NOT be called for a never-uploaded file (would 404)",
+        )
+        assertEquals(null, stateDb.getEntry("/draft.txt"), "row must be marked deleted")
+    }
+
+    @Test
+    fun unlink_of_uploaded_row_does_call_provider_delete() = runTest {
+        // Contrast case: a normally-synced file (real remoteId) still routes
+        // through the provider delete — the skip is scoped strictly to the
+        // remoteId == null case.
+        val (impl, provider, stateDb) = freshEnv()
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/synced.txt",
+                remoteId = "rid-synced",
+                remoteHash = "hash",
+                remoteSize = 4L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+
+        val result = impl.unlink("/synced.txt")
+
+        assertEquals(UnlinkResult.Ok, result)
+        assertEquals("/synced.txt", provider.lastDeletedPath, "uploaded file must hit provider.delete")
+    }
+
+    @Test
     fun rmdir_detects_provider_not_empty_substring() = runTest {
         // OneDrive wording
         val (impl1, provider1, stateDb1) = freshEnv()
