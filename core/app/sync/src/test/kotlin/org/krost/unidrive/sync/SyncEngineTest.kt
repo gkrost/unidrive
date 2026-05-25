@@ -2597,6 +2597,68 @@ class SyncEngineTest {
             )
         }
 
+    // Cross-account cache-collision guard: two profiles of the SAME provider
+    // type (same providerId) but DIFFERENT accounts (different cacheKey =
+    // profile.name) must resolve the same remote path to DISTINCT cache files.
+    // Before cacheKey, both keyed on providerId (the shared type), so two
+    // `onedrive` accounts collided on `hydration/onedrive/<path>` and could
+    // clobber each other's content. If this test fails, the per-account cache
+    // isolation has regressed — do not "fix" it by collapsing cacheKey.
+    @Test
+    fun `cache path is keyed per-account so same-type profiles do not collide`() {
+        val cacheRoot = Files.createTempDirectory("unidrive-cache-collision-test")
+        val accountA =
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                providerId = "onedrive",
+                cacheKey = "posteo_onedrive",
+                cacheRoot = cacheRoot,
+            )
+        val accountB =
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                providerId = "onedrive",
+                cacheKey = "work_onedrive",
+                cacheRoot = cacheRoot,
+            )
+
+        val pathA = accountA.resolveCachePath("/Documents/report.docx")
+        val pathB = accountB.resolveCachePath("/Documents/report.docx")
+
+        assertNotEquals(
+            pathA,
+            pathB,
+            "two same-type accounts must NOT share a cache file for the same remote path",
+        )
+        assertTrue(pathA.toString().contains("/hydration/posteo_onedrive/"))
+        assertTrue(pathB.toString().contains("/hydration/work_onedrive/"))
+    }
+
+    // cacheKey defaults to providerId, preserving the pre-fix layout for any
+    // caller (notably tests) that still constructs SyncEngine with only
+    // providerId. Pins that the default isn't silently dropped to "default".
+    @Test
+    fun `cacheKey defaults to providerId when unset`() {
+        val cacheRoot = Files.createTempDirectory("unidrive-cache-default-test")
+        val engineTypeOnly =
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                providerId = "internxt",
+                cacheRoot = cacheRoot,
+            )
+        val path = engineTypeOnly.resolveCachePath("/foo.txt")
+        assertTrue(
+            path.toString().contains("/hydration/internxt/"),
+            "with no explicit cacheKey, layout must fall back to providerId; got $path",
+        )
+    }
+
     @Test
     fun `uploadFromCache uploads the cache file and updates state`() =
         runTest {

@@ -1,6 +1,21 @@
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
+// The shadow plugin drags log4j-core and plexus-utils onto this module's
+// buildscript (plugin) classpath; both carried known advisories at the
+// versions shadow pins (log4j-core deserialization/DoS; plexus-utils
+// directory-traversal). The latest shadow release still pins the vulnerable
+// versions, so a plugin bump can't fix it — force the patched releases on the
+// plugin classpath. These are build-time-only and never reach the shipped jar.
+buildscript {
+    configurations.classpath {
+        resolutionStrategy {
+            force("org.apache.logging.log4j:log4j-core:2.25.4")
+            force("org.codehaus.plexus:plexus-utils:4.0.3")
+        }
+    }
+}
+
 plugins {
     kotlin("jvm")
     kotlin("plugin.serialization")

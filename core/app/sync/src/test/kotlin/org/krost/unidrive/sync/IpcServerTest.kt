@@ -70,6 +70,36 @@ class IpcServerTest {
         return sb.toString()
     }
 
+    /**
+     * Issue `sync.subscribe` on `client` and drain the {"ok":true} reply
+     * line plus any subsequent state-dump lines. Production code registers
+     * this verb in SyncCommand; tests must register it themselves on the
+     * IpcServer they constructed. Idempotent across tests within a run.
+     *
+     * Returns after the post-reply state-dump has completed and the
+     * connection is registered in IpcServer.syncSubscribers.
+     */
+    private suspend fun subscribeSync(client: SocketChannel) {
+        runCatching {
+            server!!.registerHandler("sync.subscribe") { connId, _ ->
+                server!!.scheduleAfterReply(connId) {
+                    server!!.flushStateDumpTo(connId)
+                    server!!.registerSyncSubscriber(connId)
+                }
+                """{"ok":true}"""
+            }
+            server!!.registerConnectionCloseListener { connId ->
+                server!!.unregisterSyncSubscriber(connId)
+            }
+        }
+        val req = """{"verb":"sync.subscribe"}""" + "\n"
+        val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+        while (w.hasRemaining()) client.write(w)
+        // Drain at least the {"ok":true} reply; allow up to 250ms for
+        // any state-dump lines that follow.
+        readFromClient(client, timeoutMs = 250, minLines = 1)
+    }
+
     // UD-816: real Unix-domain-socket I/O races runTest's virtual-time delays.
     // CLAUDE.md: "runTest with real NIO operations will hang; use virtual time
     // or mocks." Here it doesn't hang — it races and the assertion fails
@@ -89,6 +119,7 @@ class IpcServerTest {
 
                 val client = connectClient()
                 delay(100)
+                subscribeSync(client)
 
                 server!!.emit("""{"event":"test","data":"hello"}""")
                 val received = readFromClient(client)
@@ -168,6 +199,7 @@ class IpcServerTest {
                 // Should work — stale socket was reclaimed
                 val client = connectClient()
                 delay(100)
+                subscribeSync(client)
                 server!!.emit("""{"event":"reclaimed"}""")
                 val received = readFromClient(client)
                 assertTrue(received.contains("reclaimed"), "Expected data after reclaim: $received")
@@ -177,37 +209,53 @@ class IpcServerTest {
             }
         }
 
-    // UD-816: same runTest+real-UDS race. Switch to runBlocking(IO).
     @Test
-    fun `late joiner receives state dump`() =
+    fun `subscriber receives state dump after sync subscribe`() =
         runBlocking(Dispatchers.IO) {
             val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
             try {
                 server = IpcServer(socketPath)
                 server!!.start(serverScope)
-                delay(100)
-
-                // Set state BEFORE client connects
                 server!!.updateState(
                     IpcServer.SyncState(
-                        profile = "personal",
-                        phase = "remote",
+                        profile = "test_profile",
+                        phase = "reconcile",
                         scanCount = 42,
                         actionTotal = 10,
                         actionIndex = 3,
-                        lastAction = "DownloadFile",
-                        lastPath = "/docs/report.pdf",
+                        lastAction = "Upload",
+                        lastPath = "/foo.txt",
                     ),
                 )
-
                 val client = connectClient()
-                delay(200)
+                delay(100)
 
-                val received = readFromClient(client, timeoutMs = 3000, minLines = 4)
-                assertTrue(received.contains("sync_started"), "Expected sync_started in: $received")
-                assertTrue(received.contains("scan_progress"), "Expected scan_progress in: $received")
-                assertTrue(received.contains("action_count"), "Expected action_count in: $received")
-                assertTrue(received.contains("action_progress"), "Expected action_progress in: $received")
+                // BEFORE sync.subscribe: no state-dump bytes should arrive.
+                val preSubscribe = readFromClient(client, timeoutMs = 300, minLines = 1)
+                assertEquals("", preSubscribe, "Expected zero pre-subscribe bytes; got: $preSubscribe")
+
+                // Register the handler + issue sync.subscribe.
+                server!!.registerHandler("sync.subscribe") { connId, _ ->
+                    server!!.scheduleAfterReply(connId) {
+                        server!!.flushStateDumpTo(connId)
+                        server!!.registerSyncSubscriber(connId)
+                    }
+                    """{"ok":true}"""
+                }
+                val req = """{"verb":"sync.subscribe"}""" + "\n"
+                val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+                while (w.hasRemaining()) client.write(w)
+                val received = readFromClient(client, timeoutMs = 2000, minLines = 5)
+
+                val lines = received.split("\n").filter { it.isNotEmpty() }
+                assertTrue(lines.size >= 5, "Expected ≥5 lines, got ${lines.size}: $received")
+
+                assertTrue(lines[0].contains("\"ok\":true"), "Line 1 must be the subscribe reply: ${lines[0]}")
+                assertTrue(lines[1].contains("sync_started"), "Line 2 must be sync_started: ${lines[1]}")
+                assertTrue(lines[2].contains("scan_progress"), "Line 3 must be scan_progress: ${lines[2]}")
+                assertTrue(lines[3].contains("action_count"), "Line 4 must be action_count: ${lines[3]}")
+                assertTrue(lines[4].contains("action_progress"), "Line 5 must be action_progress: ${lines[4]}")
+
                 client.close()
             } finally {
                 serverScope.cancel()
@@ -251,6 +299,7 @@ class IpcServerTest {
 
                 val client = connectClient()
                 delay(300)
+                subscribeSync(client)
 
                 val received = readFromClient(client, timeoutMs = 3000, minLines = 4)
                 val lines = received.trim().split("\n").filter { it.isNotBlank() }
@@ -461,6 +510,17 @@ class IpcServerTest {
         val sockPath = tempSocket()
         val srv = IpcServer(sockPath)
         srv.registerHandler("echo") { _, json -> """{"reply":"ok","echo":$json}""" }
+        // Register sync.subscribe handler before starting the listener
+        srv.registerHandler("sync.subscribe") { connId, _ ->
+            srv.scheduleAfterReply(connId) {
+                srv.flushStateDumpTo(connId)
+                srv.registerSyncSubscriber(connId)
+            }
+            """{"ok":true}"""
+        }
+        srv.registerConnectionCloseListener { connId ->
+            srv.unregisterSyncSubscriber(connId)
+        }
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         srv.start(scope)
         waitForSocket(sockPath)
@@ -471,6 +531,10 @@ class IpcServerTest {
             java.nio.channels.SocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { sc ->
                 sc.connect(java.net.UnixDomainSocketAddress.of(sockPath))
                 sc.configureBlocking(false)
+                // Send sync.subscribe immediately after connect
+                val subReq = """{"verb":"sync.subscribe"}""" + "\n"
+                val subBuf = java.nio.ByteBuffer.wrap(subReq.toByteArray(Charsets.UTF_8))
+                while (subBuf.hasRemaining()) sc.write(subBuf)
                 val buf = java.nio.ByteBuffer.allocate(4096)
                 val sb = StringBuilder()
                 while (isActive) {

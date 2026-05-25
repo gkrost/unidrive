@@ -21,6 +21,22 @@ allprojects {
     dependencyLocking {
         lockAllConfigurations()
     }
+
+    // Internxt's socket.io-client drags in engine.io-client, which pins
+    // okhttp and org.json transitively. Both transitive pins carried known
+    // advisories (okhttp cert-validation; org.json DoS + stack-overflow).
+    // engine.io-client declares them with {strictly}, so a plain dependency
+    // bump won't override — resolutionStrategy.force is required. Applied
+    // across all projects so any module that later pulls these gets the
+    // patched versions too; only :app:cli and :providers:internxt actually
+    // resolve them today. okio rides along transitively from okhttp and
+    // lands above its own advisory floor, so it needs no explicit force.
+    configurations.all {
+        resolutionStrategy {
+            force("com.squareup.okhttp3:okhttp:4.12.0")
+            force("org.json:json:20231013")
+        }
+    }
 }
 
 // UD-774: temporary disable. ktlint costs ~20–30 s per `./gradlew build` and

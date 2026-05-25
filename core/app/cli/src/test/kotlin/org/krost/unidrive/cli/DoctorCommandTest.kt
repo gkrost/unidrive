@@ -293,6 +293,122 @@ class DoctorCommandTest {
         )
     }
 
+    // ── Lock liveness — mode-mutex `<pid> <mode>` sidecar format ──────────
+    // The `.lock.pid` sidecar now carries `<pid> <mode>` (e.g. `551057 daemon`)
+    // per the mode-mutex wire format. Doctor must parse the first token as the
+    // PID; the prior `pidStr.toLongOrNull()` on the whole string always tripped
+    // the false "lock file contents not a PID" WARN.
+
+    @Test
+    fun `live pid with mode token reports lock-liveness OK`() {
+        // The current JVM process is guaranteed alive — use its PID with a
+        // trailing mode token, exactly the sidecar a running daemon writes.
+        val livePid = ProcessHandle.current().pid()
+        Files.writeString(profileDir.resolve(".lock.pid"), "$livePid daemon")
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        val lock = result(runDoctor(), "lock-liveness")
+        assertEquals(
+            DoctorCommand.Severity.OK,
+            lock.severity,
+            "live `<pid> daemon` sidecar must report OK, not the false 'not a PID' WARN; got '${lock.summary}'",
+        )
+        assertTrue(
+            lock.summary.contains("alive"),
+            "expected 'alive' in summary; got '${lock.summary}'",
+        )
+    }
+
+    @Test
+    fun `stale pid with mode token reports lock-liveness WARN not malformed`() {
+        // A dead PID carrying the mode token must surface the stale-lock WARN,
+        // NOT the "contents not a PID" parse-failure WARN — the bug this fixes.
+        Files.writeString(profileDir.resolve(".lock.pid"), "4294967290 daemon")
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        val lock = result(runDoctor(), "lock-liveness")
+        assertEquals(DoctorCommand.Severity.WARN, lock.severity)
+        assertTrue(
+            lock.summary.contains("stale"),
+            "expected the stale-lock WARN (not the parse-failure WARN); got '${lock.summary}'",
+        )
+        assertFalse(
+            lock.summary.contains("not a PID"),
+            "mode token must not trip the 'not a PID' branch; got '${lock.summary}'",
+        )
+    }
+
+    // ── Write-upload durability — unsynced local writes trip WARN ─────────
+    // A file created through the mount (remoteId = null) whose write-back
+    // upload failed (last_error_at stamped) sits only on disk. The user's
+    // close() already returned 0, so doctor is the operator's only signal.
+
+    @Test
+    fun `write-upload-failures check WARNs when an unsynced local write exists`() {
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+            // never-uploaded row (remoteId = null) ...
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/draft.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = Instant.parse("2026-05-17T08:00:00Z").toEpochMilli(),
+                    localSize = 0L,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.parse("2026-05-17T08:00:00Z"),
+                ),
+            )
+            // ... whose upload was attempted and failed.
+            db.markUploadFailed("/draft.txt", Instant.parse("2026-05-17T08:30:00Z"))
+        }
+        val check = result(runDoctor(), "write-upload-failures")
+        assertEquals(DoctorCommand.Severity.WARN, check.severity)
+        assertTrue(
+            check.summary.contains("1 file(s)") && check.summary.contains("not uploaded"),
+            "summary must name the unsynced count; got '${check.summary}'",
+        )
+    }
+
+    @Test
+    fun `write-upload-failures check is OK when no unsynced writes exist`() {
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+            // A normally-synced row (real remoteId, no error) must NOT trip it.
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/synced.txt",
+                    remoteId = "rid-synced",
+                    remoteHash = "h",
+                    remoteSize = 3L,
+                    remoteModified = Instant.parse("2026-05-17T08:00:00Z"),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.parse("2026-05-17T08:00:00Z"),
+                ),
+            )
+        }
+        val check = result(runDoctor(), "write-upload-failures")
+        assertEquals(DoctorCommand.Severity.OK, check.severity)
+    }
+
     // ── Hydration drift — 60 missing files trips WARN ─────────────────────
 
     @Test

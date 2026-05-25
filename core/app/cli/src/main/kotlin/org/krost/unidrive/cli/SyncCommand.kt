@@ -35,6 +35,7 @@ import picocli.CommandLine.ArgGroup
 import picocli.CommandLine.Command
 import picocli.CommandLine.Model.CommandSpec
 import picocli.CommandLine.Option
+import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
 import java.nio.file.Files
@@ -54,6 +55,14 @@ open class SyncCommand : Runnable {
 
     @ParentCommand
     lateinit var parent: Main
+
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
 
     @Option(names = ["--watch", "-w"], description = ["Run continuously, polling for changes (adaptive interval)"])
     var watch: Boolean = false
@@ -166,6 +175,11 @@ open class SyncCommand : Runnable {
     private val log = LoggerFactory.getLogger(SyncCommand::class.java)
 
     override fun run() {
+        // Positional <profile> arg (mirror MountCommand): set parent.provider
+        // before any resolveCurrentProfile() call — including the one
+        // acquireProfileLock() makes on contention — so both
+        // `unidrive -p X sync` and `unidrive sync X` resolve the same profile.
+        applyPositionalProfile(parent, profilePositional)
         // UD-243: parse-time rejection of contradictory flag pairs. The
         // upload-only/download-only mutex is already enforced by the
         // @ArgGroup above; these remaining pairs share `--dry-run` and
@@ -211,6 +225,22 @@ open class SyncCommand : Runnable {
         // for paths instead of failing loud.
         syncPath = normalizeSyncPath(syncPath)
         val lock = parent.acquireProfileLock()
+        Runtime.getRuntime().addShutdownHook(Thread { lock.unlock() })
+
+        // Spec mount-sync-mode-mutex §3.4.1: warn-but-do-not-abort if a
+        // stale unidrive FUSE mount survived a kill -9'd MountCommand.
+        val staleMounts = StaleMountDetector.detectStaleFuseUnidriveMounts()
+        if (staleMounts.isNotEmpty()) {
+            System.err.println(
+                "WARNING: detected ${staleMounts.size} stale unidrive FUSE mount(s) " +
+                    "(likely from a kill -9'd `unidrive mount` parent): ${staleMounts.joinToString()}.",
+            )
+            System.err.println(
+                "These mounts no longer serve data. Clean up with " +
+                    "`fusermount3 -u <path>` for each.",
+            )
+        }
+
         val profile = parent.resolveCurrentProfile()
         val rawProvider = parent.createProvider()
         val config = parent.loadSyncConfig()
@@ -404,6 +434,10 @@ open class SyncCommand : Runnable {
                 maxDeletePerSubtreePercent = config.maxDeletePerSubtreePercent,
                 verifyIntegrity = config.verifyIntegrity,
                 providerId = profile.type,
+                // Cache namespace keyed per-account (profile.name), not per-type:
+                // two accounts of the same provider type must not share one
+                // hydration cache dir and collide on identical remote paths.
+                cacheKey = profile.name,
                 useTrash = config.useTrash,
                 includeShared = profile.rawProvider?.include_shared == true,
                 echoSuppress = watcher?.let { w -> { path: String -> w.suppress(path) } },
@@ -468,6 +502,24 @@ open class SyncCommand : Runnable {
                 hydrationIpc.start(this, ipcServer::writeToConnection)
                 ipcServer.registerConnectionCloseListener { connId -> hydrationIpc.onSubscriberDisconnect(connId) }
                 launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
+
+                // Register sync.subscribe verb (spec docs/dev/specs/sync-progress-subscriber-set-design.md).
+                // Symmetric with hydration.subscribe at the wire level: client issues the
+                // verb, reads {"ok":true} as the first line, then receives the state dump
+                // followed by live events. The post-reply hook (mechanism β) defers the
+                // state dump + subscriber-set registration until after dispatchRequest has
+                // written the reply, so subscribers never see events interleaved with the
+                // reply.
+                ipcServer.registerHandler("sync.subscribe") { connId, _ ->
+                    ipcServer.scheduleAfterReply(connId) {
+                        ipcServer.flushStateDumpTo(connId)
+                        ipcServer.registerSyncSubscriber(connId)
+                    }
+                    """{"ok":true}"""
+                }
+                ipcServer.registerConnectionCloseListener { connId ->
+                    ipcServer.unregisterSyncSubscriber(connId)
+                }
 
                 provider.authenticateAndLog()
 
