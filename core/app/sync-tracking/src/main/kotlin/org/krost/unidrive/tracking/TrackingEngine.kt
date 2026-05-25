@@ -319,11 +319,11 @@ class TrackingEngine(
             // doesn't interpret zero items seen as a universal-delete signal.
             return RemoteEnumResult(out, complete = false)
         }
-        var cursor: String? = null
+        // Resume from the cursor the last completed pass ended on (opaque to
+        // the engine; the provider interprets it). Null on the first pass or
+        // after a pass that never completed.
+        var cursor: String? = trackingSet.loadDeltaCursor()
         var complete = true
-        // Drain delta pages once. Does not persist a cursor across runs — every
-        // pass is a full enumeration. Cursor persistence is follow-up work for
-        // real-provider integration.
         try {
             do {
                 val page = provider.delta(cursor)
@@ -348,6 +348,13 @@ class TrackingEngine(
         } catch (e: ProviderException) {
             log.warn("Remote enumeration failed mid-loop; marking pass incomplete: ${e.message}")
             complete = false
+        }
+        // Only advance the persisted cursor on a pass that saw the full
+        // inventory. An incomplete pass leaves the prior cursor in place so
+        // the next pass re-enumerates safely (preserves the delete-suppression
+        // backup path's safety contract).
+        if (complete) {
+            trackingSet.saveDeltaCursor(cursor)
         }
         return RemoteEnumResult(out, complete)
     }

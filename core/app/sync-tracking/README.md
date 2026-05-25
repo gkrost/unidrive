@@ -233,9 +233,6 @@ BACKLOG entry once `:app:sync-tracking` has provider-integration parity:
   fully or not at all. Placeholder support is platform-tier work per
   [docs/adr/multi-platform.md](../../../docs/adr/multi-platform.md).
 - **Pinning rules.** No `pin_rules` table equivalent.
-- **Delta-cursor persistence.** Every pass is a full remote
-  enumeration. Real-provider work (Internxt, OneDrive) will need a
-  per-profile cursor that survives across runs.
 - **Real-provider end-to-end verification.** The integration tests use
   `FakeTrackingProvider`; the engine has not been exercised end-to-end
   against live Internxt / OneDrive yet. That is the obvious next ticket.

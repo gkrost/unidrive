@@ -32,6 +32,16 @@ class FakeTrackingProvider : CloudProvider {
     val deletedPaths: MutableList<String> = mutableListOf()
 
     /**
+     * Test hook: the cursor passed to every [delta] invocation, in call
+     * order. Lets tests pin that a subsequent pass resumes from the cursor
+     * a prior pass ended on rather than from an empty/initial cursor.
+     */
+    val deltaCursors: MutableList<String?> = mutableListOf()
+
+    /** Test hook: the cursor value the next [delta] page reports. */
+    var nextCursor: String = "fake-cursor"
+
+    /**
      * Test hook: flip to false to simulate a provider whose delta enumeration
      * couldn't gather the full inventory (transient API failure, throttling
      * mid-walk, etc.). The returned [DeltaPage] still carries [files] but
@@ -105,8 +115,9 @@ class FakeTrackingProvider : CloudProvider {
         onPageProgress: ((Int) -> Unit)?,
         scanContext: ScanContext?,
     ): DeltaPage {
+        deltaCursors += cursor
         val items = files.entries.map { (path, bytes) -> itemFor(path, bytes) }
-        return DeltaPage(items = items, cursor = "fake-cursor", hasMore = false, complete = deltaComplete)
+        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = deltaComplete)
     }
 
     override suspend fun quota(): QuotaInfo = QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)

@@ -334,6 +334,96 @@ class TrackingEngineIntegrationTest {
     }
 
     /**
+     * Cursor persistence: across two passes against the same on-disk
+     * tracking.db, the SECOND pass's first delta() call must receive the
+     * cursor the first (completed) pass ended on — NOT an empty/initial
+     * cursor. Without persistence, every pass re-enumerates the full
+     * remote inventory from scratch (catastrophic at the ~196k Internxt
+     * scale).
+     */
+    @Test
+    fun `completed pass persists delta cursor and next pass resumes from it`() {
+        provider.files["/doc.txt"] = "hello world".toByteArray()
+        provider.nextCursor = "cursor-after-pass-1"
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+        } finally {
+            tracking.close()
+        }
+        assertEquals(
+            listOf<String?>(null),
+            provider.deltaCursors,
+            "first pass should start from an empty cursor",
+        )
+
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking2).syncOnce()
+        } finally {
+            tracking2.close()
+        }
+        assertEquals(
+            "cursor-after-pass-1",
+            provider.deltaCursors[1],
+            "second pass must resume from the cursor the first pass ended on, not an empty cursor",
+        )
+    }
+
+    /**
+     * Cursor-advance gate: when a pass returns complete == false, the
+     * persisted cursor MUST NOT be advanced. The next pass must still
+     * start from the prior cursor (or empty if none was ever stored), so
+     * the enumeration re-runs safely and the delete-suppression backup
+     * path's contract holds.
+     */
+    @Test
+    fun `incomplete pass does not advance persisted delta cursor`() {
+        provider.files["/doc.txt"] = "hello world".toByteArray()
+
+        // Pass 1 completes and stores "cursor-1".
+        provider.nextCursor = "cursor-1"
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals("cursor-1", tracking.loadDeltaCursor())
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2 reports incomplete and would advance to "cursor-2" — must NOT persist it.
+        provider.deltaComplete = false
+        provider.nextCursor = "cursor-2"
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking2).syncOnce()
+            assertEquals(
+                "cursor-1",
+                tracking2.loadDeltaCursor(),
+                "incomplete pass must leave the prior persisted cursor in place",
+            )
+        } finally {
+            tracking2.close()
+        }
+
+        // Pass 3 resumes from the prior cursor ("cursor-1"), not the discarded "cursor-2".
+        provider.deltaComplete = true
+        provider.deltaCursors.clear()
+        val tracking3 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking3).syncOnce()
+            assertEquals(
+                "cursor-1",
+                provider.deltaCursors.first(),
+                "next pass after an incomplete pass must resume from the last completed cursor",
+            )
+        } finally {
+            tracking3.close()
+        }
+    }
+
+    /**
      * Spec Amendment 2: an untracked path that exists on BOTH sides with
      * matching content is adopted silently. With non-matching content
      * the engine emits a loud ReportCollision, never a download or
