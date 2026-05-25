@@ -66,7 +66,7 @@ cp "${jar}" "${target}"
 log "unidrive: deployed ${target} ($(stat -c%s "${target}") bytes)"
 
 # --- unidrive-mount-linux Rust co-daemon ---
-if [[ -d "${MOUNT_REPO}/.git" ]]; then
+if [[ -e "${MOUNT_REPO}/.git" ]]; then # -e not -d: a git worktree's .git is a file, not a dir
   m_branch="$(git -C "${MOUNT_REPO}" rev-parse --abbrev-ref HEAD)"
   m_commit="$(git -C "${MOUNT_REPO}" rev-parse --short HEAD)"
   log "unidrive-mount: cargo build --release from '${m_branch}' (${m_commit})"
