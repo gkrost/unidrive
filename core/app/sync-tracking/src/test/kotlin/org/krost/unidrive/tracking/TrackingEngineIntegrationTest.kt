@@ -561,6 +561,152 @@ class TrackingEngineIntegrationTest {
     }
 
     /**
+     * UD-410: a 410 Gone on a resumed delta cursor (the cursor aged out /
+     * the drive re-keyed) must self-heal into ONE full re-enumeration that
+     * reconciles deletes correctly — not loop forever on an incomplete pass.
+     *
+     * This pins the whole recovery contract in a single scenario:
+     *  - pass 1 full-enumerates two files, both → TrackedSynced, cursor saved;
+     *  - pass 2 resumes from that cursor, the provider 410s, AND `/gone.txt`
+     *    was genuinely removed remotely during the stale window;
+     *  - the engine clears the cursor, re-runs from null as a FULL pass, and:
+     *      • `/gone.txt` (tracked, absent from the FULL enum) IS reaped, and
+     *      • `/keep.txt` (tracked, present in the FULL enum) is NOT deleted;
+     *  - the pass is `complete = true` and `remoteEnumerationComplete = true`
+     *    (so the engine converges instead of staying stuck), and the cursor is
+     *    re-saved to the post-resync value.
+     *
+     * `incrementalAware = true` proves the recovery is genuinely FULL: an
+     * incremental delta from the stale cursor would OMIT `/gone.txt` (absent ⇒
+     * unchanged-present) and never reap it. Only a full re-enum from null sees
+     * its true absence.
+     */
+    @Test
+    fun `410 on resumed cursor self-heals into a full re-enumeration that reaps genuine deletes`() {
+        provider.files["/keep.txt"] = "keep".toByteArray()
+        provider.files["/gone.txt"] = "gone".toByteArray()
+        provider.nextCursor = "cursor-after-full"
+
+        // Pass 1: full enumeration → both files TrackedSynced + downloaded locally.
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(2, tracking.countsByState()[TrackState.TrackedSynced])
+            assertEquals("cursor-after-full", tracking.loadDeltaCursor())
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2: resume from the stored cursor; the provider 410s on it.
+        // `/gone.txt` was removed remotely during the stale window; the post-410
+        // FULL re-enum (cursor=null) returns the live `files` map without it.
+        provider.expiredCursor = "cursor-after-full"
+        provider.incrementalAware = true
+        provider.files.remove("/gone.txt")
+        provider.nextCursor = "cursor-after-resync"
+        provider.deltaCursors.clear()
+
+        val permissive = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE)
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report = engine(tracking = tracking2, guard = permissive).syncOnce()
+
+            // The pass converged: full inventory seen, no infinite incomplete loop.
+            assertTrue(report.remoteEnumerationComplete, "post-410 full re-enum must complete")
+
+            // The recovery walked the cursor THEN re-walked from null.
+            assertEquals(
+                listOf<String?>("cursor-after-full", null),
+                provider.deltaCursors,
+                "engine must hit the stale cursor, then re-enumerate from null; was ${provider.deltaCursors}",
+            )
+
+            // The genuine remote deletion is reaped (tracked, absent from FULL enum).
+            val remoteDeletes =
+                report.effectivePlan.filterIsInstance<ReconcileAction.PropagateRemoteDelete>().map { it.path }
+            assertEquals(
+                listOf("/gone.txt"),
+                remoteDeletes,
+                "genuine remote deletion during the stale window must be reaped on the full re-enum; got $remoteDeletes",
+            )
+            assertTrue(provider.deletedPaths.isEmpty(), "no remote delete is issued — the file is already gone remotely")
+            assertFalse(Files.exists(syncRoot.resolve("gone.txt")), "local copy of the reaped path must be removed")
+
+            // The unchanged tracked path is NOT deleted, and survives locally.
+            assertEquals(
+                0,
+                report.effectivePlan.count {
+                    (it is ReconcileAction.PropagateRemoteDelete && it.path == "/keep.txt") ||
+                        (it is ReconcileAction.PropagateLocalDelete && it.path == "/keep.txt")
+                },
+                "an unchanged tracked path present in the full enum must NOT be deleted",
+            )
+            assertTrue(Files.exists(syncRoot.resolve("keep.txt")), "unchanged path's local copy must survive")
+
+            // The cursor was cleared (during recovery) and then re-saved to the
+            // value the post-resync full pass ended on.
+            assertEquals(
+                "cursor-after-resync",
+                tracking2.loadDeltaCursor(),
+                "the post-410 full pass must persist the fresh cursor it ended on",
+            )
+            assertEquals(1, tracking2.paths().size, "only the surviving tracked path remains")
+        } finally {
+            tracking2.close()
+        }
+    }
+
+    /**
+     * UD-410 failure path: if the post-410 FULL re-enumeration ITSELF fails
+     * (any ProviderException), the engine must fall back to the existing
+     * delete-suppression net — `complete = false`, every delete dropped from
+     * the effective plan — and NOT throw out of the pass. The lemma's safety
+     * net stays intact even when recovery can't reach the remote.
+     */
+    @Test
+    fun `410 recovery whose full re-enum fails suppresses deletes and does not throw`() {
+        provider.files["/a.txt"] = "a".toByteArray()
+        provider.files["/b.txt"] = "b".toByteArray()
+        provider.nextCursor = "cursor-after-full"
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertEquals(2, tracking.countsByState()[TrackState.TrackedSynced])
+        } finally {
+            tracking.close()
+        }
+
+        // Pass 2: 410 on the stored cursor, AND the recovery full re-enum (null
+        // cursor) also fails. Local copies vanish so, without suppression, both
+        // tracked paths would look remote-absent → 2 deletes.
+        Files.delete(syncRoot.resolve("a.txt"))
+        Files.delete(syncRoot.resolve("b.txt"))
+        provider.expiredCursor = "cursor-after-full"
+        provider.failFullReenumeration = true
+
+        val permissive = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE)
+        val tracking2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report = engine(tracking = tracking2, guard = permissive, dryRun = true).syncOnce()
+
+            assertFalse(report.remoteEnumerationComplete, "failed recovery must mark the pass incomplete")
+            assertEquals(
+                0,
+                report.effectivePlan.count {
+                    it is ReconcileAction.PropagateLocalDelete ||
+                        it is ReconcileAction.PropagateRemoteDelete
+                },
+                "a failed 410 recovery must suppress every delete from the effective plan",
+            )
+            // Cursor was cleared by the recovery attempt and not re-saved (incomplete).
+            assertEquals(null, tracking2.loadDeltaCursor(), "a failed recovery leaves the cursor cleared, not re-advanced")
+        } finally {
+            tracking2.close()
+        }
+    }
+
+    /**
      * Spec Amendment 2: an untracked path that exists on BOTH sides with
      * matching content is adopted silently. With non-matching content
      * the engine emits a loud ReportCollision, never a download or

@@ -160,7 +160,20 @@ class OneDriveProvider(
         // staging slice is therefore redundant here and the parameter is
         // intentionally unused. Left in the signature so the SPI shape is
         // uniform across providers — see CloudProvider.kt for the contract.
-        val result = graphApi.getDelta(cursor)
+        val result =
+            try {
+                graphApi.getDelta(cursor)
+            } catch (e: GraphApiException) {
+                // 410 Gone on the delta endpoint = the cursor aged out / the
+                // drive was re-keyed; delta continuity is lost. Re-raise as a
+                // typed signal so cursor-persisting callers (tracking engine)
+                // can clear the cursor and full-resync, while legacy callers
+                // that only catch ProviderException keep their behaviour.
+                if (e.statusCode == 410) {
+                    throw DeltaCursorExpiredException(e.message ?: "Delta cursor expired (410 Gone)", e, e.requestId)
+                }
+                throw e
+            }
         val visibleItems =
             result.items
                 .filterNot { it.isRootItem() }

@@ -4,6 +4,7 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanContext
@@ -77,6 +78,25 @@ class FakeTrackingProvider : CloudProvider {
     /** Paths to report as DELETED on an incremental (non-null cursor) delta. */
     val incrementalDeletes: MutableList<String> = mutableListOf()
 
+    /**
+     * UD-410 test hook: when [delta] is called with a cursor equal to this
+     * value, throw [DeltaCursorExpiredException] (the 410-Gone signal). Models
+     * a stored cursor that aged out / a re-keyed drive. The recovery pass
+     * re-enters [delta] with `cursor = null`, which returns the full [files]
+     * inventory as usual — so a tracked path genuinely removed during the
+     * stale window is absent from the full enum (→ remote-gone) and an
+     * unchanged path is present.
+     */
+    var expiredCursor: String? = null
+
+    /**
+     * UD-410 test hook: flip to true to make the post-410 FULL re-enumeration
+     * itself fail (a `cursor == null` delta throws). Lets a test pin that a
+     * failed recovery falls back to `complete = false` (deletes suppressed)
+     * rather than throwing out of the engine.
+     */
+    var failFullReenumeration: Boolean = false
+
     override fun capabilities(): Set<Capability> =
         setOf(Capability.Delta, Capability.VerifyItem)
 
@@ -144,6 +164,12 @@ class FakeTrackingProvider : CloudProvider {
         scanContext: ScanContext?,
     ): DeltaPage {
         deltaCursors += cursor
+        if (cursor != null && cursor == expiredCursor) {
+            throw DeltaCursorExpiredException("simulated 410 Gone on cursor=$cursor")
+        }
+        if (cursor == null && failFullReenumeration) {
+            throw org.krost.unidrive.ProviderException("simulated full re-enumeration failure")
+        }
         val items =
             if (incrementalAware && cursor != null) {
                 // Incremental delta: only changed + explicitly-deleted items.

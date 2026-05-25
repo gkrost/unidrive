@@ -59,6 +59,25 @@ open class PermanentDownloadFailureException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * Signals that a resumed delta cursor is no longer accepted by the
+ * provider — the remote returned a "gone" status (Graph 410 Gone) on the
+ * delta endpoint because the stored marker aged out or the drive was
+ * re-keyed. Delta continuity is lost: arbitrary changes (including
+ * deletions) happened in the gap and will never arrive incrementally.
+ *
+ * Callers that persist a cursor must treat this as "clear the cursor and
+ * re-enumerate the FULL inventory from a null cursor" — NOT as a generic
+ * transient failure. It is a [ProviderException] so legacy callers that
+ * only catch the base type keep their existing behaviour unchanged; the
+ * tracking engine catches this subtype first to drive a full resync.
+ */
+open class DeltaCursorExpiredException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
+/**
  * UD-203: helper for logging call sites. Returns ` requestId=<id>` (with
  * leading space) if the throwable is a [ProviderException] subclass that
  * carries a non-null id, otherwise the empty string. The leading space

@@ -3,6 +3,7 @@ package org.krost.unidrive.tracking
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.ProviderException
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -345,7 +346,6 @@ class TrackingEngine(
     }
 
     private suspend fun enumerateRemote(): RemoteEnumResult {
-        val out = mutableMapOf<String, RemoteObservation>()
         if (!provider.capabilities().contains(Capability.Delta)) {
             log.warn(
                 "Provider {} does not support Delta; tracking-set engine will see " +
@@ -355,7 +355,7 @@ class TrackingEngine(
             )
             // No remote view at all is treated as incomplete so the caller
             // doesn't interpret zero items seen as a universal-delete signal.
-            return RemoteEnumResult(out, complete = false, incremental = false)
+            return RemoteEnumResult(emptyMap(), complete = false, incremental = false)
         }
         // Resume from the cursor the last completed pass ended on (opaque to
         // the engine; the provider interprets it). Null on the first pass or
@@ -363,12 +363,51 @@ class TrackingEngine(
         // an INCREMENTAL delta: the provider returns only changed + explicitly-
         // deleted items, so a tracked path absent from the page is UNCHANGED-
         // PRESENT, not gone (see absentRemoteObservation).
-        var cursor: String? = trackingSet.loadDeltaCursor()
-        val incremental = cursor != null
+        val resumeCursor: String? = trackingSet.loadDeltaCursor()
+        val incremental = resumeCursor != null
+        return try {
+            walkDelta(resumeCursor, incremental)
+        } catch (e: DeltaCursorExpiredException) {
+            // The resumed cursor aged out / the drive re-keyed (Graph 410). We
+            // lost delta continuity — arbitrary changes INCLUDING deletions
+            // happened in the gap and will never arrive incrementally. Recover
+            // by clearing the cursor and re-enumerating the FULL inventory from
+            // a null cursor (incremental = false), so genuine deletes during the
+            // stale window are reaped and unchanged paths are not. A full pass
+            // that itself fails falls back to complete = false (deletes
+            // suppressed) — never throw out of enumerateRemote.
+            log.warn(
+                "Delta cursor expired ({}); clearing it and re-enumerating the full inventory.",
+                e.message,
+            )
+            trackingSet.saveDeltaCursor(null)
+            try {
+                walkDelta(cursor = null, incremental = false)
+            } catch (e2: ProviderException) {
+                log.warn("Full re-enumeration after cursor expiry failed; marking pass incomplete: ${e2.message}")
+                RemoteEnumResult(emptyMap(), complete = false, incremental = false)
+            }
+        }
+    }
+
+    /**
+     * Walk the provider delta from [cursor], accumulating remote observations.
+     * Persists the cursor the walk ends on iff the walk saw the full inventory
+     * (`complete == true`). A mid-loop [ProviderException] marks the pass
+     * incomplete (deletes suppressed upstream) and leaves the prior persisted
+     * cursor untouched. A [DeltaCursorExpiredException] is NOT swallowed here —
+     * it propagates to [enumerateRemote] which drives the full-resync recovery.
+     */
+    private suspend fun walkDelta(
+        cursor: String?,
+        incremental: Boolean,
+    ): RemoteEnumResult {
+        val out = mutableMapOf<String, RemoteObservation>()
+        var nextCursor: String? = cursor
         var complete = true
         try {
             do {
-                val page = provider.delta(cursor)
+                val page = provider.delta(nextCursor)
                 if (!page.complete) {
                     complete = false
                 }
@@ -400,8 +439,10 @@ class TrackingEngine(
                             )
                         }
                 }
-                cursor = page.cursor
+                nextCursor = page.cursor
             } while (page.hasMore)
+        } catch (e: DeltaCursorExpiredException) {
+            throw e // recovery is enumerateRemote's responsibility, not a generic incomplete
         } catch (e: ProviderException) {
             log.warn("Remote enumeration failed mid-loop; marking pass incomplete: ${e.message}")
             complete = false
@@ -411,7 +452,7 @@ class TrackingEngine(
         // the next pass re-enumerates safely (preserves the delete-suppression
         // backup path's safety contract).
         if (complete) {
-            trackingSet.saveDeltaCursor(cursor)
+            trackingSet.saveDeltaCursor(nextCursor)
         }
         return RemoteEnumResult(out, complete, incremental)
     }
