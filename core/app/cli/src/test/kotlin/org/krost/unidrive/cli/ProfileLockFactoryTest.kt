@@ -28,12 +28,14 @@ class ProfileLockFactoryTest {
         Files.deleteIfExists(lockFile.resolveSibling("${lockFile.fileName}.pid"))
     }
 
-    private fun renderMountFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
+    // MUST mirror Main.acquireProfileLockForDaemon byte-for-byte. If the factory
+    // wording drifts, update both sides together.
+    private fun renderDaemonFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
         val holderDesc = when {
             holder?.mode == ProcessLock.Mode.SYNC ->
-                "Another `unidrive sync` is mirroring profile '$profileName'"
-            holder?.mode == ProcessLock.Mode.MOUNT ->
-                "Another `unidrive mount` already serves profile '$profileName'"
+                "Another `unidrive sync` is running for profile '$profileName'"
+            holder?.mode == ProcessLock.Mode.DAEMON ->
+                "Another `unidrive daemon` already serves profile '$profileName'"
             holder != null && holder.mode == null && holder.rawMode != null ->
                 "Profile '$profileName' is held by an unidrive process running in " +
                     "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
@@ -42,19 +44,16 @@ class ProfileLockFactoryTest {
         }
         val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
         System.err.println("$holderDesc$pidPart.")
-        if (holder?.mode == ProcessLock.Mode.SYNC) {
-            System.err.println(
-                "Stop the sync watcher first: `kill ${holder.pid}` (or Ctrl-C its terminal).",
-            )
-        }
     }
 
+    // MUST mirror Main.acquireProfileLock byte-for-byte. If the factory
+    // wording drifts, update both sides together.
     private fun renderSyncFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
         val holderDesc = when {
             holder?.mode == ProcessLock.Mode.SYNC ->
                 "Another `unidrive sync` is running for profile '$profileName'"
-            holder?.mode == ProcessLock.Mode.MOUNT ->
-                "Profile '$profileName' is currently FUSE-mounted by `unidrive mount`"
+            holder?.mode == ProcessLock.Mode.DAEMON ->
+                "Profile '$profileName' is currently in use by `unidrive daemon`"
             holder != null && holder.mode == null && holder.rawMode != null ->
                 "Profile '$profileName' is held by an unidrive process running in " +
                     "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
@@ -66,19 +65,19 @@ class ProfileLockFactoryTest {
     }
 
     @Test
-    fun mount_command_refuses_when_sync_holds_lock() {
+    fun daemon_refuses_to_start_when_sync_holds_lock() {
         val held = ProcessLock(lockFile)
         try {
             assertTrue(held.tryLock(ProcessLock.Mode.SYNC), "precondition: SYNC lock must acquire")
             val contender = ProcessLock(lockFile)
-            val acquired = contender.tryLock(ProcessLock.Mode.MOUNT)
-            assertEquals(false, acquired, "MOUNT must not acquire while SYNC holds")
+            val acquired = contender.tryLock(ProcessLock.Mode.DAEMON)
+            assertEquals(false, acquired, "DAEMON must not acquire while SYNC holds")
             val holder = contender.readHolderInfo()
-            renderMountFactoryContention(holder, profileName = "test_profile")
+            renderDaemonFactoryContention(holder, profileName = "test_profile")
 
             val out = capturedErr.toString()
             assertTrue(
-                out.contains("is mirroring profile 'test_profile'"),
+                out.contains("Another `unidrive sync` is running for profile 'test_profile'"),
                 "expected sync-holder phrasing; got: $out",
             )
             assertTrue(
@@ -91,20 +90,20 @@ class ProfileLockFactoryTest {
     }
 
     @Test
-    fun sync_command_refuses_when_mount_holds_lock() {
+    fun sync_refuses_to_start_when_daemon_holds_lock() {
         val held = ProcessLock(lockFile)
         try {
-            assertTrue(held.tryLock(ProcessLock.Mode.MOUNT), "precondition: MOUNT lock must acquire")
+            assertTrue(held.tryLock(ProcessLock.Mode.DAEMON), "precondition: DAEMON lock must acquire")
             val contender = ProcessLock(lockFile)
             val acquired = contender.tryLock(ProcessLock.Mode.SYNC)
-            assertEquals(false, acquired, "SYNC must not acquire while MOUNT holds")
+            assertEquals(false, acquired, "SYNC must not acquire while DAEMON holds")
             val holder = contender.readHolderInfo()
             renderSyncFactoryContention(holder, profileName = "test_profile")
 
             val out = capturedErr.toString()
             assertTrue(
-                out.contains("is currently FUSE-mounted by"),
-                "expected mount-holder phrasing; got: $out",
+                out.contains("is currently in use by `unidrive daemon`"),
+                "expected daemon-holder phrasing; got: $out",
             )
             assertTrue(
                 out.contains("PID ${ProcessHandle.current().pid()}"),

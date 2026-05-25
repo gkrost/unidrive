@@ -557,6 +557,9 @@ class Main : Runnable {
      * Acquire the per-profile process lock in SYNC mode. Returns the lock on
      * success. If another unidrive process holds the lock, prints a mode-
      * specific message and exits with code 1.
+     *
+     * NOTE: error wording is duplicated in ProfileLockFactoryTest.renderSyncFactoryContention.
+     * Keep both in sync when editing — drift here means stale test assertions.
      */
     fun acquireProfileLock(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
@@ -568,8 +571,8 @@ class Main : Runnable {
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"
-                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
-                    "Profile '${profile.name}' is currently FUSE-mounted by `unidrive mount`"
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON ->
+                    "Profile '${profile.name}' is currently in use by `unidrive daemon`"
                 holder != null && holder.mode == null && holder.rawMode != null ->
                     "Profile '${profile.name}' is held by an unidrive process running in " +
                         "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
@@ -578,10 +581,9 @@ class Main : Runnable {
             }
             val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
             System.err.println("$holderDesc$pidPart.")
-            if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT) {
+            if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON) {
                 System.err.println(
-                    "Mount and sync are mutually exclusive per profile. " +
-                        "Stop the mount first: unmount the FUSE path, or `kill ${holder.pid}`.",
+                    "Stop the daemon first: `unidrive daemon stop ${profile.name}`.",
                 )
             } else if (holder != null) {
                 val isWindows = System.getProperty("os.name").lowercase().contains("win")
@@ -596,22 +598,26 @@ class Main : Runnable {
     }
 
     /**
-     * Acquire the per-profile process lock in MOUNT mode. Refuses with code 1
-     * if another process holds the lock (typically `unidrive sync --watch`
-     * for the same profile). See docs/dev/specs/mount-sync-mode-mutex-design.md.
+     * Acquire the per-profile process lock in DAEMON mode. Refuses with code 1
+     * if another process holds the lock (typically `unidrive sync` for the same
+     * profile, or another `unidrive daemon` instance).
+     * See docs/dev/specs/unidrive-daemon-design.md.
+     *
+     * NOTE: error wording is duplicated in ProfileLockFactoryTest.renderDaemonFactoryContention.
+     * Keep both in sync when editing — drift here means stale test assertions.
      */
-    fun acquireProfileLockForMount(): org.krost.unidrive.sync.ProcessLock {
+    fun acquireProfileLockForDaemon(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
         java.nio.file.Files.createDirectories(lockFile.parent)
         val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
-        if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.MOUNT)) {
+        if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.DAEMON)) {
             val profile = resolveCurrentProfile()
             val holder = lock.readHolderInfo()
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
-                    "Another `unidrive sync` is mirroring profile '${profile.name}'"
-                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.MOUNT ->
-                    "Another `unidrive mount` already serves profile '${profile.name}'"
+                    "Another `unidrive sync` is running for profile '${profile.name}'"
+                holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON ->
+                    "Another `unidrive daemon` already serves profile '${profile.name}'"
                 holder != null && holder.mode == null && holder.rawMode != null ->
                     "Profile '${profile.name}' is held by an unidrive process running in " +
                         "unknown mode '${holder.rawMode}' (this binary may be older than the holder)"
@@ -625,8 +631,12 @@ class Main : Runnable {
                     "Stop the sync watcher first: `kill ${holder.pid}` (or Ctrl-C its terminal).",
                 )
                 System.err.println(
-                    "Mount and sync are mutually exclusive per profile " +
-                        "(see docs/dev/specs/mount-sync-mode-mutex-design.md).",
+                    "Sync and daemon are mutually exclusive per profile " +
+                        "(see docs/dev/specs/unidrive-daemon-design.md).",
+                )
+            } else if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON) {
+                System.err.println(
+                    "Stop the running daemon first: `unidrive daemon stop ${profile.name}`.",
                 )
             } else if (holder != null) {
                 System.err.println("Stop it with `kill ${holder.pid}`, or wait for it to exit.")
@@ -635,6 +645,15 @@ class Main : Runnable {
         }
         return lock
     }
+
+    /**
+     * Transitional alias. Removed in the same commit that strips
+     * MountCommand's lock acquisition. Do not introduce new callers.
+     */
+    @Deprecated("Removed in Task 3 (MountCommand strip); use acquireProfileLockForDaemon instead",
+                ReplaceWith("acquireProfileLockForDaemon()"))
+    fun acquireProfileLockForMount(): org.krost.unidrive.sync.ProcessLock =
+        acquireProfileLockForDaemon()
 
     override fun run() {
         val profile = resolveCurrentProfile()
