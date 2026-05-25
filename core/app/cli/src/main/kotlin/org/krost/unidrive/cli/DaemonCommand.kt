@@ -86,7 +86,7 @@ class DaemonStatusCommand : Runnable {
         }
         println("pid $pid, mode $modeToken")
 
-        // Phase 3 will add the RPC call to daemon.status here.
+        // Phase 4 (Task 12) will add the RPC call to daemon.status here.
         // For Phase 2, status is file-derived only.
     }
 }
