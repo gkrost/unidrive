@@ -74,6 +74,13 @@ class HydrationImpl(
             openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
             OpenResult.Ok(cachePath)
         } catch (e: Exception) {
+            // The co-daemon fires open_write at FUSE release; the user's
+            // close() already returned 0. Make the durability gap
+            // operator-visible by stamping the row before we surface the
+            // failure, so `unidrive doctor` can report "written locally but
+            // not uploaded." Best-effort — a stamp failure must not mask the
+            // original upload error.
+            runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
             val err = HydrationError.Generic(e.message ?: "upload failed")
             _events.emit(HydrationEvent.Failed(path, err))
             OpenResult.Failed(err)

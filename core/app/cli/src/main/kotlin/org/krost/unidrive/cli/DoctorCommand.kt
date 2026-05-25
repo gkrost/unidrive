@@ -130,6 +130,7 @@ class DoctorCommand : Runnable {
                 results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
                 results += checkEffectiveScope(db)
                 results += checkQuotaFreshness(db, now)
+                results += checkWriteUploadFailures(db)
             } finally {
                 db.close()
             }
@@ -374,6 +375,35 @@ class DoctorCommand : Runnable {
         } else {
             CheckResult(name, Severity.OK, "quota cache is fresh (age=${age ?: "?"} days)", listOf("fetched_at = $fetchedAt"))
         }
+    }
+
+    /**
+     * **Check — Write-upload durability.** Counts rows that were written
+     * locally (through a FUSE mount) but never uploaded to the cloud: a
+     * `local:` synthetic `remote_id` AND a stamped `last_error_at` (an
+     * `openForWrite` upload was attempted and failed). The co-daemon's
+     * close() already returned 0 to the user, so without this surface the
+     * data sits only on disk silently. WARN whenever any such row exists;
+     * sample paths in detail. Read-only.
+     */
+    internal fun checkWriteUploadFailures(db: StateDatabase): CheckResult {
+        val name = "write-upload-failures"
+        val count = db.countWriteUploadFailed()
+        if (count == 0) {
+            return CheckResult(name, Severity.OK, "no files written locally but unsynced", emptyList())
+        }
+        val detail = mutableListOf<String>()
+        val sample = db.writeUploadFailedPaths(SAMPLE_DETAIL)
+        if (sample.isNotEmpty()) {
+            detail += "sample unsynced paths (written locally, upload failed):"
+            sample.forEach { detail += "  $it" }
+        }
+        return CheckResult(
+            name,
+            Severity.WARN,
+            "$count file(s) written locally but not uploaded to cloud (re-run sync to retry)",
+            detail,
+        )
     }
 
     /**
