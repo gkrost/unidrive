@@ -142,6 +142,19 @@ class HydrationImplNamespaceTest {
     }
 
     @Test
+    fun mkdir_detects_provider_parent_not_found_substring() = runTest {
+        // OneDrive wording: GraphApiException("Create folder failed: 404 ...")
+        val (impl1, provider1, _) = freshEnv()
+        provider1.throwOnCreate = RuntimeException("Create folder failed: 404 Not Found - The resource could not be found.")
+        assertEquals(MkdirResult.ParentNotFound, impl1.mkdir("/missing/child"))
+
+        // Internxt wording: ProviderException("Folder not found: <seg> in <path>")
+        val (impl2, provider2, _) = freshEnv()
+        provider2.throwOnCreate = RuntimeException("Folder not found: missing in /missing/child")
+        assertEquals(MkdirResult.ParentNotFound, impl2.mkdir("/missing/child"))
+    }
+
+    @Test
     fun rmdir_detects_provider_not_empty_substring() = runTest {
         // OneDrive wording
         val (impl1, provider1, stateDb1) = freshEnv()
