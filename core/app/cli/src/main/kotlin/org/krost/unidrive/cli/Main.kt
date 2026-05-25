@@ -650,15 +650,6 @@ class Main : Runnable {
         return lock
     }
 
-    /**
-     * Transitional alias. Removed in the same commit that strips
-     * MountCommand's lock acquisition. Do not introduce new callers.
-     */
-    @Deprecated("Removed in Task 3 (MountCommand strip); use acquireProfileLockForDaemon instead",
-                ReplaceWith("acquireProfileLockForDaemon()"))
-    fun acquireProfileLockForMount(): org.krost.unidrive.sync.ProcessLock =
-        acquireProfileLockForDaemon()
-
     override fun run() {
         val profile = resolveCurrentProfile()
         val authenticated = isProviderAuthenticated()

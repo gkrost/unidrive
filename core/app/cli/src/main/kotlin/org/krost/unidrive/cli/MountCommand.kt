@@ -39,38 +39,45 @@ class MountCommand : Runnable {
         }
         val profile = parent.resolveCurrentProfile()
 
-        // Acquire the per-profile mode-mutex. Refuses with a clear message
-        // if `sync` mode already holds it for this profile.
-        val lock = parent.acquireProfileLockForMount()
+        // Per spec unidrive-daemon-design.md §3.3: mount no longer acquires
+        // the profile lock. The daemon (which holds Mode.DAEMON) is the
+        // authoritative IPC server for the profile. If the daemon is not
+        // running, the co-daemon connection refusal below produces a clear
+        // operator-facing error pointing at `unidrive daemon run`.
+        val socketPath = IpcServer.defaultSocketPath(profile.name)
+        val cacheRoot = SyncEngine.hydrationCacheRoot(
+            SyncEngine.defaultHydrationCacheRoot(),
+            profile.type,
+        )
+        val binary = defaultBinaryPath()
 
-        try {
-            val socketPath = IpcServer.defaultSocketPath(profile.name)
-            val cacheRoot = SyncEngine.hydrationCacheRoot(
-                SyncEngine.defaultHydrationCacheRoot(),
-                profile.type,
+        val existsExit = checkBinaryExists(binary)
+        if (existsExit != 0) {
+            System.err.println(
+                "unidrive mount: co-daemon binary not found at $binary",
             )
-            val binary = defaultBinaryPath()
-
-            val existsExit = checkBinaryExists(binary)
-            if (existsExit != 0) {
-                System.err.println(
-                    "unidrive mount: co-daemon binary not found at $binary",
-                )
-                System.err.println(
-                    "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
-                        "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
-                )
-                System.exit(existsExit)
-                return
-            }
-
-            Files.createDirectories(cacheRoot)
-            val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
-            val exit = superviseProcess(argv)
-            System.exit(exit)
-        } finally {
-            lock.unlock()
+            System.err.println(
+                "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
+                    "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
+            )
+            System.exit(existsExit)
+            return
         }
+
+        Files.createDirectories(cacheRoot)
+        val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
+        val exit = superviseProcess(argv)
+        if (exit != 0) {
+            // Per spec §3.4 "Daemon-not-running error path": the co-daemon's
+            // inherited stderr already prints "failed to connect IPC at ...:
+            // Connection refused". Augment with the operator hint.
+            System.err.println(
+                "unidrive mount: co-daemon exited with code $exit. If the cause was " +
+                    "Connection refused, the daemon for profile '${profile.name}' is " +
+                    "not running. Start it with: `unidrive daemon run ${profile.name}`.",
+            )
+        }
+        System.exit(exit)
     }
 
     companion object {
