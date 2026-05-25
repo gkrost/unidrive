@@ -420,6 +420,12 @@ dependencies {
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
     implementation(project(":app:sync"))
+    // Runtime-only: the tracking-set engine implements the CliExtension SPI
+    // that lives in this module, so :app:sync-tracking depends on :app:cli.
+    // Declaring it runtimeOnly puts TrackingCliExtension (+ its
+    // META-INF/services registration) on the shadowJar runtime classpath for
+    // ServiceLoader discovery without forming a compile-time dependency cycle.
+    runtimeOnly(project(":app:sync-tracking"))
     implementation(project(":app:hydration"))
 
     implementation(libs.kotlinx.coroutines.core)
