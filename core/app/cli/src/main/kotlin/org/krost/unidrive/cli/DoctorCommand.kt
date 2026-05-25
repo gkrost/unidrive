@@ -165,7 +165,11 @@ class DoctorCommand : Runnable {
         } catch (e: Exception) {
             return CheckResult(name, Severity.WARN, "lock file unreadable: ${e.message}", emptyList())
         }
-        val pid = pidStr.toLongOrNull()
+        // The `.lock.pid` sidecar carries the mode-mutex wire format
+        // `<pid> <mode>` (e.g. `551057 daemon`); parse only the first
+        // whitespace-separated token, mirroring ProcessLock.readHolderPid.
+        // A legacy pid-only file (`<pid>\n`) still parses cleanly.
+        val pid = pidStr.substringBefore(' ').toLongOrNull()
             ?: return CheckResult(name, Severity.WARN, "lock file contents not a PID: '$pidStr'", emptyList())
         val alive = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
         return if (alive) {

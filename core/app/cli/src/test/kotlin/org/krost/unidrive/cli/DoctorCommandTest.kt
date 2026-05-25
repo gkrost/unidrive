@@ -293,6 +293,57 @@ class DoctorCommandTest {
         )
     }
 
+    // ── Lock liveness — mode-mutex `<pid> <mode>` sidecar format ──────────
+    // The `.lock.pid` sidecar now carries `<pid> <mode>` (e.g. `551057 daemon`)
+    // per the mode-mutex wire format. Doctor must parse the first token as the
+    // PID; the prior `pidStr.toLongOrNull()` on the whole string always tripped
+    // the false "lock file contents not a PID" WARN.
+
+    @Test
+    fun `live pid with mode token reports lock-liveness OK`() {
+        // The current JVM process is guaranteed alive — use its PID with a
+        // trailing mode token, exactly the sidecar a running daemon writes.
+        val livePid = ProcessHandle.current().pid()
+        Files.writeString(profileDir.resolve(".lock.pid"), "$livePid daemon")
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        val lock = result(runDoctor(), "lock-liveness")
+        assertEquals(
+            DoctorCommand.Severity.OK,
+            lock.severity,
+            "live `<pid> daemon` sidecar must report OK, not the false 'not a PID' WARN; got '${lock.summary}'",
+        )
+        assertTrue(
+            lock.summary.contains("alive"),
+            "expected 'alive' in summary; got '${lock.summary}'",
+        )
+    }
+
+    @Test
+    fun `stale pid with mode token reports lock-liveness WARN not malformed`() {
+        // A dead PID carrying the mode token must surface the stale-lock WARN,
+        // NOT the "contents not a PID" parse-failure WARN — the bug this fixes.
+        Files.writeString(profileDir.resolve(".lock.pid"), "4294967290 daemon")
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+            db.setSyncState("pending_cursor_complete", "true")
+            db.setSyncState("quota_fetched_at", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        val lock = result(runDoctor(), "lock-liveness")
+        assertEquals(DoctorCommand.Severity.WARN, lock.severity)
+        assertTrue(
+            lock.summary.contains("stale"),
+            "expected the stale-lock WARN (not the parse-failure WARN); got '${lock.summary}'",
+        )
+        assertFalse(
+            lock.summary.contains("not a PID"),
+            "mode token must not trip the 'not a PID' branch; got '${lock.summary}'",
+        )
+    }
+
     // ── Hydration drift — 60 missing files trips WARN ─────────────────────
 
     @Test
