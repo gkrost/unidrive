@@ -1,5 +1,8 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.Capability
@@ -140,5 +143,40 @@ class HydrationImplCreateTest {
         val result = env.hydration.create("conn-1", "create-1", "/already.txt")
 
         assertEquals(CreateResult.PathExists, result)
+    }
+
+    @Test
+    fun concurrent_creates_for_same_path_serialise_exactly_one_succeeds() = runTest {
+        // Reproduces the TOCTOU race where two concurrent
+        // `hydration.create(samePath)` callers can both pass the
+        // existence check, both clobber the cache file via
+        // TRUNCATE_EXISTING, and both return Ok. The per-path mutex
+        // in HydrationImpl.create must serialise the check+materialise
+        // +upsert tuple so the loser sees the winner's row and returns
+        // PathExists. Without the fix, both calls return Ok and the
+        // assertion below fires.
+        val env = freshEnv()
+        val path = "/concurrent-create.txt"
+        val parallelism = 8
+
+        val results = coroutineScope {
+            (0 until parallelism).map { idx ->
+                async {
+                    env.hydration.create("conn-$idx", "create-$idx", path)
+                }
+            }.awaitAll()
+        }
+
+        val oks = results.count { it is CreateResult.Ok }
+        val pathExists = results.count { it === CreateResult.PathExists }
+        assertEquals(
+            1, oks,
+            "exactly one concurrent create must win; got $oks Ok, $pathExists PathExists (results: $results)",
+        )
+        assertEquals(
+            parallelism - 1, pathExists,
+            "every loser must see PathExists, not Ok or Failed (results: $results)",
+        )
+        assertNotNull(env.stateDb.getEntry(path))
     }
 }

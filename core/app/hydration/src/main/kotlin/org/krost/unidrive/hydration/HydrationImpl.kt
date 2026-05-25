@@ -3,6 +3,8 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import java.nio.file.Path
@@ -23,6 +25,18 @@ class HydrationImpl(
     // mutations with a connection-scoped lock) before this becomes load-bearing.
     private val openSets =
         ConcurrentHashMap<String, MutableMap<String, String>>()
+
+    // Per-path mutex for `create`. Without this, two concurrent
+    // `hydration.create(samePath)` callers can both pass the
+    // `stateDb.getEntry == null` existence check before either has
+    // upserted its row, then both proceed to TRUNCATE_EXISTING the
+    // same cache file (clobbering one writer's content) and both
+    // return Ok. The mutex serialises the check+materialise+upsert
+    // tuple per-path; the second caller wakes after the first's
+    // upsert and correctly returns PathExists. Entries stay in the
+    // map for the daemon's lifetime — bounded by the number of
+    // distinct paths ever created, which is small per-session.
+    private val createMutexes = ConcurrentHashMap<String, Mutex>()
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
@@ -194,51 +208,54 @@ class HydrationImpl(
 
     override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
-        if (stateDb.getEntry(normalised) != null) return CreateResult.PathExists
+        val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
+        return mutex.withLock {
+            if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
 
-        // Parent must exist as a folder row (root "/" / "" is implicit and
-        // always considered present).
-        val parent = normalised.substringBeforeLast('/', missingDelimiterValue = "")
-        if (parent.isNotEmpty()) {
-            val parentEntry = stateDb.getEntry(parent)
-                ?: return CreateResult.ParentNotFound
-            if (!parentEntry.isFolder) return CreateResult.ParentNotFound
-        }
+            // Parent must exist as a folder row (root "/" / "" is implicit and
+            // always considered present).
+            val parent = normalised.substringBeforeLast('/', missingDelimiterValue = "")
+            if (parent.isNotEmpty()) {
+                val parentEntry = stateDb.getEntry(parent)
+                    ?: return@withLock CreateResult.ParentNotFound
+                if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
+            }
 
-        val cachePath = syncEngine.resolveCachePath(normalised)
-        return try {
-            java.nio.file.Files.createDirectories(cachePath.parent)
-            // Materialise an empty cache file; truncate if some stray byte
-            // is sitting there from a previous abortive run.
-            java.nio.file.Files.newByteChannel(
-                cachePath,
-                java.util.EnumSet.of(
-                    java.nio.file.StandardOpenOption.CREATE,
-                    java.nio.file.StandardOpenOption.WRITE,
-                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-                ),
-            ).close()
+            val cachePath = syncEngine.resolveCachePath(normalised)
+            try {
+                java.nio.file.Files.createDirectories(cachePath.parent)
+                // Materialise an empty cache file; truncate if some stray byte
+                // is sitting there from a previous abortive run.
+                java.nio.file.Files.newByteChannel(
+                    cachePath,
+                    java.util.EnumSet.of(
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE,
+                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    ),
+                ).close()
 
-            val now = java.time.Instant.now()
-            stateDb.upsertEntry(
-                org.krost.unidrive.sync.model.SyncEntry(
-                    path = normalised,
-                    remoteId = null,
-                    remoteHash = null,
-                    remoteSize = 0L,
-                    remoteModified = null,
-                    localMtime = now.toEpochMilli(),
-                    localSize = 0L,
-                    isFolder = false,
-                    isPinned = false,
-                    isHydrated = true,
-                    lastSynced = now,
-                ),
-            )
-            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
-            CreateResult.Ok(cachePath = cachePath, handleId = handleId)
-        } catch (e: Exception) {
-            CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
+                val now = java.time.Instant.now()
+                stateDb.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = normalised,
+                        remoteId = null,
+                        remoteHash = null,
+                        remoteSize = 0L,
+                        remoteModified = null,
+                        localMtime = now.toEpochMilli(),
+                        localSize = 0L,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+                CreateResult.Ok(cachePath = cachePath, handleId = handleId)
+            } catch (e: Exception) {
+                CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
+            }
         }
     }
 
