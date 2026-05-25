@@ -137,6 +137,28 @@ class HydrationIpcHandlerTest {
     }
 
     @Test
+    fun `open_write_begin request returns JSON with cache_path`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/x.txt", remoteSize = 5)
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin","path":"/x.txt"}""")
+
+        assertTrue(reply.contains("\"ok\":true"))
+        assertTrue(reply.contains("\"cache_path\":"))
+    }
+
+    @Test
+    fun `open_write_begin without path returns missing_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin"}""")
+
+        assertEquals("""{"ok":false,"error":"missing_path"}""", reply.trim())
+    }
+
+    @Test
     fun `unknown verb returns unknown_verb error`() = runTest {
         val env = HydrationTestEnv()
         val handler = HydrationIpcHandler(env.hydration)

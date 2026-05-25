@@ -55,6 +55,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"new_path_exists"}       EEXIST
  *                         {"ok":false,"error":"<msg>"}                 EIO
  *
+ *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
+ *
  *   subscribe   request:  {"verb":"hydration.subscribe"}
  *   subscribe   reply:    {"ok":true} — and from then on, the connection becomes a one-way
  *                         event stream (server-pushed NDJSON of HydrationEvent serializations)
@@ -173,6 +175,7 @@ class HydrationIpcHandler(
         val VERBS: List<String> = listOf(
             "hydration.open_read",
             "hydration.open_write",
+            "hydration.open_write_begin",
             "hydration.close_handle",
             "hydration.hydrate",
             "hydration.dehydrate",
@@ -203,6 +206,13 @@ class HydrationIpcHandler(
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
+                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+                    is OpenResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.open_write_begin" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.openWriteBegin(path)) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
