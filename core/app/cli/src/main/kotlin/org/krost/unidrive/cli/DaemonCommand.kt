@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
+import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
@@ -32,8 +33,17 @@ class DaemonRunCommand : Runnable {
     @ParentCommand
     lateinit var daemonCmd: DaemonCommand
 
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
+
     override fun run() {
         val parent = daemonCmd.parent
+        applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val config = parent.loadSyncConfig()
         val lockFile = parent.providerConfigDir().resolve(".lock")
@@ -79,8 +89,17 @@ class DaemonStatusCommand : Runnable {
     @ParentCommand
     lateinit var daemonCmd: DaemonCommand
 
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
+
     override fun run() {
         val parent = daemonCmd.parent
+        applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
@@ -140,12 +159,21 @@ class DaemonStopCommand : Runnable {
     @ParentCommand
     lateinit var daemonCmd: DaemonCommand
 
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
+
     companion object {
         const val STOP_DEADLINE_MS: Long = 12_000  // 10s graceful + 2s buffer
     }
 
     override fun run() {
         val parent = daemonCmd.parent
+        applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
@@ -237,4 +265,19 @@ internal fun readLockPid(pidFile: java.nio.file.Path): LockPidReadResult {
     val pid = parts.getOrNull(0)?.toLongOrNull() ?: return LockPidReadResult.Malformed(raw)
     val modeToken = parts.getOrNull(1)
     return LockPidReadResult.Present(LockPidContents(pid, modeToken))
+}
+
+/**
+ * Apply a positional `<profile>` argument to [parent] before
+ * [Main.resolveCurrentProfile] runs. Mirrors `MountCommand.profileNameOverride`
+ * (sets `parent.provider` + invalidates the memoised profile cache). Lets
+ * `unidrive daemon run <profile>` / `unidrive sync <profile>` /
+ * `unidrive refresh <profile>` work alongside the global `-p <profile>` form,
+ * matching `unidrive mount`'s precedent. No-op when [positional] is null.
+ */
+internal fun applyPositionalProfile(parent: Main, positional: String?) {
+    if (positional != null) {
+        parent.provider = positional
+        parent.invalidateProfileCaches()
+    }
 }

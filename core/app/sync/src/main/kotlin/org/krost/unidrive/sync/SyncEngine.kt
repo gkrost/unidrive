@@ -103,6 +103,15 @@ class SyncEngine(
     // uploadFromCache. Null means resolve via XDG_CACHE_HOME (or ~/.cache).
     // Injected in tests so the cache stays inside the temp directory.
     private val cacheRoot: Path? = null,
+    // Per-account namespace for the hydration cache subtree. MUST be unique
+    // per profile (use profile.name, not profile.type) so two accounts of the
+    // same provider type (e.g. two `onedrive` profiles) don't collide on
+    // identical remote paths under one shared cache dir. Distinct from
+    // [providerId], which is the provider TYPE used for ProviderRegistry
+    // metadata lookups (concurrency cap, capability flags) and must stay the
+    // type. Defaults to [providerId] so callers that don't set it keep the
+    // pre-existing layout; the CLI sync/daemon paths pass profile.name.
+    private val cacheKey: String = providerId,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -178,9 +187,9 @@ class SyncEngine(
      * (e.g. [PermanentDownloadFailureException] for a 404; IO errors; unknown
      * path).
      *
-     * Cache layout: `<cacheRoot>/unidrive/hydration/<providerId>/<path>` where
+     * Cache layout: `<cacheRoot>/unidrive/hydration/<cacheKey>/<path>` where
      * `cacheRoot` is [cacheRoot] when set, otherwise `XDG_CACHE_HOME` or
-     * `~/.cache`.
+     * `~/.cache`, and `cacheKey` is the per-account namespace (profile.name).
      *
      * Integrity failure throws (not warns) because FUSE-passthrough exposes the
      * cache directly to userspace reads — a silently accepted corrupt file would
@@ -305,7 +314,7 @@ class SyncEngine(
                 ?: Paths.get(System.getProperty("user.home"), ".cache"))
         return effectiveRoot
             .resolve("unidrive/hydration")
-            .resolve(providerId.ifBlank { "default" })
+            .resolve(cacheKey.ifBlank { "default" })
             .resolve(path.trimStart('/'))
     }
 
@@ -337,6 +346,25 @@ class SyncEngine(
     suspend fun deleteRemote(path: String) {
         provider.delete(path)
         db.markDeleted(path)
+    }
+
+    /**
+     * Rename a remote item from [oldPath] to [newPath] and update state.db.
+     * Used by the hydration SPI (HydrationImpl.rename) to back FUSE rename
+     * requests. Pre-flight checks (source-exists, destination-doesn't-exist,
+     * destination-parent-exists) live in HydrationImpl; this entry point
+     * trusts its caller and performs the remote move plus the state.db
+     * row update unconditionally.
+     *
+     * Throws ProviderException on cloud-side failure. state.db is only
+     * updated after the provider call succeeds. For folders, the path
+     * rewrite also moves all descendant rows under the new prefix
+     * (db.renamePrefix), matching the rename's recursive semantics on
+     * both OneDrive and Internxt.
+     */
+    suspend fun renameRemote(oldPath: String, newPath: String) {
+        provider.move(oldPath, newPath)
+        db.renamePrefix(oldPath, newPath)
     }
 
     suspend fun syncOnce(
@@ -2963,9 +2991,9 @@ class SyncEngine(
             System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
                 ?: Paths.get(System.getProperty("user.home"), ".cache")
 
-        fun hydrationCacheRoot(cacheRoot: Path, providerId: String): Path =
+        fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
             cacheRoot
                 .resolve("unidrive/hydration")
-                .resolve(providerId.ifBlank { "default" })
+                .resolve(cacheKey.ifBlank { "default" })
     }
 }

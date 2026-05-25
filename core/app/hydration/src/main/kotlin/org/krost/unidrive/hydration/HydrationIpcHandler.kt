@@ -42,6 +42,19 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"not_empty"}          ENOTEMPTY
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
+ *   create      request:  {"verb":"hydration.create","handle_id":"...","path":"/foo.txt"}
+ *               reply:    {"ok":true,"cache_path":"/home/.../foo.txt","handle_id":"..."}
+ *                         {"ok":false,"error":"parent_not_found"}   ENOENT
+ *                         {"ok":false,"error":"path_exists"}        EEXIST
+ *                         {"ok":false,"error":"<msg>"}              EIO
+ *
+ *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"}
+ *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"old_path_not_found"}    ENOENT
+ *                         {"ok":false,"error":"new_parent_not_found"}  ENOENT
+ *                         {"ok":false,"error":"new_path_exists"}       EEXIST
+ *                         {"ok":false,"error":"<msg>"}                 EIO
+ *
  *   subscribe   request:  {"verb":"hydration.subscribe"}
  *   subscribe   reply:    {"ok":true} — and from then on, the connection becomes a one-way
  *                         event stream (server-pushed NDJSON of HydrationEvent serializations)
@@ -169,6 +182,8 @@ class HydrationIpcHandler(
             "hydration.mkdir",
             "hydration.unlink",
             "hydration.rmdir",
+            "hydration.create",
+            "hydration.rename",
         )
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
@@ -249,6 +264,27 @@ class HydrationIpcHandler(
                     RmdirResult.PathIsFile -> reply(ok = false, error = "path_is_file")
                     RmdirResult.NotEmpty -> reply(ok = false, error = "not_empty")
                     is RmdirResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.create" -> {
+                val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                when (val r = hydration.create(connectionId, handleId, path)) {
+                    is CreateResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"handle_id":${jsonEsc(r.handleId)}}"""
+                    CreateResult.ParentNotFound -> reply(ok = false, error = "parent_not_found")
+                    CreateResult.PathExists -> reply(ok = false, error = "path_exists")
+                    is CreateResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.rename" -> {
+                val oldPath = pluck(jsonRequest, "old_path") ?: return reply(ok = false, error = "missing_old_path")
+                val newPath = pluck(jsonRequest, "new_path") ?: return reply(ok = false, error = "missing_new_path")
+                when (val r = hydration.rename(oldPath, newPath)) {
+                    is RenameResult.Ok -> reply(ok = true)
+                    RenameResult.OldPathNotFound -> reply(ok = false, error = "old_path_not_found")
+                    RenameResult.NewParentNotFound -> reply(ok = false, error = "new_parent_not_found")
+                    RenameResult.NewPathExists -> reply(ok = false, error = "new_path_exists")
+                    is RenameResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
             "hydration.subscribe" -> {

@@ -204,6 +204,33 @@ internal class HydrationTestEnv {
 
         fun isHydrated(path: String): Boolean =
             db.getEntry(path)?.isHydrated ?: false
+
+        /**
+         * Insert a created-but-never-uploaded row (remoteId = null), exactly
+         * the shape HydrationImpl.create writes for a file made through the
+         * mount before its upload runs.
+         */
+        fun insertCreatedRow(path: String) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = Instant.now().toEpochMilli(),
+                    localSize = 0L,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+
+        fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
+
+        fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()
     }
 
     inner class SyncEngineFacade internal constructor(
@@ -303,6 +330,30 @@ class HydrationImplTest {
         val cacheFile2 = env.tempDir.resolve("world.txt").also { java.nio.file.Files.writeString(it, "reopen") }
         val reopen = env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile2)
         assertTrue(reopen is OpenResult.Ok)
+    }
+
+    @Test
+    fun `openForWrite_marks_row_on_upload_failure`() = runTest {
+        val env = HydrationTestEnv()
+        // A file created through the mount, never uploaded (remoteId = null).
+        env.stateDb.insertCreatedRow("/draft.txt")
+        // Force the upload to fail: uploadFromCache require()s the cache file
+        // to exist; point at a path that doesn't. The close() already returned
+        // 0 to the user, so the only durability surface is the state.db stamp.
+        val missingCache = env.tempDir.resolve("does-not-exist.txt")
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/draft.txt", missingCache)
+
+        assertTrue(r is OpenResult.Failed, "a failed upload must surface OpenResult.Failed")
+        assertTrue(
+            env.stateDb.lastErrorAt("/draft.txt") != null,
+            "upload failure must stamp last_error_at so doctor can surface the unsynced row",
+        )
+        assertEquals(
+            1,
+            env.stateDb.countWriteUploadFailed(),
+            "the never-uploaded + stamped row must count as written-but-not-synced",
+        )
     }
 
     @Test

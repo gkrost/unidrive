@@ -3,6 +3,8 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import java.nio.file.Path
@@ -23,6 +25,18 @@ class HydrationImpl(
     // mutations with a connection-scoped lock) before this becomes load-bearing.
     private val openSets =
         ConcurrentHashMap<String, MutableMap<String, String>>()
+
+    // Per-path mutex for `create`. Without this, two concurrent
+    // `hydration.create(samePath)` callers can both pass the
+    // `stateDb.getEntry == null` existence check before either has
+    // upserted its row, then both proceed to TRUNCATE_EXISTING the
+    // same cache file (clobbering one writer's content) and both
+    // return Ok. The mutex serialises the check+materialise+upsert
+    // tuple per-path; the second caller wakes after the first's
+    // upsert and correctly returns PathExists. Entries stay in the
+    // map for the daemon's lifetime — bounded by the number of
+    // distinct paths ever created, which is small per-session.
+    private val createMutexes = ConcurrentHashMap<String, Mutex>()
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
@@ -60,6 +74,13 @@ class HydrationImpl(
             openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
             OpenResult.Ok(cachePath)
         } catch (e: Exception) {
+            // The co-daemon fires open_write at FUSE release; the user's
+            // close() already returned 0. Make the durability gap
+            // operator-visible by stamping the row before we surface the
+            // failure, so `unidrive doctor` can report "written locally but
+            // not uploaded." Best-effort — a stamp failure must not mask the
+            // original upload error.
+            runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
             val err = HydrationError.Generic(e.message ?: "upload failed")
             _events.emit(HydrationEvent.Failed(path, err))
             OpenResult.Failed(err)
@@ -163,6 +184,31 @@ class HydrationImpl(
             ?: return UnlinkResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
         if (entry.isFolder) return UnlinkResult.PathIsFolder
 
+        // Never-uploaded file (remote_id is null): the file only ever existed
+        // locally — created through the mount, upload not yet done. There is
+        // nothing to delete cloud-side, so calling provider.delete would 404
+        // and surface as EIO on `rm`. Skip the provider call entirely; drop
+        // the local cache file and HARD-DELETE the row.
+        //
+        // Hard-delete, not markDeleted: a tombstone preserves deletion-history
+        // so the reconciler can tell "existed-on-cloud-then-deleted" from
+        // "never-existed". A never-uploaded row has no cloud counterpart, so a
+        // tombstone carries no reconciliation value — and create/delete temp-
+        // file churn through the mount (editor swap files, build artifacts)
+        // would grow sync_entries unboundedly with dead tombstones. deleteEntry
+        // removes the row outright, matching the pending-upload cleanup path.
+        if (entry.remoteId == null) {
+            return runCatching {
+                runCatching {
+                    java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
+                }
+                stateDb.deleteEntry(normalised)
+                UnlinkResult.Ok
+            }.getOrElse { e ->
+                UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
+            }
+        }
+
         return runCatching {
             syncEngine.deleteRemote(normalised)
             UnlinkResult.Ok
@@ -189,6 +235,93 @@ class HydrationImpl(
             } else {
                 RmdirResult.Failed(HydrationError.Generic(msg.ifBlank { "rmdir failed" }))
             }
+        }
+    }
+
+    override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
+        return mutex.withLock {
+            if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
+
+            // Parent must exist as a folder row (root "/" / "" is implicit and
+            // always considered present).
+            val parent = normalised.substringBeforeLast('/', missingDelimiterValue = "")
+            if (parent.isNotEmpty()) {
+                val parentEntry = stateDb.getEntry(parent)
+                    ?: return@withLock CreateResult.ParentNotFound
+                if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
+            }
+
+            val cachePath = syncEngine.resolveCachePath(normalised)
+            try {
+                java.nio.file.Files.createDirectories(cachePath.parent)
+                // Materialise an empty cache file; truncate if some stray byte
+                // is sitting there from a previous abortive run.
+                java.nio.file.Files.newByteChannel(
+                    cachePath,
+                    java.util.EnumSet.of(
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE,
+                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    ),
+                ).close()
+
+                val now = java.time.Instant.now()
+                stateDb.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = normalised,
+                        remoteId = null,
+                        remoteHash = null,
+                        remoteSize = 0L,
+                        remoteModified = null,
+                        localMtime = now.toEpochMilli(),
+                        localSize = 0L,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+                CreateResult.Ok(cachePath = cachePath, handleId = handleId)
+            } catch (e: Exception) {
+                CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
+            }
+        }
+    }
+
+    override suspend fun rename(oldPath: String, newPath: String): RenameResult {
+        val oldNorm = oldPath.trimEnd('/').let { if (it == "") "/" else it }
+        val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
+
+        // Pre-flight: source must exist in state.db.
+        stateDb.getEntry(oldNorm)
+            ?: return RenameResult.OldPathNotFound
+
+        // Pre-flight: destination parent must exist (or destination is at root).
+        val newParent = newNorm.substringBeforeLast('/', missingDelimiterValue = "")
+        if (newParent.isNotEmpty()) {
+            val parentEntry = stateDb.getEntry(newParent)
+                ?: return RenameResult.NewParentNotFound
+            if (!parentEntry.isFolder) return RenameResult.NewParentNotFound
+        }
+
+        // Pre-flight: destination must not exist. POSIX rename(2) atomically
+        // replaces the destination if it exists; neither OneDrive's PATCH nor
+        // Internxt's move endpoint supports atomic replace, and emulating it
+        // via delete-then-rename leaves a window where the destination is
+        // missing. Refuse with NewPathExists and let userland do the
+        // unlink-then-rename dance (editors handle this gracefully).
+        if (stateDb.getEntry(newNorm) != null) {
+            return RenameResult.NewPathExists
+        }
+
+        return runCatching {
+            syncEngine.renameRemote(oldNorm, newNorm)
+            RenameResult.Ok
+        }.getOrElse { e ->
+            RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
         }
     }
 

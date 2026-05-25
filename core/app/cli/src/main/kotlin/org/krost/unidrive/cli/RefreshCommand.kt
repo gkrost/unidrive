@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
+import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -31,6 +32,14 @@ class RefreshCommand : Runnable {
     @ParentCommand
     lateinit var parent: Main
 
+    @Parameters(
+        index = "0",
+        arity = "0..1",
+        paramLabel = "<profile>",
+        description = ["Profile name (alternative to the global -p option)"],
+    )
+    var profilePositional: String? = null
+
     @Option(
         names = ["--reset"],
         description = [
@@ -42,6 +51,7 @@ class RefreshCommand : Runnable {
     var reset: Boolean = false
 
     override fun run() {
+        applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
@@ -50,7 +60,7 @@ class RefreshCommand : Runnable {
                 "unidrive refresh: daemon for profile '${profile.name}' is not running.",
             )
             System.err.println(
-                "Start it first: `unidrive daemon run ${profile.name}` (in another terminal).",
+                "Start it first: `unidrive -p ${profile.name} daemon run` (in another terminal).",
             )
             System.exit(1)
             return
@@ -101,7 +111,7 @@ class RefreshCommand : Runnable {
             }
         } catch (e: java.io.IOException) {
             System.err.println("unidrive refresh: failed to communicate with daemon: ${e.message}")
-            System.err.println("Daemon may have crashed. Restart with: `unidrive daemon run ${profile.name}`.")
+            System.err.println("Daemon may have crashed. Restart with: `unidrive -p ${profile.name} daemon run`.")
             System.exit(1)
         }
     }
