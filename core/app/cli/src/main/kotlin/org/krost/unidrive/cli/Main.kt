@@ -558,8 +558,10 @@ class Main : Runnable {
      * success. If another unidrive process holds the lock, prints a mode-
      * specific message and exits with code 1.
      *
-     * NOTE: error wording is duplicated in ProfileLockFactoryTest.renderSyncFactoryContention.
-     * Keep both in sync when editing — drift here means stale test assertions.
+     * NOTE: holderDesc + pidPart wording is duplicated in
+     * ProfileLockFactoryTest.renderSyncFactoryContention. The recovery-hint
+     * lines below are NOT covered by that helper — change them freely, but if the
+     * holderDesc wording changes, update both sides together.
      */
     fun acquireProfileLock(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")
@@ -603,8 +605,10 @@ class Main : Runnable {
      * profile, or another `unidrive daemon` instance).
      * See docs/dev/specs/unidrive-daemon-design.md.
      *
-     * NOTE: error wording is duplicated in ProfileLockFactoryTest.renderDaemonFactoryContention.
-     * Keep both in sync when editing — drift here means stale test assertions.
+     * NOTE: holderDesc + pidPart wording is duplicated in
+     * ProfileLockFactoryTest.renderDaemonFactoryContention. The recovery-hint
+     * lines below are NOT covered by that helper — change them freely, but if the
+     * holderDesc wording changes, update both sides together.
      */
     fun acquireProfileLockForDaemon(): org.krost.unidrive.sync.ProcessLock {
         val lockFile = providerConfigDir().resolve(".lock")

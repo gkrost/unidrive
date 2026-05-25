@@ -28,8 +28,11 @@ class ProfileLockFactoryTest {
         Files.deleteIfExists(lockFile.resolveSibling("${lockFile.fileName}.pid"))
     }
 
-    // MUST mirror Main.acquireProfileLockForDaemon byte-for-byte. If the factory
-    // wording drifts, update both sides together.
+    // MUST mirror the holderDesc + pidPart block of Main.acquireProfileLockForDaemon
+    // byte-for-byte. The factory additionally prints recovery-hint lines below the
+    // first println (e.g. "Stop the sync watcher first: ..."); those are NOT covered
+    // by this helper. If recovery-hint wording drift becomes a maintenance concern,
+    // extend this helper and add named tests for each branch's hints.
     private fun renderDaemonFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
         val holderDesc = when {
             holder?.mode == ProcessLock.Mode.SYNC ->
@@ -46,8 +49,11 @@ class ProfileLockFactoryTest {
         System.err.println("$holderDesc$pidPart.")
     }
 
-    // MUST mirror Main.acquireProfileLock byte-for-byte. If the factory
-    // wording drifts, update both sides together.
+    // MUST mirror the holderDesc + pidPart block of Main.acquireProfileLock
+    // byte-for-byte. The factory additionally prints recovery-hint lines below the
+    // first println (e.g. "Stop the daemon first: ..."); those are NOT covered by
+    // this helper. If recovery-hint wording drift becomes a maintenance concern,
+    // extend this helper and add named tests for each branch's hints.
     private fun renderSyncFactoryContention(holder: ProcessLock.HolderInfo?, profileName: String) {
         val holderDesc = when {
             holder?.mode == ProcessLock.Mode.SYNC ->
@@ -104,6 +110,31 @@ class ProfileLockFactoryTest {
             assertTrue(
                 out.contains("is currently in use by `unidrive daemon`"),
                 "expected daemon-holder phrasing; got: $out",
+            )
+            assertTrue(
+                out.contains("PID ${ProcessHandle.current().pid()}"),
+                "expected holder PID in stderr; got: $out",
+            )
+        } finally {
+            held.unlock()
+        }
+    }
+
+    @Test
+    fun daemon_refuses_to_start_when_another_daemon_holds_lock() {
+        val held = ProcessLock(lockFile)
+        try {
+            assertTrue(held.tryLock(ProcessLock.Mode.DAEMON), "precondition: DAEMON lock must acquire")
+            val contender = ProcessLock(lockFile)
+            val acquired = contender.tryLock(ProcessLock.Mode.DAEMON)
+            assertEquals(false, acquired, "second DAEMON must not acquire while DAEMON holds")
+            val holder = contender.readHolderInfo()
+            renderDaemonFactoryContention(holder, profileName = "test_profile")
+
+            val out = capturedErr.toString()
+            assertTrue(
+                out.contains("Another `unidrive daemon` already serves profile 'test_profile'"),
+                "expected daemon-vs-daemon phrasing; got: $out",
             )
             assertTrue(
                 out.contains("PID ${ProcessHandle.current().pid()}"),
