@@ -27,7 +27,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *   dehydrate   request:  {"verb":"hydration.dehydrate","path":"/foo"}
  *   dehydrate   reply:    {"ok":true} or {"ok":false,"error":"busy"} or {"ok":false,"error":"<message>"}
  *   mkdir       request:  {"verb":"hydration.mkdir","path":"/foo"}
- *               reply:    {"ok":true}  or  {"ok":false,"error":"<msg>"}
+ *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"parent_not_found"}   ENOENT
+ *                         {"ok":false,"error":"<msg>"}              EIO
  *
  *   unlink      request:  {"verb":"hydration.unlink","path":"/foo.txt"}
  *               reply:    {"ok":true}
@@ -228,6 +230,7 @@ class HydrationIpcHandler(
                 val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.mkdir(path)) {
                     is MkdirResult.Ok -> reply(ok = true)
+                    MkdirResult.ParentNotFound -> reply(ok = false, error = "parent_not_found")
                     is MkdirResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }

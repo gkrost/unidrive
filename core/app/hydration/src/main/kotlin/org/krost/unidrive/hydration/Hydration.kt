@@ -70,6 +70,7 @@ sealed class ListResult {
 sealed class MkdirResult {
     data object Ok : MkdirResult()
     data class Failed(val error: HydrationError) : MkdirResult()
+    data object ParentNotFound : MkdirResult()
 }
 
 sealed class UnlinkResult {

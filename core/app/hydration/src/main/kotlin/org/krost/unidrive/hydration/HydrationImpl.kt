@@ -137,9 +137,23 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrated(normalised, bytes = 0L))
             MkdirResult.Ok
         }.getOrElse { e ->
-            val err = HydrationError.Generic(e.message ?: "mkdir failed")
-            _events.emit(HydrationEvent.Failed(normalised, err))
-            MkdirResult.Failed(err)
+            val msg = e.message ?: ""
+            // Provider-side parent-missing detection by substring. Different
+            // providers word it differently:
+            // - OneDrive: GraphApiException("Create folder failed: 404 ...")
+            // - Internxt: ProviderException("Folder not found: <seg> in <path>")
+            // Both contain "not found" case-insensitively; OneDrive also
+            // carries the literal "404". Match any of those signals.
+            if (msg.contains("not found", ignoreCase = true) ||
+                msg.contains("404", ignoreCase = true)
+            ) {
+                _events.emit(HydrationEvent.Failed(normalised, HydrationError.Generic(msg)))
+                MkdirResult.ParentNotFound
+            } else {
+                val err = HydrationError.Generic(msg.ifBlank { "mkdir failed" })
+                _events.emit(HydrationEvent.Failed(normalised, err))
+                MkdirResult.Failed(err)
+            }
         }
     }
 
