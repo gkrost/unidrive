@@ -586,7 +586,7 @@ class Main : Runnable {
             System.err.println("$holderDesc$pidPart.")
             if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON) {
                 System.err.println(
-                    "Stop the daemon first: `unidrive daemon stop ${profile.name}`.",
+                    "Stop the daemon first: `unidrive -p ${profile.name} daemon stop`.",
                 )
             } else if (holder != null) {
                 val isWindows = System.getProperty("os.name").lowercase().contains("win")
@@ -641,7 +641,7 @@ class Main : Runnable {
                 )
             } else if (holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.DAEMON) {
                 System.err.println(
-                    "Stop the running daemon first: `unidrive daemon stop ${profile.name}`.",
+                    "Stop the running daemon first: `unidrive -p ${profile.name} daemon stop`.",
                 )
             } else if (holder != null) {
                 System.err.println("Stop it with `kill ${holder.pid}`, or wait for it to exit.")
