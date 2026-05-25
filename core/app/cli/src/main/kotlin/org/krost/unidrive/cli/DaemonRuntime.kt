@@ -141,8 +141,10 @@ class DaemonRuntime(
                 }
 
                 // refresh.run verb (spec §4.2). Pass serveScope so refresh
-                // jobs are cancelled when the daemon shuts down.
-                val refreshHandler = RefreshRpcHandler(server, engine, serveScope)
+                // jobs are cancelled when the daemon shuts down. Pass db so
+                // the F9 `reset` parameter can call db.resetAll() before
+                // re-enumeration.
+                val refreshHandler = RefreshRpcHandler(server, engine, db!!, serveScope)
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)
                 }

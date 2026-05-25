@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.slf4j.LoggerFactory
 import java.util.UUID
@@ -29,6 +30,7 @@ import java.util.concurrent.atomic.AtomicReference
 class RefreshRpcHandler(
     private val ipcServer: IpcServer,
     private val engine: SyncEngine,
+    private val db: StateDatabase,
     private val scope: CoroutineScope,
 ) {
     private val log = LoggerFactory.getLogger(RefreshRpcHandler::class.java)
@@ -41,14 +43,25 @@ class RefreshRpcHandler(
      * Handle one `refresh.run` request. Returns the synchronous reply JSON.
      * If accepted (ok:true), launches the refresh body as a child of [scope].
      */
-    fun handle(@Suppress("UNUSED_PARAMETER") connectionId: String, @Suppress("UNUSED_PARAMETER") jsonRequest: String): String {
+    fun handle(@Suppress("UNUSED_PARAMETER") connectionId: String, jsonRequest: String): String {
         val existing = inFlight.get()
         if (existing != null) {
             return """{"ok":false,"error":"busy","message":"refresh already running (job_id=${existing.id})"}"""
         }
+        // Parse optional `"reset": true` from the request. Spec amendment vs.
+        // initial §4.2 ("no parameters"): F9 added `reset` to cover the
+        // delta-cursor recovery path that was lost when RefreshCommand
+        // dropped SyncCommand inheritance in Task 11. JSON parse is intentionally
+        // minimal (regex over the request body) — the daemon RPC contract is
+        // append-only so a sloppy match here can't break a strict client.
+        val reset = RESET_TRUE_REGEX.containsMatchIn(jsonRequest)
         val jobId = UUID.randomUUID().toString()
         val launched = scope.launch {
             val terminalEvent = try {
+                if (reset) {
+                    log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
+                    db.resetAll()
+                }
                 engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
                 """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -72,4 +85,8 @@ class RefreshRpcHandler(
 
     fun isInFlight(): Boolean = inFlight.get() != null
     fun inFlightJobId(): String? = inFlight.get()?.id
+
+    companion object {
+        private val RESET_TRUE_REGEX = Regex("\"reset\"\\s*:\\s*true")
+    }
 }

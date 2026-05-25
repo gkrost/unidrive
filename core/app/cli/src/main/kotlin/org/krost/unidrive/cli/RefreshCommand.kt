@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
+import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -30,6 +31,16 @@ class RefreshCommand : Runnable {
     @ParentCommand
     lateinit var parent: Main
 
+    @Option(
+        names = ["--reset"],
+        description = [
+            "Clear state.db on the daemon and re-enumerate the full cloud tree. " +
+                "Recovers from poisoned delta cursors (e.g. when the cloud was modified " +
+                "while sync was offline and the cursor returned only the recent delta).",
+        ],
+    )
+    var reset: Boolean = false
+
     override fun run() {
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
@@ -51,8 +62,13 @@ class RefreshCommand : Runnable {
                 channel.write(ByteBuffer.wrap(("""{"verb":"sync.subscribe"}""" + "\n").toByteArray()))
                 readOneJsonReply(channel)  // discard sync.subscribe reply
 
-                // Issue refresh.run
-                channel.write(ByteBuffer.wrap(("""{"verb":"refresh.run"}""" + "\n").toByteArray()))
+                // Issue refresh.run (with optional reset flag — F9 fix).
+                val refreshReq = if (reset) {
+                    """{"verb":"refresh.run","reset":true}"""
+                } else {
+                    """{"verb":"refresh.run"}"""
+                }
+                channel.write(ByteBuffer.wrap((refreshReq + "\n").toByteArray()))
                 val runReply = readOneJsonReply(channel)
                 if (!runReply.contains("\"ok\":true")) {
                     System.err.println("unidrive refresh: daemon rejected refresh.run: $runReply")
