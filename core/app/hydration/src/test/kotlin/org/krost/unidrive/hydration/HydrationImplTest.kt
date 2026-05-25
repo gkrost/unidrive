@@ -1,5 +1,6 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -119,7 +120,11 @@ internal class MinimalFakeProvider(
  * - [syncEngine] — exposes seedRemoteContent
  * - [hydration] — the [HydrationImpl] under test
  */
-internal class HydrationTestEnv {
+internal class HydrationTestEnv(
+    /** Optional scope for recovery uploads. Pass the [runTest] scope to control
+     *  background-job dispatch in recovery-path tests; null uses the default. */
+    recoveryUploadScope: CoroutineScope? = null,
+) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
     private val fakeProvider = MinimalFakeProvider()
@@ -144,7 +149,11 @@ internal class HydrationTestEnv {
 
         stateDb = StateDatabaseFacade(db)
         syncEngine = SyncEngineFacade(fakeProvider, engine)
-        hydration = HydrationImpl(syncEngine = engine, stateDb = db)
+        hydration = if (recoveryUploadScope != null) {
+            HydrationImpl(syncEngine = engine, stateDb = db, recoveryUploadScope = recoveryUploadScope)
+        } else {
+            HydrationImpl(syncEngine = engine, stateDb = db)
+        }
     }
 
     internal inner class StateDatabaseFacade(private val db: StateDatabase) {
@@ -353,6 +362,49 @@ class HydrationImplTest {
             1,
             env.stateDb.countWriteUploadFailed(),
             "the never-uploaded + stamped row must count as written-but-not-synced",
+        )
+    }
+
+    @Test
+    fun `recovery_handle_open_write_returns_ok_without_blocking_on_upload`() = runTest {
+        // Invariant: open_write with a "recovery-N" handle_id returns Ok immediately,
+        // without waiting for the upload to complete. This is the crash-recovery path:
+        // the cache_scanner fires open_write before the FUSE mount goes live; a
+        // synchronous upload of a large file would block the co-daemon indefinitely.
+        //
+        // Pass `this` (the test scope) so the background launch runs on the test
+        // dispatcher — yield() then drains it deterministically.
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/big.bin", localSize = 5)
+        val cacheFile = env.tempDir.resolve("big.bin").also { java.nio.file.Files.writeString(it, "bytes") }
+
+        val r = env.hydration.openForWrite("conn1", "recovery-1", "/big.bin", cacheFile)
+
+        assertTrue(r is OpenResult.Ok, "recovery open_write must return Ok immediately")
+        // The upload is in flight on the test scope; yield so the test dispatcher
+        // can run the background job before we assert its side-effect.
+        yield()
+        assertEquals("bytes", env.syncEngine.remoteContentSeen("/big.bin"),
+            "recovery upload must complete even though the call returned immediately")
+    }
+
+    @Test
+    fun `recovery_handle_open_write_stamps_upload_failed_on_error`() = runTest {
+        // Invariant: when a recovery upload fails, markUploadFailed is still called
+        // (same durability contract as normal RELEASE open_write), even though the
+        // open_write call itself returned Ok.
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/big.bin", localSize = 5)
+        val missingCache = env.tempDir.resolve("does-not-exist-recovery.bin")
+
+        val r = env.hydration.openForWrite("conn1", "recovery-1", "/big.bin", missingCache)
+        assertTrue(r is OpenResult.Ok, "recovery open_write must return Ok even when upload will fail")
+
+        // Let the background upload attempt run and fail on the test scope.
+        yield()
+        assertTrue(
+            env.stateDb.lastErrorAt("/big.bin") != null,
+            "recovery upload failure must stamp last_error_at so doctor can surface the unsynced row",
         )
     }
 
