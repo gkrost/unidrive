@@ -54,6 +54,48 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    fun daemon_fail_fast_on_auth_failure_does_not_bind_socket() = runBlocking {
+        // Spec T4: provider.authenticate() throws → daemon refuses to bind
+        // the socket, releases the lock, exits non-zero.
+        val provider: CloudProvider = AuthFailingStubProvider()
+
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            socketPath = socketPath,
+            providerFactory = { provider },
+        )
+
+        // start() rethrows the auth exception (per DaemonRuntime catch+rethrow).
+        // For T4 to be cleanly testable, DaemonRuntime.start() must propagate
+        // auth exceptions BEFORE the socket is bound. The catch block in start()
+        // rethrows after cleanup() — that's the design contract this test pins.
+        val ex = kotlin.runCatching {
+            runtime.start()
+        }.exceptionOrNull()
+
+        assertTrue(
+            ex is org.krost.unidrive.AuthenticationException ||
+                ex?.cause is org.krost.unidrive.AuthenticationException,
+            "auth failure must propagate; got: $ex",
+        )
+
+        // Invariant I4: socket file must NOT exist after auth failure.
+        assertTrue(
+            !Files.exists(socketPath),
+            "socket file must not be left behind after auth failure; found $socketPath",
+        )
+
+        // Lock must be released — the .lock.pid sidecar should be gone.
+        val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
+        assertTrue(
+            !Files.exists(pidFile),
+            ".lock.pid sidecar must be cleaned up after auth failure; found $pidFile",
+        )
+    }
+
+    @Test
     fun daemon_binds_socket_and_serves_hydration_verbs() = runBlocking {
         val provider: CloudProvider = StubProvider()
 
@@ -129,6 +171,55 @@ class DaemonRuntimeTest {
 
         override suspend fun move(fromPath: String, toPath: String): CloudItem =
             error("not used in T1")
+
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
+        ): DeltaPage = DeltaPage(items = emptyList(), cursor = "x", hasMore = false)
+
+        override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
+    }
+
+    /**
+     * Stub that throws AuthenticationException from authenticate().
+     * Used by T4 to pin the fail-fast contract: socket must NOT be bound
+     * when auth fails.
+     */
+    private class AuthFailingStubProvider : CloudProvider {
+        override val id: String = "stub-auth-failing"
+        override val displayName: String = "Stub (auth fails)"
+        override var isAuthenticated: Boolean = false
+
+        override fun capabilities(): Set<Capability> = emptySet()
+
+        override suspend fun authenticate() {
+            throw org.krost.unidrive.AuthenticationException("test auth failure (T4)")
+        }
+
+        override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
+
+        override suspend fun getMetadata(path: String): CloudItem =
+            error("not used in T4")
+
+        override suspend fun download(
+            remotePath: String,
+            destination: Path,
+        ): Long = error("not used in T4")
+
+        override suspend fun upload(
+            localPath: Path,
+            remotePath: String,
+            existingRemoteId: String?,
+            onProgress: ((Long, Long) -> Unit)?,
+        ): CloudItem = error("not used in T4")
+
+        override suspend fun delete(remotePath: String) = error("not used in T4")
+
+        override suspend fun createFolder(path: String): CloudItem = error("not used in T4")
+
+        override suspend fun move(fromPath: String, toPath: String): CloudItem =
+            error("not used in T4")
 
         override suspend fun delta(
             cursor: String?,
