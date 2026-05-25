@@ -2123,7 +2123,11 @@ class SyncEngineTest {
             )
         }
 
+        // When non-null, the NEXT delete() call throws this exception (single-use, cleared after throw).
+        var deleteThrow: Throwable? = null
+
         override suspend fun delete(remotePath: String) {
+            deleteThrow?.also { deleteThrow = null; throw it }
             if (deleteFailCount > 0) {
                 deleteFailCount--
                 throw ProviderException("Network timeout on delete")
@@ -2922,5 +2926,63 @@ class SyncEngineTest {
                 Files.exists(expectedCachePath),
                 "corrupted cache file must be deleted after integrity failure",
             )
+        }
+
+    // ── deleteRemote idempotency ──────────────────────────────────────────────
+
+    @Test
+    fun `deleteRemote_treats_not_found_404_as_already_deleted`() =
+        runTest {
+            // Guards: SyncEngine.deleteRemote must NOT throw when the provider
+            // signals the path is already gone (not-found / 404 message).
+            // markDeleted must still run — the postcondition is "path gone from cloud".
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/gone.txt",
+                    remoteId = "rid-gone",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = ProviderException("Folder not found: gone in /gone.txt")
+
+            engine.deleteRemote("/gone.txt")   // must not throw
+
+            assertNull(db.getEntry("/gone.txt"), "markDeleted must have run: row must not be alive")
+            val tombstone = db.recovery.allEntriesAnyStatus().find { it.path == "/gone.txt" }
+            assertNotNull(tombstone, "DELETED tombstone must exist for reconciler tracking")
+        }
+
+    @Test
+    fun `deleteRemote_rethrows_non_not_found_errors`() =
+        runTest {
+            // Guards: real errors (5xx, auth, throttle) must NOT be swallowed.
+            // The row must remain alive — EIO is the correct outcome.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/server-error.txt",
+                    remoteId = "rid-err",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = ProviderException("500 Internal Server Error")
+
+            assertFailsWith<ProviderException> { engine.deleteRemote("/server-error.txt") }
+            assertNotNull(db.getEntry("/server-error.txt"), "row must remain alive after real error")
         }
 }

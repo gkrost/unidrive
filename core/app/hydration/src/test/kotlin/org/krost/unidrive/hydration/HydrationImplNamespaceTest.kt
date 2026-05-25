@@ -225,6 +225,114 @@ class HydrationImplNamespaceTest {
     }
 
     @Test
+    fun unlink_treats_remote_already_gone_404_as_success() = runTest {
+        // Guards: rm of a stale (already-deleted-on-cloud) file must return Ok,
+        // not EIO. The row must be tombstoned so the reconciler tracks the deletion.
+        val (impl, provider, stateDb) = freshEnv()
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/gone.txt",
+                remoteId = "rid-gone",
+                remoteHash = "hash",
+                remoteSize = 10L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        provider.throwOnDelete = RuntimeException("Folder not found: gone in /gone.txt")
+
+        val result = impl.unlink("/gone.txt")
+
+        assertEquals(UnlinkResult.Ok, result, "rm of already-gone remote file must succeed, not EIO")
+        // Row must be tombstoned (status DELETED) — getEntry returns null (alive view), but
+        // the tombstone is present so the reconciler can track the cloud deletion.
+        assertEquals(null, stateDb.getEntry("/gone.txt"), "row must no longer be alive after unlink")
+        val tombstone = stateDb.recovery.allEntriesAnyStatus().find { it.path == "/gone.txt" }
+        assertTrue(tombstone != null, "a DELETED tombstone must remain for reconciler tracking")
+    }
+
+    @Test
+    fun unlink_does_not_mask_non_notfound_errors() = runTest {
+        // Guards: idempotent-on-gone must NOT become swallow-all-errors.
+        // A real server error (5xx, auth, throttle) must surface as Failed, not Ok.
+        // The row must remain alive — a real error leaves the file in an unknown state.
+        val (impl, provider, stateDb) = freshEnv()
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/real-error.txt",
+                remoteId = "rid-real",
+                remoteHash = "hash",
+                remoteSize = 10L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        provider.throwOnDelete = RuntimeException("500 Internal Server Error")
+
+        val result = impl.unlink("/real-error.txt")
+
+        assertTrue(result is UnlinkResult.Failed, "5xx error must surface as Failed, not Ok")
+        assertTrue(stateDb.getEntry("/real-error.txt") != null, "row must remain alive after a real error")
+    }
+
+    @Test
+    fun rmdir_treats_remote_already_gone_404_as_success() = runTest {
+        // Guards: rm -d of a folder whose cloud copy is already gone must return Ok.
+        // "Not empty" errors must NOT be masked — they are a distinct failure class.
+        val (impl, provider, stateDb) = freshEnv()
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/gone-dir",
+                remoteId = "rid-gone-dir",
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        provider.throwOnDelete = RuntimeException("Folder not found: gone-dir in /gone-dir")
+
+        val result = impl.rmdir("/gone-dir")
+
+        assertEquals(RmdirResult.Ok, result, "rmdir of already-gone remote folder must succeed, not EIO")
+        assertEquals(null, stateDb.getEntry("/gone-dir"), "row must no longer be alive after rmdir")
+        // "not empty" must still fail — not-found idempotency must not swallow a different error class
+        val (impl2, provider2, stateDb2) = freshEnv()
+        stateDb2.upsertEntry(
+            SyncEntry(
+                path = "/nonempty-dir",
+                remoteId = "rid-nonempty",
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        provider2.throwOnDelete = RuntimeException("Folder not empty")
+        assertEquals(RmdirResult.NotEmpty, impl2.rmdir("/nonempty-dir"), "not-empty must not be swallowed as gone")
+    }
+
+    @Test
     fun rmdir_detects_provider_not_empty_substring() = runTest {
         // OneDrive wording
         val (impl1, provider1, stateDb1) = freshEnv()

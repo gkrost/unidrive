@@ -340,11 +340,32 @@ class SyncEngine(
      * remoteId/path. Caller (HydrationImpl.unlink or .rmdir) is
      * responsible for type-checking.
      *
-     * Throws ProviderException on cloud-side failure. state.db is only
-     * updated after the provider call succeeds.
+     * Idempotent on "remote already gone": if [provider.delete] throws with
+     * a message that signals not-found / 404 (same detection as mkdir's
+     * ParentNotFound handling and InternxtApiService's own 404-as-success
+     * treatment at the API-call layer), the deletion is treated as already
+     * complete — the exception is swallowed and markDeleted still runs, since
+     * the postcondition "path no longer on cloud" is satisfied. Every other
+     * exception (auth, 5xx, network, throttle) is re-thrown unchanged so real
+     * failures surface as EIO rather than being silently eaten.
+     *
+     * state.db is only updated after the provider call succeeds (or is
+     * determined to be a no-op because the remote is already gone).
      */
     suspend fun deleteRemote(path: String) {
-        provider.delete(path)
+        try {
+            provider.delete(path)
+        } catch (e: Exception) {
+            val msg = e.message ?: ""
+            // Treat not-found / 404 as "already deleted" — idempotent success.
+            // Mirrors HydrationImpl.mkdir's detection and the API-layer 404
+            // handling in InternxtApiService.deleteFile/deleteFolder.
+            if (msg.contains("not found", ignoreCase = true) || msg.contains("404", ignoreCase = true)) {
+                // Remote is already gone; fall through to markDeleted below.
+            } else {
+                throw e
+            }
+        }
         db.markDeleted(path)
     }
 
