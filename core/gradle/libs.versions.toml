@@ -11,7 +11,7 @@ shadow = "9.4.1"
 sshd = "2.17.1"
 bouncycastle = "1.84"
 eddsa = "0.3.0"
-playwright = "1.59.0"
+playwright = "1.60.0"
 ktlint-gradle = "14.2.0"
 socket-io-client = "2.1.2"
 
