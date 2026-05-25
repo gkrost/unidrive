@@ -111,7 +111,12 @@ class DaemonRuntime(
                 server.start(serveScope)
                 startedAtMs = System.currentTimeMillis()
 
-                val engine = SyncEngine(provider, db!!, syncRoot = syncRoot)
+                // cacheKey = profileName keeps the daemon's hydration cache
+                // subtree per-account and consistent with MountCommand's
+                // co-daemon --cache root (also profile.name), so the FUSE
+                // backing store, eviction, and crash-recovery scanner all
+                // address the same files.
+                val engine = SyncEngine(provider, db!!, syncRoot = syncRoot, cacheKey = profileName)
                 val hydration = HydrationImpl(engine, db!!)
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in HydrationIpcHandler.VERBS) {

@@ -434,6 +434,10 @@ open class SyncCommand : Runnable {
                 maxDeletePerSubtreePercent = config.maxDeletePerSubtreePercent,
                 verifyIntegrity = config.verifyIntegrity,
                 providerId = profile.type,
+                // Cache namespace keyed per-account (profile.name), not per-type:
+                // two accounts of the same provider type must not share one
+                // hydration cache dir and collide on identical remote paths.
+                cacheKey = profile.name,
                 useTrash = config.useTrash,
                 includeShared = profile.rawProvider?.include_shared == true,
                 echoSuppress = watcher?.let { w -> { path: String -> w.suppress(path) } },
