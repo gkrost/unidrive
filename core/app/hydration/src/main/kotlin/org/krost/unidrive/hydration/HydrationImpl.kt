@@ -253,11 +253,12 @@ class HydrationImpl(
     }
 
     override suspend fun openWriteBegin(path: String): OpenResult {
-        val entry = stateDb.getEntry(path)
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
         return try {
-            OpenResult.Ok(prepareEmptyCache(path))
+            OpenResult.Ok(prepareEmptyCache(normalised))
         } catch (e: Exception) {
             OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
         }

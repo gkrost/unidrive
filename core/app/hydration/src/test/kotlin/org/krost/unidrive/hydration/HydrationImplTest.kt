@@ -647,4 +647,18 @@ class HydrationImplTest {
         assertTrue(result is OpenResult.Failed)
         assertEquals("path_is_folder", (result as OpenResult.Failed).error.message)
     }
+
+    @Test
+    fun `openWriteBegin truncates a pre-existing stale cache file to zero`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/big.bin", remoteSize = 1024)
+        // Seed a non-empty cache file to simulate a stale/partial cache left by a previous session.
+        env.syncEngine.seedCacheContent("/big.bin", "stale content that must be discarded")
+
+        val result = env.hydration.openWriteBegin("/big.bin")
+
+        assertTrue(result is OpenResult.Ok)
+        val cachePath = (result as OpenResult.Ok).cachePath
+        assertEquals(0L, Files.size(cachePath), "TRUNCATE_EXISTING must discard all pre-existing bytes")
+    }
 }
