@@ -1149,14 +1149,39 @@ class InternxtProvider(
         }
 
         val creds = authService.getValidCredentials()
-        val folderMap = allFolders.associateBy { it.uuid }
+        // Mutable so the self-healing ancestor re-fetch can splice missing
+        // ancestors in as it resolves; `associateBy` keeps the last entry per
+        // uuid. Fetched ancestors live only in this map (they are unchanged
+        // folders, not part of this delta's changed set) so they enable path
+        // resolution without being emitted as spurious folder changes.
+        val folderMap = allFolders.associateByTo(mutableMapOf()) { it.uuid }
+        // Memoisation shared across the whole pass so a missing ancestor uuid is
+        // fetched at most once: a known-gone uuid never re-requested, a fetched
+        // one served from folderMap thereafter. Bounds the re-fetch at the count
+        // of distinct missing ancestors (not the count of orphaned leaves) —
+        // mandatory at ~196k-file / deep-tree scale.
+        val unfetchableAncestors = mutableSetOf<String>()
+        // 404 / trashed / gone (or any non-fatal API error) degrades to null:
+        // the ancestor can't be resolved, the item is dropped + counted, and
+        // complete=false stands for the pass. Never throws out of delta().
+        val fetchAncestor: suspend (String) -> InternxtFolder? = { uuid ->
+            try {
+                api.getFolderMeta(uuid)
+            } catch (e: InternxtApiException) {
+                log.warn("Ancestor folder {} unfetchable ({}); dropping its descendants this pass", uuid, e.statusCode)
+                null
+            }
+        }
         // Folders last so that path collisions in gatherRemoteChanges resolve in favour of folders.
-        // toDeltaCloudItem returns null when an ancestor uuid is absent from folderMap
-        // (typical when /folders delta returned a changed leaf without its unchanged
-        // ancestors). Dropped items are counted so `complete` reflects the gap and
-        // the engine skips detectMissingAfterFullSync + leaves the cursor un-advanced.
-        val rawFiles = allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) }
-        val rawFolders = allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId) }
+        // toDeltaCloudItem returns null when an ancestor uuid is absent from folderMap AND
+        // unfetchable (the /folders delta returned a changed leaf without its unchanged
+        // ancestors and the ancestor is genuinely gone). Such drops are counted so
+        // `complete` reflects the residual gap and the engine skips
+        // detectMissingAfterFullSync + leaves the cursor un-advanced.
+        val rawFiles =
+            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor) }
+        val rawFolders =
+            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor) }
         val filesDropped = rawFiles.count { it == null }
         val foldersDropped = rawFolders.count { it == null }
         val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
@@ -1181,9 +1206,9 @@ class InternxtProvider(
         if (ancestorDrops > 0) {
             log.warn(
                 "Internxt delta gather dropped {} item(s) ({} file(s), {} folder(s)) " +
-                    "whose ancestor uuid was missing from this page's folderMap; " +
-                    "returning DeltaPage(complete=false). Dropped items recover when " +
-                    "their ancestors next change or via --reset.",
+                    "whose ancestor folder could not be resolved even after re-fetch " +
+                    "(404 / trashed / gone); returning DeltaPage(complete=false). " +
+                    "Dropped items recover when their ancestors reappear or via --reset.",
                 ancestorDrops,
                 filesDropped,
                 foldersDropped,
@@ -1394,26 +1419,34 @@ class InternxtProvider(
 
     private fun InternxtFolder.toCloudItem(parentPath: String): CloudItem = folderToCloudItem(this, parentPath)
 
-    private fun InternxtFile.toDeltaCloudItem(
-        folderMap: Map<String, InternxtFolder>,
+    private suspend fun InternxtFile.toDeltaCloudItem(
+        folderMap: MutableMap<String, InternxtFolder>,
         rootUuid: String,
+        unfetchable: MutableSet<String>,
+        fetchFolder: suspend (String) -> InternxtFolder?,
     ): CloudItem? {
         val parentPath =
             when (val fUuid = folderUuid) {
                 null -> ""
-                else -> buildFolderPath(fUuid, folderMap, rootUuid) ?: return null
+                else ->
+                    Companion.buildFolderPathFetching(fUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                        ?: return null
             }
         return fileToDeltaCloudItem(this, parentPath)
     }
 
-    private fun InternxtFolder.toDeltaCloudItem(
-        folderMap: Map<String, InternxtFolder>,
+    private suspend fun InternxtFolder.toDeltaCloudItem(
+        folderMap: MutableMap<String, InternxtFolder>,
         rootUuid: String,
+        unfetchable: MutableSet<String>,
+        fetchFolder: suspend (String) -> InternxtFolder?,
     ): CloudItem? {
         val parentPath =
             when (val pUuid = parentUuid) {
                 null -> ""
-                else -> buildFolderPath(pUuid, folderMap, rootUuid) ?: return null
+                else ->
+                    Companion.buildFolderPathFetching(pUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                        ?: return null
             }
         return folderToDeltaCloudItem(this, parentPath)
     }
@@ -1709,6 +1742,60 @@ class InternxtProvider(
                 when (val parentUuid = folder.parentUuid) {
                     null -> ""
                     else -> buildFolderPath(parentUuid, folderMap, rootUuid) ?: return null
+                }
+            val name = sanitizeName(folder.plainName ?: folder.name ?: "")
+            return "$parentPath/$name"
+        }
+
+        /**
+         * Self-healing variant of [buildFolderPath]: when an ancestor uuid is
+         * absent from [folderMap] (typical when the /folders delta page returned
+         * a changed leaf without its unchanged ancestors), fetch that folder's
+         * metadata via [fetchFolder] and walk up, inserting each fetched
+         * ancestor into [folderMap] before resolving the path. Without this an
+         * unchanged remote keeps reproducing the same ancestor-uuid drop on
+         * every pass — the gather never reaches `complete=true`, so the engine
+         * suppresses deletes indefinitely.
+         *
+         * Memoisation, bounded to one fetch per missing uuid per pass:
+         *  - a successful fetch is written into [folderMap], so any later item
+         *    under the same ancestor finds it already present (no re-fetch);
+         *  - an unfetchable uuid (404 / trashed / gone → [fetchFolder] returns
+         *    null) is recorded in [unfetchable], so a known-gone ancestor is
+         *    never re-requested.
+         * Both maps are shared across the whole delta() pass; at ~196k-file
+         * scale this caps the re-fetch at the number of distinct missing
+         * ancestors, not the number of orphaned leaves.
+         *
+         * Returns null exactly as [buildFolderPath] does when an ancestor
+         * cannot be resolved — the caller drops the item, counts it, and lets
+         * `complete=false` stand for the pass.
+         */
+        internal suspend fun buildFolderPathFetching(
+            uuid: String,
+            folderMap: MutableMap<String, InternxtFolder>,
+            rootUuid: String,
+            unfetchable: MutableSet<String>,
+            fetchFolder: suspend (String) -> InternxtFolder?,
+        ): String? {
+            if (uuid == rootUuid) return ""
+            if (uuid in unfetchable) return null
+            val folder =
+                folderMap[uuid] ?: run {
+                    val fetched = fetchFolder(uuid)
+                    if (fetched == null) {
+                        unfetchable.add(uuid)
+                        return null
+                    }
+                    folderMap[uuid] = fetched
+                    fetched
+                }
+            val parentPath: String =
+                when (val parentUuid = folder.parentUuid) {
+                    null -> ""
+                    else ->
+                        buildFolderPathFetching(parentUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                            ?: return null
                 }
             val name = sanitizeName(folder.plainName ?: folder.name ?: "")
             return "$parentPath/$name"

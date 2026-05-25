@@ -99,6 +99,7 @@ class InternxtApiService(
     // key-design guidance), mirroring the original folderContentsDedup wiring.
     internal val folderContentsDedup = InFlightDedup<String, FolderContentResponse>()
     internal val fileMetaDedup = InFlightDedup<String, InternxtFile>()
+    internal val folderMetaDedup = InFlightDedup<String, InternxtFolder>()
     internal val listFilesDedup = InFlightDedup<String, List<InternxtFile>>()
     internal val listFoldersDedup = InFlightDedup<String, List<InternxtFolder>>()
 
@@ -136,6 +137,12 @@ class InternxtApiService(
         fileMetaDedup.load(uuid, currentPriority()) {
             val body = authenticatedGet("$baseUrl/files/$uuid/meta")
             json.decodeFromString<InternxtFile>(body)
+        }
+
+    suspend fun getFolderMeta(uuid: String): InternxtFolder =
+        folderMetaDedup.load(uuid, currentPriority()) {
+            val body = authenticatedGet("$baseUrl/folders/$uuid/meta")
+            json.decodeFromString<InternxtFolder>(body)
         }
 
     suspend fun createFile(

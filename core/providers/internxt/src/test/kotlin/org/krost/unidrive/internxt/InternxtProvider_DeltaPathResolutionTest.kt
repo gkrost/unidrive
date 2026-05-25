@@ -77,6 +77,137 @@ class InternxtProvider_DeltaPathResolutionTest {
         assertNull(result)
     }
 
+    // ---- Self-healing ancestor re-fetch (buildFolderPathFetching) ----
+
+    @Test
+    fun `missing ancestor that IS fetchable resolves to a correct path (not dropped)`() =
+        kotlinx.coroutines.test.runTest {
+            // Delta page returned `_XXX` but NOT its unchanged parent `_INBOX`.
+            // Pre-fix this dropped `_XXX` and forced complete=false forever on an
+            // unchanged remote. The re-fetch splices `_INBOX` in and resolves.
+            val inbox = InternxtFolder(uuid = "inbox-uuid", plainName = "_INBOX", parentUuid = rootUuid)
+            val xxx = InternxtFolder(uuid = "xxx-uuid", plainName = "_XXX", parentUuid = inbox.uuid)
+            val folderMap = mutableMapOf(xxx.uuid to xxx)
+            val unfetchable = mutableSetOf<String>()
+
+            val path =
+                InternxtProvider.buildFolderPathFetching(
+                    uuid = xxx.uuid,
+                    folderMap = folderMap,
+                    rootUuid = rootUuid,
+                    unfetchable = unfetchable,
+                    fetchFolder = { uuid -> if (uuid == inbox.uuid) inbox else null },
+                )
+
+            assertEquals("/_INBOX/_XXX", path)
+            // Fetched ancestor is now memoised in the map for the rest of the pass.
+            assertNotNull(folderMap[inbox.uuid])
+            assertTrue(unfetchable.isEmpty())
+        }
+
+    @Test
+    fun `multi-level missing ancestor chain is fetched up to root`() =
+        kotlinx.coroutines.test.runTest {
+            // `_XXX` present; both `_INBOX` and `_MID` missing — the walk must
+            // climb the whole chain to root, fetching each absent ancestor once.
+            val inbox = InternxtFolder(uuid = "inbox-uuid", plainName = "_INBOX", parentUuid = rootUuid)
+            val mid = InternxtFolder(uuid = "mid-uuid", plainName = "_MID", parentUuid = inbox.uuid)
+            val xxx = InternxtFolder(uuid = "xxx-uuid", plainName = "_XXX", parentUuid = mid.uuid)
+            val byUuid = mapOf(inbox.uuid to inbox, mid.uuid to mid)
+            val folderMap = mutableMapOf(xxx.uuid to xxx)
+            val unfetchable = mutableSetOf<String>()
+
+            val path =
+                InternxtProvider.buildFolderPathFetching(
+                    uuid = xxx.uuid,
+                    folderMap = folderMap,
+                    rootUuid = rootUuid,
+                    unfetchable = unfetchable,
+                    fetchFolder = { uuid -> byUuid[uuid] },
+                )
+
+            assertEquals("/_INBOX/_MID/_XXX", path)
+        }
+
+    @Test
+    fun `genuinely unfetchable ancestor degrades to null without throwing`() =
+        kotlinx.coroutines.test.runTest {
+            // The ancestor is 404 / trashed / gone — fetchFolder returns null.
+            // Resolution must degrade to drop (null), not throw, so delta() can
+            // count it and let complete=false stand.
+            val xxx = InternxtFolder(uuid = "xxx-uuid", plainName = "_XXX", parentUuid = "gone-uuid")
+            val folderMap = mutableMapOf(xxx.uuid to xxx)
+            val unfetchable = mutableSetOf<String>()
+
+            val path =
+                InternxtProvider.buildFolderPathFetching(
+                    uuid = xxx.uuid,
+                    folderMap = folderMap,
+                    rootUuid = rootUuid,
+                    unfetchable = unfetchable,
+                    fetchFolder = { null },
+                )
+
+            assertNull(path, "unfetchable ancestor must drop (null), never throw")
+            assertTrue(unfetchable.contains("gone-uuid"), "gone uuid is recorded so it is never re-fetched")
+        }
+
+    @Test
+    fun `the same missing ancestor uuid is fetched at most once per pass`() =
+        kotlinx.coroutines.test.runTest {
+            // Scale guard: many leaves share one missing ancestor. The re-fetch
+            // must memoise so an N+1 fetch storm can't happen against a
+            // ~196k-file deep tree. Resolve five distinct children that all hang
+            // off the same absent `_INBOX`; assert exactly one fetch.
+            val inbox = InternxtFolder(uuid = "inbox-uuid", plainName = "_INBOX", parentUuid = rootUuid)
+            val children =
+                (1..5).map { InternxtFolder(uuid = "child-$it", plainName = "C$it", parentUuid = inbox.uuid) }
+            val folderMap = children.associateByTo(mutableMapOf()) { it.uuid }
+            val unfetchable = mutableSetOf<String>()
+            var fetchCount = 0
+            val fetch: suspend (String) -> InternxtFolder? = { uuid ->
+                if (uuid == inbox.uuid) {
+                    fetchCount++
+                    inbox
+                } else {
+                    null
+                }
+            }
+
+            children.forEach { child ->
+                val path =
+                    InternxtProvider.buildFolderPathFetching(child.uuid, folderMap, rootUuid, unfetchable, fetch)
+                assertEquals("/_INBOX/${child.plainName}", path)
+            }
+
+            assertEquals(1, fetchCount, "the shared missing ancestor must be fetched exactly once across all leaves")
+        }
+
+    @Test
+    fun `a known-unfetchable ancestor is not re-requested across leaves`() =
+        kotlinx.coroutines.test.runTest {
+            // Negative-cache twin of the memoisation test: an ancestor that is
+            // gone must be requested at most once even though many leaves point
+            // at it. Otherwise a gone-folder subtree triggers an N-fetch storm.
+            val children =
+                (1..4).map { InternxtFolder(uuid = "child-$it", plainName = "C$it", parentUuid = "gone-uuid") }
+            val folderMap = children.associateByTo(mutableMapOf()) { it.uuid }
+            val unfetchable = mutableSetOf<String>()
+            var fetchCount = 0
+            val fetch: suspend (String) -> InternxtFolder? = { _ ->
+                fetchCount++
+                null
+            }
+
+            children.forEach { child ->
+                assertNull(
+                    InternxtProvider.buildFolderPathFetching(child.uuid, folderMap, rootUuid, unfetchable, fetch),
+                )
+            }
+
+            assertEquals(1, fetchCount, "a known-gone ancestor must be fetched at most once per pass")
+        }
+
     // ---- Resumable-scan helpers ----
 
     @Test
