@@ -242,11 +242,45 @@ class SyncEngine(
      * indicates the cache content changed. Updates the DB row with the new
      * remote metadata (id, hash, size, mtime).
      */
+    private fun isExcluded(path: String): Boolean =
+        effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
+
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
+        if (isExcluded(path)) {
+            log.info("Skipping upload of excluded path (keep-local): {}", path)
+            // Keep-local files are never uploaded, but the local watermark must still
+            // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,
+            // and the co-daemon's crash-recovery scanner replays open_write for any
+            // cache file whose mtime exceeds it — so without this, every daemon restart
+            // re-replays excluded files forever. remoteId stays null (nothing uploaded).
+            val mtime = Files.getLastModifiedTime(cachePath).toMillis()
+            val size = Files.size(cachePath)
+            val existing = db.getEntry(path)
+            db.upsertEntry(
+                existing?.copy(
+                    localMtime = mtime,
+                    localSize = size,
+                    isHydrated = true,
+                ) ?: SyncEntry(
+                    path = path,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = mtime,
+                    localSize = size,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            return
+        }
         val existingEntry = db.getEntry(path)
         val prevHash = existingEntry?.remoteHash
         val existingRemoteId = existingEntry?.remoteId
