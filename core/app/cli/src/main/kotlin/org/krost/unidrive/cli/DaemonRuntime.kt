@@ -149,17 +149,19 @@ class DaemonRuntime(
                 // jobs are cancelled when the daemon shuts down. Pass db so
                 // the F9 `reset` parameter can call db.resetAll() before
                 // re-enumeration.
-                // Route refresh to the one-way enumerate path when a mount client
-                // (a hydration.subscribe consumer = the FUSE co-daemon) is serving
-                // this profile's view — that profile's sync_root is empty/unset, so
-                // the legacy reconcile would (correctly) abort on the deletion guards.
+                // Route refresh to the one-way enumerate path when a mount client (the FUSE
+                // co-daemon) is serving this profile's view — that profile's sync_root is
+                // empty/unset, so the legacy reconcile would (correctly) abort on the deletion
+                // guards. Detect the mount via a live connection that has issued a hydration verb;
+                // hasSubscribers() is always false today because the co-daemon doesn't yet
+                // subscribe on mount (that's the Phase-3 follow-up — design §4/§6).
                 val refreshHandler =
                     RefreshRpcHandler(
                         server,
                         engine,
                         db!!,
                         serveScope,
-                        mountClientConnected = { hydrationIpc.hasSubscribers() },
+                        mountClientConnected = { hydrationIpc.hasActiveMountConnection() },
                     )
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)
