@@ -154,6 +154,14 @@ class DaemonRuntime(
                     refreshHandler.handle(connId, json)
                 }
 
+                // sync.enumerate verb (mount-view-refresh-design.md §4.1): one-way
+                // remote→state.db refresh for mount view consumers. Terminal events
+                // fan out to sync.subscribe listeners via server.emit.
+                val enumerateHandler = EnumerateRpcHandler(engine, serveScope, server::emit)
+                server.registerHandler("sync.enumerate") { connId, json ->
+                    enumerateHandler.handle(connId, json)
+                }
+
                 // daemon.status verb (spec §4.3)
                 server.registerHandler("daemon.status") { _, _ ->
                     val uptimeMs = System.currentTimeMillis() - startedAtMs
