@@ -17,6 +17,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class HydrationImplRenameTest {
 
@@ -93,6 +94,24 @@ class HydrationImplRenameTest {
         )
     }
 
+    private fun seedNeverUploadedFile(db: StateDatabase, path: String, localSize: Long = 0L) {
+        db.upsertEntry(
+            SyncEntry(
+                path = path,
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = null,
+                localMtime = Instant.now().toEpochMilli(),
+                localSize = localSize,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
+
     private fun seedFolder(db: StateDatabase, path: String) {
         db.upsertEntry(
             SyncEntry(
@@ -158,5 +177,38 @@ class HydrationImplRenameTest {
 
         assertEquals(RenameResult.NewPathExists, result)
         assertNull(provider.lastMoveFrom, "provider.move must not be called when destination exists")
+    }
+
+    // Regression test for the file-manager partial-rename (temp → final) EIO bug.
+    // A never-uploaded file (remoteId == null) must be renamed purely locally —
+    // no provider.move call — so the pending upload can proceed at the new path.
+    @Test
+    fun rename_of_never_uploaded_file_is_local_no_provider_move() = runTest {
+        val (impl, provider, db) = freshEnv()
+        seedNeverUploadedFile(db, "/repro.txt.part", localSize = 42L)
+
+        val result = impl.rename("/repro.txt.part", "/repro.txt")
+
+        assertEquals(RenameResult.Ok, result, "rename of never-uploaded file must succeed")
+        assertNull(provider.lastMoveFrom, "provider.move must NOT be called for a never-uploaded file")
+        assertNull(db.getEntry("/repro.txt.part"), "old path must be gone from state.db")
+        val newEntry = db.getEntry("/repro.txt")
+        assertNotNull(newEntry, "new path must exist in state.db after local rename")
+        assertNull(newEntry.remoteId, "remoteId must remain null — file is still pending upload")
+        assertFalse(newEntry.isFolder, "renamed row must still be a file")
+        assertEquals(42L, newEntry.localSize, "localSize must be preserved across local rename")
+    }
+
+    // Counterpart: a file that HAS been uploaded must still go through provider.move.
+    @Test
+    fun rename_of_uploaded_file_calls_provider_move() = runTest {
+        val (impl, provider, db) = freshEnv()
+        seedFile(db, "/uploaded.txt") // remoteId = "rid-/uploaded.txt"
+
+        val result = impl.rename("/uploaded.txt", "/renamed.txt")
+
+        assertEquals(RenameResult.Ok, result)
+        assertEquals("/uploaded.txt", provider.lastMoveFrom, "provider.move must be called for uploaded file")
+        assertEquals("/renamed.txt", provider.lastMoveTo)
     }
 }
