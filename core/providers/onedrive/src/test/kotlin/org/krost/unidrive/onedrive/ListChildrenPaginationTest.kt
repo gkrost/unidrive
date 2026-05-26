@@ -490,7 +490,13 @@ class ListChildrenPaginationTest {
             val staleExpiresAt = java.time.Instant.now().plusSeconds(60) // close to expiry
             val freshExpiresAt = java.time.Instant.parse("2030-06-15T12:00:00Z") // server bumped
             val storedUrl = "https://upload.example.com/session/refresh"
-            UploadSessionStore(storeDir).put("/refresh.bin", storedUrl, staleExpiresAt)
+            UploadSessionStore(storeDir).put(
+                "/refresh.bin",
+                storedUrl,
+                staleExpiresAt,
+                localSize = java.nio.file.Files.size(tempFile),
+                localMtimeMillis = java.nio.file.Files.getLastModifiedTime(tempFile).toMillis(),
+            )
 
             val storeFile = storeDir.resolve("upload_sessions.json")
             var storeAfterProbe: String? = null
@@ -584,7 +590,13 @@ class ListChildrenPaginationTest {
             val tempFile = java.nio.file.Files.createTempFile("unidrive-probe-", ".bin")
             java.nio.file.Files.write(tempFile, "p".toByteArray())
             val deadUrl = "https://upload.example.com/session/dead"
-            UploadSessionStore(storeDir).put("/probe.bin", deadUrl, java.time.Instant.now().plusSeconds(3600))
+            UploadSessionStore(storeDir).put(
+                "/probe.bin",
+                deadUrl,
+                java.time.Instant.now().plusSeconds(3600),
+                localSize = java.nio.file.Files.size(tempFile),
+                localMtimeMillis = java.nio.file.Files.getLastModifiedTime(tempFile).toMillis(),
+            )
 
             val driveItemBody = """{"id":"item-7","name":"probe.bin","size":1}"""
             val freshSessionBody = """{"uploadUrl":"https://upload.example.com/session/fresh","expirationDateTime":"2030-01-01T00:00:00Z"}"""
