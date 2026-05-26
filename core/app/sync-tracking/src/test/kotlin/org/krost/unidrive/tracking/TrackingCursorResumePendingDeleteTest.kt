@@ -10,32 +10,6 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/**
- * Cursor-resume crash-recovery for pending-delete rows.
- *
- * On an INCREMENTAL (cursor-resumed) pass the delta carries only changed/explicitly-deleted
- * items, so [TrackingEngine.absentRemoteObservation] synthesizes `exists = true` for every
- * omitted tracked path. That is correct for ordinary unchanged paths, but it MASKS the
- * remote-absence a `PendingDeleteLocal` row depends on:
- *
- *   PendingDeleteLocal = remote already vanished, local delete propagated but the engine
- *   crashed before `trackingSet.remove(path)`. The deletion tombstone was already consumed,
- *   so the omitted path's forced `exists = true` makes the reconciler see NoOp and the local
- *   delete is never retried — stale local file persists, and a later local edit resurrects it.
- *
- * The fix preserves remote-absence ONLY for `PendingDeleteLocal`. It is deliberately
- * asymmetric: a `PendingDeleteRemote` row (local vanished, remote-delete propagated) is driven
- * by `localGone`, which the synthesis does not touch — and preserving remote-absence for it
- * would conclude both-gone and remove the row WITHOUT deleting a remote that may not have been
- * deleted yet, orphaning it. Two named invariants, one test each:
- *
- *  1. [pending_delete_local_retries_the_local_delete_on_cursor_resume] — the bug fix.
- *  2. [pending_delete_remote_still_deletes_the_remote_on_cursor_resume_no_orphan] — the guard
- *     against a naive "preserve for both states" fix.
- *
- * If either test is removed or loosened, the cursor-resume pending-delete behaviour can
- * silently regress.
- */
 class TrackingCursorResumePendingDeleteTest {
     private lateinit var workDir: Path
     private lateinit var syncRoot: Path

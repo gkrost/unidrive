@@ -10,21 +10,6 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/**
- * Default-ignore-list surface (c): the tracking-set engine must keep desktop/OS junk LOCAL —
- * never upload it, never adopt it into the tracking set, never tombstone it. Surfaces (a)
- * LocalScanner and (b) the mount upload path already consult the shared ignore list; this pins
- * the tracking engine's pass to the same `effectiveExcludePatterns`.
- *
- * Two orthogonal invariants, one test each:
- *  1. [excluded_file_is_not_uploaded_even_when_tracked_and_changed] — the `.directory.lock`
- *     upload-storm shape: a tracked junk file rewritten locally must NOT re-upload.
- *  2. [excluded_file_is_not_adopted_into_the_tracking_set] — junk present on both sides must not
- *     be adopted (it must never enter the managed set in the first place).
- *
- * Both pin a real (non-excluded) file alongside the junk to prove the filter doesn't over-match.
- * If either test is removed or loosened, junk can silently flow into the user's cloud account.
- */
 class TrackingExcludePatternsTest {
     private lateinit var workDir: Path
     private lateinit var syncRoot: Path
