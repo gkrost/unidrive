@@ -340,12 +340,63 @@ class SyncEngine(
      * remoteId/path. Caller (HydrationImpl.unlink or .rmdir) is
      * responsible for type-checking.
      *
-     * Throws ProviderException on cloud-side failure. state.db is only
-     * updated after the provider call succeeds.
+     * Idempotent on "remote already gone": if [provider.delete] throws a
+     * [ProviderException] that [isAlreadyGone] recognises as a typed not-found
+     * signal, the deletion is treated as already complete — the exception is
+     * swallowed and markDeleted still runs, since the postcondition "path no
+     * longer on cloud" is satisfied. Every other exception (auth, 5xx, network,
+     * throttle) is re-thrown unchanged so real failures surface as EIO rather
+     * than being silently eaten.
+     *
+     * The idempotency gate is type-gated, not free-text: only the two specific
+     * provider-originated not-found shapes (path-resolution failure, direct
+     * metadata miss) are recognised. A 5xx/proxy error whose body happens to
+     * contain "404" or "not found" does NOT satisfy [isAlreadyGone] and will
+     * re-throw as expected.
+     *
+     * state.db is only updated after the provider call succeeds (or is
+     * determined to be a no-op because the remote is already gone).
      */
     suspend fun deleteRemote(path: String) {
-        provider.delete(path)
+        try {
+            provider.delete(path)
+        } catch (e: Exception) {
+            if (isAlreadyGone(e)) {
+                // Remote is already gone; fall through to markDeleted below.
+            } else {
+                throw e
+            }
+        }
         db.markDeleted(path)
+    }
+
+    /**
+     * Returns true if and only if [e] is a typed provider signal that the
+     * remote path is already gone — making deleteRemote idempotent on that
+     * outcome. Two specific shapes qualify:
+     *
+     * 1. **Path-resolution failure** — InternxtProvider.resolveFolder walks
+     *    the path tree and throws `ProviderException("Folder not found: <seg>
+     *    in <path>")` when a parent folder no longer exists on the remote. This
+     *    was the shape observed in the live bug.
+     *
+     * 2. **Direct metadata miss** — InternxtProvider.getMetadata throws
+     *    `ProviderException("Item not found: <path>")` when the target itself
+     *    is absent (parent exists, but the leaf is gone).
+     *
+     * OneDrive's provider handles HTTP 404 internally and never propagates it
+     * here — OneDriveProvider.delete returns normally when Graph returns 404.
+     *
+     * Anything that is NOT a [ProviderException] (e.g. a bare RuntimeException,
+     * IOException) returns false and will be re-thrown. A [ProviderException]
+     * with a different message prefix (e.g. a 5xx body that happens to contain
+     * "not found" or "404") also returns false — the anchored prefix match
+     * closes the free-text misclassification hole.
+     */
+    private fun isAlreadyGone(e: Throwable): Boolean {
+        if (e !is ProviderException) return false
+        val msg = e.message ?: return false
+        return msg.startsWith("Folder not found: ") || msg.startsWith("Item not found: ")
     }
 
     /**
