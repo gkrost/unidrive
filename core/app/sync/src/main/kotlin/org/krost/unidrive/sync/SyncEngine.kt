@@ -486,6 +486,7 @@ open class SyncEngine(
                 for ((path, item) in remoteChanges) {
                     if (!item.deleted) continue
                     db.markDeleted(path)
+                    runCatching { Files.deleteIfExists(resolveCachePath(path)) }
                     reaped++
                 }
             }

@@ -103,6 +103,24 @@ class EnumerateRemoteIntoStateTest {
             assertEquals(0, provider.deletedPaths.size, "reaping is a state.db flip, NOT a provider.delete")
         }
 
+    @Test
+    fun `reaping a remotely-deleted hydrated path evicts its cache file`() =
+        runTest {
+            provider.putRemote("/big.bin", "X".repeat(10))
+            engine.enumerateRemoteIntoState(reset = false)
+            val cache =
+                engine.resolveCachePath("/big.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "X".repeat(10))
+                }
+            assertTrue(Files.exists(cache))
+
+            provider.removeRemote("/big.bin")
+            engine.enumerateRemoteIntoState(reset = true)
+
+            assertFalse(Files.exists(cache), "cache file must be evicted when the remote path is reaped")
+        }
+
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an
