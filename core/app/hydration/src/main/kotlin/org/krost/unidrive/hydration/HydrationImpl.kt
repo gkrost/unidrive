@@ -252,13 +252,21 @@ class HydrationImpl(
         return cachePath
     }
 
-    override suspend fun openWriteBegin(path: String): OpenResult {
+    override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
         return try {
-            OpenResult.Ok(prepareEmptyCache(normalised))
+            val cachePath = prepareEmptyCache(normalised)
+            // When a live handle id is provided (O_TRUNC open), register it in
+            // the connection's open-set so dehydrate/busy-checks see the file as
+            // open.  One-shot callers (setattr bare-truncate) pass null → no
+            // registration, matching the existing no-spurious-close_handle contract.
+            if (handleId != null) {
+                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+            }
+            OpenResult.Ok(cachePath)
         } catch (e: Exception) {
             OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
         }

@@ -618,7 +618,7 @@ class HydrationImplTest {
         env.stateDb.insertUnhydratedEntry("/big.bin", remoteSize = 1024)
         val expectedCachePath = env.syncEngine.resolveCachePath("/big.bin")
 
-        val result = env.hydration.openWriteBegin("/big.bin")
+        val result = env.hydration.openWriteBegin("conn1", "/big.bin")
 
         assertTrue(result is OpenResult.Ok)
         assertEquals(expectedCachePath, (result as OpenResult.Ok).cachePath)
@@ -631,7 +631,7 @@ class HydrationImplTest {
     fun `open_write_begin on absent row returns Failed with unknown_path`() = runTest {
         val env = HydrationTestEnv()
 
-        val result = env.hydration.openWriteBegin("/nope")
+        val result = env.hydration.openWriteBegin("conn1", "/nope")
 
         assertTrue(result is OpenResult.Failed)
         assertEquals("unknown_path", (result as OpenResult.Failed).error.message)
@@ -642,7 +642,7 @@ class HydrationImplTest {
         val env = HydrationTestEnv()
         env.stateDb.insertFolderEntry("/dir")
 
-        val result = env.hydration.openWriteBegin("/dir")
+        val result = env.hydration.openWriteBegin("conn1", "/dir")
 
         assertTrue(result is OpenResult.Failed)
         assertEquals("path_is_folder", (result as OpenResult.Failed).error.message)
@@ -655,10 +655,49 @@ class HydrationImplTest {
         // Seed a non-empty cache file to simulate a stale/partial cache left by a previous session.
         env.syncEngine.seedCacheContent("/big.bin", "stale content that must be discarded")
 
-        val result = env.hydration.openWriteBegin("/big.bin")
+        val result = env.hydration.openWriteBegin("conn1", "/big.bin")
 
         assertTrue(result is OpenResult.Ok)
         val cachePath = (result as OpenResult.Ok).cachePath
         assertEquals(0L, Files.size(cachePath), "TRUNCATE_EXISTING must discard all pre-existing bytes")
+    }
+
+    @Test
+    fun `openWriteBegin with handleId registers an open-set entry making the path busy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/live.bin", localSize = 512)
+        env.syncEngine.seedCacheContent("/live.bin", "content")
+
+        val result = env.hydration.openWriteBegin("conn1", "/live.bin", handleId = "wh-42")
+
+        assertTrue(result is OpenResult.Ok, "openWriteBegin must succeed: $result")
+        // The registered handle must block dehydrate — path is now busy.
+        assertEquals(
+            DehydrateResult.Busy,
+            env.hydration.dehydrate("/live.bin"),
+            "dehydrate must return Busy while open-set entry wh-42 is registered",
+        )
+        // After closeHandle the path is no longer busy.
+        env.hydration.closeHandle("conn1", "wh-42")
+        val afterClose = env.hydration.dehydrate("/live.bin")
+        assertTrue(
+            afterClose !is DehydrateResult.Busy,
+            "after closeHandle the path must not be Busy; got $afterClose",
+        )
+    }
+
+    @Test
+    fun `openWriteBegin without handleId does NOT register an open-set entry`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/oneshot.bin", localSize = 100)
+        env.syncEngine.seedCacheContent("/oneshot.bin", "content")
+
+        // null handleId → one-shot / bare-truncate path; no open-set registration.
+        val result = env.hydration.openWriteBegin("conn1", "/oneshot.bin", handleId = null)
+
+        assertTrue(result is OpenResult.Ok, "openWriteBegin must succeed: $result")
+        // dehydrate must NOT be Busy — no open-set entry was registered.
+        val dr = env.hydration.dehydrate("/oneshot.bin")
+        assertTrue(dr !is DehydrateResult.Busy, "dehydrate must not be Busy when handleId was null; got $dr")
     }
 }

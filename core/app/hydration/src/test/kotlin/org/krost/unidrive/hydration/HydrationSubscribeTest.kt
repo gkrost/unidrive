@@ -59,7 +59,7 @@ class HydrationSubscribeTest {
             override suspend fun rmdir(path: String): RmdirResult = RmdirResult.Failed(HydrationError.Generic("unused"))
             override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult =
                 CreateResult.Failed(HydrationError.Generic("unused"))
-            override suspend fun openWriteBegin(path: String): OpenResult = OpenResult.Failed(HydrationError.Generic("unused"))
+            override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult = OpenResult.Failed(HydrationError.Generic("unused"))
             override suspend fun rename(oldPath: String, newPath: String): RenameResult = RenameResult.Failed(HydrationError.Generic("unused"))
             override val events = kotlinx.coroutines.flow.MutableSharedFlow<HydrationEvent>()
             override fun onConnectionClosed(connectionId: String) {}
