@@ -27,7 +27,11 @@ Add to `SyncConfigTest`:
 ```kotlin
 @Test
 fun `effectiveExcludePatterns includes the default junk + internal excludes`() {
-    val cfg = SyncConfig.load(Files.createTempDirectory("ude").resolve("missing.toml"))
+    // Missing config still gets the defaults: SyncConfig.load(missing) returns
+    // defaults() (globalExcludePatterns = emptyList), so effectiveExcludePatterns
+    // = DEFAULT_EXCLUDE_PATTERNS + [] + []. (Intentional — junk is excluded even
+    // with no config file.)
+    val cfg = SyncConfig.load(tmpDir.resolve("missing.toml"), "any-profile")
     val eff = cfg.effectiveExcludePatterns("any-profile")
     // internal (consolidated from the former SyncEngine hardcode)
     assertTrue("/.unidrive-trash/**" in eff)
@@ -42,26 +46,39 @@ fun `effectiveExcludePatterns includes the default junk + internal excludes`() {
 
 @Test
 fun `effectiveExcludePatterns keeps user global + per-provider patterns additive`() {
-    val toml = Files.createTempDirectory("ude").resolve("config.toml")
+    // NOTE the TOML key is `exclude_patterns` (SyncConfig.kt:176/:208), NOT `exclude`.
+    val toml = tmpDir.resolve("additive.toml")
     Files.writeString(
         toml,
         """
         [general]
-        exclude = ["**/secret-*"]
+        sync_root = "/tmp/sync"
+        exclude_patterns = ["**/secret-*"]
+
         [providers.p1]
-        type = "internxt"
-        sync_root = "/tmp/x"
-        exclude = ["**/p1-only.bin"]
+        exclude_patterns = ["**/p1-only.bin"]
         """.trimIndent(),
     )
-    val eff = SyncConfig.load(toml).effectiveExcludePatterns("p1")
+    val eff = SyncConfig.load(toml, "p1").effectiveExcludePatterns("p1")
     assertTrue("**/secret-*" in eff)        // user global still present
     assertTrue("**/p1-only.bin" in eff)     // per-provider still present
     assertTrue("**/.directory.lock" in eff) // defaults still present
 }
 ```
 
-(Confirm the exact `SyncConfig.load(...)` entry point + the `[general] exclude` TOML key name by reading `SyncConfig.kt`; the second test's TOML must match the real schema. If the loader signature differs, adjust the test setup to match — do not change production behavior to fit the test.)
+`tmpDir` is the existing `SyncConfigTest` temp-dir field (used by the current tests, e.g. `tmpDir.resolve("config.toml")`); `SyncConfig.load(file, providerId)` is the 2-arg form the existing tests use.
+
+**Also in this step — fix the existing test that will otherwise break (review Bug B):** `SyncConfigTest.kt:607-621` (`effectiveExcludePatterns merges global and provider patterns`) currently asserts the *exact* list:
+
+```kotlin
+assertEquals(listOf("*.tmp", ".git/**", "Videos/**"), effective)
+```
+
+Prepending `DEFAULT_EXCLUDE_PATTERNS` changes the result. Update that assertion to keep an exact check, accounting for the new prefix (order is defaults → global → per-provider):
+
+```kotlin
+assertEquals(SyncConfig.DEFAULT_EXCLUDE_PATTERNS + listOf("*.tmp", ".git/**", "Videos/**"), effective)
+```
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -171,7 +188,7 @@ private val effectiveExcludePatterns =
     )
 ```
 
-with a reference to the single source, deduped (the production caller at `SyncCommand.kt:418` passes `config.effectiveExcludePatterns(...)`, which now already contains the defaults — `.distinct()` prevents doubling; test/daemon callers that pass `emptyList()` still get the defaults):
+with a reference to the single source, deduped. **Engine-side application is required, not just defensive (review Bug D):** `DaemonRuntime.kt:119` constructs `SyncEngine(provider, db, syncRoot = …, cacheKey = …)` with **no** `excludePatterns` argument (defaults to `emptyList()`); without the engine-side prefix the daemon's reconcile would sync junk **and** the internal trash/versions dirs. The production `sync` caller (`SyncCommand.kt:418`) passes `config.effectiveExcludePatterns(...)`, which now already contains the defaults — `.distinct()` dedups that double-inclusion; test callers passing `emptyList()` still get the defaults. (This is exactly why SP3 reconcile-in-daemon depends on it.)
 
 ```kotlin
 private val effectiveExcludePatterns =
