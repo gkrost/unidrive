@@ -43,6 +43,10 @@ class DaemonRuntime(
     private val syncRoot: Path,
     private val socketPath: Path,
     private val providerFactory: () -> CloudProvider,
+    // > 0 enables the in-process auto-poll (mount-view-refresh-design.md §5):
+    // one periodic enumerate on serveScope, serialised by the sync.enumerate
+    // in-flight guard. 0 = off (strictly reactive, the daemon default).
+    private val pollIntervalMs: Long = 0,
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -174,6 +178,14 @@ class DaemonRuntime(
                 server.registerHandler("sync.enumerate") { connId, json ->
                     enumerateHandler.handle(connId, json)
                 }
+
+                // Optional auto-poll (mount-view-refresh-design.md §5). Polls
+                // unconditionally when enabled — the enumerate path is cheap on a
+                // no-change incremental delta and a profile served by the daemon is
+                // assumed to back a mount view. Shares the sync.enumerate in-flight
+                // guard (never overlaps a manual refresh/enumerate). Launched on
+                // serveScope so it cancels with the daemon at shutdown.
+                EnumeratePoller(enumerateHandler, pollIntervalMs, serveScope).start()
 
                 // daemon.status verb (spec §4.3)
                 server.registerHandler("daemon.status") { _, _ ->
