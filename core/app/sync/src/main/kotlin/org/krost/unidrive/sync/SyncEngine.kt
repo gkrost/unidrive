@@ -22,7 +22,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.PatternSyntaxException
 
-class SyncEngine(
+open class SyncEngine(
     private val provider: CloudProvider,
     private val db: StateDatabase,
     private val syncRoot: Path,
@@ -452,7 +452,33 @@ class SyncEngine(
         db.renamePrefix(oldPath, newPath)
     }
 
-    suspend fun syncOnce(
+    /**
+     * One-way remote→state.db refresh for view consumers (the FUSE mount). Reuses the remote
+     * gather + state.db upsert, but NEVER scans sync_root, NEVER plans/executes a local→remote
+     * delete, and NEVER evaluates the empty-sync_root / max_delete_* guards. Remote-observed
+     * deletions flip state.db rows only on a COMPLETE enumeration (see reaping below). See
+     * docs/dev/specs/mount-view-refresh-design.md.
+     */
+    open suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
+        // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
+        // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
+        // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
+        if (reset) db.setSyncState("delta_cursor", "")
+        val remoteChanges: Map<String, CloudItem> =
+            try {
+                gatherRemoteChanges()
+            } catch (e: ProviderException) {
+                return EnumerateResult(ok = false, error = e.message)
+            }
+        // Completeness is recorded in sync_state by the gather, not on its return value.
+        val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
+        val upserted = remoteChanges.count { !it.value.deleted }
+        db.batch { updateRemoteEntries(remoteChanges) }
+        promotePendingCursor()
+        return EnumerateResult(ok = true, upserted = upserted, complete = complete)
+    }
+
+    open suspend fun syncOnce(
         dryRun: Boolean = false,
         forceDelete: Boolean = false,
         // UD-254: classifies WHY a sync pass started so post-incident log review
