@@ -473,9 +473,25 @@ open class SyncEngine(
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
         val upserted = remoteChanges.count { !it.value.deleted }
-        db.batch { updateRemoteEntries(remoteChanges) }
+        var reaped = 0
+        db.batch {
+            updateRemoteEntries(remoteChanges)
+            if (complete) {
+                // Reap ONLY on a complete enumeration (spec §3.1). The deleted items are
+                // already present in remoteChanges: gatherRemoteChanges runs
+                // detectMissingAfterFullSync on a full (cursor-null) gather, injecting
+                // deleted=true CloudItems for DB rows absent from the live set; incremental
+                // gathers carry provider tombstones the same way. updateRemoteEntries skips
+                // them, so we flip state.db here directly — never via provider.delete.
+                for ((path, item) in remoteChanges) {
+                    if (!item.deleted) continue
+                    db.markDeleted(path)
+                    reaped++
+                }
+            }
+        }
         promotePendingCursor()
-        return EnumerateResult(ok = true, upserted = upserted, complete = complete)
+        return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }
 
     open suspend fun syncOnce(

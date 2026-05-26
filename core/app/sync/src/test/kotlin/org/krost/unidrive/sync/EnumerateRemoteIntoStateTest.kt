@@ -68,6 +68,41 @@ class EnumerateRemoteIntoStateTest {
             assertEquals(0, provider.uploadedPaths.size, "enumerate must never upload")
         }
 
+    @Test
+    fun `incomplete enumeration does not mark omitted rows deleted`() =
+        runTest {
+            provider.putRemote("/keep.txt", "K")
+            engine.enumerateRemoteIntoState(reset = false)
+            assertNotNull(db.getEntry("/keep.txt"))
+
+            // Next delta is incomplete AND reports /keep.txt as a tombstone. The
+            // §3.1 invariant: reaping is suppressed because the page is incomplete,
+            // even though a tombstone is present.
+            provider.markNextDeltaIncomplete(tombstones = listOf("/keep.txt"))
+            val r = engine.enumerateRemoteIntoState(reset = false)
+
+            assertFalse(r.complete)
+            assertNotNull(db.getEntry("/keep.txt"), "tombstone on an INCOMPLETE delta must NOT be reaped")
+            assertEquals(0, r.reaped)
+        }
+
+    @Test
+    fun `complete enumeration reaps a remotely-deleted path`() =
+        runTest {
+            provider.putRemote("/gone.txt", "G")
+            provider.putRemote("/stay.txt", "S")
+            engine.enumerateRemoteIntoState(reset = false)
+
+            provider.removeRemote("/gone.txt")
+            val r = engine.enumerateRemoteIntoState(reset = true)
+
+            assertTrue(r.complete)
+            assertNull(db.getEntry("/gone.txt"), "complete enum must reap /gone.txt (alive view excludes DELETED)")
+            assertNotNull(db.getEntry("/stay.txt"))
+            assertEquals(1, r.reaped)
+            assertEquals(0, provider.deletedPaths.size, "reaping is a state.db flip, NOT a provider.delete")
+        }
+
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an
@@ -91,6 +126,7 @@ class EnumerateRemoteIntoStateTest {
         val deltaCursorsSeen = mutableListOf<String?>()
         private var nextCursorSeq = 0
         private var nextDeltaIncomplete = false
+        private var nextDeltaTombstones = listOf<String>()
 
         fun putRemote(path: String, content: String = "", isFolder: Boolean = false) {
             remote[path] =
@@ -111,9 +147,15 @@ class EnumerateRemoteIntoStateTest {
             remote.remove(path)
         }
 
-        /** The NEXT delta() call returns complete=false (single-use). */
-        fun markNextDeltaIncomplete() {
+        /**
+         * The NEXT delta() call returns complete=false and carries the given paths
+         * as deleted=true tombstones (single-use). Models a provider that reports
+         * some deletions then 503's a subtree — the enumerate path must suppress
+         * reaping on the incomplete page regardless of the carried tombstones.
+         */
+        fun markNextDeltaIncomplete(tombstones: List<String> = emptyList()) {
             nextDeltaIncomplete = true
+            nextDeltaTombstones = tombstones
         }
 
         override suspend fun authenticate() {}
@@ -124,6 +166,20 @@ class EnumerateRemoteIntoStateTest {
 
         override suspend fun getMetadata(path: String) = remote.getValue(path)
 
+        private fun tombstoneItem(path: String) =
+            CloudItem(
+                id = "id-$path",
+                name = path.substringAfterLast("/"),
+                path = path,
+                size = 0,
+                isFolder = false,
+                modified = null,
+                created = null,
+                hash = null,
+                mimeType = null,
+                deleted = true,
+            )
+
         override suspend fun delta(
             cursor: String?,
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -131,10 +187,17 @@ class EnumerateRemoteIntoStateTest {
         ): DeltaPage {
             deltaCursorsSeen.add(cursor)
             val complete = !nextDeltaIncomplete
-            // On an incomplete delta, return an empty page (a throttled subtree
-            // skip) — the engine must NOT infer the omitted paths as deletions.
-            val items = if (nextDeltaIncomplete) emptyList() else remote.values.toList()
+            // On an incomplete delta, return only the explicit tombstones (a throttled
+            // subtree skip that still reported some deletions) — the engine must NOT
+            // reap them while the page is incomplete.
+            val items =
+                if (nextDeltaIncomplete) {
+                    nextDeltaTombstones.map { tombstoneItem(it) }
+                } else {
+                    remote.values.toList()
+                }
             nextDeltaIncomplete = false
+            nextDeltaTombstones = emptyList()
             nextCursorSeq++
             return DeltaPage(
                 items = items,
