@@ -59,6 +59,18 @@ class ApplyOrderTest {
     }
 
     @Test
+    fun `a move that relocates a subtree runs before a deep child mkdir under the moved tree`() {
+        // move /old/A -> /A brings the whole /A subtree (incl. /A/B) with it; mkdir /A/B/C's
+        // immediate parent /A/B is produced only by that move (no direct mkdir /A/B). The dep
+        // must resolve through the moved ANCESTOR /A, not just the immediate parent.
+        val out = topologicalApplyOrder(listOf(mkdir("/A/B/C"), move("/old/A", "/A")))
+        assertTrue(
+            out.moveIdx("/A") < out.mkdirIdx("/A/B/C"),
+            "move relocating /A must precede mkdir /A/B/C (parent /A/B arrives via the move); got $out",
+        )
+    }
+
+    @Test
     fun `a stable list with no dependencies is returned unchanged`() {
         val input = listOf(mkdir("/a"), mkdir("/b"), mkdir("/c"))
         assertEquals(input, topologicalApplyOrder(input), "independent mkdirs keep input order")

@@ -31,6 +31,23 @@ fun topologicalApplyOrder(actions: List<SyncAction>): List<SyncAction> {
         if (produced != null) producer.putIfAbsent(produced, i)
     }
 
+    // The in-batch producer that makes `required` exist: its exact producer, OR — failing that —
+    // the closest ANCESTOR produced by a MoveRemote. A move relocates its whole subtree, so
+    // `MoveRemote(/old/A -> /A)` makes not just /A but /A/B, /A/B/C, … available; a deep
+    // `CreateRemoteFolder(/A/B/C)` whose immediate parent /A/B has no direct producer must still
+    // depend on that move. A CreateRemoteFolder ancestor does NOT cover descendants (mkdir /A
+    // creates only /A), so only MoveRemote ancestors satisfy a non-exact path.
+    fun producerFor(required: String): Int? {
+        producer[required]?.let { return it }
+        var anc = parentPath(required)
+        while (anc.isNotEmpty()) {
+            val p = producer[anc]
+            if (p != null && structural[p] is SyncAction.MoveRemote) return p
+            anc = parentPath(anc)
+        }
+        return null
+    }
+
     // prerequisites[i] = structural actions that must run before i (its parent / move source).
     val indegree = IntArray(structural.size)
     val dependents = Array(structural.size) { mutableListOf<Int>() }
@@ -42,7 +59,7 @@ fun topologicalApplyOrder(actions: List<SyncAction>): List<SyncAction> {
                 else -> emptyList()
             }
         for (req in required) {
-            val p = producer[req] ?: continue // req is pre-existing on the remote — no in-batch edge
+            val p = producerFor(req) ?: continue // req is pre-existing on the remote — no in-batch edge
             if (p != i) {
                 dependents[p].add(i)
                 indegree[i]++
