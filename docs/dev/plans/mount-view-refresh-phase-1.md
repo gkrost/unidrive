@@ -79,26 +79,30 @@ data class EnumerateResult(
  * docs/dev/specs/mount-view-refresh-design.md.
  */
 suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
-    if (reset) db.resetAll()
-    val gather = try {
-        gatherRemoteChanges(/* same args doSyncOnce passes for the remote-only path */)
+    // GAP-4: do NOT db.resetAll() up front (that empties state.db; if the gather then fails the
+    // mount serves nothing). reset clears only the CURSOR → a full re-enumeration whose Task-2
+    // complete-reap removes stale rows (mark-and-sweep), with no empty-view window.
+    if (reset) db.setSyncState("delta_cursor", "")
+    val remoteChanges: Map<String, CloudItem> = try {
+        gatherRemoteChanges()                           // GAP-1: returns Map<path,CloudItem> (SyncEngine.kt:1353)
     } catch (e: ProviderException) {
         return EnumerateResult(ok = false, error = e.message)
     }
-    var upserted = 0
-    db.batch {
-        for (item in gather.remoteItems) {            // adds + mods
-            updateRemoteEntries(/* entryFromCloudItem(item) per existing mapping */)
-            upserted++
-        }
-    }
-    promotePendingCursor()                            // incremental next time
-    return EnumerateResult(ok = true, upserted = upserted, complete = gather.complete)
-    // Task 2 inserts the complete-enumeration-only deletion reaping before the return.
+    // GAP-1: completeness is NOT on the return value — it lives in sync_state, set during gather.
+    val complete = (db.getSyncState("pending_cursor_complete") ?: "true") == "true"
+    val upserted = remoteChanges.count { !it.value.deleted }
+    db.batch { updateRemoteEntries(remoteChanges) }     // upserts live items; SKIPS deleted (SyncEngine.kt:2687)
+    // Task 2 inserts the complete-only deletion reaping here.
+    promotePendingCursor()                              // GAP-3: advances delta_cursor (resume-safe even if incomplete)
+    return EnumerateResult(ok = true, upserted = upserted, complete = complete)
 }
 ```
 
-Key: route the remote-item upsert through the SAME `db.batch { updateRemoteEntries(...) }` + `entryFromCloudItem` the legacy path uses (constraint B), so `hydration.list` sees well-formed rows. Do NOT call `scanner.scan()`, the reconciler, the apply loop, or any guard.
+Key (verified against source — addresses review gaps 1/3/4):
+- `gatherRemoteChanges()` returns `Map<String, CloudItem>` — there is **no** `.remoteItems`/`.complete`. Read completeness from `db.getSyncState("pending_cursor_complete")`. **Do not refactor `gatherRemoteChanges`'s signature** (it would touch existing `doSyncOnce` callers).
+- Upserts go through the SAME `db.batch { updateRemoteEntries(...) }` the legacy path uses (constraint B); `updateRemoteEntries` already skips `deleted=true` items, so `hydration.list` sees well-formed rows.
+- Do NOT call `scanner.scan()`, the reconciler, the apply loop, or any guard.
+- `promotePendingCursor()` advancing `delta_cursor` is resume-safe on an incomplete gather (the pending cursor is a continuation token); only **reaping** is gated on `complete` (Task 2), never the cursor.
 
 - [ ] **Step 5: Run the test — expect PASS.** Same command. Confirm `provider.deletedPaths` is empty and rows appear.
 
@@ -149,10 +153,18 @@ fun `complete enumeration reaps a remotely-deleted path`() = runTest {
 
 ```kotlin
     var reaped = 0
-    if (gather.complete) {                                  // ONLY on a complete enumeration
-        val missing = detectMissingAfterFullSync(/* present remote ids/paths from gather */)
+    if (complete) {                                         // reap ONLY on a complete enumeration (GAP-3: gate REAPING, not the cursor)
+        // GAP-2: detectMissingAfterFullSync (SyncEngine.kt:2097) finds DB entries whose remoteId
+        // is absent from the gathered live items and MUTATES its arg by injecting deleted=true
+        // CloudItems (for the legacy reconciler, which would DeleteLocal them). updateRemoteEntries
+        // SKIPS deleted items (:2687), so they never upsert. For STATE-ONLY semantics we run it on
+        // a throwaway copy, then markDeleted the injected paths ourselves — never via the
+        // reconciler / provider.delete.
+        val probe = remoteChanges.toMutableMap()
+        detectMissingAfterFullSync(probe)
+        val missingPaths = probe.filterValues { it.deleted }.keys - remoteChanges.keys
         db.batch {
-            for (path in missing) {
+            for (path in missingPaths) {
                 db.markDeleted(path)                        // state.db flip, NOT provider.delete
                 reaped++
                 // Task 3 adds cache eviction here.
@@ -160,7 +172,7 @@ fun `complete enumeration reaps a remotely-deleted path`() = runTest {
         }
     }
     promotePendingCursor()
-    return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = gather.complete)
+    return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
 ```
 
 - [ ] **Step 5: Run both — expect PASS.** Confirm test A keeps `/keep.txt`, test B reaps `/gone.txt`, and `provider.deletedPaths` stays empty in both.
@@ -225,7 +237,7 @@ fun `enumerate resumes from the persisted cursor unless reset`() = runTest {
 
 (Adapt the cursor-assertion to the fake's recorded-cursor hook — same shape the legacy sync tests use.)
 
-- [ ] **Step 2: Run — expect PASS or FAIL.** If `promotePendingCursor` already runs (Task 1) it may pass; if `reset` doesn't null the cursor, fix `resetAll()` ordering. Iterate to green.
+- [ ] **Step 2: Run — expect PASS or FAIL.** Task 1 already promotes the cursor and `reset` clears `delta_cursor` to `""` (which `gatherRemoteChanges`'s `storedCursor?.ifEmpty { null }` treats as a null/full cursor), so this likely passes; if not, check the `setSyncState("delta_cursor","")` ordering. Iterate to green.
 
 - [ ] **Step 3: Commit (if any change).** `git commit -m "test(sync): pin enumerate cursor-resume + reset semantics"`
 
@@ -274,7 +286,7 @@ fun `refresh uses legacy reconcile when no mount client is connected`() = runTes
 
 - [ ] **Step 2: Run — expect FAIL.**
 
-- [ ] **Step 3: Implement.** Add `mountClientConnected: () -> Boolean` ctor param to `RefreshRpcHandler`; in `handle`, branch: `if (mountClientConnected()) engine.enumerateRemoteIntoState(reset) else engine.syncOnce(skipTransfers = true, skipRemoteGather = false, …)`. In `DaemonRuntime`, pass `mountClientConnected = { server.clientCount > 0 }` (confirm the connected-client accessor at `DaemonRuntime.kt:160` / `IpcServer`). Keep the emitted event shape identical so `unidrive refresh`'s client rendering is unchanged.
+- [ ] **Step 3: Implement.** Add `mountClientConnected: () -> Boolean` ctor param to `RefreshRpcHandler`; in `handle`, branch: `if (mountClientConnected()) engine.enumerateRemoteIntoState(reset) else engine.syncOnce(skipTransfers = true, skipRemoteGather = false, …)`. In `DaemonRuntime`, pass `mountClientConnected = { server.clientCount > 0 }` (confirm the connected-client accessor at `DaemonRuntime.kt:160` / `IpcServer`). Keep the emitted event shape identical so `unidrive refresh`'s client rendering is unchanged. **GAP-5:** `RefreshCommand` sends `"force_delete":true`; on the enumerate branch that flag is meaningless (enumerate cannot delete remote content) — include `"force_delete_ignored":true` in the `enumerate.done`/terminal event when the request carried `force_delete=true && mountClientConnected`, so the drop is visible, not silent.
 
 - [ ] **Step 4: Run — expect PASS.** Run the full `:app:cli:test` + `:app:sync:test` suites for regressions.
 
@@ -291,6 +303,21 @@ With the two test-account mounts up (`internxt_test`, `posteo_onedrive`):
 - [ ] `unidrive -p posteo_onedrive refresh` → **succeeds** (no 77%-deletion safeguard), view reflects the remote.
 - [ ] Delete a file on the provider web UI → `unidrive refresh` → the path disappears from the mount (and its cache file is evicted); a file added on the web UI appears.
 - [ ] Confirm **no** provider `delete()` was issued during any refresh (daemon log).
+
+## Review feedback (PR #85 comment) — resolution
+
+Verified each item against source; criticals were real and are fixed in this revision.
+
+| # | Item | Severity | Resolution |
+|---|------|----------|------------|
+| 1 | `gatherRemoteChanges` returns `Map<String,CloudItem>`, not `.remoteItems`/`.complete` | **Critical** | **Fixed** Task 1: use the `Map` + read completeness from `db.getSyncState("pending_cursor_complete")`. No `gatherRemoteChanges` signature refactor (would touch `doSyncOnce` callers). |
+| 2 | `detectMissingAfterFullSync` routing unspecified (mutates map; `updateRemoteEntries` skips deleted) | **Critical** | **Fixed** Task 2: run it on a throwaway copy, extract the injected `deleted=true` paths, `db.markDeleted` them directly (state-only) — never through the reconciler/`provider.delete`. |
+| 3 | Unconditional `promotePendingCursor` | Medium | **Clarified** Task 1: cursor advance is resume-safe on an incomplete gather (continuation token); only **reaping** is gated on `complete` (Task 2). |
+| 4 | `reset=true` empties `state.db` before a gather that may fail | Medium | **Fixed** Task 1: `reset` clears only `delta_cursor` (mark-and-sweep via the Task-2 complete-reap), so there's no empty-view window. |
+| 5 | `--force-delete` silently dropped on the enumerate branch | Minor | **Addressed** Task 6: surface `force_delete_ignored:true` in the terminal event. |
+| 6 | Coupling `enumerateRemoteIntoState` to legacy `SyncEngine` deepens dependence | Architectural | **Documented** spec §8: pragmatic for Phase 1 (reuses the gather/upsert/cursor helpers); note "extract to a standalone `EnumerateService(provider, StateDatabase, cursor)` on the TrackingEngine migration." Not blocking. |
+| 7 | Cache-eviction race vs the co-daemon reading the file | Medium | **Documented** spec §6 + Phase 3: the mount's `open_read` already re-hydrates on cache-miss; a markDeleted row makes the row gone so `open` fails cleanly. Phase-3 task verifies the co-daemon's ENOENT path. |
+| 8 | No-change enumeration cost depends on provider delta behaviour | Monitoring | **Documented** spec §5: incremental delta should be O(changes); OneDrive `$select` slim payloads; accept provider-dependent cost, measure on the 195k account. |
 
 ## Subsequent phases (separate plans)
 

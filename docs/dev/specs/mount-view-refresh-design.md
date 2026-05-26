@@ -29,7 +29,7 @@ A new engine entry point: `SyncEngine.enumerateRemoteIntoState(reset: Boolean): 
 3. **Never** emits or executes `DeleteRemote` / `Upload` / `MoveRemote` (no local→remote propagation) and runs **no Pass-1/Pass-2 apply loop**.
 4. **Never** evaluates the empty-sync_root guard (`:827`), the `sync_root`-drift guard (`:556`), or the `max_delete_*` safeguards (`:959`) — there are no local-inferred deletes to guard against. It must **not** set `forceDelete=true` (that disables remote-side safety the legacy path needs and is semantically wrong).
 5. **Remote-observed deletions → `state.db` status flip only.** Reuse `detectMissingAfterFullSync` (`:2097`) to find "DB row absent from a complete delta," but route its result to `StateDatabase.markDeleted` (`:602`) + **hydration-cache eviction** (`Files.deleteIfExists(resolveCachePath(path))`) — **not** to a provider `delete()`. (Closes the BACKLOG cache-eviction-on-remote-delete item too.)
-6. **Promotes the cursor** like the no-transfer success path (`promotePendingCursor` `:2070`) so successive enumerations are incremental. With `reset=true`, call `db.resetAll()` (`:72`) first (full re-enumeration).
+6. **Promotes the cursor** like the no-transfer success path (`promotePendingCursor` `:2070`) so successive enumerations are incremental (cursor advance is resume-safe even on an incomplete gather; only *reaping* in step 5 is gated on completeness). With `reset=true`, clear **only the cursor** (`delta_cursor → ""`) to force a full re-enumeration whose complete-reap (step 5) sweeps stale rows (**mark-and-sweep**). Do **not** `db.resetAll()` up front: that empties `state.db`, and if the subsequent gather fails the mount serves nothing until the next success (the enumerate path has no `sync_root` fallback). [review gap 4]
 
 ### 3.1 Safety invariant (mandatory, own named test)
 
@@ -72,6 +72,8 @@ The Rust co-daemon caches `getattr`/`readdir` results (`CachedAttr`). After an e
 
 Phase 3 (sibling repo). Phase 1 can ship with the JVM side correct and rely on the co-daemon's existing re-read behaviour / a short TTL; the event-push is the clean finish. **This is a `unidrive-mount-linux` BACKLOG entry**, filed when Phase 1 lands.
 
+**Eviction/read race [review gap 7]:** enumerate evicts a cache file (step 5) while the co-daemon may hold it open. Linux fd semantics keep existing opens valid; a *new* `open()` after eviction gets ENOENT — but the row was also `markDeleted` (the path is gone on the remote), so `open_read` resolving a deleted row should fail cleanly (ENOENT to the kernel), not hang. For a row that is merely *re-hydratable* (not deleted), `open_read`'s existing cache-miss path re-downloads. The Phase-3 task must verify the co-daemon's ENOENT-on-open path for a reaped path.
+
 ## 7. Constraints any implementation must satisfy (from the knot doc §6–7)
 
 - **A.** `RefreshRpcHandler` routes to the enumerate path when a mount client is connected.
@@ -91,6 +93,8 @@ Phase 3 (sibling repo). Phase 1 can ship with the JVM side correct and rely on t
 - Replacing the legacy `SyncEngine` reconcile for real-`sync_root` profiles (`refresh.run` stays).
 - Migrating the daemon/mount onto `TrackingEngine` (separate, larger effort; this cut is within the legacy engine the daemon already uses).
 - Provider push/webhooks (OneDrive supports them; a future efficiency add — polling is the baseline).
+
+**Coupling note [review gap 6]:** `enumerateRemoteIntoState` lives on `SyncEngine` and reuses its gather/upsert/cursor helpers — pragmatic for Phase 1 (no duplication), but it does deepen the daemon/mount's dependence on the legacy engine while the tracking-set engine is the stated migration target. The enumerate path is intentionally a *thin, self-contained read operation* over `provider.delta()` + `StateDatabase` with no `sync_root` coupling, so it is **extractable** to a standalone `EnumerateService(provider, StateDatabase, cursorStore)` when the daemon/mount migrates off `SyncEngine`. Marked "extract on migration"; not blocking Phase 1.
 
 ## 9. Test plan (high level; per-task detail in the Phase-1 plan)
 
