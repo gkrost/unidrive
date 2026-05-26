@@ -2890,6 +2890,44 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `uploadFromCache advances the local watermark for skipped excluded paths (no recovery replay)`() =
+        runTest {
+            // Skipping the upload must still advance localMtime: the co-daemon's
+            // crash-recovery scanner replays open_write for any cache file whose mtime
+            // exceeds HydrationImpl.lastSynced() (= localMtime); a skipped keep-local file
+            // with a stale/absent watermark would be replayed on EVERY daemon restart.
+            val cacheRoot = Files.createTempDirectory("unidrive-excl-watermark-test")
+            val engineWithDefaults =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+            val excludedPath = "/sub/.directory.lock"
+            val cacheFile = Files.createTempFile("excl-watermark", ".bin")
+            Files.writeString(cacheFile, "junk")
+            val cacheMtime = Files.getLastModifiedTime(cacheFile).toMillis()
+
+            engineWithDefaults.uploadFromCache(excludedPath, cacheFile)
+
+            val entry = db.getEntry(excludedPath)
+            assertNotNull(entry, "skip path must persist a keep-local row so recovery has a watermark")
+            assertEquals(
+                cacheMtime,
+                entry.localMtime,
+                "localMtime watermark must equal the cache file mtime so crash-recovery does not replay the excluded file",
+            )
+            assertNull(entry.remoteId, "excluded keep-local file must NOT get a remoteId (never uploaded)")
+            assertFalse(
+                provider.uploadedPaths.contains(excludedPath),
+                "provider.upload must not be called for the excluded path",
+            )
+        }
+
+    @Test
     fun `ensureHydrated rejects a corrupted download when verifyIntegrity is enabled`() =
         runTest {
             // Minimal CloudProvider that returns Sha256Hex as its hash algorithm so
