@@ -88,6 +88,14 @@ class HydrationIpcHandler(
     private var subscriberWriter: (suspend (String, String) -> Boolean)? = null
 
     /**
+     * True when at least one connection has issued `hydration.subscribe` — i.e. a
+     * mount client (the FUSE co-daemon) is serving this profile's view. The daemon
+     * uses this to route `refresh.run` to the one-way enumerate path rather than the
+     * legacy sync_root reconcile (mount-view-refresh-design.md §4).
+     */
+    fun hasSubscribers(): Boolean = subscribers.isNotEmpty()
+
+    /**
      * Production wiring entry point. Stores the scope used to launch per-subscriber
      * writer coroutines and the function used to write a single NDJSON line to a
      * given connection. The daemon also registers onSubscriberDisconnect on the
