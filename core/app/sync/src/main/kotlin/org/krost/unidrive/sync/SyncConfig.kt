@@ -313,7 +313,7 @@ data class SyncConfig(
     fun providerExcludePatterns(providerId: String): List<String> = providers[providerId]?.excludePatterns ?: emptyList()
 
     fun effectiveExcludePatterns(providerId: String): List<String> =
-        globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
+        DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
     data class ProviderConfig(
         val pinIncludes: List<String> = emptyList(),
@@ -323,6 +323,34 @@ data class SyncConfig(
     )
 
     companion object {
+        /**
+         * Patterns excluded from sync for every profile, before any user
+         * (TOML global / per-provider / CLI --exclude) patterns. Consolidates
+         * the unidrive-internal excludes (formerly hardcoded in SyncEngine)
+         * with desktop/OS/editor junk that must never reach the cloud.
+         * Matched by Reconciler.matchesGlob (handles **&#47;, *, ?, and
+         * escapes other chars incl. dollar-sign).
+         */
+        val DEFAULT_EXCLUDE_PATTERNS: List<String> = listOf(
+            // unidrive-internal
+            "/.unidrive-trash/**",
+            "/.unidrive-versions/**",
+            // desktop / OS / editor junk
+            "**/.directory.lock", // KDE Dolphin
+            "**/.DS_Store",       // macOS
+            "**/._*",             // macOS AppleDouble
+            "**/Thumbs.db",       // Windows
+            "**/ehthumbs.db",     // Windows
+            "**/desktop.ini",     // Windows
+            "**/~\$*",            // MS Office lock files
+            "**/*.part",          // partial downloads
+            "**/*.crdownload",    // Chrome partial download
+            "**/*.swp",           // vim swap
+            "**/*.swx",           // vim swap
+            "**/*.tmp",           // generic temp
+            "**/*~",              // generic backup
+        )
+
         private val home: String = System.getenv("HOME") ?: System.getProperty("user.home")
 
         /**
