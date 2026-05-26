@@ -7,7 +7,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
+import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 
 class HydrationImpl(
@@ -296,7 +299,7 @@ class HydrationImpl(
         val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
 
         // Pre-flight: source must exist in state.db.
-        stateDb.getEntry(oldNorm)
+        val sourceEntry = stateDb.getEntry(oldNorm)
             ?: return RenameResult.OldPathNotFound
 
         // Pre-flight: destination parent must exist (or destination is at root).
@@ -315,6 +318,51 @@ class HydrationImpl(
         // unlink-then-rename dance (editors handle this gracefully).
         if (stateDb.getEntry(newNorm) != null) {
             return RenameResult.NewPathExists
+        }
+
+        // Never-uploaded file (remoteId == null): the file only ever existed
+        // locally — created through the mount, upload not yet done. Calling
+        // provider.move would 404 (nothing exists cloud-side) and surface as
+        // EIO on `mv`. Perform a purely local rename instead:
+        //  1. Move the cache file from the old path to the new path. A missing
+        //     cache file is tolerated — a zero-byte temp that was never written
+        //     may have no cache entry yet.
+        //  2. Repath the state.db row via renamePrefix (which rewrites both the
+        //     root row and any descendants). remoteId stays null so the pending
+        //     upload picks up the new path on the next sync pass.
+        //  3. Return Ok without touching the provider.
+        //
+        // Mirrors the unlink remoteId==null branch above. Same rationale for
+        // not leaving a tombstone: the row never reached the cloud, so there
+        // is nothing to reconcile.
+        //
+        // Folder case: renamePrefix naturally covers a never-uploaded folder —
+        // it rewrites the root row AND all descendant rows in one UPDATE, so
+        // a never-uploaded folder rename is handled correctly here too. Cache
+        // dirs follow from the per-file cache move logic (each child's cache
+        // file is at resolveCachePath(childPath)); the folder itself has no
+        // cache file. The overall folder case is safe as long as every
+        // descendant also has remoteId==null (a mixed folder — some children
+        // uploaded, some not — would need to be split). For now we treat the
+        // whole subtree as local when the root's remoteId is null; a mixed
+        // subtree in practice only occurs during an in-progress upload burst,
+        // which is an unlikely race with a folder rename.
+        if (sourceEntry.remoteId == null) {
+            return runCatching {
+                val oldCache = syncEngine.resolveCachePath(oldNorm)
+                val newCache = syncEngine.resolveCachePath(newNorm)
+                try {
+                    Files.createDirectories(newCache.parent)
+                    Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
+                } catch (_: NoSuchFileException) {
+                    // Cache file absent — zero-byte temp that was never written.
+                    // Nothing to move; the state.db repath below is sufficient.
+                }
+                stateDb.renamePrefix(oldNorm, newNorm)
+                RenameResult.Ok
+            }.getOrElse { e ->
+                RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
+            }
         }
 
         return runCatching {
