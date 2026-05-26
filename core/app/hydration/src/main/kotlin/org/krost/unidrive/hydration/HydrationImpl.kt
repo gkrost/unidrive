@@ -1,8 +1,11 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.sync.StateDatabase
@@ -13,6 +16,22 @@ import java.util.concurrent.ConcurrentHashMap
 class HydrationImpl(
     private val syncEngine: SyncEngine,
     private val stateDb: StateDatabase,
+    /**
+     * Scope used to launch crash-recovery uploads in the background so that
+     * `open_write` with a `recovery-N` handle ID returns immediately rather
+     * than blocking until the upload completes. Crash-recovery happens before
+     * the FUSE mount goes live; a blocking upload for large files (e.g. 650 MB)
+     * would hang the co-daemon indefinitely before the mountpoint ever appears.
+     *
+     * Normal-path (FUSE RELEASE) `open_write` calls still block: the caller
+     * already returned 0 from `close(2)`, so upload failure must be stamped for
+     * `unidrive doctor` to surface — and `fsync`-driven uploads must complete
+     * synchronously to give the application meaningful error feedback.
+     *
+     * Defaults to a standalone `Dispatchers.IO` scope so tests that construct
+     * [HydrationImpl] directly do not need to pass one.
+     */
+    private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
 ) : Hydration {
 
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
@@ -65,6 +84,34 @@ class HydrationImpl(
     override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
         stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.Generic("Unknown path: $path"))
+
+        // Crash-recovery replay: the co-daemon's cache_scanner fires open_write with
+        // handle_id = "recovery-<n>" for each cache file whose mtime exceeds the
+        // last_synced watermark. These calls happen BEFORE the FUSE mount goes live,
+        // and a synchronous upload of a large file (e.g. 650 MB) would block the
+        // co-daemon indefinitely — the mountpoint would never appear.
+        //
+        // For recovery handles, launch the upload on recoveryUploadScope and return Ok
+        // immediately so the co-daemon can proceed to mount(). The upload still runs;
+        // on failure, markUploadFailed stamps the row so `unidrive doctor` can surface
+        // the gap. The connection is already registered in openSets so closeHandle
+        // from the co-daemon's paired close_handle call cleans it up normally.
+        if (handleId.startsWith("recovery-")) {
+            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
+            recoveryUploadScope.launch {
+                try {
+                    _events.emit(HydrationEvent.Hydrating(path))
+                    syncEngine.uploadFromCache(path, cachePath)
+                    val bytes = java.nio.file.Files.size(cachePath)
+                    _events.emit(HydrationEvent.Hydrated(path, bytes))
+                } catch (e: Exception) {
+                    runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                    val err = HydrationError.Generic(e.message ?: "upload failed")
+                    _events.emit(HydrationEvent.Failed(path, err))
+                }
+            }
+            return OpenResult.Ok(cachePath)
+        }
 
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
@@ -238,6 +285,40 @@ class HydrationImpl(
         }
     }
 
+    private fun prepareEmptyCache(path: String): java.nio.file.Path {
+        val cachePath = syncEngine.resolveCachePath(path)
+        java.nio.file.Files.createDirectories(cachePath.parent)
+        java.nio.file.Files.newByteChannel(
+            cachePath,
+            java.util.EnumSet.of(
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+            ),
+        ).close()
+        return cachePath
+    }
+
+    override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val entry = stateDb.getEntry(normalised)
+            ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
+        if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
+        return try {
+            val cachePath = prepareEmptyCache(normalised)
+            // When a live handle id is provided (O_TRUNC open), register it in
+            // the connection's open-set so dehydrate/busy-checks see the file as
+            // open.  One-shot callers (setattr bare-truncate) pass null → no
+            // registration, matching the existing no-spurious-close_handle contract.
+            if (handleId != null) {
+                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+            }
+            OpenResult.Ok(cachePath)
+        } catch (e: Exception) {
+            OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
+        }
+    }
+
     override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
@@ -253,20 +334,8 @@ class HydrationImpl(
                 if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
             }
 
-            val cachePath = syncEngine.resolveCachePath(normalised)
             try {
-                java.nio.file.Files.createDirectories(cachePath.parent)
-                // Materialise an empty cache file; truncate if some stray byte
-                // is sitting there from a previous abortive run.
-                java.nio.file.Files.newByteChannel(
-                    cachePath,
-                    java.util.EnumSet.of(
-                        java.nio.file.StandardOpenOption.CREATE,
-                        java.nio.file.StandardOpenOption.WRITE,
-                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-                    ),
-                ).close()
-
+                val cachePath = prepareEmptyCache(normalised)
                 val now = java.time.Instant.now()
                 stateDb.upsertEntry(
                     org.krost.unidrive.sync.model.SyncEntry(

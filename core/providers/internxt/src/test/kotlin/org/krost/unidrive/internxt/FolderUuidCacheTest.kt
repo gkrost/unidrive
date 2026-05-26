@@ -68,6 +68,21 @@ class FolderUuidCacheTest {
     }
 
     @Test
+    fun `invalidate drops a single stale entry leaving others intact`() {
+        // Guards: folderCache.invalidate(parentUuid, name) must remove exactly the
+        // targeted entry so a subsequent get returns null (self-heal on observed 404).
+        // Other entries under the same parent must not be affected.
+        val cache = FolderUuidCache()
+        cache.put("parent-1", "stale-folder", "uuid-stale")
+        cache.put("parent-1", "live-folder", "uuid-live")
+
+        cache.invalidate("parent-1", "stale-folder")
+
+        assertNull(cache.get("parent-1", "stale-folder"), "invalidated entry must return null")
+        assertEquals("uuid-live", cache.get("parent-1", "live-folder"), "sibling entry must be unaffected")
+    }
+
+    @Test
     fun `size and clear support the test infrastructure`() {
         val cache = FolderUuidCache()
         assertEquals(0, cache.size())

@@ -487,7 +487,10 @@ open class SyncCommand : Runnable {
                 ipcServer.start(this)
 
                 // Wire Phase-1 hydration SPI as IpcServer handlers.
-                val hydration = HydrationImpl(engine, db)
+                // Pass `this` (the runBlocking scope) as recoveryUploadScope so that
+                // crash-recovery open_write calls run on the daemon's managed scope
+                // rather than a fire-and-forget orphan scope.
+                val hydration = HydrationImpl(engine, db, recoveryUploadScope = this)
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in HydrationIpcHandler.VERBS) {
                     ipcServer.registerHandler(verb) { connId, json ->

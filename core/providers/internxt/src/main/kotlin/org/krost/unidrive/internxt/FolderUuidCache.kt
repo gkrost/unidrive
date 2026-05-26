@@ -51,6 +51,9 @@ class FolderUuidCache {
         sanitizedName: String,
     ): String? = map[Key(parentUuid, sanitizedName)]
 
+    /** Drop a single stale entry (e.g. after its UUID 404s out-of-band). */
+    fun invalidate(parentUuid: String, sanitizedName: String) { map.remove(Key(parentUuid, sanitizedName)) }
+
     /** For tests. Returns the number of cached entries. */
     fun size(): Int = map.size
 

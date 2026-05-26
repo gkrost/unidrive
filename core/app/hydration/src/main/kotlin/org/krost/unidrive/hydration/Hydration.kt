@@ -27,6 +27,7 @@ interface Hydration {
     suspend fun unlink(path: String): UnlinkResult
     suspend fun rmdir(path: String): RmdirResult
     suspend fun create(connectionId: String, handleId: String, path: String): CreateResult
+    suspend fun openWriteBegin(connectionId: String, path: String, handleId: String? = null): OpenResult
     suspend fun rename(oldPath: String, newPath: String): RenameResult
 
     val events: Flow<HydrationEvent>
