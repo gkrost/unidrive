@@ -2810,6 +2810,85 @@ class SyncEngineTest {
             assertTrue(lines[0].contains("\"result\":\"failed:"), "audit entry must record a failed result")
         }
 
+    // ── uploadFromCache: excluded-path guard (keep-local, surface (b) fix) ───
+
+    @Test
+    fun `uploadFromCache does not upload excluded desktop-junk paths`() =
+        runTest {
+            // Paths that match DEFAULT_EXCLUDE_PATTERNS: .directory.lock, Thumbs.db, *.tmp
+            val excludedPaths = listOf(
+                "/.directory.lock",
+                "/sub/.directory.lock",
+                "/Thumbs.db",
+                "/pics/Thumbs.db",
+                "/work/draft.tmp",
+            )
+            val cacheRoot = Files.createTempDirectory("unidrive-excl-test")
+            val engineWithDefaults =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            for (excludedPath in excludedPaths) {
+                val cacheFile = Files.createTempFile("excl-cache", ".bin")
+                Files.writeString(cacheFile, "junk")
+                val uploadsBefore = provider.uploadedPaths.size
+
+                engineWithDefaults.uploadFromCache(excludedPath, cacheFile)
+
+                assertEquals(
+                    uploadsBefore,
+                    provider.uploadedPaths.size,
+                    "provider.upload must NOT be called for excluded path $excludedPath",
+                )
+            }
+        }
+
+    @Test
+    fun `uploadFromCache uploads non-excluded paths normally`() =
+        runTest {
+            val cacheRoot = Files.createTempDirectory("unidrive-excl-nonexcl-test")
+            val engineWithDefaults =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                )
+
+            val cacheFile = Files.createTempFile("real-cache", ".bin")
+            Files.writeString(cacheFile, "real content")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/real.txt",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.now(),
+                ),
+            )
+
+            engineWithDefaults.uploadFromCache("/real.txt", cacheFile)
+
+            assertTrue(
+                provider.uploadedPaths.contains("/real.txt"),
+                "provider.upload MUST be called for a non-excluded path; got: ${provider.uploadedPaths}",
+            )
+        }
+
     @Test
     fun `ensureHydrated rejects a corrupted download when verifyIntegrity is enabled`() =
         runTest {

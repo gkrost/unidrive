@@ -242,11 +242,18 @@ class SyncEngine(
      * indicates the cache content changed. Updates the DB row with the new
      * remote metadata (id, hash, size, mtime).
      */
+    private fun isExcluded(path: String): Boolean =
+        effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
+
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
+        if (isExcluded(path)) {
+            log.info("Skipping upload of excluded path (keep-local): {}", path)
+            return
+        }
         val existingEntry = db.getEntry(path)
         val prevHash = existingEntry?.remoteHash
         val existingRemoteId = existingEntry?.remoteId
