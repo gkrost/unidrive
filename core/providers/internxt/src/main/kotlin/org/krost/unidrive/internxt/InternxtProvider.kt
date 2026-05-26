@@ -773,22 +773,107 @@ class InternxtProvider(
                     )
                 } catch (e: InternxtApiException) {
                     // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
-                    // path that already exists on remote. Re-resolve the UUID and retry as PUT
-                    // rather than stranding the local edit.
+                    // path that already exists on remote.  Safe overwrite requires PROVEN
+                    // content identity; anything else keeps both copies.
                     if (e.statusCode != 409) throw e
                     log.warn(
                         "UD-366: 409 on POST /files for {} despite existingRemoteId=null — " +
-                            "reconciler/DB drift; re-resolving UUID and retrying as PUT /files/{{uuid}}",
+                            "reconciler/DB drift; inspecting remote for content-identity check",
                         remotePath,
                     )
-                    val existing = getMetadata(remotePath)
-                    if (existing.isFolder) throw e
-                    api.replaceFile(
-                        uuid = existing.id,
-                        size = fileSize,
-                        fileId = bucketEntry.id,
-                        modificationTime = localMtime,
-                    )
+                    // Get the raw InternxtFile (not CloudItem) so we keep fileId, the
+                    // bucket-entry content-address.  parentUuid is already resolved above.
+                    val folderContent = api.getFolderContents(parentUuid)
+                    val remoteFile =
+                        folderContent.files.find { f ->
+                            val baseName = sanitizeName(f.plainName ?: f.name ?: "")
+                            val cleanType = f.type?.let { sanitizeName(it) }
+                            val fullName =
+                                if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) {
+                                    "$baseName.$cleanType"
+                                } else {
+                                    baseName
+                                }
+                            fullName == segments.last() || baseName == segments.last()
+                        }
+                    val remoteFolder =
+                        folderContent.children.find { folder ->
+                            sanitizeName(folder.plainName ?: folder.name ?: "") == segments.last()
+                        }
+                    if (remoteFolder != null || remoteFile == null) {
+                        // Path maps to a folder, or the listing doesn't see it at all —
+                        // keep the original behaviour (re-throw).
+                        throw e
+                    }
+                    // Content-identity: bucket-entry fileId is Internxt's content-address.
+                    // Equal fileId AND equal size ⇒ provably same content → safe adopt.
+                    // Null fileId, size mismatch, or fileId mismatch → not provably identical
+                    // → keep both to prevent silent data loss.
+                    val remoteFileId = remoteFile.fileId
+                    val remoteSize = remoteFile.size.toLongOrNull() ?: -1L
+                    val contentIdentical =
+                        remoteFileId != null &&
+                            remoteFileId == bucketEntry.id &&
+                            remoteSize == fileSize
+                    if (contentIdentical) {
+                        log.info(
+                            "UD-366: remote {} has identical content (fileId={}, size={}) — adopting via replaceFile",
+                            remotePath, bucketEntry.id, fileSize,
+                        )
+                        api.replaceFile(
+                            uuid = remoteFile.uuid,
+                            size = fileSize,
+                            fileId = bucketEntry.id,
+                            modificationTime = localMtime,
+                        )
+                    } else {
+                        // KEEP BOTH: leave remote untouched; land local under a conflict name.
+                        val today =
+                            java.time.format.DateTimeFormatter
+                                .ofPattern("yyyy-MM-dd")
+                                .withZone(java.time.ZoneOffset.UTC)
+                                .format(java.time.Instant.now())
+                        log.warn(
+                            "UD-366: collision on {} — remote fileId={} size={} differs from local fileId={} size={}; " +
+                                "preserving remote untouched, uploading local as conflict copy",
+                            remotePath, remoteFileId, remoteSize, bucketEntry.id, fileSize,
+                        )
+                        // Upload conflict copy: reuse the already-committed bucket entry
+                        // (same fileId) under a conflict-suffixed name.
+                        var conflictResult: org.krost.unidrive.internxt.model.InternxtFile? = null
+                        for (counter in 1..MAX_KEEP_OVERWRITTEN_RETRIES) {
+                            val conflictPlainName = conflictName(plainName, today, counter)
+                            val conflictEncryptedName =
+                                crypto.encryptName(conflictPlainName, "${creds.mnemonic}-$parentUuid")
+                            try {
+                                conflictResult =
+                                    api.createFile(
+                                        bucket = bucket,
+                                        folderUuid = parentUuid,
+                                        plainName = conflictPlainName,
+                                        encryptedName = conflictEncryptedName,
+                                        size = fileSize,
+                                        type = ext,
+                                        fileId = bucketEntry.id,
+                                    )
+                                break
+                            } catch (ce: InternxtApiException) {
+                                if (ce.statusCode == 409 && counter < MAX_KEEP_OVERWRITTEN_RETRIES) {
+                                    log.warn(
+                                        "UD-366: conflict name '{}' also taken; trying counter {}",
+                                        conflictPlainName, counter + 1,
+                                    )
+                                    continue
+                                }
+                                throw ce
+                            }
+                        }
+                        conflictResult
+                            ?: throw InternxtApiException(
+                                message = "UD-366: exhausted $MAX_KEEP_OVERWRITTEN_RETRIES conflict-name attempts for $remotePath",
+                                statusCode = 409,
+                            )
+                    }
                 }
             finalItem = created.toCloudItem(parentPath)
         }
@@ -1589,6 +1674,21 @@ class InternxtProvider(
                     .format(now)
             val base = "$plainName.unidrive-prev-$stamp"
             return if (counter <= 1) base else "$base-$counter"
+        }
+
+        /**
+         * UD-366: build the conflict-copy plainName for the keep-both collision
+         * handler.  Format: `$plainName (conflict $date)` for counter=1, then
+         * `$plainName (conflict $date) (N)` for N ≥ 2.  [date] is a yyyy-MM-dd
+         * string passed by the caller so it can be pinned in tests.
+         */
+        internal fun conflictName(
+            plainName: String,
+            date: String,
+            counter: Int = 1,
+        ): String {
+            val base = "$plainName (conflict $date)"
+            return if (counter <= 1) base else "$base ($counter)"
         }
 
         /** UD-369: split a leaf filename into (plainName, type). Returned type is the bare extension or null. */
