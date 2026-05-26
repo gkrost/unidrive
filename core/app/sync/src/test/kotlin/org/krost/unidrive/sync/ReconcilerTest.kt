@@ -131,17 +131,19 @@ class ReconcilerTest {
     fun `UD-373 matchesGlob compiles each distinct pattern exactly once (cached across calls)`() {
         // Reset the spy counter so this test sees only its own invocations even if other
         // tests in the suite ran first and warmed the cache for unrelated patterns.
+        // Use patterns NOT in DEFAULT_EXCLUDE_PATTERNS to avoid cache-pre-warm from other
+        // tests (e.g. LocalScannerTest) that exercise the default set before this test runs.
         Reconciler.buildGlobRegexInvocations.set(0)
         // Same pattern, many different paths → single buildGlobRegex call.
         repeat(50) { i ->
-            Reconciler.matchesGlob("/dir/file-$i.tmp", "**/*.tmp")
+            Reconciler.matchesGlob("/dir/file-$i.zzz373", "**/*.zzz373")
         }
         // A second distinct pattern → second compile.
         repeat(50) { i ->
-            Reconciler.matchesGlob("/dir/file-$i.bak", "**/*.bak")
+            Reconciler.matchesGlob("/dir/file-$i.qqq373", "**/*.qqq373")
         }
         // The first pattern again — must not recompile (cache hit).
-        Reconciler.matchesGlob("/dir/file-99.tmp", "**/*.tmp")
+        Reconciler.matchesGlob("/dir/file-99.zzz373", "**/*.zzz373")
         assertEquals(2L, Reconciler.buildGlobRegexInvocations.get())
     }
 
@@ -1775,5 +1777,21 @@ class ReconcilerTest {
         val move = assertIs<SyncAction.MoveRemote>(finalized[0])
         assertEquals("/new.txt", move.path)
         assertEquals("/old.txt", move.fromPath)
+    }
+
+    @Test
+    fun `default exclude patterns match their target paths at root and nested`() {
+        fun m(path: String, pat: String) = Reconciler.matchesGlob(path, pat)
+        // ~$* — the $ must be escaped (else-branch Regex.escape), root + nested
+        assertTrue(m("/~\$report.docx", "**/~\$*"))
+        assertTrue(m("/Documents/~\$report.docx", "**/~\$*"))
+        // **/ matches both root-level and nested
+        assertTrue(m("/.directory.lock", "**/.directory.lock"))
+        assertTrue(m("/a/b/.directory.lock", "**/.directory.lock"))
+        // *.swp matches dotfile-prefixed swap (vim writes .name.swp)
+        assertTrue(m("/.notes.txt.swp", "**/*.swp"))
+        // negative: a real file must NOT match a junk pattern
+        assertFalse(m("/report.docx", "**/~\$*"))
+        assertFalse(m("/important.txt", "**/*.tmp"))
     }
 }

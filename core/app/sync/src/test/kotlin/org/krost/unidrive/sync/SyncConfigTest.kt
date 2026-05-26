@@ -618,7 +618,7 @@ class SyncConfigTest {
         Files.writeString(configFile, toml)
         val config = SyncConfig.load(configFile, "onedrive")
         val effective = config.effectiveExcludePatterns("onedrive")
-        assertEquals(listOf("*.tmp", ".git/**", "Videos/**"), effective)
+        assertEquals(SyncConfig.DEFAULT_EXCLUDE_PATTERNS + listOf("*.tmp", ".git/**", "Videos/**"), effective)
     }
 
     @Test
@@ -1037,5 +1037,47 @@ class SyncConfigTest {
     @Test
     fun `resolveStreamingReconciliation falls back to false when all inputs absent`() {
         assertFalse(SyncConfig.resolveStreamingReconciliation(cliOverride = null, tomlValue = null, sentinel = null))
+    }
+
+    // ── SP1: DEFAULT_EXCLUDE_PATTERNS ──────────────────────────────────────────
+
+    @Test
+    fun `effectiveExcludePatterns includes the default junk + internal excludes`() {
+        // Missing config still gets the defaults: SyncConfig.load(missing) returns
+        // defaults() (globalExcludePatterns = emptyList), so effectiveExcludePatterns
+        // = DEFAULT_EXCLUDE_PATTERNS + [] + []. (Intentional — junk is excluded even
+        // with no config file.)
+        val cfg = SyncConfig.load(tmpDir.resolve("missing.toml"), "any-profile")
+        val eff = cfg.effectiveExcludePatterns("any-profile")
+        // internal (consolidated from the former SyncEngine hardcode)
+        assertTrue("/.unidrive-trash/**" in eff)
+        assertTrue("/.unidrive-versions/**" in eff)
+        // representative junk
+        assertTrue("**/.directory.lock" in eff)
+        assertTrue("**/Thumbs.db" in eff)
+        assertTrue("**/~\$*" in eff)
+        // the constant is the single source of truth
+        assertTrue(SyncConfig.DEFAULT_EXCLUDE_PATTERNS.all { it in eff })
+    }
+
+    @Test
+    fun `effectiveExcludePatterns keeps user global + per-provider patterns additive`() {
+        // NOTE the TOML key is `exclude_patterns` (SyncConfig.kt:176/:208), NOT `exclude`.
+        val toml = tmpDir.resolve("additive.toml")
+        Files.writeString(
+            toml,
+            """
+            [general]
+            sync_root = "/tmp/sync"
+            exclude_patterns = ["**/secret-*"]
+
+            [providers.p1]
+            exclude_patterns = ["**/p1-only.bin"]
+            """.trimIndent(),
+        )
+        val eff = SyncConfig.load(toml, "p1").effectiveExcludePatterns("p1")
+        assertTrue("**/secret-*" in eff)        // user global still present
+        assertTrue("**/p1-only.bin" in eff)     // per-provider still present
+        assertTrue("**/.directory.lock" in eff) // defaults still present
     }
 }

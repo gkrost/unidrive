@@ -328,4 +328,25 @@ class LocalScannerTest {
             )
         }
     }
+
+    @Test
+    fun `default excludes skip desktop and editor junk but keep real files`() {
+        // A scanner configured with the production default set.
+        val excluded = LocalScanner(syncRoot, db, SyncConfig.DEFAULT_EXCLUDE_PATTERNS)
+        Files.writeString(syncRoot.resolve(".directory.lock"), "x")
+        Files.writeString(syncRoot.resolve("Thumbs.db"), "x")
+        Files.writeString(syncRoot.resolve("~\$report.docx"), "x")
+        Files.writeString(syncRoot.resolve("notes.txt.swp"), "x")
+        Files.writeString(syncRoot.resolve("draft.tmp"), "x")
+        Files.writeString(syncRoot.resolve("real.txt"), "keep me")
+
+        val changes = excluded.scan()
+
+        assertEquals(ChangeState.NEW, changes["/real.txt"], "real file must sync")
+        assertNull(changes["/.directory.lock"], ".directory.lock must be excluded")
+        assertNull(changes["/Thumbs.db"], "Thumbs.db must be excluded")
+        assertNull(changes["/~\$report.docx"], "Office lock file must be excluded")
+        assertNull(changes["/notes.txt.swp"], "vim swap must be excluded")
+        assertNull(changes["/draft.tmp"], "temp file must be excluded")
+    }
 }
