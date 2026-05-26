@@ -300,9 +300,15 @@ by section (e.g. "per spec §3.4") in commits and BACKLOG entries.
 
 ## Hard rules
 
-- **No JVM or Rust source code.** This repo packages; it does not build
-  the things being packaged. New code here belongs in one of the sibling
-  repos.
+- **No JVM or Rust source code committed here.** This repo packages;
+  it does not contain the sources of the things being packaged. New
+  source code belongs in one of the sibling repos.
+- **Dev-loop exception:** `test/local-build.sh` may *invoke* `./gradlew`
+  and `cargo build` against sibling-repo checkouts to produce artefacts
+  for packaging-testing. That's a convenience for fast iteration on
+  packaging recipes — the toolchains run on the developer's machine,
+  not in this repo. **CI never builds from source** (CI fetches
+  pre-built artefacts via `release/fetch-artefacts.sh`).
 - **Pre-built artefacts only.** `release/fetch-artefacts.sh` downloads
   the JAR and Rust tarballs from the sibling repos' GitHub Releases.
   We never re-build them locally or in CI.
@@ -730,6 +736,13 @@ Create `release/fetch-artefacts.sh`:
 #                          (the public key). If set and $GNUPGHOME
 #                          has no matching key, import it.
 #   GH_TOKEN / GITHUB_TOKEN  Passed through to `gh`.
+#
+# Authentication prerequisite:
+#   - In CI: GITHUB_TOKEN is set automatically by GH Actions.
+#   - For local invocation (test/local-build.sh, debugging): run
+#     `gh auth status` first to confirm you're logged in. If not, run
+#     `gh auth login` and follow prompts. The script exits non-zero
+#     with a clear gh-side error if auth is missing.
 
 set -euo pipefail
 
@@ -1251,6 +1264,15 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT"
 
 # --- 1. Read versions from sibling manifests -------------------------
+# NOTE: this awk pattern matches the FIRST `version = "..."` line in
+# core/build.gradle.kts (currently the `allprojects { version = "0.0.1" }`
+# block). If the root build is later refactored to use a property
+# indirection (e.g. `version = libs.versions.unidrive.get()`), this
+# extraction breaks silently. Track-the-future-refactor follow-up:
+# add a robust extraction helper in the unidrive repo (e.g.
+# `./gradlew -q :printVersion`) and call that instead. For MVP the awk
+# is sufficient; the failure mode is loud (the next `[[ -n $JVM_SEMVER ]]`
+# guard catches an empty result).
 JVM_SEMVER=$(awk -F'"' '/^[[:space:]]*version = / && !v { v=1; print $2 }' "$UNIDRIVE/core/build.gradle.kts")
 [[ -n $JVM_SEMVER ]] || { echo "ERROR: failed to extract version from $UNIDRIVE/core/build.gradle.kts" >&2; exit 1; }
 MOUNT_SEMVER=$(awk -F'"' '/^version = / {print $2; exit}' "$MOUNT/mount/Cargo.toml")

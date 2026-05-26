@@ -729,6 +729,13 @@ done
 
 # Remove the originals from the drop after a successful sign-drop run.
 # (The CI is expected to pull from $SIGNED, then call clear-signed.)
+#
+# Recovery note: if the CI's sftp-pull from $SIGNED fails AFTER this
+# point (network blip, container restart, CI runner crash), the signed
+# artefacts remain in $SIGNED. The recovery path is for the CI to
+# retry the sftp-pull — NOT to re-submit to $DROP and re-sign. The
+# `clear-signed` subcommand is only called after a successful pull.
+# This split — sign once, allow pull retries — is intentional.
 find . -mindepth 1 -delete
 log "sign-drop completed signed_count=$signed_count"
 echo "OK signed=$signed_count"

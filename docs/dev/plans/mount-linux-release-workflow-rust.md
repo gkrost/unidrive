@@ -335,6 +335,18 @@ jobs:
         if: ${{ matrix.use_cross == true }}
         # cross-rs/cross runs the build in a Docker container so the host
         # doesn't need an aarch64 sysroot. Pin a version for reproducibility.
+        #
+        # KNOWN RISK (review-3 Issue 6): cross 0.2.5 (released Feb 2025)
+        # may or may not ship Docker images with rustc ≥ 1.85 (the
+        # minimum for edition 2024 used by mount/Cargo.toml). Plan P2
+        # Task 4a (added below) verifies a real aarch64 cross-build
+        # before the first tag push so this can't surprise us at
+        # release time. If 0.2.5 turns out to be incompatible:
+        #   - Try cross main: `cargo install --git https://github.com/cross-rs/cross cross`
+        #   - Or override Cross.toml's image to a hand-pinned rustc:1.85+
+        #     toolchain image.
+        # Document the fix in unidrive-dist's docs/release-process.md
+        # if/when it becomes necessary.
         run: |
           set -euo pipefail
           cargo install --locked --version 0.2.5 cross
@@ -595,6 +607,88 @@ rm -rf /tmp/unidrive-mount-release-dryrun
 ```
 
 - [ ] **Step 5: No commit**
+
+---
+
+## Task 4a: Verify `cross` 0.2.5 supports Rust edition 2024 (aarch64 cross-build smoke)
+
+**Files:** none changed (verification only)
+
+Mount's `Cargo.toml` declares `edition = "2024"` which requires `rustc ≥ 1.85`. The workflow uses `cross 0.2.5` to cross-build for aarch64; if cross's pinned Docker image ships an older rustc, the aarch64 build fails at the first real tag push. This task catches that locally before a release is cut.
+
+- [ ] **Step 1: Install `cross` 0.2.5 locally**
+
+Run:
+
+```bash
+cd /home/gernot/dev/git/unidrive-mount-linux
+cargo install --locked --version 0.2.5 cross
+cross --version
+```
+
+Expected: `cross 0.2.5` printed (possibly with a `cargo-cross 0.2.5` line).
+
+- [ ] **Step 2: Confirm Docker is available**
+
+Run:
+
+```bash
+docker info >/dev/null && echo "docker: ok"
+```
+
+Expected: `docker: ok`. If Docker isn't running on the dev machine, start it (or use rootless docker per krost-infra's setup). Without Docker, `cross` falls back to native cargo build, which defeats the purpose.
+
+- [ ] **Step 3: Cross-build for aarch64**
+
+Run:
+
+```bash
+cross build --release --target aarch64-unknown-linux-gnu --bin unidrive-mount 2>&1 | tail -30
+```
+
+Expected: a successful compile message ending with `Finished release [optimized] target(s) in ...s`, and an aarch64 binary at `target/aarch64-unknown-linux-gnu/release/unidrive-mount`.
+
+**If the build fails with "edition2024 is required" or a similar rustc-version error**, cross 0.2.5's pinned image is too old. Two remedies (pick one):
+
+- **(a) Bump to cross main** — usually carries fresher toolchain images:
+
+  ```bash
+  cargo install --git https://github.com/cross-rs/cross cross
+  cross build --release --target aarch64-unknown-linux-gnu --bin unidrive-mount
+  ```
+
+  If this works, update Task 3's workflow YAML — replace
+  `cargo install --locked --version 0.2.5 cross` with the git form
+  pinned to a SHA (read the cross main HEAD SHA at the time and pin
+  it). Don't commit a version-floating install in the workflow.
+
+- **(b) Override Cross.toml** — add a `Cross.toml` at the workspace root pinning a known-fresh image:
+
+  ```toml
+  [target.aarch64-unknown-linux-gnu]
+  image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
+  ```
+
+  Re-run the cross build. If green, commit `Cross.toml` to the
+  `unidrive-mount-linux` repo on the same `release/rust-workflow`
+  branch.
+
+Document whichever path you take in the Task 6 PR body so the
+maintainer knows what changed.
+
+- [ ] **Step 4: Verify the produced binary**
+
+Run:
+
+```bash
+file target/aarch64-unknown-linux-gnu/release/unidrive-mount
+```
+
+Expected: `ELF 64-bit LSB pie executable, ARM aarch64`. You won't be able to run it on an x86_64 dev machine — `file`'s output is sufficient confirmation that the cross-build produced the right artefact.
+
+- [ ] **Step 5: No commit (verification only)**
+
+If a fix from Step 3 was applied (option a or b), commit those changes separately under the existing Task 3's branch.
 
 ---
 

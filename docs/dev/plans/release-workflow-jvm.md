@@ -16,7 +16,7 @@
 - No distro packaging (Plan P4).
 - No apt/dnf repo publishing (Plans P3 + P4 + P5).
 - No `dist/install.sh` changes (Plan P4 moves the canonical installer to `unidrive-dist`).
-- No `BuildInfo.kt` changes — the existing `--version` enrichment with commit-SHA is pre-existing and stays as-is. Spec §3.5's "just 0.0.1" rule applies to the user-visible canonical version on GH Releases / deb / rpm, not to the CLI's internal build-info output.
+- **No `BuildInfo.kt` changes here.** The existing `--version` enrichment with commit-SHA is pre-existing; P1 does not touch it. **However, this leaves an unresolved tension with spec §3.5** — the spec says `unidrive --version` prints exactly the user-visible version (e.g. `0.0.1`, no commit suffix), but the current `BuildInfo.kt` generator embeds the SHA on every build, producing strings like `0.0.1 (abc1234)`. **Reconciling this is Plan P5's responsibility**, not P1's. P5's pre-flight checklist includes a task to either (a) suppress the `(commit)` suffix when building from a tag with no dirty tree, or (b) accept the enriched form for the first release and treat the spec §3.5 wording as descriptive-of-the-coordinated-version rather than literal-CLI-output. The choice is deferred so P1 doesn't grow a scope it doesn't need; the tension is documented so the first real tag push doesn't accidentally violate the spec.
 
 **Pre-flight assumptions to verify in Task 0:**
 
