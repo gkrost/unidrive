@@ -116,7 +116,7 @@ class SyncEngine(
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
         validateExcludePatterns(
-            excludePatterns + listOf("/.unidrive-trash/**", "/.unidrive-versions/**"),
+            (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
     private val reconciler = Reconciler(db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns)
