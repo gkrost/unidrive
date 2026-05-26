@@ -5,6 +5,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
@@ -228,6 +229,8 @@ class HydrationImplNamespaceTest {
     fun unlink_treats_remote_already_gone_404_as_success() = runTest {
         // Guards: rm of a stale (already-deleted-on-cloud) file must return Ok,
         // not EIO. The row must be tombstoned so the reconciler tracks the deletion.
+        // Uses the typed resolution-error shape (ProviderException with "Folder not found: "
+        // prefix) that InternxtProvider.resolveFolder emits when a parent is gone.
         val (impl, provider, stateDb) = freshEnv()
         stateDb.upsertEntry(
             SyncEntry(
@@ -244,7 +247,7 @@ class HydrationImplNamespaceTest {
                 lastSynced = Instant.now(),
             ),
         )
-        provider.throwOnDelete = RuntimeException("Folder not found: gone in /gone.txt")
+        provider.throwOnDelete = ProviderException("Folder not found: gone in /gone.txt")
 
         val result = impl.unlink("/gone.txt")
 
@@ -254,6 +257,37 @@ class HydrationImplNamespaceTest {
         assertEquals(null, stateDb.getEntry("/gone.txt"), "row must no longer be alive after unlink")
         val tombstone = stateDb.recovery.allEntriesAnyStatus().find { it.path == "/gone.txt" }
         assertTrue(tombstone != null, "a DELETED tombstone must remain for reconciler tracking")
+    }
+
+    @Test
+    fun unlink_does_not_swallow_5xx_mentioning_404_in_message() = runTest {
+        // Guards: codex P2 — a ProviderException whose MESSAGE contains "404" or
+        // "not found" but does NOT carry a recognised typed not-found prefix must
+        // surface as Failed, not Ok. Proves the free-text misclassification hole is closed.
+        val (impl, provider, stateDb) = freshEnv()
+        stateDb.upsertEntry(
+            SyncEntry(
+                path = "/live.txt",
+                remoteId = "rid-live",
+                remoteHash = "hash",
+                remoteSize = 10L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        // 502 proxy error whose body contains both "404" and "not found" —
+        // old free-text check would have returned Ok and tombstoned a live file.
+        provider.throwOnDelete = ProviderException("502 Bad Gateway: upstream /live.txt not found (404)")
+
+        val result = impl.unlink("/live.txt")
+
+        assertTrue(result is UnlinkResult.Failed, "5xx with '404' in message must be Failed, not Ok")
+        assertTrue(stateDb.getEntry("/live.txt") != null, "row must remain alive — 5xx must not tombstone a live file")
     }
 
     @Test
@@ -277,7 +311,7 @@ class HydrationImplNamespaceTest {
                 lastSynced = Instant.now(),
             ),
         )
-        provider.throwOnDelete = RuntimeException("500 Internal Server Error")
+        provider.throwOnDelete = ProviderException("500 Internal Server Error")
 
         val result = impl.unlink("/real-error.txt")
 
@@ -305,7 +339,7 @@ class HydrationImplNamespaceTest {
                 lastSynced = Instant.now(),
             ),
         )
-        provider.throwOnDelete = RuntimeException("Folder not found: gone-dir in /gone-dir")
+        provider.throwOnDelete = ProviderException("Folder not found: gone-dir in /gone-dir")
 
         val result = impl.rmdir("/gone-dir")
 
