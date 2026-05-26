@@ -1,8 +1,10 @@
 # Sync-Engine Stability — Design Spec
 
-**Version:** 2
+**Version:** 3
 **Status:** Draft — for implementation planning
-**Revision history:** v2 — addressed implementation-review findings: SP1 exclude-layer consolidation (the hardcoded trash/versions live at `SyncEngine.kt:119`, not `SyncConfig`); SP2a references the existing `StreamingReconcileBuffer` prior art + batches the probe fallback; SP2b front-loads empirical verification of the Internxt `/files` lag (the ≥60 min figure is one observation, not a measured bound); SP3 carries the full `sync`-flag parity list + an explicit reconcile-guard / scheduler / subscription-renewal coalescing policy.
+**Revision history:**
+- v2 — addressed implementation-review findings: SP1 exclude-layer consolidation (the hardcoded trash/versions live at `SyncEngine.kt:119`, not `SyncConfig`); SP2a references the existing `StreamingReconcileBuffer` prior art + batches the probe fallback; SP2b front-loads empirical verification of the Internxt `/files` lag (the ≥60 min figure is one observation, not a measured bound); SP3 carries the full `sync`-flag parity list + an explicit reconcile-guard / scheduler / subscription-renewal coalescing policy.
+- v3 — second-review (SP3 detail): defined `sync.cancel` semantics, the `--watch` reinterpretation for the daemon model, and the `SyncEngine` per-daemon-singleton lifetime transition (see SP3 "Lifecycle & RPC semantics").
 **Supersedes/relates:** `unidrive-daemon-design.md` (amends the G3 "strictly reactive" contract), `sync-progress-subscriber-set-design.md` (reuses its progress channel), `mount-sync-mode-mutex-design.md` (retires its scaffolding).
 
 ## Goal
@@ -85,6 +87,11 @@ Deletion detection relies solely on the flat `/files` listing's `status` field, 
 **Result.** Remote deletions/renames/creates reflect on the mount within one reconcile interval, no manual `refresh`. Builds on SP2 (the loop's deletion detection must be correct).
 
 **Boundaries.** The reconcile loop is a daemon-side scheduled task with one job (run `syncOnce` on schedule + on `sync.run`). The RPC surface (`sync.run`/`sync.cancel`) is a thin adapter over the existing engine. Progress streaming reuses the existing subscriber-set — no new channel.
+
+**Lifecycle & RPC semantics (v3, second review).**
+- **`sync.cancel`** cancels the in-flight reconcile pass via the engine's existing `CancellationException` handling (`syncOnce` is `suspend`; cancellation points already exist throughout `SyncEngine`). A cancelled pass stops at the next checkpoint; partial work is safe — per-action `state.db` writes are transactional and the delta cursor is promoted only on clean completion, so a cancelled pass does **not** advance the cursor (the next pass re-drains). `sync.cancel` does NOT stop the scheduled loop (the next interval still fires); disabling scheduling is a separate config concern (interval = 0). The CLI returns once cancellation is acknowledged (bounded), not necessarily after full unwind.
+- **`--watch`** is reinterpreted for the daemon model: the scheduled reconcile loop **is** the watch. So `--watch` means "issue `sync.run`, then stay attached and stream the daemon's ongoing reconcile progress" rather than spinning a client-side loop (today's `SyncCommand` loops `syncOnce` with a delay — that role moves to the daemon's scheduler). Plain `sync` streams until the triggered pass completes, then exits.
+- **Engine lifetime:** `SyncEngine` moves from a per-`sync`-invocation object (constructed fresh each run at `SyncCommand.kt:418`) to a **per-profile, per-daemon singleton** (daemon-lifetime). Existing long-lived state is concurrency-safe (`Reconciler.globCache`, `HydrationImpl.createMutexes` are `ConcurrentHashMap`; `LocalScanner` is stateless; `StateDatabase` is pool-managed). The SP3 plan MUST audit for per-pass assumptions that break under a long-lived engine — in particular SP2a's recently-written set must be **scoped/cleared per pass**, not accumulate unbounded across the daemon's life.
 
 ---
 
