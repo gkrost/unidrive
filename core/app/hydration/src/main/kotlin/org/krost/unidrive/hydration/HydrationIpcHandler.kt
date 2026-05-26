@@ -55,6 +55,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"new_path_exists"}       EEXIST
  *                         {"ok":false,"error":"<msg>"}                 EIO
  *
+ *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
+ *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
+ *                            absent → no registration (one-shot setattr/bare-truncate, backward-compatible).
+ *
  *   subscribe   request:  {"verb":"hydration.subscribe"}
  *   subscribe   reply:    {"ok":true} — and from then on, the connection becomes a one-way
  *                         event stream (server-pushed NDJSON of HydrationEvent serializations)
@@ -173,6 +177,7 @@ class HydrationIpcHandler(
         val VERBS: List<String> = listOf(
             "hydration.open_read",
             "hydration.open_write",
+            "hydration.open_write_begin",
             "hydration.close_handle",
             "hydration.hydrate",
             "hydration.dehydrate",
@@ -203,6 +208,16 @@ class HydrationIpcHandler(
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
+                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+                    is OpenResult.Failed -> reply(ok = false, error = r.error.message)
+                }
+            }
+            "hydration.open_write_begin" -> {
+                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                // handle_id is OPTIONAL: present → O_TRUNC live open (registers open-set entry);
+                // absent → one-shot setattr/bare-truncate (no registration).
+                val handleId = pluck(jsonRequest, "handle_id")
+                when (val r = hydration.openWriteBegin(connectionId, path, handleId)) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }

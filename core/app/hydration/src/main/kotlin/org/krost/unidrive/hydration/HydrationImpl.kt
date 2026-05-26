@@ -238,6 +238,40 @@ class HydrationImpl(
         }
     }
 
+    private fun prepareEmptyCache(path: String): java.nio.file.Path {
+        val cachePath = syncEngine.resolveCachePath(path)
+        java.nio.file.Files.createDirectories(cachePath.parent)
+        java.nio.file.Files.newByteChannel(
+            cachePath,
+            java.util.EnumSet.of(
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+            ),
+        ).close()
+        return cachePath
+    }
+
+    override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
+        val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        val entry = stateDb.getEntry(normalised)
+            ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
+        if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
+        return try {
+            val cachePath = prepareEmptyCache(normalised)
+            // When a live handle id is provided (O_TRUNC open), register it in
+            // the connection's open-set so dehydrate/busy-checks see the file as
+            // open.  One-shot callers (setattr bare-truncate) pass null → no
+            // registration, matching the existing no-spurious-close_handle contract.
+            if (handleId != null) {
+                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+            }
+            OpenResult.Ok(cachePath)
+        } catch (e: Exception) {
+            OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
+        }
+    }
+
     override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
@@ -253,20 +287,8 @@ class HydrationImpl(
                 if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
             }
 
-            val cachePath = syncEngine.resolveCachePath(normalised)
             try {
-                java.nio.file.Files.createDirectories(cachePath.parent)
-                // Materialise an empty cache file; truncate if some stray byte
-                // is sitting there from a previous abortive run.
-                java.nio.file.Files.newByteChannel(
-                    cachePath,
-                    java.util.EnumSet.of(
-                        java.nio.file.StandardOpenOption.CREATE,
-                        java.nio.file.StandardOpenOption.WRITE,
-                        java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-                    ),
-                ).close()
-
+                val cachePath = prepareEmptyCache(normalised)
                 val now = java.time.Instant.now()
                 stateDb.upsertEntry(
                     org.krost.unidrive.sync.model.SyncEntry(
