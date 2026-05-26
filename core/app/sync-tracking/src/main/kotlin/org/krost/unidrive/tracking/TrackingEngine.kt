@@ -5,6 +5,7 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.sync.Reconciler
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -46,6 +47,7 @@ class TrackingEngine(
     private val reconciler: TrackingReconciler = TrackingReconciler(),
     private val batchGuard: BatchGuard = BatchGuard(),
     private val dryRun: Boolean = false,
+    private val excludePatterns: List<String> = emptyList(),
 ) {
     private val log = LoggerFactory.getLogger(TrackingEngine::class.java)
 
@@ -67,6 +69,11 @@ class TrackingEngine(
             val cleanedUp = mutableListOf<String>()
 
             for (path in universe) {
+                // Default-ignore-list (keep-local): desktop/OS junk is never uploaded, adopted,
+                // downloaded, or tombstoned. Skipping the whole path — not just its local
+                // observation — is what guarantees "don't tombstone": an already-tracked path
+                // that becomes excluded is left inert rather than read as locally-gone.
+                if (isExcluded(path)) continue
                 val l = localObs[path] ?: LocalObservation(exists = false, hash = null, size = null, mtime = null, inode = null)
                 val t = trackingSet.lookup(path)
                 val r =
@@ -284,12 +291,25 @@ class TrackingEngine(
      * `remoteObs`, so genuine removals still propagate. An untracked path
      * (`track == null`) can't be in the delta as a no-change item; treat
      * its absence as `exists = false`, same as the full case.
+     *
+     * EXCEPTION — `PendingDeleteLocal`: the remote already vanished and the
+     * engine crashed before finishing the local delete (and removing the
+     * row). The remote's deletion tombstone was already consumed by an
+     * earlier delta page, so this resumed page OMITS the path — and
+     * synthesizing `exists = true` would mask `remoteGone`, leaving the
+     * stale local file un-reaped (and resurrected on the next local edit).
+     * Preserve remote-absence for these rows so the reconciler re-derives
+     * `PropagateRemoteDelete` (retry the local delete) or both-gone cleanup.
+     * This is asymmetric on purpose: a `PendingDeleteRemote` row is driven
+     * by `localGone` (unaffected by this synthesis) and self-heals — forcing
+     * its absence instead could conclude both-gone and remove the row
+     * WITHOUT deleting a remote that may not have been deleted yet.
      */
     private fun absentRemoteObservation(
         incremental: Boolean,
         track: TrackingRecord?,
     ): RemoteObservation =
-        if (incremental && track != null) {
+        if (incremental && track != null && track.state != TrackState.PendingDeleteLocal) {
             RemoteObservation(
                 exists = true,
                 remoteFileId = track.remoteFileId,
@@ -317,11 +337,17 @@ class TrackingEngine(
                 if (p == syncRoot) continue
                 if (Files.isDirectory(p)) continue
                 val rel = "/" + syncRoot.relativize(p).toString().replace('\\', '/')
+                // Keep-local: don't even hash excluded junk. The syncOnce universe loop also
+                // skips these paths, so this is a perf guard; the correctness guard is there.
+                if (isExcluded(rel)) continue
                 out[rel] = makeLocalObs(p)
             }
         }
         return out
     }
+
+    /** True when [path] matches any configured exclude glob (shared default-ignore-list semantics). */
+    private fun isExcluded(path: String): Boolean = excludePatterns.any { Reconciler.matchesGlob(path, it) }
 
     private fun makeLocalObs(p: Path): LocalObservation {
         val attrs = Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes::class.java)
