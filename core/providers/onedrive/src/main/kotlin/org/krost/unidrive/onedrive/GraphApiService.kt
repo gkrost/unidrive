@@ -339,17 +339,20 @@ class GraphApiService(
         remotePath: String,
         content: ByteArray,
         fileSystemInfo: FileSystemInfo? = null,
+        conflictBehavior: String = "replace",
     ): DriveItem {
-        log.debug("Upload (simple): {} ({} bytes)", remotePath, content.size)
+        log.debug("Upload (simple): {} ({} bytes, conflictBehavior={})", remotePath, content.size, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
 
-        // conflictBehavior=replace pins simple-PUT to the same overwrite policy session
-        // uploads use; without it Graph defaults to "fail" and a re-upload of a touched
-        // file returns 409 nameAlreadyExists. The two paths must agree so the policy
-        // doesn't shift based on file size crossing the 4-MiB threshold.
+        // conflictBehavior pins the simple-PUT and upload-session paths to the same overwrite
+        // policy so it doesn't shift based on file size crossing the 4-MiB threshold. The
+        // caller chooses: "replace" for an UPDATE of a file we own (a re-upload of a touched
+        // file must not 409), "fail" for a CREATE so a pre-existing remote at the path is never
+        // blind-overwritten (UD-366 data-loss), with the create-collision keep-both handled by
+        // OneDriveProvider.upload.
         val response =
-            httpClient.put("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=replace") {
+            httpClient.put("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior") {
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
                 }
@@ -509,9 +512,10 @@ class GraphApiService(
         remotePath: String,
         onProgress: ((Long, Long) -> Unit)? = null,
         fileSystemInfo: FileSystemInfo? = null,
+        conflictBehavior: String = "replace",
     ): DriveItem {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
-        log.debug("Upload (chunked): {} ({} bytes)", remotePath, fileSize)
+        log.debug("Upload (chunked): {} ({} bytes, conflictBehavior={})", remotePath, fileSize, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
 
@@ -521,7 +525,7 @@ class GraphApiService(
         var lastSessionGone: GraphApiException? = null
         repeat(2) { attempt ->
             try {
-                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo)
+                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior)
             } catch (e: GraphApiException) {
                 val isSessionGone = e.statusCode == 404 || e.statusCode == 410
                 if (attempt == 0 && isSessionGone) {
@@ -550,8 +554,9 @@ class GraphApiService(
         fileSize: Long,
         onProgress: ((Long, Long) -> Unit)?,
         fileSystemInfo: FileSystemInfo?,
+        conflictBehavior: String = "replace",
     ): DriveItem {
-        val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded, fileSystemInfo)
+        val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded, fileSystemInfo, conflictBehavior)
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
@@ -605,6 +610,7 @@ class GraphApiService(
         cleanPath: String,
         encoded: String,
         fileSystemInfo: FileSystemInfo? = null,
+        conflictBehavior: String = "replace",
     ): Pair<String, Long> {
         val stored = sessionStore.get(remotePath)
         if (stored != null) {
@@ -646,7 +652,7 @@ class GraphApiService(
         val sessionBody =
             buildJsonObject {
                 putJsonObject("item") {
-                    put("@microsoft.graph.conflictBehavior", "replace")
+                    put("@microsoft.graph.conflictBehavior", conflictBehavior)
                     if (fileSystemInfo != null) {
                         putJsonObject("fileSystemInfo") {
                             fileSystemInfo.createdDateTime?.let { put("createdDateTime", it) }

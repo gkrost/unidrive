@@ -90,7 +90,7 @@ class OneDriveProvider(
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
-        @Suppress("UNUSED_PARAMETER") existingRemoteId: String?,
+        existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val attrs = Files.readAttributes(localPath, BasicFileAttributes::class.java)
@@ -100,24 +100,54 @@ class OneDriveProvider(
                 createdDateTime = attrs.creationTime().toInstant().toString(),
                 lastModifiedDateTime = attrs.lastModifiedTime().toInstant().toString(),
             )
-        return try {
+
+        // One upload, two conflict policies. "replace" is only legitimate for an UPDATE of a
+        // file we own (existingRemoteId != null) — a re-upload of a touched file must not 409.
+        // A CREATE (existingRemoteId == null) uploads with "fail" so a pre-existing remote at
+        // the path is never blind-overwritten (UD-366 data-loss); the create-collision is then
+        // resolved by keeping BOTH below.
+        suspend fun put(conflictBehavior: String) =
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
-                graphApi.uploadSimple(remotePath, content, fsInfo).toCloudItem()
+                graphApi.uploadSimple(remotePath, content, fsInfo, conflictBehavior)
             } else {
-                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo).toCloudItem()
+                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior)
             }
+
+        if (existingRemoteId != null) {
+            // MODIFIED file we own → replace-in-place.
+            return try {
+                put("replace").toCloudItem()
+            } catch (e: GraphApiException) {
+                if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
+                    log.warn(
+                        "UD-307: OneDrive rejected '{}' with nameAlreadyExists on a replace — likely a " +
+                            "ZWJ-compound emoji filename or other server-side normalisation collision. " +
+                            "See docs/SPECS.md §3.1. Sync continues; rename the source file to work around.",
+                        remotePath,
+                    )
+                }
+                throw e
+            }
+        }
+
+        // NEW file → never blind-overwrite an unknown remote (UD-366). Try "fail"; on a
+        // collision keep BOTH — the pre-existing remote is preserved untouched and the local
+        // copy lands under a server-assigned name via "rename".
+        return try {
+            put("fail").toCloudItem()
         } catch (e: GraphApiException) {
             if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
                 log.warn(
-                    "UD-307: OneDrive rejected '{}' with nameAlreadyExists — likely a " +
-                        "ZWJ-compound emoji filename or other server-side normalisation " +
-                        "collision. See docs/SPECS.md §3.1. Sync continues; rename the " +
-                        "source file to work around.",
+                    "UD-366: create-collision on '{}' — a different remote already exists at this path; " +
+                        "preserving it untouched and landing the local copy as a keep-both copy " +
+                        "(conflictBehavior=rename) rather than overwriting it.",
                     remotePath,
                 )
+                put("rename").toCloudItem()
+            } else {
+                throw e
             }
-            throw e
         }
     }
 
