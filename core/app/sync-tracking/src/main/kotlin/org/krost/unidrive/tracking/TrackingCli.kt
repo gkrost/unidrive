@@ -78,6 +78,7 @@ internal data class TsContext(
     val configDir: Path,
     val syncRoot: Path,
     val trackingDb: Path,
+    val excludePatterns: List<String>,
 ) {
     companion object {
         fun build(
@@ -96,7 +97,14 @@ internal data class TsContext(
             val syncRoot = syncConfig.syncRoot
             // tracking.db lives next to (but distinct from) the existing state.db.
             val trackingDb = configDir.resolve("tracking.db")
-            return TsContext(services, profileName, configDir, syncRoot, trackingDb)
+            return TsContext(
+                services,
+                profileName,
+                configDir,
+                syncRoot,
+                trackingDb,
+                syncConfig.effectiveExcludePatterns(profileName),
+            )
         }
     }
 }
@@ -143,6 +151,7 @@ class TsSyncCommand : Runnable {
                     syncRoot = ctx.syncRoot,
                     batchGuard = BatchGuard(maxDeleteRatio, maxDeleteAbsolute),
                     dryRun = dryRun,
+                    excludePatterns = ctx.excludePatterns,
                 )
             val report = engine.syncOnce()
             renderReport(report, dryRun)
