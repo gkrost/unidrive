@@ -1068,9 +1068,11 @@ class SyncEngine(
         // gates the corresponding Drive REST calls in the foreground lane and
         // any concurrent background scan traffic yields.
         val sequentialActions =
-            actions.filter {
-                it !is SyncAction.DownloadContent && it !is SyncAction.Upload
-            }
+            topologicalApplyOrder(
+                actions.filter {
+                    it !is SyncAction.DownloadContent && it !is SyncAction.Upload
+                },
+            )
         db.beginBatch()
         try {
             withContext(Priority.Foreground) {
