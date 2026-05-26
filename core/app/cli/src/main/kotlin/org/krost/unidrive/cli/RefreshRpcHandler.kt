@@ -32,6 +32,13 @@ class RefreshRpcHandler(
     private val engine: SyncEngine,
     private val db: StateDatabase,
     private val scope: CoroutineScope,
+    // When this returns true a mount client is serving the profile's view from
+    // state.db, so refresh must take the one-way enumerate path (no sync_root
+    // scan, no deletion guards) instead of the legacy bidirectional reconcile.
+    // See docs/dev/specs/mount-view-refresh-design.md §4.
+    private val mountClientConnected: () -> Boolean = { false },
+    // Terminal-event sink. Defaults to the broadcast channel; injectable for tests.
+    private val emit: (String) -> Unit = ipcServer::emit,
 ) {
     private val log = LoggerFactory.getLogger(RefreshRpcHandler::class.java)
 
@@ -55,15 +62,37 @@ class RefreshRpcHandler(
         // minimal (regex over the request body) — the daemon RPC contract is
         // append-only so a sloppy match here can't break a strict client.
         val reset = RESET_TRUE_REGEX.containsMatchIn(jsonRequest)
+        val forceDelete = FORCE_DELETE_TRUE_REGEX.containsMatchIn(jsonRequest)
+        val mounted = mountClientConnected()
         val jobId = UUID.randomUUID().toString()
         val launched = scope.launch {
             val terminalEvent = try {
-                if (reset) {
-                    log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
-                    db.resetAll()
+                if (mounted) {
+                    // Mount-view refresh: one-way remote→state.db. enumerateRemoteIntoState
+                    // handles `reset` internally (clears only the cursor — NOT db.resetAll,
+                    // which would empty the view if the gather then failed). force_delete is
+                    // meaningless here (enumerate cannot delete remote content), so surface
+                    // that it was ignored rather than dropping it silently (review gap 5).
+                    log.info("refresh.run routed to enumerate (mount client connected): job_id=$jobId reset=$reset")
+                    // enumerateRemoteIntoState converts provider failures into EnumerateResult(ok=false)
+                    // rather than throwing, so a false result must be surfaced — not emitted as success.
+                    val result = engine.enumerateRemoteIntoState(reset)
+                    if (result.ok) {
+                        val forceDeleteIgnored = if (forceDelete) ""","force_delete_ignored":true""" else ""
+                        """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
+                    } else {
+                        log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
+                        val msg = result.error?.replace("\"", "\\\"") ?: ""
+                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                    }
+                } else {
+                    if (reset) {
+                        log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
+                        db.resetAll()
+                    }
+                    engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
+                    """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
                 }
-                engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
-                """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
             } catch (e: kotlinx.coroutines.CancellationException) {
                 log.info("refresh.run cancelled (shutdown): job_id=$jobId")
                 """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
@@ -77,16 +106,22 @@ class RefreshRpcHandler(
             // Fan terminal event to all sync.subscribe subscribers via the
             // existing broadcast channel. emit() is non-blocking trySend; the
             // broadcastJob loop in IpcServer filters by syncSubscribers set.
-            runCatching { ipcServer.emit(terminalEvent) }
+            runCatching { emit(terminalEvent) }
         }
-        inFlight.set(RefreshJob(jobId, launched))
+        inFlight.compareAndSet(null, RefreshJob(jobId, launched))
         return """{"ok":true,"job_id":"$jobId"}"""
     }
 
     fun isInFlight(): Boolean = inFlight.get() != null
     fun inFlightJobId(): String? = inFlight.get()?.id
 
+    /** Test hook: join the currently-launched refresh job, if any. */
+    suspend fun awaitInFlight() {
+        inFlight.get()?.job?.join()
+    }
+
     companion object {
         private val RESET_TRUE_REGEX = Regex("\"reset\"\\s*:\\s*true")
+        private val FORCE_DELETE_TRUE_REGEX = Regex("\"force_delete\"\\s*:\\s*true")
     }
 }

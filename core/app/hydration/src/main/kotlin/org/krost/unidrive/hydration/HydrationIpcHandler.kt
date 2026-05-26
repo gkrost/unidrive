@@ -87,6 +87,27 @@ class HydrationIpcHandler(
     private var subscriberScope: CoroutineScope? = null
     private var subscriberWriter: (suspend (String, String) -> Boolean)? = null
 
+    // Connections that have issued any hydration verb and are still connected — i.e. the
+    // FUSE co-daemon serving this profile's view. `handle()` is only ever called for
+    // hydration verbs, and the refresh CLI uses sync.subscribe/refresh.run (NOT hydration
+    // verbs), so this set never contains a transient CLI connection. Cleared on disconnect.
+    private val mountConnections = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * True when at least one connection has issued `hydration.subscribe`. The Phase-3 mount
+     * signal once the co-daemon subscribes on mount; see mount-view-refresh-design.md §6.
+     */
+    fun hasSubscribers(): Boolean = subscribers.isNotEmpty()
+
+    /**
+     * True when a FUSE co-daemon is currently serving this profile's view (any live connection
+     * has issued a hydration verb). The daemon uses this to route `refresh.run` to the one-way
+     * enumerate path rather than the legacy sync_root reconcile (mount-view-refresh-design.md §4).
+     * Until the co-daemon subscribes on mount (Phase 3), this — not [hasSubscribers] — is the
+     * working mount probe; it becomes true once the kernel first accesses the mount.
+     */
+    fun hasActiveMountConnection(): Boolean = mountConnections.isNotEmpty()
+
     /**
      * Production wiring entry point. Stores the scope used to launch per-subscriber
      * writer coroutines and the function used to write a single NDJSON line to a
@@ -132,6 +153,10 @@ class HydrationIpcHandler(
      * them are subscribers).
      */
     fun onSubscriberDisconnect(connectionId: String) {
+        // Called for EVERY connection close (not only subscribers), so it's also where a
+        // mount-client connection drops out of the routing probe. Must run before the
+        // not-a-subscriber early return.
+        mountConnections.remove(connectionId)
         val sub = subscribers.remove(connectionId) ?: return
         sub.job.cancel()
         sub.queue.close()
@@ -193,6 +218,8 @@ class HydrationIpcHandler(
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
         val verb = pluck(jsonRequest, "verb") ?: return reply(ok = false, error = "missing_verb")
+        // Any hydration verb on a connection marks it a live mount client (see mountConnections).
+        mountConnections.add(connectionId)
         return when (verb) {
             "hydration.open_read" -> {
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")

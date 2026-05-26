@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class HydrationIpcHandlerTest {
@@ -17,6 +18,20 @@ class HydrationIpcHandlerTest {
 
         assertTrue(reply.contains("\"ok\":true"))
         assertTrue(reply.contains("\"cache_path\":"))
+    }
+
+    @Test
+    fun `hasActiveMountConnection tracks a hydration-verb connection until disconnect`() = runTest {
+        // The refresh-route probe: a connection that issues any hydration verb is the FUSE
+        // co-daemon (the refresh CLI uses sync.subscribe/refresh.run, never hydration verbs).
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        assertFalse(handler.hasActiveMountConnection(), "no mount before any hydration verb")
+        handler.handle("codaemon", """{"verb":"hydration.list","prefix":"/"}""")
+        assertTrue(handler.hasActiveMountConnection(), "a hydration verb marks the connection a mount")
+        handler.onSubscriberDisconnect("codaemon")
+        assertFalse(handler.hasActiveMountConnection(), "disconnect clears the mount connection")
     }
 
     @Test
