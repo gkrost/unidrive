@@ -100,6 +100,33 @@ class RefreshRoutingTest {
     }
 
     @Test
+    fun refresh_propagates_enumerate_failure_on_the_mount_branch(): Unit = runBlocking {
+        // enumerateRemoteIntoState converts provider failures to EnumerateResult(ok=false) rather
+        // than throwing; the handler must report that, not emit a false success to subscribers.
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "delta 503"))
+        val emitted = mutableListOf<String>()
+        val handler =
+            RefreshRpcHandler(
+                server,
+                engine,
+                db,
+                scope,
+                mountClientConnected = { true },
+                emit = { emitted.add(it) },
+            )
+
+        handler.handle("conn-1", """{"verb":"refresh.run"}""")
+        handler.awaitInFlight()
+
+        val ev = emitted.single()
+        assertTrue(ev.contains("\"event\":\"refresh.done\""), ev)
+        assertTrue(ev.contains("\"ok\":false"), "a failed enumerate must report ok:false, not success: $ev")
+        assertTrue(ev.contains("\"error\":\"provider_error\""), ev)
+        assertTrue(ev.contains("delta 503"), "the enumerate error message must propagate: $ev")
+    }
+
+    @Test
     fun refresh_does_not_surface_force_delete_ignored_without_force_delete(): Unit = runBlocking {
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
         val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))

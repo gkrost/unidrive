@@ -74,9 +74,17 @@ class RefreshRpcHandler(
                     // meaningless here (enumerate cannot delete remote content), so surface
                     // that it was ignored rather than dropping it silently (review gap 5).
                     log.info("refresh.run routed to enumerate (mount client connected): job_id=$jobId reset=$reset")
-                    engine.enumerateRemoteIntoState(reset)
-                    val forceDeleteIgnored = if (forceDelete) ""","force_delete_ignored":true""" else ""
-                    """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
+                    // enumerateRemoteIntoState converts provider failures into EnumerateResult(ok=false)
+                    // rather than throwing, so a false result must be surfaced — not emitted as success.
+                    val result = engine.enumerateRemoteIntoState(reset)
+                    if (result.ok) {
+                        val forceDeleteIgnored = if (forceDelete) ""","force_delete_ignored":true""" else ""
+                        """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
+                    } else {
+                        log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
+                        val msg = result.error?.replace("\"", "\\\"") ?: ""
+                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                    }
                 } else {
                     if (reset) {
                         log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
