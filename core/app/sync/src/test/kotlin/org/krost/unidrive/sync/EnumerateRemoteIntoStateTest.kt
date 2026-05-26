@@ -121,6 +121,26 @@ class EnumerateRemoteIntoStateTest {
             assertFalse(Files.exists(cache), "cache file must be evicted when the remote path is reaped")
         }
 
+    @Test
+    fun `enumerate resumes from the persisted cursor unless reset`() =
+        runTest {
+            provider.putRemote("/a.txt", "A")
+
+            engine.enumerateRemoteIntoState(reset = false)
+            // First gather ran against a null (full) cursor and persisted cursor-1.
+            assertEquals(null, provider.deltaCursorsSeen[0])
+            val persisted = db.getSyncState("delta_cursor")
+            assertEquals("cursor-1", persisted, "first enumerate must promote the gathered cursor")
+
+            engine.enumerateRemoteIntoState(reset = false)
+            // Second gather must resume from the cursor the first one ended on.
+            assertEquals("cursor-1", provider.deltaCursorsSeen[1])
+
+            engine.enumerateRemoteIntoState(reset = true)
+            // reset must re-enumerate from a null cursor.
+            assertEquals(null, provider.deltaCursorsSeen[2])
+        }
+
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an
