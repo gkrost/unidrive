@@ -2123,7 +2123,11 @@ class SyncEngineTest {
             )
         }
 
+        // When non-null, the NEXT delete() call throws this exception (single-use, cleared after throw).
+        var deleteThrow: Throwable? = null
+
         override suspend fun delete(remotePath: String) {
+            deleteThrow?.also { deleteThrow = null; throw it }
             if (deleteFailCount > 0) {
                 deleteFailCount--
                 throw ProviderException("Network timeout on delete")
@@ -2922,5 +2926,154 @@ class SyncEngineTest {
                 Files.exists(expectedCachePath),
                 "corrupted cache file must be deleted after integrity failure",
             )
+        }
+
+    // ── deleteRemote idempotency ──────────────────────────────────────────────
+
+    @Test
+    fun `deleteRemote_treats_folder_not_found_resolution_error_as_already_deleted`() =
+        runTest {
+            // Guards: SyncEngine.deleteRemote must NOT throw when the provider
+            // throws ProviderException("Folder not found: <seg> in <path>") —
+            // the typed path-resolution failure emitted by InternxtProvider.resolveFolder
+            // when a parent folder is already gone on the remote.
+            // markDeleted must still run — the postcondition is "path gone from cloud".
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/gone.txt",
+                    remoteId = "rid-gone",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = ProviderException("Folder not found: gone in /gone.txt")
+
+            engine.deleteRemote("/gone.txt")   // must not throw
+
+            assertNull(db.getEntry("/gone.txt"), "markDeleted must have run: row must not be alive")
+            val tombstone = db.recovery.allEntriesAnyStatus().find { it.path == "/gone.txt" }
+            assertNotNull(tombstone, "DELETED tombstone must exist for reconciler tracking")
+        }
+
+    @Test
+    fun `deleteRemote_treats_item_not_found_metadata_miss_as_already_deleted`() =
+        runTest {
+            // Guards: SyncEngine.deleteRemote must NOT throw when the provider
+            // throws ProviderException("Item not found: <path>") —
+            // the typed metadata-miss emitted by InternxtProvider.getMetadata
+            // when the leaf item itself is absent (parent exists, leaf is gone).
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/gone-leaf.txt",
+                    remoteId = "rid-gone-leaf",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = ProviderException("Item not found: /gone-leaf.txt")
+
+            engine.deleteRemote("/gone-leaf.txt")   // must not throw
+
+            assertNull(db.getEntry("/gone-leaf.txt"), "markDeleted must have run: row must not be alive")
+            val tombstone = db.recovery.allEntriesAnyStatus().find { it.path == "/gone-leaf.txt" }
+            assertNotNull(tombstone, "DELETED tombstone must exist for reconciler tracking")
+        }
+
+    @Test
+    fun `deleteRemote_does_not_swallow_5xx_mentioning_404_in_message`() =
+        runTest {
+            // Guards: codex P2 — free-text substring matching on "not found" / "404"
+            // can misclassify a real 5xx/proxy error as "already gone", silently
+            // tombstoning a live file. This test proves the hole is closed:
+            // a ProviderException whose MESSAGE contains "404" or "not found" but
+            // does NOT carry a recognised typed not-found prefix must re-throw.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/live.txt",
+                    remoteId = "rid-live",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            // 502 proxy error whose body happens to contain both "404" and "not found" —
+            // the old free-text check would have swallowed this and tombstoned a live file.
+            provider.deleteThrow = ProviderException("502 Bad Gateway: upstream /live.txt not found (404)")
+
+            assertFailsWith<ProviderException> { engine.deleteRemote("/live.txt") }
+            assertNotNull(db.getEntry("/live.txt"), "row must remain alive — 5xx must not tombstone a live file")
+        }
+
+    @Test
+    fun `deleteRemote_rethrows_non_provider_exception`() =
+        runTest {
+            // Guards: isAlreadyGone only accepts ProviderException subtypes;
+            // a bare RuntimeException (e.g. from a mock or unexpected code path)
+            // must re-throw unchanged.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/network-err.txt",
+                    remoteId = "rid-net",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = RuntimeException("Connection reset by peer")
+
+            assertFailsWith<RuntimeException> { engine.deleteRemote("/network-err.txt") }
+            assertNotNull(db.getEntry("/network-err.txt"), "row must remain alive after non-provider error")
+        }
+
+    @Test
+    fun `deleteRemote_rethrows_non_not_found_provider_errors`() =
+        runTest {
+            // Guards: real provider errors (5xx, auth, throttle) must NOT be swallowed.
+            // The row must remain alive — EIO is the correct outcome.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/server-error.txt",
+                    remoteId = "rid-err",
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = Instant.now(),
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deleteThrow = ProviderException("500 Internal Server Error")
+
+            assertFailsWith<ProviderException> { engine.deleteRemote("/server-error.txt") }
+            assertNotNull(db.getEntry("/server-error.txt"), "row must remain alive after real error")
         }
 }

@@ -137,6 +137,64 @@ class HydrationIpcHandlerTest {
     }
 
     @Test
+    fun `open_write_begin request returns JSON with cache_path`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/x.txt", remoteSize = 5)
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin","path":"/x.txt"}""")
+
+        assertTrue(reply.contains("\"ok\":true"))
+        assertTrue(reply.contains("\"cache_path\":"))
+    }
+
+    @Test
+    fun `open_write_begin with handle_id registers an open-set entry`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/live.txt", localSize = 10)
+        env.syncEngine.seedCacheContent("/live.txt", "some content")
+        val handler = HydrationIpcHandler(env.hydration)
+
+        // IPC request carrying handle_id → live open, must register in open-set.
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin","path":"/live.txt","handle_id":"wh-1"}""")
+
+        assertTrue(reply.contains("\"ok\":true"), "open_write_begin must succeed: $reply")
+        // Verify the open-set entry was registered: dehydrate must return busy.
+        val dehydrateReply = handler.handle("conn1", """{"verb":"hydration.dehydrate","path":"/live.txt"}""")
+        assertEquals("""{"ok":false,"error":"busy"}""", dehydrateReply.trim(),
+            "dehydrate must be busy while handle_id wh-1 is in the open-set")
+    }
+
+    @Test
+    fun `open_write_begin without handle_id does NOT register an open-set entry`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/oneshot.txt", localSize = 10)
+        env.syncEngine.seedCacheContent("/oneshot.txt", "some content")
+        val handler = HydrationIpcHandler(env.hydration)
+
+        // IPC request WITHOUT handle_id → one-shot / bare-truncate; must NOT register.
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin","path":"/oneshot.txt"}""")
+
+        assertTrue(reply.contains("\"ok\":true"), "open_write_begin must succeed: $reply")
+        // Verify no open-set entry: dehydrate must NOT be busy.
+        val dehydrateReply = handler.handle("conn1", """{"verb":"hydration.dehydrate","path":"/oneshot.txt"}""")
+        assertTrue(
+            !dehydrateReply.contains("\"error\":\"busy\""),
+            "dehydrate must NOT be busy when handle_id was absent: $dehydrateReply",
+        )
+    }
+
+    @Test
+    fun `open_write_begin without path returns missing_path error`() = runTest {
+        val env = HydrationTestEnv()
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle("conn1", """{"verb":"hydration.open_write_begin"}""")
+
+        assertEquals("""{"ok":false,"error":"missing_path"}""", reply.trim())
+    }
+
+    @Test
     fun `unknown verb returns unknown_verb error`() = runTest {
         val env = HydrationTestEnv()
         val handler = HydrationIpcHandler(env.hydration)

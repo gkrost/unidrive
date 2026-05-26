@@ -1396,6 +1396,15 @@ class InternxtProvider(
             // cache (populated by createFolder) does.
             val cached = folderCache.get(currentUuid, segment)
             if (cached != null) {
+                // TODO: if a subsequent op using `cached` as a parent UUID returns
+                // 404 (stale entry — folder deleted out-of-band), call
+                // `folderCache.invalidate(currentUuid, segment)` so the next
+                // resolveFolder re-fetches via the listing. To wire this cleanly,
+                // track `parentUuid` here and wrap the downstream getFolderContents
+                // call in a catch that invalidates on 404 before re-throwing.
+                // The SyncEngine.deleteRemote idempotency fix (fix/unlink-idempotent-gone)
+                // masks the resulting ProviderException for not-found paths, so this
+                // TODO is low-urgency — the stale entry self-heals after a process restart.
                 currentUuid = cached
                 continue
             }
