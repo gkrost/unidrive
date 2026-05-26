@@ -129,6 +129,13 @@ open class SyncEngine(
     @Volatile
     private var remoteWakeDebounceJob: kotlinx.coroutines.Job? = null
 
+    // Paths a prior COMPLETE enumeration flagged missing-but-deferred under the
+    // bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2).
+    // Carried in-memory across enumerations on a long-lived daemon engine; a path
+    // is reaped only once a second consecutive complete enumeration still shows it
+    // missing. Resets on restart (conservative: re-defers).
+    private var deferredMissing: Set<String> = emptySet()
+
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
      * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
@@ -473,7 +480,14 @@ open class SyncEngine(
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
         val upserted = remoteChanges.count { !it.value.deleted }
+        // Bulk-disappearance corroboration guard (spec §3.2). A complete enumeration that
+        // would flip more than max(50, 20% of tracked rows) to deleted is suspicious (e.g.
+        // Internxt /files lag); reap only paths a PRIOR complete enumeration also saw
+        // missing, defer the rest, and carry the candidate set to the next enumeration.
+        val trackedRows = db.getEntryCount()
+        val bulkThreshold = maxOf(BULK_REAP_ABSOLUTE, (trackedRows * BULK_REAP_FRACTION).toInt())
         var reaped = 0
+        var nextDeferred = emptySet<String>()
         db.batch {
             updateRemoteEntries(remoteChanges)
             if (complete) {
@@ -483,14 +497,31 @@ open class SyncEngine(
                 // deleted=true CloudItems for DB rows absent from the live set; incremental
                 // gathers carry provider tombstones the same way. updateRemoteEntries skips
                 // them, so we flip state.db here directly — never via provider.delete.
-                for ((path, item) in remoteChanges) {
-                    if (!item.deleted) continue
+                val missingNow = remoteChanges.filterValues { it.deleted }.keys
+                val bulk = missingNow.size > bulkThreshold
+                val toReap =
+                    if (bulk) missingNow.intersect(deferredMissing) else missingNow
+                for (path in toReap) {
                     db.markDeleted(path)
                     runCatching { Files.deleteIfExists(resolveCachePath(path)) }
                     reaped++
                 }
+                if (bulk) {
+                    val deferred = missingNow - toReap
+                    nextDeferred = missingNow
+                    if (deferred.isNotEmpty()) {
+                        log.warn(
+                            "enumerate: bulk disappearance ({} paths > threshold {}); " +
+                                "deferring {} uncorroborated path(s) to the next complete enumeration",
+                            missingNow.size,
+                            bulkThreshold,
+                            deferred.size,
+                        )
+                    }
+                }
             }
         }
+        if (complete) deferredMissing = nextDeferred
         promotePendingCursor()
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }
@@ -3059,6 +3090,12 @@ open class SyncEngine(
          * outage and stop the pass so the watch loop can back off.
          */
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+
+        // Bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2):
+        // a complete enumeration flipping more than max(absolute, fraction × tracked
+        // rows) to deleted defers reaping until a second complete enumeration corroborates.
+        const val BULK_REAP_ABSOLUTE: Int = 50
+        const val BULK_REAP_FRACTION: Double = 0.20
 
         /**
          * Age at which a resumable-scan checkpoint is considered stale and
