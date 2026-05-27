@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import org.krost.unidrive.Capability
@@ -16,6 +17,8 @@ import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertNull
 import kotlin.test.assertEquals
@@ -43,6 +46,13 @@ internal class MinimalFakeProvider(
     // Optional gate: when set, upload() suspends until this deferred completes.
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
     var uploadGate: CompletableDeferred<Unit>? = null
+
+    // Per-path concurrency tracking for the serialization test.
+    // activeUploadsByPath: how many upload coroutines are currently inside upload() for each path.
+    // maxConcurrentUploadsByPath: the peak observed value of activeUploadsByPath per path.
+    // Both are updated atomically on entry/exit of each upload invocation.
+    private val activeUploadsByPath = ConcurrentHashMap<String, AtomicInteger>()
+    private val maxConcurrentUploadsByPath = ConcurrentHashMap<String, AtomicInteger>()
 
     var downloadCount: Int = 0
         private set
@@ -78,20 +88,31 @@ internal class MinimalFakeProvider(
         existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
-        uploadGate?.await()
-        val bytes = Files.readAllBytes(localPath)
-        uploadedFiles[remotePath] = bytes
-        return CloudItem(
-            id = "uploaded-$remotePath",
-            name = remotePath.substringAfterLast('/'),
-            path = remotePath,
-            size = bytes.size.toLong(),
-            isFolder = false,
-            modified = java.time.Instant.now(),
-            created = null,
-            hash = bytes.size.toString(),
-            mimeType = null,
-        )
+        // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
+        val active = activeUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
+        val peak = maxConcurrentUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
+        val currentActive = active.incrementAndGet()
+        // Update peak if current active count exceeds the recorded maximum.
+        peak.getAndUpdate { prev -> maxOf(prev, currentActive) }
+
+        try {
+            uploadGate?.await()
+            val bytes = Files.readAllBytes(localPath)
+            uploadedFiles[remotePath] = bytes
+            return CloudItem(
+                id = "uploaded-$remotePath",
+                name = remotePath.substringAfterLast('/'),
+                path = remotePath,
+                size = bytes.size.toLong(),
+                isFolder = false,
+                modified = java.time.Instant.now(),
+                created = null,
+                hash = bytes.size.toString(),
+                mimeType = null,
+            )
+        } finally {
+            active.decrementAndGet()
+        }
     }
 
     override suspend fun delete(remotePath: String) = error("delete not used")
@@ -120,6 +141,13 @@ internal class MinimalFakeProvider(
     fun makeNextDownloadThrow(throwable: Throwable) {
         nextThrowable = throwable
     }
+
+    /**
+     * Returns the peak number of concurrent upload() calls observed for [path].
+     * Used by the serialization test to assert max-1-concurrent-per-path.
+     */
+    fun maxConcurrentUploadsForPath(path: String): Int =
+        maxConcurrentUploadsByPath[path]?.get() ?: 0
 }
 
 /**
@@ -294,6 +322,13 @@ internal class HydrationTestEnv(
         fun setUploadGate(gate: CompletableDeferred<Unit>) {
             fakeProvider.uploadGate = gate
         }
+
+        /**
+         * Returns the peak number of concurrent upload() calls observed for [path].
+         * Used by the per-path serialization test to assert max-1-concurrent-per-path.
+         */
+        fun maxConcurrentUploadsForPath(path: String): Int =
+            fakeProvider.maxConcurrentUploadsForPath(path)
     }
 }
 
@@ -834,5 +869,70 @@ class HydrationImplTest {
         // dehydrate must NOT be Busy — no open-set entry was registered.
         val dr = env.hydration.dehydrate("/oneshot.bin")
         assertTrue(dr !is DehydrateResult.Busy, "dehydrate must not be Busy when handleId was null; got $dr")
+    }
+
+    // Invariant: two rapid dirty closes for the SAME path must NOT upload concurrently.
+    // The per-path Mutex in launchSerializedUpload must serialize them FIFO so that:
+    //   (a) max observed concurrency for the path == 1 (no simultaneous uploads), and
+    //   (b) the final remote content reflects the LATEST submission, not the stale one.
+    //
+    // Mechanism: install a gate on the first upload so it suspends inside upload().
+    // Then submit a second openForWrite for the same path with newer content.
+    // Drive both coroutines via advanceUntilIdle with the gate still closed.
+    // Assert the second upload has NOT yet run (it is queued behind the mutex).
+    // Release the gate; advanceUntilIdle drains both coroutines.
+    // Assert peak concurrency == 1 and final content == "v2" (the latest submission).
+    @Test
+    fun `same_path_background_uploads_are_serialized_FIFO_and_never_run_concurrently`() = runTest {
+        val uploadGate = CompletableDeferred<Unit>()
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.syncEngine.setUploadGate(uploadGate)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 2)
+
+        // Prepare two cache files with distinct content to detect which upload "won".
+        val cacheV1 = env.tempDir.resolve("doc-v1.txt").also { Files.writeString(it, "v1") }
+        val cacheV2 = env.tempDir.resolve("doc-v2.txt").also { Files.writeString(it, "v2") }
+
+        // Submit first dirty close — upload C1 is launched and will block on the gate.
+        val r1 = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheV1)
+        assertTrue(r1 is OpenResult.Ok, "first openForWrite must return Ok immediately")
+
+        // Submit second dirty close — upload C2 is launched and will queue behind the mutex.
+        val r2 = env.hydration.openForWrite("conn1", "h2", "/doc.txt", cacheV2)
+        assertTrue(r2 is OpenResult.Ok, "second openForWrite must return Ok immediately")
+
+        // Drive coroutines: C1 acquires the mutex, hits the gate, suspends.
+        // C2 tries to acquire the mutex, cannot (C1 holds it), suspends.
+        // Neither upload has completed yet; the gate is still closed.
+        advanceUntilIdle()
+        assertNull(
+            env.syncEngine.remoteContentSeen("/doc.txt"),
+            "no upload must have completed while the gate is closed",
+        )
+        // Crucially: C2 must not be inside upload() yet — it's blocked on the mutex,
+        // not inside the provider call. Peak concurrency for the path must be 1 (only C1).
+        assertEquals(
+            1,
+            env.syncEngine.maxConcurrentUploadsForPath("/doc.txt"),
+            "at most one upload must be inside the provider upload() at any moment (serialization invariant)",
+        )
+
+        // Release the gate: C1 finishes, C2 acquires the mutex and runs its upload.
+        uploadGate.complete(Unit)
+        advanceUntilIdle()
+
+        // After both uploads complete:
+        // (a) peak concurrency is still 1 — C2 only started after C1 released the lock.
+        assertEquals(
+            1,
+            env.syncEngine.maxConcurrentUploadsForPath("/doc.txt"),
+            "peak concurrency must remain 1 even after both uploads complete",
+        )
+        // (b) final remote content is "v2" — the last submission wins (FIFO order preserves it).
+        assertEquals(
+            "v2",
+            env.syncEngine.remoteContentSeen("/doc.txt"),
+            "final remote content must be from the last submission (v2), not the stale first one",
+        )
     }
 }

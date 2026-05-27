@@ -17,6 +17,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class HydrationImpl(
     private val syncEngine: SyncEngine,
@@ -47,6 +48,28 @@ class HydrationImpl(
     // map for the daemon's lifetime — bounded by the number of
     // distinct paths ever created, which is small per-session.
     private val createMutexes = ConcurrentHashMap<String, Mutex>()
+
+    // Per-path serialization for background uploads.
+    //
+    // When the same file is saved multiple times in quick succession,
+    // each dirty close launches a background upload against the same
+    // cachePath. Without serialization an older upload can finish after
+    // a newer one, overwriting the remote with stale bytes and marking
+    // the row synced with the wrong mtime.
+    //
+    // uploadMutexes: each path gets a Mutex; background upload coroutines
+    // acquire it before calling uploadFromCache so same-path uploads queue
+    // FIFO while different-path uploads run concurrently.
+    //
+    // uploadPendingCounts: tracks how many uploads are in-flight (queued or
+    // running) for each path. Incremented before launching, decremented
+    // after the upload body completes (inside the coroutine, outside the
+    // lock). When the count reaches zero, both entries are removed to
+    // prevent unbounded map growth. The count is incremented before
+    // computeIfAbsent so the mutex is never removed while a new caller
+    // has just bumped the count but hasn't yet observed the mutex entry.
+    private val uploadMutexes = ConcurrentHashMap<String, Mutex>()
+    private val uploadPendingCounts = ConcurrentHashMap<String, AtomicInteger>()
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
@@ -94,18 +117,7 @@ class HydrationImpl(
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
             openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            recoveryUploadScope.launch {
-                try {
-                    _events.emit(HydrationEvent.Hydrating(path))
-                    syncEngine.uploadFromCache(path, cachePath)
-                    val bytes = java.nio.file.Files.size(cachePath)
-                    _events.emit(HydrationEvent.Hydrated(path, bytes))
-                } catch (e: Exception) {
-                    runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                    val err = HydrationError.Generic(e.message ?: "upload failed")
-                    _events.emit(HydrationEvent.Failed(path, err))
-                }
-            }
+            launchSerializedUpload(path, cachePath)
             return OpenResult.Ok(cachePath)
         }
 
@@ -118,19 +130,50 @@ class HydrationImpl(
         // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
         // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
         openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
+        launchSerializedUpload(path, cachePath)
+        return OpenResult.Ok(cachePath)
+    }
+
+    // Launches a background upload for [path] from [cachePath], serialized per-path
+    // via [uploadMutexes]. Same-path uploads queue FIFO; different-path uploads run
+    // concurrently. The cache file is read after acquiring the lock so the last
+    // submitted upload always reads the latest content.
+    //
+    // Map cleanup: [uploadPendingCounts] is incremented before the mutex is looked up
+    // (so the mutex is never removed while a new caller has bumped the count but
+    // hasn't yet acquired it) and decremented after the upload body completes. When
+    // the count reaches zero both entries are removed from their respective maps.
+    private fun launchSerializedUpload(path: String, cachePath: Path) {
+        // Bump the pending count BEFORE computing/obtaining the mutex entry so the
+        // cleanup logic can never remove the mutex between this increment and the
+        // coroutine's withLock call.
+        uploadPendingCounts.computeIfAbsent(path) { AtomicInteger(0) }.incrementAndGet()
+        val mutex = uploadMutexes.computeIfAbsent(path) { Mutex() }
         recoveryUploadScope.launch {
             try {
-                _events.emit(HydrationEvent.Hydrating(path))
-                syncEngine.uploadFromCache(path, cachePath)
-                val bytes = java.nio.file.Files.size(cachePath)
-                _events.emit(HydrationEvent.Hydrated(path, bytes))
-            } catch (e: Exception) {
-                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                val err = HydrationError.Generic(e.message ?: "upload failed")
-                _events.emit(HydrationEvent.Failed(path, err))
+                mutex.withLock {
+                    try {
+                        _events.emit(HydrationEvent.Hydrating(path))
+                        syncEngine.uploadFromCache(path, cachePath)
+                        val bytes = java.nio.file.Files.size(cachePath)
+                        _events.emit(HydrationEvent.Hydrated(path, bytes))
+                    } catch (e: Exception) {
+                        runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                        val err = HydrationError.Generic(e.message ?: "upload failed")
+                        _events.emit(HydrationEvent.Failed(path, err))
+                    }
+                }
+            } finally {
+                // Decrement outside the lock: the upload body is done, whether it
+                // succeeded or failed. If we're the last pending upload for this
+                // path, remove both map entries to avoid unbounded growth.
+                val remaining = uploadPendingCounts[path]?.decrementAndGet() ?: 0
+                if (remaining <= 0) {
+                    uploadPendingCounts.remove(path)
+                    uploadMutexes.remove(path)
+                }
             }
         }
-        return OpenResult.Ok(cachePath)
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {
