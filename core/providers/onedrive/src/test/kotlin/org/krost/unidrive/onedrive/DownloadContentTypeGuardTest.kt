@@ -22,9 +22,13 @@ import kotlin.test.assertTrue
  * (UD-226) and only a quickXorHash comparison would reveal it.
  *
  * The guard in `downloadFile` inspects `Content-Type` before any write and throws `IOException`
- * when it matches `text/html`. The existing UD-309 flake-retry loop catches generic `Exception`
- * and retries the same URL up to `MAX_FLAKE_ATTEMPTS` (3) times; after exhaustion it surfaces
- * the last failure so higher layers can mark the file errored rather than corrupt-hydrated.
+ * when it matches `text/html`. The download path then re-resolves the download URL ONCE on the
+ * first HTML hit (a fresh CDN URL can recover a throttle/expired-URL page); a CDN that is
+ * *persistently* HTML falls through to the UD-309 flake-retry loop, which retries the same URL up to
+ * `MAX_FLAKE_ATTEMPTS` (3) times before surfacing the last failure so higher layers mark the
+ * file errored rather than corrupt-hydrated. The invariants this test pins are unchanged:
+ * HTML-on-200 must never write a destination file, and the download must FAIL after a bounded
+ * number of attempts (no infinite loop).
  *
  * Swaps the private `httpClient` field (same trick as `ListChildrenPaginationTest`) so the
  *  real `authenticatedRequest` / `HttpRetryBudget` / flake-loop code paths run and only the
@@ -105,14 +109,16 @@ class DownloadContentTypeGuardTest {
                 "UD-231: HTML-on-200 must not produce a destination file (was: exists=${Files.exists(destPath)})",
             )
             assertEquals(
-                1,
+                2,
                 metadataCalls,
-                "getItemById is called once; the flake loop reuses the cached downloadUrl across retries",
+                "getItemById is called once up front, then re-resolved exactly once on the " +
+                    "first HTML hit; a persistently-HTML CDN does NOT re-resolve again",
             )
             assertEquals(
-                3,
+                4,
                 contentCalls,
-                "Flake loop should retry the CDN fetch MAX_FLAKE_ATTEMPTS (3) times before surfacing",
+                "one initial GET + one post-reresolve GET, then the flake loop retries the " +
+                    "same URL until MAX_FLAKE_ATTEMPTS (3) is reached and surfaces — bounded, no loop",
             )
             service.close()
             // Cleanup
