@@ -15,6 +15,7 @@ import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
 
 class HydrationImpl(
     private val syncEngine: SyncEngine,
@@ -41,12 +42,13 @@ class HydrationImpl(
     override val events: Flow<HydrationEvent> = _events.asSharedFlow()
 
     // connectionId -> handleId -> path
-    // TODO(Task 8): when closeHandle and openForWrite land, two coroutines for
-    // the same connectionId may race on the inner map. Switch to
-    // `ConcurrentHashMap<String, ConcurrentMap<String, String>>` (or guard inner
-    // mutations with a connection-scoped lock) before this becomes load-bearing.
+    // The inner map is a ConcurrentHashMap: dehydrate scans every connection's
+    // inner map with containsValue while other connections' IO-dispatched
+    // handlers concurrently put/remove their own handles. A plain HashMap there
+    // would corrupt under that race (torn read missing a live handle, or worker
+    // crash), letting dehydrate delete the cache of a path open for write.
     private val openSets =
-        ConcurrentHashMap<String, MutableMap<String, String>>()
+        ConcurrentHashMap<String, ConcurrentMap<String, String>>()
 
     // Per-path mutex for `create`. Without this, two concurrent
     // `hydration.create(samePath)` callers can both pass the
@@ -80,7 +82,7 @@ class HydrationImpl(
             return OpenResult.Failed(err)
         }
 
-        openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
+        openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
         return OpenResult.Ok(cachePath)
     }
 
@@ -100,7 +102,7 @@ class HydrationImpl(
         // the gap. The connection is already registered in openSets so closeHandle
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
-            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
+            openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
             recoveryUploadScope.launch {
                 try {
                     _events.emit(HydrationEvent.Hydrating(path))
@@ -121,7 +123,7 @@ class HydrationImpl(
             syncEngine.uploadFromCache(path, cachePath)
             val bytes = java.nio.file.Files.size(cachePath)
             _events.emit(HydrationEvent.Hydrated(path, bytes))
-            openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = path
+            openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
             OpenResult.Ok(cachePath)
         } catch (e: Exception) {
             // The co-daemon fires open_write at FUSE release; the user's
@@ -314,7 +316,7 @@ class HydrationImpl(
             // open.  One-shot callers (setattr bare-truncate) pass null → no
             // registration, matching the existing no-spurious-close_handle contract.
             if (handleId != null) {
-                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+                openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
             }
             OpenResult.Ok(cachePath)
         } catch (e: Exception) {
@@ -355,7 +357,7 @@ class HydrationImpl(
                         lastSynced = now,
                     ),
                 )
-                openSets.computeIfAbsent(connectionId) { mutableMapOf() }[handleId] = normalised
+                openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
                 CreateResult.Ok(cachePath = cachePath, handleId = handleId)
             } catch (e: Exception) {
                 CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
