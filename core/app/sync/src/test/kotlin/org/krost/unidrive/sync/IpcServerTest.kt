@@ -262,6 +262,36 @@ class IpcServerTest {
             }
         }
 
+    // NEW-2 invariant: when the broadcast channel (capacity 256) is full because a
+    // consumer is too slow, emit() drops the event — but the drop must be
+    // OBSERVABLE, not silent. Pre-fix, trySend's failure is swallowed by
+    // runCatching and an operator watching progress sees gaps with no signal.
+    // Post-fix, each full-channel drop increments droppedBroadcastEvents (and logs
+    // a WARN). Here we never call start(), so nothing ever drains the channel:
+    // the first 256 emits enqueue, every further emit fails (channel full) and
+    // must be counted. We use the counter rather than log capture because slf4j
+    // log-line interception is impractical in this harness; the counter is the
+    // directly-assertable observability surface.
+    @Test
+    fun `ipcserver_emit_warns_when_broadcast_channel_full`() {
+        val srv = IpcServer(tempSocket())
+        try {
+            val total = 300 // > 256 capacity → at least 44 drops
+            repeat(total) { srv.emit("""{"event":"tick","n":$it}""") }
+            assertTrue(
+                srv.droppedBroadcastEventsForTest > 0,
+                "channel-full drops must be observable; counter was ${srv.droppedBroadcastEventsForTest}",
+            )
+            assertEquals(
+                (total - 256).toLong(),
+                srv.droppedBroadcastEventsForTest,
+                "every emit past the 256-slot channel capacity (with no consumer) must be counted as dropped",
+            )
+        } finally {
+            srv.close()
+        }
+    }
+
     @Test
     fun `socket path uses hash for long profile names`() {
         val longName = "a".repeat(100)

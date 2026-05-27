@@ -121,9 +121,22 @@ class IpcServer(
         syncState = state
     }
 
+    // NEW-2: count silently-dropped broadcast events so a full-channel drop
+    // (slow/absent subscriber) is observable instead of invisible. Exposed
+    // internally for the regression test; production drop semantics are
+    // unchanged (we still drop — observability only).
+    private val droppedBroadcastEvents = java.util.concurrent.atomic.AtomicLong(0)
+
+    internal val droppedBroadcastEventsForTest: Long
+        get() = droppedBroadcastEvents.get()
+
     fun emit(json: String) {
         if (!channel.isClosedForSend) {
-            runCatching { channel.trySend(json) }
+            val r = channel.trySend(json)
+            if (r.isFailure && !r.isClosed) {
+                droppedBroadcastEvents.incrementAndGet()
+                log.warn("sync-progress broadcast event dropped (channel full, cap=256) — subscriber too slow")
+            }
         }
     }
 
