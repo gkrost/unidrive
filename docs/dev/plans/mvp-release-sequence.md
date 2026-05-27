@@ -32,14 +32,11 @@ Include a unit if a normal user doing normal sync or mount with OneDrive or Inte
 
 Defer: pure efficiency optimizations (unless they cause wholesale abort), daemon-decomposition phases 2/3 (#141/#142), pure observability/UX/CLI polish, test-coverage-only tasks, build hygiene.
 
-## ⚠ Open scope fork — tracking-set engine: in or out of MVP?
+## Scope decisions (locked)
 
-`critical-high-fix-sequence.md` Unit 8 says the **clean** fix for the primary Internxt profile's deletion-safeguard trap (#108) is **migrating it onto the hardened tracking-set engine** — implying tracking-set is on the Internxt MVP path. Several issues hinge on this: **#99** (ts engine), **#104** (ts adopt-on-content-match data-safety, Internxt null-hash), **#108** (primary-profile unblock), **#118** (status reflects ts), **#134** (ts/legacy coexistence), plus ts live-tests #161/#162/#167/#168/#169.
-
-- **If tracking-set is OUT of MVP:** ship on legacy `SyncEngine`; #108 resolved by a one-shot operator `--force-delete` (with go-ahead), not migration; defer the ts cluster. **Shorter chain.**
-- **If tracking-set is IN MVP:** the ts cluster (Phase H) is inserted before #108 and before release.
-
-**Phases A–G + I below assume legacy-engine MVP. Phase H is gated on this fork.**
+- **Tracking-set engine is IN MVP.** The clean fix for the primary Internxt profile's deletion-safeguard trap (#108) is migrating it onto the hardened tracking-set engine. Phase H (#104, #134, #108, #118-ts, ts live-tests #133/#161/#162/#167/#168/#169) is in the chain before release. #99 is the engine umbrella.
+- **Include everything incl. webhooks.** Phase E (mount POSIX correctness), Phase F (NFC + mount freshness), and C5 (#111 OneDrive webhooks) are all in MVP.
+- Still deferred: pure efficiency optimizations, daemon-decomposition phases 2/3 (#141/#142), pure observability/UX/CLI polish, test-coverage-only and build-hygiene tasks (except #175 if it blocks the suite), and mount perf/hygiene (ML #31/#32/#33/#36-#43).
 
 ---
 
@@ -59,11 +56,11 @@ Each unit = one branch (`fix/...`), one PR, merged before the next starts. Every
   - *Shares `SyncEngine.kt` apply phase with B1 → serialize B1 then B2.*
 
 ### Phase C — OneDrive provider correctness (posteo_onedrive smoke only)
-- **C1 · #110** (High, correctness) — 410 Gone resync handling (delta loop stalls on 410).
+- **C1 · #110** (High, correctness) — 410 Gone resync handling on the **legacy `SyncEngine`** delta loop (`resyncChanges*`). NOTE: the *tracking-set* 410 self-heal already shipped (CLOSED.md:101, commit `09e9891`); #110 is the still-open legacy-engine variant — reuse the tracking-engine recovery shape, don't reinvent.
 - **C2 · #112** (High; labeled efficiency but it's change-detection correctness) — use OneDrive `file.hashes` in the local change detector to stop re-upload churn.
-- **C3 · #113** (High, correctness) — `If-Match` precondition on `createUploadSession` (catches concurrent mid-flight edit before the session URL is handed out). Surface: `GraphApiService.createUploadSession` (verified).
+- **C3 · #113** (High, correctness) — `If-Match` precondition on `createUploadSession` (catches concurrent mid-flight edit before the session URL is handed out). Surface: `GraphApiService.createUploadSession` (verified). NOTE: If-Match on `moveItem` + `uploadSimple` conflictBehavior=replace parity already shipped (CLOSED.md:82); #113 is the uncovered session-create path only.
 - **C4 · #183** (Medium, correctness) — OneDrive minimal soft-removed tombstone leaves an orphan DB row (no path to resolve) → state pollution.
-- **C5 · #111** (High, reliability) — OneDrive webhook lifecycle + validation endpoint. *Borderline: this is a push-notification enhancement; defer unless we want sub-poll-interval freshness for MVP.*
+- **C5 · #111** (High, reliability) — OneDrive webhook lifecycle + validation endpoint. **In MVP** (push freshness below the poll interval). Surface: OneDrive provider + a daemon-side validation HTTP endpoint; coordinate with the auto-poll path.
 
 ### Phase D — Sync data-safety guards & state consistency (legacy)
 - **D1 · #137** (Medium, correctness) — pre-reconcile empty-`sync_root` guard must distinguish rehydrate intent from a wrong/misconfigured `sync_root`. Data-safety guard. Surface: `SyncEngine.kt` pre-reconcile.
@@ -87,12 +84,13 @@ Each unit = one branch (`fix/...`), one PR, merged before the next starts. Every
 
 ### Phase G — CLI trust (status)
 - **G1 · #117** (High, correctness) — `status` and `status --all` enumerate different profile sources (FS-scan vs `config.toml`) → orphan-profile divergence. Pick FS-scan as truth, flag orphans.
-- **G2 · #118** (High, observability) — `status` doesn't reflect tracking-set profiles (reads legacy `state.db`). *Tracking-set-dependent → belongs with Phase H if ts is OUT, else here.*
+- **G2 · #118** (High, observability) — `status` doesn't reflect tracking-set profiles (reads legacy `state.db`). Renders `tracking.db` → **sequenced inside Phase H** (after the ts engine is hardened), not here.
 
-### Phase H — Tracking-set engine — **only if the fork resolves IN**
+### Phase H — Tracking-set engine (IN MVP)
 - **H1 · #104** (High, data-safety) — adopt-on-content-match degrades to size-only for Internxt null-hash → different-content same-size files adopted as identical.
 - **H2 · #134** (Medium) — ts/legacy `state.db` coexistence & migration.
 - **H3 · #133, #161, #162, #167, #168, #169** — ts live-test runtime + auth/throttle coverage + CLI `-p` + EXPERIMENTAL warning.
+- **H3b · #118** (High) — `status`/`status --all` render tracking-set profiles from `tracking.db` (was Phase G2; needs the hardened engine).
 - **H4 · #108** (High, **handle with care**) — primary-Internxt deletion-safeguard trap. Resolution = migrate the primary profile onto the hardened ts engine (after H1–H3) **or** a one-shot operator `--force-delete`. **No destructive op on the primary profile without explicit operator go-ahead.**
 
 ### Phase I — Release + acceptance gate
@@ -104,7 +102,7 @@ Each unit = one branch (`fix/...`), one PR, merged before the next starts. Every
 
 ## Deferred (post-MVP)
 
-Efficiency/feature: #124 #125 #126 #127 #128 #129 #130 #131 #112(if reframed) #153 #154 #155 #148. Daemon phases: #141 #142. Observability/UX/CLI: #143 #150 #151 #152 #156 #157 #159 #164 #165 #166 #170. Test/build: #133(if ts OUT) #146 #158 #163. Internxt inherent: #132 (≥60 min /files reap lag — document, cross-check folder-contents endpoint, not fully fixable client-side). Mount perf/hygiene: ML #31 #32 #33 #36 #37 #38 #39 #40 #41 #42 #43. Tracking-set cluster (#99 #104 #134 #161 #162 #167 #168 #169) only if fork resolves OUT.
+Efficiency: #124 #125 #126 #127 #128 #129 #130 #131 #153 #154 #155 #148. Daemon phases: #141 #142. Observability/UX/CLI: #143 #150 #151 #152 #156 #157 #159 #164 #165 #166 #170. Test/build: #146 #158 #163. Internxt inherent: #132 (≥60 min /files reap lag — document, cross-check folder-contents endpoint, not fully fixable client-side). Mount perf/hygiene: ML #31 #32 #36 #37 #38 #39 #40 #41 #42 #43. (ML #33 thumbnail bulk-hydration moved into Phase E consideration — re-tier if it causes egress blowups.) #99 is the tracking-set engine umbrella (core landed; Phase H completes it).
 
 ## Shared-file serialization map (why parallel is unsafe)
 
