@@ -3193,4 +3193,88 @@ class SyncEngineTest {
             assertFailsWith<ProviderException> { engine.deleteRemote("/server-error.txt") }
             assertNotNull(db.getEntry("/server-error.txt"), "row must remain alive after real error")
         }
+
+    // ── applyDeleteRemote transient-error gate ────────────────────────────────
+    // Two orthogonal invariants for the apply-phase DeleteRemote path:
+    //  (1) an already-gone remote tombstones the row WITHOUT throwing (correct
+    //      idempotent behaviour — regression guard, passes pre-fix).
+    //  (2) a transient/other ProviderException does NOT tombstone the row, so
+    //      DeleteRemote re-emits on the next sync instead of orphaning the
+    //      remote file forever (the data-safety fix — FAILS pre-fix).
+
+    @Test
+    fun `delete_of_already_gone_remote_tombstones_row_without_throwing`() =
+        runTest {
+            // Seed an alive, hydrated row (initial sync hydrates the file).
+            provider.deltaItems = listOf(cloudItem("/already-gone.txt", size = 100))
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/already-gone.txt"))
+
+            // Local delete + empty remote delta → reconciler emits DeleteRemote.
+            // Provider reports the remote is already gone via the typed
+            // metadata-miss shape that isAlreadyGone recognises.
+            Files.delete(syncRoot.resolve("already-gone.txt"))
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deleteThrow = ProviderException("Item not found: /already-gone.txt")
+
+            // syncOnce must complete normally (no throw escaping the pass).
+            engine.syncOnce()
+
+            // Already-gone is correctly treated as a no-op delete: the row is
+            // tombstoned (TRASHED) just like a successful delete.
+            assertNull(db.getEntry("/already-gone.txt"), "alive view must no longer have the row")
+            val trashed = db.recovery.trashedEntries().filter { it.path == "/already-gone.txt" }
+            assertEquals(
+                1,
+                trashed.size,
+                "already-gone remote must tombstone the row as TRASHED; got ${db.recovery.allEntriesAnyStatus()}",
+            )
+        }
+
+    @Test
+    fun `delete_with_transient_provider_error_rethrows_and_preserves_row`() =
+        runTest {
+            // Seed an alive, hydrated row.
+            provider.deltaItems = listOf(cloudItem("/transient.txt", size = 100))
+            engine.syncOnce()
+            assertNotNull(db.getEntry("/transient.txt"))
+
+            // Local delete + empty remote delta → reconciler emits DeleteRemote.
+            // Provider fails with a TRANSIENT error whose message does NOT match
+            // isAlreadyGone ("Folder not found: " / "Item not found: ").
+            Files.delete(syncRoot.resolve("transient.txt"))
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.deleteThrow = ProviderException("Service unavailable")
+
+            // The apply loop's per-action handler logs the failure and continues;
+            // syncOnce returns without crashing the whole pass.
+            engine.syncOnce()
+
+            // The provider saw the delete attempt …
+            assertTrue(
+                provider.deletedPaths.isEmpty(),
+                "delete failed, so no path should have been recorded as deleted; got ${provider.deletedPaths}",
+            )
+            // … but the row MUST survive untouched: NOT tombstoned, still alive.
+            assertNotNull(
+                db.getEntry("/transient.txt"),
+                "transient delete error must NOT tombstone the row — it must stay alive so DeleteRemote re-emits",
+            )
+            assertTrue(
+                db.recovery.trashedEntries().none { it.path == "/transient.txt" },
+                "transient error must not produce a TRASHED tombstone; got ${db.recovery.trashedEntries()}",
+            )
+
+            // Orphan-forever is fixed: a second pass (provider now healthy)
+            // re-emits DeleteRemote and the remote is finally deleted.
+            provider.deltaCursor = "cursor-3"
+            engine.syncOnce()
+            assertTrue(
+                provider.deletedPaths.contains("/transient.txt"),
+                "DeleteRemote must re-emit on the next sync after a transient failure; got ${provider.deletedPaths}",
+            )
+            assertNull(db.getEntry("/transient.txt"), "row tombstoned once the delete finally succeeds")
+        }
 }
