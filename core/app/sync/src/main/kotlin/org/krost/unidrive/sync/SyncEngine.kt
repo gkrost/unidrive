@@ -2286,7 +2286,27 @@ open class SyncEngine(
 
     private fun resolveItemPath(item: CloudItem): CloudItem? {
         if (item.path != "/" && item.path.isNotEmpty()) return item
-        if (!item.deleted) return null // non-deleted root item, skip
+        // #183: access-revoked tombstone — Graph `@microsoft.graph.removed` state="removed",
+        // no parentReference, so path resolved to "/". The item still physically exists on the
+        // remote; the local file MUST be kept. Retire the DB row via TRASHED (removed from the
+        // alive view, no longer an unreapable orphan) and return null so the item doesn't flow
+        // into the normal reconciler path.
+        if (!item.deleted && item.accessRevoked) {
+            val retired = db.setStatusTrashed(item.id)
+            if (retired) {
+                log.info(
+                    "#183: access-revoked tombstone id={}: DB row retired (TRASHED), local file preserved",
+                    item.id,
+                )
+            } else {
+                log.debug(
+                    "#183: access-revoked tombstone id={}: no alive row found (already retired or never tracked)",
+                    item.id,
+                )
+            }
+            return null
+        }
+        if (!item.deleted) return null // non-deleted root item without a known path, skip
         val entry = db.getEntryByRemoteId(item.id) ?: return null
         log.debug("Resolved deleted item id={} to path={}", item.id, entry.path)
         return item.copy(path = entry.path, name = entry.path.substringAfterLast("/"))

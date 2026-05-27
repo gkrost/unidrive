@@ -393,6 +393,11 @@ class OneDriveProvider(
             hash = file?.hashes?.quickXorHash ?: file?.hashes?.sha256Hash,
             mimeType = file?.mimeType,
             deleted = isHardDeleted(),
+            // #183: a `@microsoft.graph.removed` facet with state="removed" means the
+            // item's access was revoked (shared link revoked / moved out of scope). The
+            // path resolver (SyncEngine.resolveItemPath) uses this flag to retire the
+            // DB row via TRASHED without touching the local file.
+            accessRevoked = removed?.state == "removed",
         )
     }
 
