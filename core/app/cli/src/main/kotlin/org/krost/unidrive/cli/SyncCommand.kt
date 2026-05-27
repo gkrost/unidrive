@@ -38,7 +38,6 @@ import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
-import java.nio.file.Files
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import kotlin.time.Duration.Companion.seconds
@@ -458,8 +457,6 @@ open class SyncCommand : Runnable {
                 skippedOpsLogPath = parent.providerConfigDir().resolve("skipped-ops.jsonl"),
                 streamingReconciliation = effectiveStreaming,
             )
-
-        Files.createDirectories(config.syncRoot)
 
         // Webhook subscription store (shared DB file, separate table)
         val subscriptionStore = SubscriptionStore(dbPath)

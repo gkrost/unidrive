@@ -861,6 +861,93 @@ class SyncEngineTest {
             engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = false)
         }
 
+    // #137 — download-only rehydrate must not be blocked by the empty-sync_root guard
+
+    private fun engineWithDirection(direction: SyncDirection) =
+        SyncEngine(
+            provider = provider,
+            db = db,
+            syncRoot = syncRoot,
+            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+            reporter = ProgressReporter.Silent,
+            syncDirection = direction,
+        )
+
+    @Test
+    fun `#137 download-only with empty sync_root and hydrated DB does not trigger empty-sync_root guard`() =
+        runTest {
+            // Rehydrate scenario: user intentionally wiped local, wants cloud copy back.
+            // Guard must not fire — the destructive local→remote-delete direction is
+            // already gated by the direction filter in download-only mode.
+            seedDbEntries(50)
+            provider.deltaItems = emptyList()
+            // Must not throw — download-only rehydrate proceeds without guard intervention.
+            engineWithDirection(SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
+        }
+
+    @Test
+    fun `#137 bidirectional with empty sync_root and hydrated DB still fires the empty-sync_root guard`() =
+        runTest {
+            // Data-safety preserved: bidirectional sync with empty local + hydrated DB
+            // must still be refused to prevent a mass remote-delete.
+            seedDbEntries(50)
+            provider.deltaItems = emptyList()
+            val ex =
+                assertFailsWith<IllegalStateException> {
+                    engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+                }
+            assertTrue(ex.message!!.contains("sync_root"))
+            assertTrue(ex.message!!.contains("is empty"))
+        }
+
+    @Test
+    fun `#137 aborted guard run does not create empty sync_root directory`() =
+        runTest {
+            // An aborted (guard-fired) bidirectional run must not leave an empty
+            // sync_root dir behind. createDirectories now runs after the guard.
+            val guardSyncRoot = Files.createTempDirectory("unidrive-guard-test-parent")
+                .resolve("never-created")
+            val guardDb = StateDatabase(
+                Files.createTempDirectory("unidrive-guard-db").resolve("state.db"),
+            )
+            guardDb.initialize()
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            for (i in 0 until 50) {
+                guardDb.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/seeded-$i.txt",
+                        remoteId = "id-$i",
+                        remoteHash = "hash-$i",
+                        remoteSize = 100,
+                        remoteModified = now,
+                        localMtime = now.toEpochMilli(),
+                        localSize = 100,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+            }
+            guardDb.setSyncState("delta_cursor", "seeded-cursor")
+            val guardEngine = SyncEngine(
+                provider = FakeCloudProvider().also { it.deltaItems = emptyList() },
+                db = guardDb,
+                syncRoot = guardSyncRoot,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+                syncDirection = SyncDirection.BIDIRECTIONAL,
+            )
+            assertFailsWith<IllegalStateException> {
+                guardEngine.syncOnce(dryRun = false)
+            }
+            guardDb.close()
+            assertFalse(
+                Files.exists(guardSyncRoot),
+                "aborted guard run must not create empty sync_root at $guardSyncRoot",
+            )
+        }
+
     // UD-298 — apply percentage deletion safeguard in dry-run as warning
 
     @Test

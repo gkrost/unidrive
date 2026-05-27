@@ -807,6 +807,59 @@ open class SyncEngine(
         trashManager?.purge(trashRetentionDays)
         versionManager?.pruneByAge(versionRetentionDays)
 
+        // UD-297: empty-local + populated-DB sanity check. Catches the
+        // wrong-sync_root case (user pointed at an empty directory while
+        // the state DB knows about thousands of remote entries) before
+        // the reconciler turns it into a wall of del-remote actions.
+        // Fires in dry-run too — that's where the user is most likely
+        // to notice and the system has the least to lose by being loud.
+        //
+        // Gate on the HYDRATED entry count, not the total. A state.db
+        // populated by previous failed gather passes (Internxt "dance"
+        // pattern: many delta walks, no successful downloads) is full of
+        // unhydrated rows that represent cloud-side items the user still
+        // needs to download — refusing to run there blocks the UD-225
+        // recovery loop from doing its job. The original concern (mass
+        // DeleteRemote when sync_root is mis-pointed) only applies when
+        // hydrated entries are missing locally; the Reconciler rewrites
+        // unhydrated-FILE DELETED localChanges into DownloadContent via
+        // its UD-225a recovery downgrade, and drops DeleteRemote actions
+        // for unhydrated-FOLDER rows in a post-detectMoves filter, so
+        // the only way DeleteRemote reaches the apply phase is via
+        // hydrated rows.
+        // Live repro 2026-05-20: 171 386 file rows all is_hydrated=0,
+        // sync_root empty, old guard refused with a misleading
+        // "--force-delete" hint that would have catastrophically wiped
+        // the cloud side.
+        //
+        // #137: --download-only is exempt. In download-only mode the
+        // destructive local→remote-delete direction is already gated by
+        // the direction filter, so the mis-pointed-sync_root mass-delete
+        // risk does NOT apply. A download-only user who intentionally
+        // wiped local and wants the cloud copy back (a legitimate
+        // rehydrate) must not be blocked here.
+        val hydratedEntryCount = db.getHydratedEntryCount()
+        if (!forceDelete && syncDirection != SyncDirection.DOWNLOAD &&
+            hydratedEntryCount > 10 && isSyncRootEffectivelyEmpty()
+        ) {
+            val msg =
+                "Local sync_root '$syncRoot' is empty, but state DB knows " +
+                    "$hydratedEntryCount previously-hydrated entries (of " +
+                    "${db.getEntryCount()} total). sync_root probably points at " +
+                    "the wrong directory. To rehydrate from cloud, re-run with " +
+                    "--download-only. To proceed with a bidirectional sync after " +
+                    "an intentional local wipe, re-run with --force-delete."
+            if (dryRun) {
+                reporter.onWarning(msg)
+            } else {
+                throw IllegalStateException(msg)
+            }
+        }
+
+        // #137: create sync_root only after the guard — an aborted (guard-fired)
+        // run must not leave an empty sync_root dir behind.
+        java.nio.file.Files.createDirectories(syncRoot)
+
         // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
         // for each phase to the reporter so the heartbeat can render a
         // bucketed ETA. First-run / `--reset` scans simply have no key in
@@ -952,45 +1005,6 @@ open class SyncEngine(
             val localScanSecs = (System.currentTimeMillis() - localPhaseStart) / 1000
             db.setSyncState("last_scan_secs_local", localScanSecs.toString())
             db.setSyncState("last_scan_count_local", localChanges.size.toString())
-        }
-
-        // UD-297: empty-local + populated-DB sanity check. Catches the
-        // wrong-sync_root case (user pointed at an empty directory while
-        // the state DB knows about thousands of remote entries) before
-        // the reconciler turns it into a wall of del-remote actions.
-        // Fires in dry-run too — that's where the user is most likely
-        // to notice and the system has the least to lose by being loud.
-        //
-        // Gate on the HYDRATED entry count, not the total. A state.db
-        // populated by previous failed gather passes (Internxt "dance"
-        // pattern: many delta walks, no successful downloads) is full of
-        // unhydrated rows that represent cloud-side items the user still
-        // needs to download — refusing to run there blocks the UD-225
-        // recovery loop from doing its job. The original concern (mass
-        // DeleteRemote when sync_root is mis-pointed) only applies when
-        // hydrated entries are missing locally; the Reconciler rewrites
-        // unhydrated-FILE DELETED localChanges into DownloadContent via
-        // its UD-225a recovery downgrade, and drops DeleteRemote actions
-        // for unhydrated-FOLDER rows in a post-detectMoves filter, so
-        // the only way DeleteRemote reaches the apply phase is via
-        // hydrated rows.
-        // Live repro 2026-05-20: 171 386 file rows all is_hydrated=0,
-        // sync_root empty, old guard refused with a misleading
-        // "--force-delete" hint that would have catastrophically wiped
-        // the cloud side.
-        val hydratedEntryCount = db.getHydratedEntryCount()
-        if (!forceDelete && hydratedEntryCount > 10 && isSyncRootEffectivelyEmpty()) {
-            val msg =
-                "Local sync_root '$syncRoot' is empty, but state DB knows " +
-                    "$hydratedEntryCount previously-hydrated entries (of " +
-                    "${db.getEntryCount()} total). sync_root probably points at " +
-                    "the wrong directory. Re-run with --force-delete if the " +
-                    "local data was intentionally wiped."
-            if (dryRun) {
-                reporter.onWarning(msg)
-            } else {
-                throw IllegalStateException(msg)
-            }
         }
 
         // UD-240g: pass reporter so the phase emits a
