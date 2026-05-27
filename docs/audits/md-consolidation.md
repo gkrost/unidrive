@@ -115,7 +115,7 @@ Disposition key: KEEP · COMPRESS→~N · MERGE→file · DELETE (superseded) ·
 - **All four `docs/dev/research/bug-hunt-*.md`** — migrated to issues **#88, #97–#119, #121–#173**.
   Fixed-and-closed: #97, #98, #100, #101, #102, #106, #114. The docs add nothing the issues lack
   except the verification narrative, which is itself stale (see Contradictions 1–3).
-- **8 of 10 `docs/dev/plans/*.md`** — shipped; CLOSED.md cites the plan path for each
+- **9 of 10 `docs/dev/plans/*.md`** — shipped; CLOSED.md cites the plan path for each
   (daemon §57, mount §75, hydration §50, subscriber-set §92, ipc-transport §90/§91, view-refresh
   §93/§94, setattr fix-seq §12, ignore-list drained). The closing-citation requirement (AGENTS §11,
   "its closing BACKLOG entry cites the spec path") is satisfied by the **spec**, not the plan — so
@@ -144,10 +144,10 @@ core/**/README.md (5 — unchanged, sync-tracking compressed)
 ```
 
 Estimated totals:
-- **Files: 59 → ~38** (delete 8 plans + 4 bug-hunts + merge 1 VFS brief = −13; relocate 4 out of
+- **Files: 59 → ~37** (delete 9 plans + 4 bug-hunts + merge 1 VFS brief = −14; relocate 4 out of
   unsanctioned dirs into `docs/audits/`, net file count unchanged by relocation; `journ​ald` either
   −1 or compressed).
-- **Lines: ~18,990 → ~10,500** (plans −8,955 of 9,980; bug-hunts −1,015; the rest from compress
+- **Lines: ~18,990 → ~9,575** (plans −9,881 of 9,980; bug-hunts −1,015; the rest from compress
   passes on specs/audits/CLOSED/research nets roughly −2,500 against ~+1,000 retained).
 
 **AGENTS.md §11 edit required.** The sanction list omits `research/`, `findings/`, `lessons/`,
@@ -162,8 +162,8 @@ than sanctions new dirs). Pick (b) for least churn; note it in the execution pla
 
 Safe deletions/merges first; judgment-heavy compressions last.
 
-1. **[HIGH]** Delete the 8 shipped plans (keep `critical-high-fix-sequence.md`). Pure removal;
-   each is cited-as-shipped in CLOSED.md + a merged PR. `−8,955` lines. *Confidence: HIGH —
+1. **[HIGH]** Delete the 9 shipped plans (keep `critical-high-fix-sequence.md`). Pure removal;
+   each is cited-as-shipped in CLOSED.md + a merged PR. `−9,881` lines. *Confidence: HIGH —
    verified per-plan against CLOSED citations and code symbols on main.*
 2. **[HIGH]** Delete `bug-hunt-third-pass-opencode.md` (byte-identical-minus-table duplicate of
    third-review). `−268`. *HIGH.*
