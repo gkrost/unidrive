@@ -120,7 +120,6 @@ class TrackingReconciler {
             localGone ->
                 ReconcileAction.PropagateLocalDelete(path)
 
-            // Symmetric: remote-gone propagates to local.
             remoteGone ->
                 ReconcileAction.PropagateRemoteDelete(path)
 
@@ -131,7 +130,6 @@ class TrackingReconciler {
                     "tracked path diverged on both sides since last sync",
                 )
 
-            // One side diverged.
             localChanged -> ReconcileAction.UploadLocal(path)
             remoteChanged -> ReconcileAction.DownloadRemote(path)
 

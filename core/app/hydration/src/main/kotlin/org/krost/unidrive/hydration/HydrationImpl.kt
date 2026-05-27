@@ -21,21 +21,6 @@ import java.util.concurrent.ConcurrentMap
 class HydrationImpl(
     private val syncEngine: SyncEngine,
     private val stateDb: StateDatabase,
-    /**
-     * Scope used to launch crash-recovery uploads in the background so that
-     * `open_write` with a `recovery-N` handle ID returns immediately rather
-     * than blocking until the upload completes. Crash-recovery happens before
-     * the FUSE mount goes live; a blocking upload for large files (e.g. 650 MB)
-     * would hang the co-daemon indefinitely before the mountpoint ever appears.
-     *
-     * Normal-path (FUSE RELEASE) `open_write` calls still block: the caller
-     * already returned 0 from `close(2)`, so upload failure must be stamped for
-     * `unidrive doctor` to surface — and `fsync`-driven uploads must complete
-     * synchronously to give the application meaningful error feedback.
-     *
-     * Defaults to a standalone `Dispatchers.IO` scope so tests that construct
-     * [HydrationImpl] directly do not need to pass one.
-     */
     private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
 ) : Hydration {
 

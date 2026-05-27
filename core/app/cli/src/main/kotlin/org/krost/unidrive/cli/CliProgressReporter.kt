@@ -141,15 +141,13 @@ class CliProgressReporter(
         }
     }
 
-    /**
-     * Build the " since <YYYY-MM-DD HH:mm>[ (incomplete prior run)]"
-     * suffix that follows the phase label at scan-start. Returns "" when
-     * no cursor hint exists for [phase], when the cursor is blank, or
-     * when it fails to parse as ISO-8601 (defensive — never break the
-     * heartbeat line over a malformed sync_state value, just drop the
-     * suffix). Formatting is in the user's local timezone since the
-     * label is for human at-a-glance use, not log correlation.
-     */
+    // Build the " since <YYYY-MM-DD HH:mm>[ (incomplete prior run)]"
+    // suffix that follows the phase label at scan-start. Returns "" when
+    // no cursor hint exists for [phase], when the cursor is blank, or
+    // when it fails to parse as ISO-8601 (defensive — never break the
+    // heartbeat line over a malformed sync_state value, just drop the
+    // suffix). Formatting is in the user's local timezone since the
+    // label is for human at-a-glance use, not log correlation.
     internal fun cursorSuffix(phase: String): String {
         val raw = scanCursors[phase] ?: return ""
         val formatted = formatCursorForDisplay(raw) ?: return ""
@@ -300,31 +298,29 @@ class CliProgressReporter(
     // thousands separator, fr uses NBSP — neither is parser-friendly).
     internal fun formatCount(count: Int): String = String.format(Locale.ROOT, "%,d", count)
 
-    /**
-     * UD-747 / UD-748 (UD-744 slices) → UD-757: ETA-in-seconds for the
-     * scan-progress line. Renderer formats this with [formatTime].
-     *
-     * Two paths:
-     *
-     * - **Wall-clock-only (UD-747).** When only [lastSecs] is known,
-     *   `remainingSecs = lastSecs - elapsedSecs`. Robust but blind to
-     *   the actual progress speed of THIS run.
-     *
-     * - **Count-aware (UD-748).** When both [lastSecs] and [lastCount]
-     *   exist AND the current run has accumulated >= 5% of last run's
-     *   count, derive the ETA from progress fraction:
-     *       progressFraction  = currentCount / lastCount
-     *       estimatedTotalSec = elapsedSecs / progressFraction
-     *       remainingSecs     = estimatedTotalSec - elapsedSecs
-     *   Sanity clamp: if the count-based estimate diverges by > 4x from
-     *   `lastSecs - elapsedSecs`, fall back to the wall-clock path —
-     *   the run isn't following last run's shape and we shouldn't
-     *   overcommit either way.
-     *
-     * Returns `null` (rendered as "no ETA segment") when:
-     *   - [lastSecs] is null/zero/negative (first run, no foundation), or
-     *   - the chosen estimate's remainingSecs <= 0 (overrun — don't lie).
-     */
+    // UD-747 / UD-748 (UD-744 slices) → UD-757: ETA-in-seconds for the
+    // scan-progress line. Renderer formats this with [formatTime].
+    //
+    // Two paths:
+    //
+    // - Wall-clock-only (UD-747). When only [lastSecs] is known,
+    //   `remainingSecs = lastSecs - elapsedSecs`. Robust but blind to
+    //   the actual progress speed of THIS run.
+    //
+    // - Count-aware (UD-748). When both [lastSecs] and [lastCount]
+    //   exist AND the current run has accumulated >= 5% of last run's
+    //   count, derive the ETA from progress fraction:
+    //       progressFraction  = currentCount / lastCount
+    //       estimatedTotalSec = elapsedSecs / progressFraction
+    //       remainingSecs     = estimatedTotalSec - elapsedSecs
+    //   Sanity clamp: if the count-based estimate diverges by > 4x from
+    //   `lastSecs - elapsedSecs`, fall back to the wall-clock path —
+    //   the run isn't following last run's shape and we shouldn't
+    //   overcommit either way.
+    //
+    // Returns `null` (rendered as "no ETA segment") when:
+    //   - [lastSecs] is null/zero/negative (first run, no foundation), or
+    //   - the chosen estimate's remainingSecs <= 0 (overrun — don't lie).
     internal fun computeEtaSecs(
         lastSecs: Long?,
         elapsedSecs: Long,
