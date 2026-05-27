@@ -381,24 +381,33 @@ class XdgLocaleAliasingTest {
 
     /**
      * Invariant: the streaming path must alias local Bilder/... to
-     * Pictures/... even when the canonical /Pictures folder entry lands
-     * on a DIFFERENT page than the child items being reconciled.
+     * Pictures/... regardless of how many pages separate the canonical
+     * /Pictures folder entry from the child items being reconciled.
      *
-     * Scenario:
-     *   page 1 → /Pictures (folder) only — establishes canonical name
-     *   page 2 → /Pictures/photo.jpg (child) — but local has /Bilder/photo.jpg NEW
+     * Scenario (4 pages — defeats a 1-page lookahead):
+     *   page 1 → /Bilder (local NEW) children: /Bilder/photo.jpg NEW
+     *   page 2 → unrelated item (/Documents/file.txt)
+     *   page 3 → another unrelated item (/Music/song.mp3)
+     *   page 4 → /Pictures (canonical folder) — arrives LAST
      *
-     * Without the fix: resolveSlice(page2, localChanges) builds alias context
-     * from page2 alone, which has no top-level /Pictures folder → alias is
-     * empty → emits CreateRemoteFolder("/Bilder") + Upload("/Bilder/photo.jpg").
+     * A 1-page lookahead fails here: when page 1's slice fires, the
+     * lookahead has only seen page 2 (/Documents/...) — "Pictures" is
+     * NOT in the accumulated set → alias is empty → emits
+     * CreateRemoteFolder("/Bilder") + Upload("/Bilder/photo.jpg").
      *
-     * With the fix: resolveSlice receives the full stable set of remote top-level
-     * folder names ({"Pictures"}) — derived from ALL pages before slice emission —
-     * so the alias fires and NO /Bilder-prefixed action is emitted.
+     * With the fix (Option A — preliminary root listing): resolveSlice
+     * receives the pre-fetched complete set {"Pictures"} for every page,
+     * so the alias fires from page 1 onward and NO /Bilder-prefixed
+     * action is emitted across any of the 4 slices.
+     *
+     * The test additionally confirms that calling resolveSlice with the
+     * EMPTY set (simulating the broken 1-page lookahead for page 1) DOES
+     * produce /Bilder-prefixed actions — i.e. the new test would have
+     * caught the pre-fix regression.
      */
     @Test
-    fun `streaming_reconcile_aliases_against_full_remote_top_level_not_just_page`() {
-        // Local filesystem: /Bilder/photo.jpg exists (the aliased local file)
+    fun `streaming_reconcile_aliases_canonical_arriving_pages_later`() {
+        // Local filesystem: /Bilder/photo.jpg (the aliased local file)
         mkLocalDir("/Bilder")
         mkLocalFile("/Bilder/photo.jpg", size = 77)
 
@@ -407,26 +416,47 @@ class XdgLocaleAliasingTest {
             "/Bilder/photo.jpg" to ChangeState.NEW,
         )
 
-        // page 1 carries the canonical /Pictures folder — establishes alias
+        // page 1: children under the aliased folder — NO top-level canonical entry
         val page1Remote = mapOf(
-            "/Pictures" to cloudItem("/Pictures", isFolder = true),
-        )
-        // page 2 carries the child item — NO /Pictures top-level entry
-        val page2Remote = mapOf(
             "/Pictures/photo.jpg" to cloudItem("/Pictures/photo.jpg", size = 77),
         )
-
-        // Full stable set of remote top-level names — known across all pages
-        val stableTopLevelNames = setOf("Pictures")
+        // pages 2–3: unrelated top-level items (no "Pictures" among them)
+        val page2Remote = mapOf(
+            "/Documents/file.txt" to cloudItem("/Documents/file.txt", size = 10),
+        )
+        val page3Remote = mapOf(
+            "/Music/song.mp3" to cloudItem("/Music/song.mp3", size = 50),
+        )
+        // page 4: the canonical /Pictures folder arrives LAST
+        val page4Remote = mapOf(
+            "/Pictures" to cloudItem("/Pictures", isFolder = true),
+        )
 
         val reconciler = Reconciler(
             db, syncRoot, ConflictPolicy.KEEP_BOTH,
             xdgUserDirsOverrides = mapOf("XDG_PICTURES_DIR" to "Bilder"),
         )
 
-        // Simulate the streaming path: reconcile each page slice in isolation,
-        // passing the FULL stable top-level name set (the fix) rather than
-        // deriving it only from the current page's entries.
+        // ── Part A: confirm the 1-page-lookahead approach FAILS ──────────────
+        // Simulate the broken state: when page 1's slice fires under a
+        // 1-page lookahead, the look-ahead page is page 2 (/Documents/...) —
+        // it adds NO top-level folder name.  Pass emptySet() to model this.
+        val brokenActionsPage1 = reconciler.resolveSlice(
+            pageRemote = page1Remote,
+            localChanges = localChanges,
+            stableRemoteTopLevelNames = emptySet(),   // lookahead didn't reach /Pictures
+        )
+        val brokenBilder = brokenActionsPage1.filter { it.path.startsWith("/Bilder") }
+        assertTrue(
+            brokenBilder.isNotEmpty(),
+            "Broken lookahead must emit /Bilder-prefixed actions (regression sentinel); " +
+                "got brokenActionsPage1=$brokenActionsPage1",
+        )
+
+        // ── Part B: confirm the fix (complete pre-fetched set) PASSES ────────
+        // The complete set is known upfront via provider.listChildren("/").
+        val stableTopLevelNames = setOf("Pictures", "Documents", "Music")
+
         val actionsPage1 = reconciler.resolveSlice(
             pageRemote = page1Remote,
             localChanges = localChanges,
@@ -437,21 +467,42 @@ class XdgLocaleAliasingTest {
             localChanges = localChanges,
             stableRemoteTopLevelNames = stableTopLevelNames,
         )
+        val actionsPage3 = reconciler.resolveSlice(
+            pageRemote = page3Remote,
+            localChanges = localChanges,
+            stableRemoteTopLevelNames = stableTopLevelNames,
+        )
+        val actionsPage4 = reconciler.resolveSlice(
+            pageRemote = page4Remote,
+            localChanges = localChanges,
+            stableRemoteTopLevelNames = stableTopLevelNames,
+        )
 
-        val allActions = actionsPage1 + actionsPage2
+        val allActions = actionsPage1 + actionsPage2 + actionsPage3 + actionsPage4
 
-        // No /Bilder-prefixed action must appear anywhere across both slices.
+        // (a) No /Bilder-prefixed action anywhere across all 4 slices.
         val bilder = allActions.filter { it.path.startsWith("/Bilder") }
         assertTrue(
             bilder.isEmpty(),
-            "No action must reference /Bilder across streaming slices; got: $bilder",
+            "No action must reference /Bilder across any of the 4 streaming slices; got: $bilder",
         )
 
-        // The upload must reference the canonical path, not the alias.
+        // (b) No CreateRemoteFolder for /Bilder.
+        val mkdirs = allActions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
+        assertFalse(
+            mkdirs.any { it == "/Bilder" || it.startsWith("/Bilder") },
+            "Must NOT emit CreateRemoteFolder for the locale alias /Bilder; got mkdirs=$mkdirs",
+        )
+
+        // (c) The upload references the canonical path.
         val uploads = allActions.filterIsInstance<SyncAction.Upload>().map { it.path }
         assertTrue(
             uploads.any { it == "/Pictures/photo.jpg" },
             "Local /Bilder/photo.jpg must upload as /Pictures/photo.jpg; got uploads=$uploads",
+        )
+        assertFalse(
+            uploads.any { it.startsWith("/Bilder") },
+            "No upload must reference /Bilder; got uploads=$uploads",
         )
     }
 

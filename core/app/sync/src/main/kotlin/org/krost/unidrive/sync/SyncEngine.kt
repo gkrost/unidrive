@@ -1951,6 +1951,39 @@ open class SyncEngine(
             db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
         }
 
+        // #115 streaming fix (page-order-independent): obtain the complete set of
+        // remote top-level folder names with ONE cheap listing of the root's direct
+        // children BEFORE the streaming loop starts.  XDG aliasing only concerns
+        // top-level folders, so this single call is sufficient and does not defeat
+        // streaming (we are NOT fetching the full tree — just root/children).
+        //
+        // This replaces the previous 1-page-lookahead accumulator
+        // (accumulatedTopLevelNames), which failed when the canonical folder
+        // (e.g. /Pictures) arrived more than one page after the slice carrying the
+        // aliasable children (e.g. /Bilder/...) — remote delta/enumeration order
+        // is NOT guaranteed to be parent-first.  With a stable pre-fetched set,
+        // every resolveSlice() call receives the same complete set regardless of
+        // which page the canonical folder's delta entry falls on.
+        val stableRemoteTopLevelNames: Set<String> =
+            try {
+                provider
+                    .listChildren("/")
+                    .filter { it.isFolder && !it.deleted }
+                    .mapTo(mutableSetOf()) { it.name }
+            } catch (e: Exception) {
+                // Non-fatal: if the preliminary listing fails (e.g. network glitch,
+                // provider doesn't support it), fall back to an empty set so
+                // resolveSlice() derives alias context from each page's own items
+                // (pre-fix behaviour — still better than crashing the sync).
+                log.warn(
+                    "#115: preliminary root-children listing failed ({}); " +
+                        "XDG aliasing may not fire for streaming pages whose canonical " +
+                        "folder entry falls on a later page.",
+                    e.message,
+                )
+                emptySet()
+            }
+
         // Per-page reconciliation with 1-page rename-coalescing lookahead
         // (spec §3) on a bounded backpressure channel (spec §4).
         //
@@ -1975,13 +2008,11 @@ open class SyncEngine(
         data class PageSlice(
             val slice: Map<String, CloudItem>,
             val ids: List<String>,
-            // #115 streaming fix: snapshot of all remote top-level folder names
-            // accumulated across pages up to (and including) the page whose held
-            // items are being flushed.  Passed to resolveSlice() so XDG-alias
-            // context is built from the FULL stable set — not just this page's
-            // items — preventing the duplicate-tree bug when the canonical folder
-            // (e.g. /Pictures) and the aliasable local changes (/Bilder/...) fall
-            // on different pages.
+            // The complete set of remote top-level folder names, pre-fetched
+            // before the streaming loop (page-order-independent).  Passed to
+            // resolveSlice() so XDG-alias context is built from the FULL stable
+            // set regardless of which delta page the canonical folder entry
+            // (e.g. /Pictures) falls on.
             val stableRemoteTopLevelNames: Set<String>,
         )
 
@@ -2086,17 +2117,9 @@ open class SyncEngine(
                     }
                 }
 
-            // Producer: page-fetch loop with 1-page lookahead.
+            // Producer: page-fetch loop with 1-page rename-coalescing lookahead.
             launch {
                 var heldItems: MutableMap<String, HeldItem>? = null
-                // #115 streaming fix: accumulate every top-level folder name seen
-                // across ALL pages.  Updated BEFORE flushHeld() so each PageSlice
-                // carries a snapshot that already includes the look-ahead page's
-                // top-level entries — the canonical /Pictures seen on page N is
-                // therefore present in the stable set when page N-1's slice fires.
-                // This mutable set is only ever written by the producer; read-only
-                // snapshots (toSet()) are embedded into PageSlice before the send.
-                val accumulatedTopLevelNames = mutableSetOf<String>()
 
                 suspend fun flushHeld() {
                     val held = heldItems ?: return
@@ -2110,7 +2133,8 @@ open class SyncEngine(
                         changes[item.resolved.path] = item.resolved
                     }
                     reporter.onScanProgress("remote", changes.size)
-                    pageChannel.send(PageSlice(slice, ids, accumulatedTopLevelNames.toSet()))
+                    // Pass the pre-fetched complete top-level set (page-order-independent).
+                    pageChannel.send(PageSlice(slice, ids, stableRemoteTopLevelNames))
                 }
 
                 suspend fun ingestPage(page: DeltaPage) {
@@ -2124,21 +2148,6 @@ open class SyncEngine(
                     for (item in page.items) {
                         val resolved = resolveItemPath(item) ?: continue
                         newItems[resolved.id] = HeldItem(resolved, resolved.id)
-                    }
-
-                    // #115 streaming fix: update the stable top-level names from
-                    // this page's items BEFORE flushing the held slice — so the
-                    // PageSlice that is about to fire includes names from the
-                    // look-ahead page too (1-page ahead = canonical folder on N+1
-                    // is visible when N's children are reconciled).
-                    for ((_, item) in newItems) {
-                        val resolved = item.resolved
-                        if (!resolved.deleted &&
-                            resolved.path.count { it == '/' } == 1 &&
-                            resolved.isFolder
-                        ) {
-                            accumulatedTopLevelNames.add(resolved.path.removePrefix("/"))
-                        }
                     }
 
                     // Merge step: any id in newItems that also lives in the held
