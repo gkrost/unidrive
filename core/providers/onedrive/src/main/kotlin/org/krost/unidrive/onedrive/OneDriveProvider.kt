@@ -83,8 +83,26 @@ class OneDriveProvider(
         destination: Path,
     ): Long {
         val item = graphApi.getItemByPath(remotePath)
-        graphApi.downloadFile(item.id, destination)
-        return item.size
+        return try {
+            graphApi.downloadFile(item.id, destination)
+            item.size
+        } catch (e: GraphApiException) {
+            // A 404 on the content GET means the pre-resolved download URL went
+            // stale (the CDN URL expired) and/or the cached remoteId drifted off
+            // the live item. Re-resolving BY PATH once fixes both: it yields a
+            // fresh id AND a fresh download URL. Bounded to a single retry so a
+            // genuinely-missing item still surfaces a clean not-found instead of
+            // spinning. Any non-404 (403, 410, 5xx) propagates unchanged.
+            if (e.statusCode != 404) throw e
+            log.info(
+                "OneDrive download of '{}' got 404 (stale download URL or drifted remoteId); " +
+                    "re-resolving the item by path and retrying once",
+                remotePath,
+            )
+            val fresh = graphApi.getItemByPath(remotePath)
+            graphApi.downloadFile(fresh.id, destination)
+            fresh.size
+        }
     }
 
     override suspend fun upload(
