@@ -380,16 +380,14 @@ class OneDriveProvider(
         )
     }
 
-    /**
-     * Graph's delta page carries two distinct removal signals, and only one of them
-     * means the local copy should go. A `@microsoft.graph.removed` facet with
-     * `state == "removed"` is a SOFT removal — the item still exists, the user merely
-     * lost access (a shared-with-me link was revoked, or the item moved out of scope).
-     * Reaping the local copy on that signal destroys still-valid data. A hard delete is
-     * either `removed.state == "deleted"` or the standalone `deleted` facet. A removed
-     * facet with no state at all is the pre-2017 schema fallback; we cannot prove it is
-     * soft, so we keep the historical reading and treat it as a hard delete.
-     */
+    // Graph's delta page carries two distinct removal signals, and only one of them
+    // means the local copy should go. A `@microsoft.graph.removed` facet with
+    // `state == "removed"` is a SOFT removal — the item still exists, the user merely
+    // lost access (a shared-with-me link was revoked, or the item moved out of scope).
+    // Reaping the local copy on that signal destroys still-valid data. A hard delete is
+    // either `removed.state == "deleted"` or the standalone `deleted` facet. A removed
+    // facet with no state at all is the pre-2017 schema fallback; we cannot prove it is
+    // soft, so we keep the historical reading and treat it as a hard delete.
     private fun DriveItem.isHardDeleted(): Boolean {
         val removedFacet = removed
         if (removedFacet != null) {
