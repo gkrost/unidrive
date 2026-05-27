@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.krost.unidrive.sync.EnumerateResult
 import org.krost.unidrive.sync.SyncEngine
 import org.slf4j.LoggerFactory
 import java.util.UUID
@@ -95,6 +96,25 @@ class EnumerateRpcHandler(
         // request as busy and make awaitInFlight join a completed job).
         inFlight.compareAndSet(placeholder, EnumerateJob(jobId, launched))
         return """{"ok":true,"job_id":"$jobId"}"""
+    }
+
+    /**
+     * Run one enumeration through the SAME in-flight guard the `sync.enumerate`
+     * verb uses (mount-view-refresh-design.md §5). Returns the result, or null
+     * if an enumeration (manual or another poll tick) already holds the guard —
+     * the caller (the poll loop) skips this tick rather than overlapping.
+     * No terminal event is emitted (this is the in-process poll path, not an
+     * RPC reply).
+     */
+    suspend fun runGuarded(reset: Boolean): EnumerateResult? {
+        val jobId = UUID.randomUUID().toString()
+        val placeholder = EnumerateJob(jobId, Job())
+        if (!inFlight.compareAndSet(null, placeholder)) return null
+        return try {
+            engine.enumerateRemoteIntoState(reset)
+        } finally {
+            inFlight.set(null)
+        }
     }
 
     fun isInFlight(): Boolean = inFlight.get() != null

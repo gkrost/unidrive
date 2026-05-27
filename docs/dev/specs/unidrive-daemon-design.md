@@ -22,7 +22,7 @@ This spec introduces `unidrive daemon` — a per-profile, long-lived JVM that ow
 
 - **G1:** `unidrive mount` works end-to-end without requiring a concurrent `sync` process.
 - **G2:** One daemon process per profile. Multiple profiles run multiple daemons.
-- **G3:** Daemon is strictly reactive — it only acts when an IPC verb arrives. No background reconcile loops, no scheduled enumeration, no auto-bootstrap.
+- **G3:** Daemon is strictly reactive — it only acts when an IPC verb arrives. No background reconcile loops, no scheduled enumeration, no auto-bootstrap. **Documented exception (`--poll-interval`, mount-view-refresh-design.md §5):** `unidrive daemon run --poll-interval <duration>` (default `0` = off) opts into ONE in-process timer that fires the reactive `sync.enumerate` path on an interval (±10% jitter, serialised by that verb's in-flight guard, backs off on provider failure/429, cancelled at shutdown). The verb itself stays reactive; only the optional timer is the exception, and it is off unless the operator sets the flag.
 - **G4:** State-of-the-cloud population is the operator's choice via a new IPC verb `refresh.run`, exposed through a thin `unidrive refresh` client (replacing today's standalone refresh JVM).
 - **G5:** Lifecycle is explicit and operator-visible: `unidrive daemon run|status|stop` subcommands. Foreground run; operator backgrounds via shell or wrapper.
 - **G6:** Mode-mutex extends to two-way exclusion: `sync` ⇄ `daemon` per profile. Mount becomes a daemon client, not a lock holder. The existing `Mode.MOUNT` enum value is removed.

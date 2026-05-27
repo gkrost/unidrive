@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
+import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
@@ -41,6 +42,16 @@ class DaemonRunCommand : Runnable {
     )
     var profilePositional: String? = null
 
+    @Option(
+        names = ["--poll-interval"],
+        paramLabel = "<duration>",
+        description = [
+            "Auto-poll the remote into the mount view on a timer (e.g. 60s, 5m). " +
+                "Default 0 = off (strictly reactive).",
+        ],
+    )
+    var pollInterval: String = "0"
+
     override fun run() {
         val parent = daemonCmd.parent
         applyPositionalProfile(parent, profilePositional)
@@ -49,6 +60,7 @@ class DaemonRunCommand : Runnable {
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val socketPath = IpcServer.defaultSocketPath(profile.name)
+        val pollIntervalMs = EnumeratePoller.parseIntervalMs(pollInterval)
 
         val runtime = DaemonRuntime(
             profileName = profile.name,
@@ -57,6 +69,7 @@ class DaemonRunCommand : Runnable {
             syncRoot = config.syncRoot,
             socketPath = socketPath,
             providerFactory = { parent.createProvider() },
+            pollIntervalMs = pollIntervalMs,
         )
 
         // Install SIGTERM handler that signals graceful shutdown.

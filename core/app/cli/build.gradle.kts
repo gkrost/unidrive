@@ -435,6 +435,7 @@ dependencies {
     implementation(libs.logback.classic)
 
     testImplementation(kotlin("test"))
+    testImplementation(libs.kotlinx.coroutines.test) // poll-loop virtual-time tests
 }
 
 tasks.test {

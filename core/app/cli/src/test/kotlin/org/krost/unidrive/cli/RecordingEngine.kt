@@ -30,9 +30,11 @@ class RecordingEngine(
     @Volatile var enumerateCalled = false
     @Volatile var syncOnceCalled = false
     @Volatile var lastReset: Boolean? = null
+    val enumerateCount = java.util.concurrent.atomic.AtomicInteger(0)
 
     override suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
         enumerateCalled = true
+        enumerateCount.incrementAndGet()
         lastReset = reset
         gate?.await()
         return enumerateResult
