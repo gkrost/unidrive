@@ -31,6 +31,7 @@ class UploadSessionStore(
         val expiresAt: String, // ISO-8601 Instant
         val localSize: Long,
         val localMtimeMillis: Long,
+        val ifMatchETag: String? = null,
     )
 
     private val storeFile: Path get() = storeDir.resolve("upload_sessions.json")
@@ -63,7 +64,8 @@ class UploadSessionStore(
 
     /**
      * Persist [uploadUrl] for [remotePath] with [expiresAt] as the expiry instant,
-     * bound to the local file's identity ([localSize] bytes, [localMtimeMillis] epoch millis).
+     * bound to the local file's identity ([localSize] bytes, [localMtimeMillis] epoch millis)
+     * and the optional [ifMatchETag] the session was created under (null = no guard).
      */
     @Synchronized
     fun put(
@@ -72,9 +74,10 @@ class UploadSessionStore(
         expiresAt: Instant,
         localSize: Long,
         localMtimeMillis: Long,
+        ifMatchETag: String? = null,
     ) {
         val map = readMap().toMutableMap()
-        map[remotePath] = StoredSession(uploadUrl, expiresAt.toString(), localSize, localMtimeMillis)
+        map[remotePath] = StoredSession(uploadUrl, expiresAt.toString(), localSize, localMtimeMillis, ifMatchETag)
         writeMap(map)
     }
 

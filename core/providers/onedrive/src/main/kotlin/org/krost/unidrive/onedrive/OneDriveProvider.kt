@@ -124,18 +124,26 @@ class OneDriveProvider(
         // A CREATE (existingRemoteId == null) uploads with "fail" so a pre-existing remote at
         // the path is never blind-overwritten (UD-366 data-loss); the create-collision is then
         // resolved by keeping BOTH below.
-        suspend fun put(conflictBehavior: String) =
+        suspend fun put(conflictBehavior: String, ifMatchETag: String? = null) =
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
                 graphApi.uploadSimple(remotePath, content, fsInfo, conflictBehavior)
             } else {
-                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior)
+                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior, ifMatchETag)
             }
 
         if (existingRemoteId != null) {
-            // MODIFIED file we own → replace-in-place.
+            // MODIFIED file we own → replace-in-place. For large-file uploads the session-create
+            // is guarded by If-Match so a concurrent edit surfaces as 412 instead of silently
+            // overwriting the other editor's change (#113).
+            val ifMatchETag =
+                if (fileSize > 4 * 1024 * 1024) {
+                    runCatching { graphApi.getItemByPath(remotePath) }.getOrNull()?.eTag
+                } else {
+                    null
+                }
             return try {
-                put("replace").toCloudItem()
+                put("replace", ifMatchETag).toCloudItem()
             } catch (e: GraphApiException) {
                 if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
                     log.warn(

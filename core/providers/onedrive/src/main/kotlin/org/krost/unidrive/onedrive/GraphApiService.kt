@@ -536,6 +536,7 @@ class GraphApiService(
         onProgress: ((Long, Long) -> Unit)? = null,
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
+        ifMatchETag: String? = null,
     ): DriveItem {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
         log.debug("Upload (chunked): {} ({} bytes, conflictBehavior={})", remotePath, fileSize, conflictBehavior)
@@ -548,7 +549,7 @@ class GraphApiService(
         var lastSessionGone: GraphApiException? = null
         repeat(2) { attempt ->
             try {
-                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior)
+                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior, ifMatchETag)
             } catch (e: GraphApiException) {
                 val isSessionGone = e.statusCode == 404 || e.statusCode == 410
                 if (attempt == 0 && isSessionGone) {
@@ -578,8 +579,9 @@ class GraphApiService(
         onProgress: ((Long, Long) -> Unit)?,
         fileSystemInfo: FileSystemInfo?,
         conflictBehavior: String = "replace",
+        ifMatchETag: String? = null,
     ): DriveItem {
-        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, cleanPath, encoded, fileSize, fileSystemInfo, conflictBehavior)
+        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, cleanPath, encoded, fileSize, fileSystemInfo, conflictBehavior, ifMatchETag)
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
@@ -636,6 +638,7 @@ class GraphApiService(
         fileSize: Long,
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
+        ifMatchETag: String? = null,
     ): Pair<String, Long> {
         val localMtimeMillis = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toMillis() }
         val storedSession = sessionStore.getSession(remotePath)
@@ -654,7 +657,19 @@ class GraphApiService(
             )
             sessionStore.delete(remotePath)
         }
-        val stored = storedSession?.takeIf { it.localSize == fileSize && it.localMtimeMillis == localMtimeMillis }?.uploadUrl
+        // If-Match guard: a stored session not bound to the current eTag must not be reused.
+        // Resuming such a session would skip the createUploadSession If-Match check entirely,
+        // silently overwriting a concurrent remote edit that the caller is trying to detect.
+        if (storedSession != null && ifMatchETag != storedSession.ifMatchETag) {
+            log.info(
+                "OneDrive upload session for {} was created under a different If-Match guard (stored={}, now={}); discarding and creating a fresh session",
+                remotePath,
+                storedSession.ifMatchETag,
+                ifMatchETag,
+            )
+            sessionStore.delete(remotePath)
+        }
+        val stored = storedSession?.takeIf { it.localSize == fileSize && it.localMtimeMillis == localMtimeMillis && it.ifMatchETag == ifMatchETag }?.uploadUrl
         if (stored != null) {
             // Probe the stored URL — Graph extends session lifetime on activity, so our
             // locally stored expiresAt is an upper-bound hint, not authoritative. A network
@@ -670,7 +685,7 @@ class GraphApiService(
                 // shrinks toward its original expiry, an active one stretches up to 14 d.
                 parsedSession.expirationDateTime
                     ?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
-                    ?.let { sessionStore.put(remotePath, stored, it, fileSize, localMtimeMillis) }
+                    ?.let { sessionStore.put(remotePath, stored, it, fileSize, localMtimeMillis, ifMatchETag) }
                 val committedOffset =
                     parsedSession.nextExpectedRanges
                         ?.firstOrNull()
@@ -707,6 +722,12 @@ class GraphApiService(
             httpClient.post("$baseUrl/me/drive/root:/$encoded:/createUploadSession") {
                 bearerAuth(tokenProvider(false))
                 contentType(ContentType.Application.Json)
+                // If-Match makes the session-create conditional on the caller's view of the item
+                // being current. A concurrent edit between the metadata fetch and this call flips
+                // the server-side eTag and Graph returns 412 Precondition Failed instead of
+                // silently overwriting the other editor's change. Caller passes null to opt out
+                // (new files or call sites without an eTag in hand).
+                if (ifMatchETag != null) header(HttpHeaders.IfMatch, ifMatchETag)
                 setBody(sessionBody.toString())
             }
 
@@ -734,7 +755,7 @@ class GraphApiService(
                     .now()
                     .plusSeconds(86_400) // fallback: 24 h
 
-        sessionStore.put(remotePath, url, expiresAt, fileSize, localMtimeMillis)
+        sessionStore.put(remotePath, url, expiresAt, fileSize, localMtimeMillis, ifMatchETag)
         return url to 0L
     }
 
