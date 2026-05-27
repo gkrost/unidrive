@@ -112,6 +112,13 @@ open class SyncEngine(
     // type. Defaults to [providerId] so callers that don't set it keep the
     // pre-existing layout; the CLI sync/daemon paths pass profile.name.
     private val cacheKey: String = providerId,
+    // Called once after enumerateRemoteIntoState mutates state.db with the set of
+    // changed paths (upserted + reaped). No-op default keeps callers that don't
+    // need the signal unaffected. Only invoked when something actually changed
+    // (upserted > 0 || reaped > 0). app:hydration is the intended wiring site;
+    // keeping this as a plain lambda avoids a circular import (HydrationEvent lives
+    // in app:hydration which depends on app:sync, not the other way around).
+    private val viewInvalidationSink: (changedPaths: Set<String>) -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -546,7 +553,8 @@ open class SyncEngine(
             }
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
-        val upserted = remoteChanges.count { !it.value.deleted }
+        val upsertedPaths = remoteChanges.filterValues { !it.deleted }.keys
+        val upserted = upsertedPaths.size
         // Bulk-disappearance corroboration guard (spec §3.2). A complete enumeration that
         // would flip more than max(50, 20% of tracked rows) to deleted is suspicious (e.g.
         // Internxt /files lag); reap only paths a PRIOR complete enumeration also saw
@@ -554,6 +562,7 @@ open class SyncEngine(
         val trackedRows = db.getEntryCount()
         val bulkThreshold = maxOf(BULK_REAP_ABSOLUTE, (trackedRows * BULK_REAP_FRACTION).toInt())
         var reaped = 0
+        val reapedPaths = mutableSetOf<String>()
         var nextDeferred = emptySet<String>()
         db.batch {
             updateRemoteEntries(remoteChanges)
@@ -571,6 +580,7 @@ open class SyncEngine(
                 for (path in toReap) {
                     db.markDeleted(path)
                     runCatching { Files.deleteIfExists(resolveCachePath(path)) }
+                    reapedPaths.add(path)
                     reaped++
                 }
                 if (bulk) {
@@ -596,6 +606,15 @@ open class SyncEngine(
         // deleted).
         deferredMissing = if (complete) nextDeferred else emptySet()
         promotePendingCursor()
+        // Notify the view-invalidation sink once, with all paths that changed in state.db
+        // during this pass. Only fires when something actually changed so quiescent polls
+        // do not produce spurious cache-invalidation traffic. The sink is a plain lambda so
+        // app:hydration can wire HydrationEvent.ViewInvalidated without creating a circular
+        // import (app:hydration depends on app:sync, not vice versa).
+        if (upserted > 0 || reaped > 0) {
+            val changedPaths: Set<String> = upsertedPaths + reapedPaths
+            viewInvalidationSink(changedPaths)
+        }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }
 

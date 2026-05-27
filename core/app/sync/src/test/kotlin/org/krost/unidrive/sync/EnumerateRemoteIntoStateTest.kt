@@ -204,6 +204,68 @@ class EnumerateRemoteIntoStateTest {
             assertNotNull(db.getEntry("/f0.txt"), "deferred paths must survive (not reaped)")
         }
 
+    // ── view-invalidation sink tests ──────────────────────────────────────────
+
+    @Test
+    fun `enumerate_emits_view_invalidation_with_changed_paths`() =
+        runTest {
+            // Wire a sink that records calls.
+            val sinkInvocations = mutableListOf<Set<String>>()
+            val engineWithSink =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    cacheKey = "enum-test",
+                    viewInvalidationSink = { paths -> sinkInvocations.add(paths) },
+                )
+
+            // Scenario: two remote files added (upserted), then one is deleted (reaped).
+            provider.putRemote("/add1.txt", "A")
+            provider.putRemote("/add2.txt", "B")
+            engineWithSink.enumerateRemoteIntoState(reset = false)
+
+            // First pass: 2 upserts, 0 reaps — sink called once with both paths.
+            assertEquals(1, sinkInvocations.size, "sink must be called exactly once when something changes")
+            assertTrue("/add1.txt" in sinkInvocations[0], "upserted path must appear in sink args")
+            assertTrue("/add2.txt" in sinkInvocations[0], "upserted path must appear in sink args")
+
+            // Second pass: remove one path so it gets reaped on a complete enumeration.
+            sinkInvocations.clear()
+            provider.removeRemote("/add1.txt")
+            engineWithSink.enumerateRemoteIntoState(reset = true)
+
+            // add2 was re-upserted (full re-enum), add1 was reaped.
+            assertEquals(1, sinkInvocations.size, "sink must fire once on second changed pass")
+            assertTrue("/add1.txt" in sinkInvocations[0], "reaped path must appear in sink args")
+        }
+
+    @Test
+    fun `enumerate_with_no_changes_emits_no_invalidation`() =
+        runTest {
+            val sinkInvocations = mutableListOf<Set<String>>()
+            val engineWithSink =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    cacheKey = "enum-test",
+                    viewInvalidationSink = { paths -> sinkInvocations.add(paths) },
+                )
+
+            // Empty remote — no upserts, no reaps.
+            val result = engineWithSink.enumerateRemoteIntoState(reset = false)
+
+            assertTrue(result.ok)
+            assertEquals(0, result.upserted)
+            assertEquals(0, result.reaped)
+            assertEquals(0, sinkInvocations.size, "sink must NOT be called when nothing changed")
+        }
+
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an

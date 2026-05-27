@@ -2,6 +2,7 @@ package org.krost.unidrive.hydration
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class HydrationEventTest {
     @Test
@@ -34,11 +35,34 @@ class HydrationEventTest {
     fun `when over sealed class is exhaustive`() {
         val e: HydrationEvent = HydrationEvent.Hydrating("/x")
         val s: String = when (e) {
-            is HydrationEvent.Hydrating  -> "ing"
-            is HydrationEvent.Hydrated   -> "ed"
-            is HydrationEvent.Dehydrated -> "dh"
-            is HydrationEvent.Failed     -> "fa"
+            is HydrationEvent.Hydrating      -> "ing"
+            is HydrationEvent.Hydrated       -> "ed"
+            is HydrationEvent.Dehydrated     -> "dh"
+            is HydrationEvent.Failed         -> "fa"
+            is HydrationEvent.ViewInvalidated -> "vi"
         }
         assertEquals("ing", s)
+    }
+
+    @Test
+    fun `view_invalidated serialises as paths array when under the cap`() {
+        val e = HydrationEvent.ViewInvalidated(paths = listOf("/a", "/b/c"))
+        val json = serialiseHydrationEvent(e)
+        assertEquals("""{"event":"view.invalidated","paths":["/a","/b/c"]}""", json)
+    }
+
+    @Test
+    fun `view_invalidated serialises as full_true when over the cap`() {
+        val e = HydrationEvent.ViewInvalidated(paths = emptyList(), full = true)
+        val json = serialiseHydrationEvent(e)
+        assertEquals("""{"event":"view.invalidated","full":true}""", json)
+    }
+
+    @Test
+    fun `view_invalidated with exactly 256 paths stays under cap and emits paths array`() {
+        val paths = (1..HydrationEvent.VIEW_INVALIDATED_PATH_CAP).map { "/p$it" }
+        val e = HydrationEvent.ViewInvalidated(paths = paths)
+        val json = serialiseHydrationEvent(e)
+        assertTrue(json.startsWith("""{"event":"view.invalidated","paths":["""))
     }
 }

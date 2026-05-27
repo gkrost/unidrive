@@ -5,6 +5,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.HydrationIpcHandler
 import org.krost.unidrive.sync.IpcServer
@@ -57,7 +58,6 @@ class DaemonRuntime(
     private var startedAtMs: Long = 0
 
     suspend fun start() {
-        // 1. Acquire lock (Mode.DAEMON).
         Files.createDirectories(lockFile.parent)
         val acquiredLock = ProcessLock(lockFile)
         if (!acquiredLock.tryLock(ProcessLock.Mode.DAEMON)) {
@@ -81,7 +81,6 @@ class DaemonRuntime(
                 )
             }
 
-            // 3. Open StateDatabase.
             db = StateDatabase(dbPath).also { it.initialize() }
 
             // 4. Authenticate. NO socket is bound until this succeeds.
@@ -96,7 +95,6 @@ class DaemonRuntime(
                 throw e
             }
 
-            // 5. Bind IpcServer + register handlers.
             Files.createDirectories(socketPath.parent)
             val server = IpcServer(socketPath)
             ipcServer = server
@@ -120,9 +118,28 @@ class DaemonRuntime(
                 // co-daemon --cache root (also profile.name), so the FUSE
                 // backing store, eviction, and crash-recovery scanner all
                 // address the same files.
-                val engine = SyncEngine(provider, db!!, syncRoot = syncRoot, cacheKey = profileName)
+                // viewInvalidationSink is a late-binding lambda: hydrationIpc is not yet
+                // constructed when engine is built, but the lambda captures the `var` slot
+                // and is only invoked after enumerateRemoteIntoState returns (by which time
+                // hydrationIpc is fully wired). dispatchEvent fans the event to all subscribers
+                // without going through the HydrationImpl flow, which is intentional: the
+                // invalidation event originates outside the per-path hydration lifecycle.
+                var hydrationIpcRef: HydrationIpcHandler? = null
+                val engine = SyncEngine(
+                    provider, db!!, syncRoot = syncRoot, cacheKey = profileName,
+                    viewInvalidationSink = { changedPaths ->
+                        val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
+                        val event = if (changedPaths.size > cap) {
+                            HydrationEvent.ViewInvalidated(paths = emptyList(), full = true)
+                        } else {
+                            HydrationEvent.ViewInvalidated(paths = changedPaths.toList())
+                        }
+                        hydrationIpcRef?.dispatchEvent(event)
+                    },
+                )
                 val hydration = HydrationImpl(engine, db!!)
                 val hydrationIpc = HydrationIpcHandler(hydration)
+                hydrationIpcRef = hydrationIpc
                 for (verb in HydrationIpcHandler.VERBS) {
                     server.registerHandler(verb) { connId, json ->
                         hydrationIpc.handle(connectionId = connId, jsonRequest = json)
@@ -201,7 +218,6 @@ class DaemonRuntime(
                     "daemon ready, pid ${ProcessHandle.current().pid()}, socket $socketPath",
                 )
 
-                // 6. SERVE until close().
                 closeSignal.await()
                 log.info("daemon: shutting down")
             } finally {
@@ -215,7 +231,6 @@ class DaemonRuntime(
             log.error("daemon: lifecycle error", e)
             throw e
         } finally {
-            // 7. Graceful cleanup.
             cleanup()
         }
     }

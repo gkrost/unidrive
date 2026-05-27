@@ -386,6 +386,14 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
     is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Failed     -> """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}}"""
+    is HydrationEvent.ViewInvalidated -> {
+        if (e.full) {
+            """{"event":"view.invalidated","full":true}"""
+        } else {
+            val paths = e.paths.joinToString(",") { jsonEsc(it) }
+            """{"event":"view.invalidated","paths":[$paths]}"""
+        }
+    }
 }
 
 private fun jsonEsc(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
