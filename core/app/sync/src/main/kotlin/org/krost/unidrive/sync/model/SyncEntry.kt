@@ -4,6 +4,17 @@ import java.time.Instant
 
 data class SyncEntry(
     val path: String,
+    // #115: canonical REMOTE path for a row whose local [path] is an XDG
+    // locale alias (e.g. path=/Bilder/x.jpg, remotePath=/Pictures/x.jpg).
+    // When null the remote path EQUALS [path] — the universal, non-aliased
+    // case, so a null here is byte-identical to pre-#115 behaviour. The
+    // effective remote path of any row is therefore `remotePath ?: path`.
+    // [path] always stays the REAL local sync_root-relative path so
+    // LocalScanner (which keys/scans by the on-disk name) keeps finding the
+    // row; the reconciler's remote-delta match uses the effective remote
+    // path so an uploaded-to-canonical row is found by its canonical delta
+    // key without re-uploading or planning a spurious local move.
+    val remotePath: String? = null,
     val remoteId: String?,
     val remoteHash: String?,
     val remoteSize: Long,

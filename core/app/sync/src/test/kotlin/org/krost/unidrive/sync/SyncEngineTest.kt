@@ -1967,6 +1967,158 @@ class SyncEngineTest {
             )
         }
 
+    // ── #115: transparent XDG locale-alias adoption — executor + round-trip ──
+
+    /**
+     * Executor path-split (#115 mandatory): an aliased Upload reads the REAL
+     * local file (`/Bilder/x.jpg`) and writes to the CANONICAL remote
+     * (`/Pictures/x.jpg`). Asserted at the executor/provider seam:
+     *   - provider.upload received the canonical remote path,
+     *   - the bytes it received are exactly the local /Bilder file's bytes,
+     *   - the persisted row is keyed at the real-local path with the canonical
+     *     in remote_path.
+     *
+     * Uses the static alias table (Bilder ∈ Pictures group) so the test is
+     * independent of the host's ~/.config/user-dirs.dirs.
+     */
+    @Test
+    fun `aliased upload reads real local file and writes to canonical remote`() =
+        runTest {
+            // The user's local sync root holds the German-named alias folder
+            // /Bilder with a new file; the cloud holds the canonical /Pictures.
+            val bytes = ByteArray(91) { ((it * 7 + 3) and 0xff).toByte() }
+            Files.createDirectories(syncRoot.resolve("Bilder"))
+            Files.write(syncRoot.resolve("Bilder/x.jpg"), bytes)
+
+            // Cloud already holds the canonical /Pictures folder → adoption fires.
+            provider.deltaItems = listOf(cloudItem("/Pictures", isFolder = true))
+            engine.syncOnce()
+
+            // (a) The REMOTE upload landed at the canonical path, never the alias.
+            assertTrue(
+                provider.uploadedPaths.contains("/Pictures/x.jpg"),
+                "aliased upload must write to canonical /Pictures/x.jpg; got ${provider.uploadedPaths}",
+            )
+            assertFalse(
+                provider.uploadedPaths.any { it.startsWith("/Bilder") },
+                "no upload may reference the alias path /Bilder; got ${provider.uploadedPaths}",
+            )
+
+            // (b) The bytes uploaded are exactly the LOCAL /Bilder file's bytes
+            //     (the executor read the real local path, not the canonical one).
+            assertContentEquals(
+                bytes, provider.files["/Pictures/x.jpg"],
+                "executor must read the real local /Bilder/x.jpg bytes and upload them",
+            )
+
+            // (c) The persisted row is keyed real-local with the canonical in remote_path.
+            val row = db.getEntry("/Bilder/x.jpg")
+            assertNotNull(row, "row must be keyed at the real-local path /Bilder/x.jpg")
+            assertEquals("/Pictures/x.jpg", row.remotePath, "row.remotePath must be the canonical")
+            assertNotNull(row.remoteId, "row must carry the provider remote_id after upload")
+            // No phantom canonical-keyed row.
+            assertNull(
+                db.getEntry("/Pictures/x.jpg"),
+                "must NOT create a phantom row keyed at the canonical /Pictures/x.jpg",
+            )
+        }
+
+    /**
+     * Round-trip (#115 mandatory) — defeats BOTH single-path failure modes.
+     *
+     * After an aliased upload persists a row (path=/Bilder/x.jpg,
+     * remotePath=/Pictures/x.jpg, real remote_id), a SUBSEQUENT reconcile where
+     *   (a) LocalScanner re-scans and sees /Bilder/x.jpg unchanged on disk, and
+     *   (b) the remote delta reports /Pictures/x.jpg unchanged
+     * must produce an EMPTY plan: NO re-Upload, NO DeleteRemote, NO
+     * DownloadContent, NO MoveLocal. This is the invariant the two single-path
+     * keyings broke (re-upload churn / spurious DeleteRemote on failure mode 1;
+     * spurious NEW + MoveLocal on failure mode 2).
+     */
+    @Test
+    fun `round trip after aliased upload plans nothing`() =
+        runTest {
+            // First pass: the alias folder /Bilder exists locally with a new file;
+            // the cloud holds the canonical /Pictures → adopt + upload to canonical.
+            val bytes = ByteArray(64) { (it and 0xff).toByte() }
+            Files.createDirectories(syncRoot.resolve("Bilder"))
+            Files.write(syncRoot.resolve("Bilder/x.jpg"), bytes)
+            provider.deltaItems = listOf(cloudItem("/Pictures", isFolder = true))
+            engine.syncOnce()
+
+            // Confirm the row is the aliased shape the round-trip protects.
+            val row = db.getEntry("/Bilder/x.jpg")
+            assertNotNull(row)
+            assertEquals("/Pictures/x.jpg", row.remotePath)
+            val uploadsBefore = provider.uploadedPaths.size
+            val deletesBefore = provider.deletedPaths.size
+            val downByIdBefore = provider.downloadByIdCalls.size
+            val downByPathBefore = provider.downloadByPathCalls.size
+            val movesBefore = provider.movedPaths.size
+
+            // ── Subsequent reconcile ──────────────────────────────────────────
+            // (a) /Bilder/x.jpg is unchanged on disk (LocalScanner sees no delta).
+            // (b) the remote delta reports /Pictures/x.jpg unchanged: same id/hash
+            //     as the persisted row, plus the canonical folder.
+            val capturing = CapturingActionCountReporter()
+            val engine2 =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = capturing,
+                )
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/Pictures", isFolder = true),
+                    // unchanged file: same remote_id + hash + modified as the
+                    // persisted row, so remoteState resolves to UNCHANGED.
+                    cloudItem("/Pictures/x.jpg", size = bytes.size.toLong())
+                        .copy(id = row.remoteId!!, hash = row.remoteHash, modified = row.remoteModified),
+                )
+            engine2.syncOnce()
+
+            // The plan must be EMPTY (reconciler verdict count == 0).
+            assertEquals(
+                0, capturing.lastPreFilterTotal,
+                "round-trip reconcile must plan ZERO actions; the aliased row must be " +
+                    "recognised as unchanged on both sides",
+            )
+
+            // And no provider side-effect of any reconcile-driven action class.
+            assertEquals(uploadsBefore, provider.uploadedPaths.size, "NO re-Upload")
+            assertEquals(deletesBefore, provider.deletedPaths.size, "NO DeleteRemote")
+            assertEquals(downByIdBefore, provider.downloadByIdCalls.size, "NO id-based DownloadContent")
+            assertEquals(downByPathBefore, provider.downloadByPathCalls.size, "NO path-based DownloadContent")
+            assertEquals(movesBefore, provider.movedPaths.size, "NO MoveLocal/MoveRemote")
+
+            // The local file must still live in the German-named folder (no MoveLocal
+            // physically relocated it to /Pictures).
+            assertTrue(
+                Files.exists(syncRoot.resolve("Bilder/x.jpg")),
+                "the file must remain in the locale-named /Bilder folder",
+            )
+            assertFalse(
+                Files.exists(syncRoot.resolve("Pictures/x.jpg")),
+                "no spurious MoveLocal may relocate the file to a /Pictures folder",
+            )
+        }
+
+    /** Captures the reconciler's pre-filter action count from onActionCount. */
+    private class CapturingActionCountReporter : ProgressReporter by ProgressReporter.Silent {
+        var lastPreFilterTotal: Int = -1
+            private set
+
+        override fun onActionCount(
+            total: Int,
+            preFilterTotal: Int,
+            filterReason: String?,
+        ) {
+            lastPreFilterTotal = preFilterTotal
+        }
+    }
+
     // -- Fake provider for testing --
 
     private fun cloudItem(
