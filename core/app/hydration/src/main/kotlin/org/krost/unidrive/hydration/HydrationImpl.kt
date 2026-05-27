@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import java.nio.file.Files
@@ -77,7 +78,12 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             p
         } catch (e: Exception) {
-            val err = HydrationError.Generic(e.message ?: "download failed")
+            // A genuinely-gone read (provider download still not-found after the
+            // #176 re-resolve) must surface a typed not_found token so the mount
+            // maps it to ENOENT, not the catch-all EIO. Any other failure stays
+            // Generic (→ EIO).
+            val err: HydrationError =
+                if (isNotFound(e)) HydrationError.NotFound else HydrationError.Generic(e.message ?: "download failed")
             _events.emit(HydrationEvent.Failed(path, err))
             return OpenResult.Failed(err)
         }
@@ -451,4 +457,22 @@ class HydrationImpl(
     override fun onConnectionClosed(connectionId: String) {
         openSets.remove(connectionId)
     }
+
+    // Classify a download failure as genuinely-not-found versus any other error.
+    // Two provider-agnostic signals, since this module cannot reference a concrete
+    // provider's exception type:
+    //  - PermanentDownloadFailureException — the typed "remote object is gone
+    //    (stable 404)" signal (Internxt raises it directly).
+    //  - An exception carrying an Int `statusCode` == 404 — covers OneDrive's
+    //    GraphApiException, read reflectively to avoid a provider classpath dep.
+    private fun isNotFound(e: Throwable): Boolean {
+        if (e is PermanentDownloadFailureException) return true
+        return statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)
+    }
+
+    private fun statusCodeOf(e: Throwable): Int? =
+        runCatching {
+            val getter = e.javaClass.methods.firstOrNull { it.name == "getStatusCode" && it.parameterCount == 0 }
+            (getter?.invoke(e) as? Int)
+        }.getOrNull()
 }
