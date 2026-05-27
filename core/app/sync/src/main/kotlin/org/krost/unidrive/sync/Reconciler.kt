@@ -33,6 +33,14 @@ class Reconciler(
     // regression test inject a counting stub and assert the bound, and
     // the algorithm fix groups uploads by size from a single pre-pass.
     private val localFsProbe: (Path) -> LocalFileInfo? = ::probeRealFs,
+    // #115: XDG-user-dir locale aliasing.  Injectable user-dirs.dirs content
+    // (XDG_*_DIR key → basename).  Empty map = rely on the static alias table
+    // alone.  SyncEngine wires the real ~/.config/user-dirs.dirs content here
+    // at construction time; tests inject synthetic maps so they are host-
+    // independent.  Alias resolution happens at the start of each reconcile()
+    // / resolveSlice() call using the remote top-level names from that call's
+    // remoteChanges argument (canonical name = existing cloud folder).
+    private val xdgUserDirsOverrides: Map<String, String> = emptyMap(),
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
@@ -132,8 +140,56 @@ class Reconciler(
 
         val actions = mutableListOf<SyncAction>()
         actions.addAll(resurrectedActions)
+
+        // #115: translate locale-aliased local paths to cloud-canonical paths.
+        // e.g. localChanges["/Bilder/photo.jpg"] → localChanges["/Pictures/photo.jpg"]
+        // when the cloud already holds "/Pictures" and "Bilder" is a known locale
+        // alias.  Built from remoteChanges keys so the canonical name is the actual
+        // current cloud state, not a stale snapshot.
+        val xdgAliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = remoteChanges.keys
+                .filter { it.count { c -> c == '/' } == 1 && !remoteChanges[it]!!.deleted }
+                .map { it.removePrefix("/") }
+                .toSet(),
+            userDirsOverrides = xdgUserDirsOverrides,
+        )
+        val effectiveLocalChanges =
+            if (xdgAliases.isEmpty) localChanges
+            else localChanges.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
+
+        // #115: resolver that maps a canonical sync-path back to the real local
+        // filesystem path.  When "Bilder" was translated to "Pictures", the real
+        // local path for "/Pictures/..." is syncRoot/Bilder/..., not syncRoot/Pictures/...
+        // The closure undoes the top-level translation for filesystem checks only.
+        // reverseAliasTopLevel: canonical top-level name → original local top-level name
+        val reverseAliasTopLevel: Map<String, String> =
+            if (xdgAliases.isEmpty) emptyMap()
+            else {
+                val rev = HashMap<String, String>()
+                for (origPath in localChanges.keys) {
+                    val origTop = origPath.removePrefix("/").substringBefore('/')
+                    val canonical = xdgAliases.canonicalFor(origTop)
+                    if (canonical != null) rev[canonical] = origTop
+                }
+                rev
+            }
+        val localPathFnForReconcile: (String) -> java.nio.file.Path =
+            if (xdgAliases.isEmpty) ::resolveLocal
+            else { canonicalPath ->
+                val noSlash = canonicalPath.removePrefix("/")
+                val slash = noSlash.indexOf('/')
+                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+                val originalTop = reverseAliasTopLevel[top]
+                if (originalTop != null) {
+                    val rest = if (slash < 0) "" else noSlash.substring(slash)
+                    safeResolveLocal(syncRoot, "/$originalTop$rest")
+                } else {
+                    resolveLocal(canonicalPath)
+                }
+            }
+
         val allPaths =
-            (remoteChanges.keys + localChanges.keys)
+            (remoteChanges.keys + effectiveLocalChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
         val pinRules = db.getPinRules()
 
@@ -154,7 +210,7 @@ class Reconciler(
             // an Upload for an already-synced file.
             if (path in resurrectedPaths) continue
             val remoteItem = remoteChanges[path]
-            val localState = localChanges[path] ?: ChangeState.UNCHANGED
+            val localState = effectiveLocalChanges[path] ?: ChangeState.UNCHANGED
             val entry = entryByPath[path]
 
             val remoteState =
@@ -176,7 +232,7 @@ class Reconciler(
             // Skip if nothing changed on either side
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
 
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, localPathFnForReconcile)
             if (action != null) actions.add(action)
             processed++
             heartbeat.tick(processed)
@@ -184,7 +240,7 @@ class Reconciler(
         reporter.onReconcileProgress(totalPaths, totalPaths)
 
         // Detect case collisions for new local files
-        for ((path, state) in localChanges) {
+        for ((path, state) in effectiveLocalChanges) {
             if (state != ChangeState.NEW) continue
             val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
@@ -203,7 +259,7 @@ class Reconciler(
         }
 
         // Detect case collisions between new local files in the same cycle
-        val newLocalPaths = localChanges.filterValues { it == ChangeState.NEW }.keys.toList()
+        val newLocalPaths = effectiveLocalChanges.filterValues { it == ChangeState.NEW }.keys.toList()
         val caseGroups = newLocalPaths.groupBy { it.lowercase() }
         for ((_, paths) in caseGroups) {
             if (paths.size > 1) {
@@ -370,15 +426,53 @@ class Reconciler(
         val entryByPath = allDbEntries.associateBy { it.path }
         val pinRules = db.getPinRules()
 
+        // #115: same locale-alias translation as in reconcile().
+        val xdgAliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = pageRemote.keys
+                .filter { it.count { c -> c == '/' } == 1 && !pageRemote[it]!!.deleted }
+                .map { it.removePrefix("/") }
+                .toSet(),
+            userDirsOverrides = xdgUserDirsOverrides,
+        )
+        val effectiveLocalChanges =
+            if (xdgAliases.isEmpty) localChanges
+            else localChanges.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
+
+        val reverseAliasTopLevel: Map<String, String> =
+            if (xdgAliases.isEmpty) emptyMap()
+            else {
+                val rev = HashMap<String, String>()
+                for (origPath in localChanges.keys) {
+                    val origTop = origPath.removePrefix("/").substringBefore('/')
+                    val canonical = xdgAliases.canonicalFor(origTop)
+                    if (canonical != null) rev[canonical] = origTop
+                }
+                rev
+            }
+        val localPathFnForSlice: (String) -> java.nio.file.Path =
+            if (xdgAliases.isEmpty) ::resolveLocal
+            else { canonicalPath ->
+                val noSlash = canonicalPath.removePrefix("/")
+                val slash = noSlash.indexOf('/')
+                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+                val originalTop = reverseAliasTopLevel[top]
+                if (originalTop != null) {
+                    val rest = if (slash < 0) "" else noSlash.substring(slash)
+                    safeResolveLocal(syncRoot, "/$originalTop$rest")
+                } else {
+                    resolveLocal(canonicalPath)
+                }
+            }
+
         val actions = mutableListOf<SyncAction>()
         val allPaths =
-            (pageRemote.keys + localChanges.keys)
+            (pageRemote.keys + effectiveLocalChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
                 .filter { pathInSyncScope(it, syncPath) }
 
         for (path in allPaths) {
             val remoteItem = pageRemote[path]
-            val localState = localChanges[path] ?: ChangeState.UNCHANGED
+            val localState = effectiveLocalChanges[path] ?: ChangeState.UNCHANGED
             val entry = entryByPath[path]
 
             val remoteState =
@@ -393,7 +487,7 @@ class Reconciler(
                 }
 
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, localPathFnForSlice)
             if (action != null) actions.add(action)
         }
         return actions
@@ -428,8 +522,20 @@ class Reconciler(
         val actions = streamedActions.toMutableList()
         val coveredPaths = actions.mapTo(mutableSetOf()) { it.path }
 
+        // #115: same locale-alias translation as in reconcile() / resolveSlice().
+        val xdgAliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = fullRemote.keys
+                .filter { it.count { c -> c == '/' } == 1 && !fullRemote[it]!!.deleted }
+                .map { it.removePrefix("/") }
+                .toSet(),
+            userDirsOverrides = xdgUserDirsOverrides,
+        )
+        val effectiveFullLocal =
+            if (xdgAliases.isEmpty) fullLocal
+            else fullLocal.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
+
         // Case-collision detection on new local files — see [reconcile] for rationale.
-        for ((path, state) in fullLocal) {
+        for ((path, state) in effectiveFullLocal) {
             if (state != ChangeState.NEW) continue
             val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
@@ -446,7 +552,7 @@ class Reconciler(
             }
         }
 
-        val newLocalPaths = fullLocal.filterValues { it == ChangeState.NEW }.keys.toList()
+        val newLocalPaths = effectiveFullLocal.filterValues { it == ChangeState.NEW }.keys.toList()
         val caseGroups = newLocalPaths.groupBy { it.lowercase() }
         for ((_, paths) in caseGroups) {
             if (paths.size > 1) {
@@ -541,6 +647,13 @@ class Reconciler(
         remoteItem: CloudItem?,
         entry: SyncEntry?,
         pinRules: List<Pair<String, Boolean>>,
+        // #115: resolves a sync-path to the actual local filesystem path.
+        // Defaults to the identity resolver (path → syncRoot/path).  When
+        // XDG alias translation is active, the caller passes an alias-aware
+        // resolver that maps the canonical path back to its real local name
+        // (e.g. "/Pictures" → syncRoot/Bilder) so isDirectory / size checks
+        // work even though the local folder has the locale name.
+        localPathFn: (String) -> java.nio.file.Path = ::resolveLocal,
     ): SyncAction? =
         when {
             // Both deleted
@@ -549,7 +662,7 @@ class Reconciler(
 
             // Both new
             localState == ChangeState.NEW && remoteState == ChangeState.NEW -> {
-                val localPath = resolveLocal(path)
+                val localPath = localPathFn(path)
                 when {
                     // Both created a folder — merge, no conflict
                     remoteItem != null && remoteItem.isFolder && Files.isDirectory(localPath) ->
@@ -600,7 +713,7 @@ class Reconciler(
 
             // Local only changes
             localState == ChangeState.NEW && remoteState == ChangeState.UNCHANGED -> {
-                val local = resolveLocal(path)
+                val local = localPathFn(path)
                 if (Files.isDirectory(local)) {
                     SyncAction.CreateRemoteFolder(path)
                 } else {

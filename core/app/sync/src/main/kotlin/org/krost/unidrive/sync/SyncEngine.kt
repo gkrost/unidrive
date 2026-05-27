@@ -119,7 +119,17 @@ open class SyncEngine(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
-    private val reconciler = Reconciler(db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns)
+    private val reconciler = Reconciler(
+        db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns,
+        // #115: wire real user-dirs.dirs content so the reconciler can map locale-
+        // aliased local folder names to their cloud-canonical equivalents.
+        xdgUserDirsOverrides = parseUserDirsFile(
+            Paths.get(
+                System.getenv("HOME") ?: System.getProperty("user.home"),
+                ".config", "user-dirs.dirs",
+            ),
+        ),
+    )
 
     // Debounce state for remote-change wake hints (Internxt notifications WS).
     // The provider may emit many frames per second during a folder-tree
