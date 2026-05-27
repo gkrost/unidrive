@@ -886,6 +886,81 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#160 download-only with hydrated rows locally missing re-downloads files`() =
+        runTest {
+            // #160 invariant: a download-only run where state.db has a hydrated row
+            // whose local file is absent and the cloud delta is unchanged must
+            // re-download the file. Before the fix: DeleteRemote was dropped by the
+            // direction filter and the file stayed unreachable forever.
+            val filePath = "/rehydrate-me.txt"
+            val fileContent = "content to rehydrate".toByteArray()
+            provider.files[filePath] = fileContent
+            // Seed a hydrated DB entry — simulates a previously-synced file.
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = filePath,
+                    remoteId = "id-rehydrate",
+                    remoteHash = "hash-rehydrate",
+                    remoteSize = fileContent.size.toLong(),
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = fileContent.size.toLong(),
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            // Local file is absent (intentionally wiped). Cloud delta carries no
+            // change for this path (unchanged remote) — the common rehydrate shape.
+            provider.deltaItems = emptyList()
+            // Run download-only — must re-download the locally-missing hydrated row.
+            engineWithDirection(SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
+            // File must be restored in sync_root.
+            val localFile = syncRoot.resolve(filePath.trimStart('/'))
+            assertTrue(Files.exists(localFile), "rehydrate-me.txt must be downloaded back to sync_root")
+            assertEquals(fileContent.size.toLong(), Files.size(localFile))
+        }
+
+    @Test
+    fun `#160 bidirectional unchanged - locally-deleted hydrated row propagates as DeleteRemote`() =
+        runTest {
+            // Bidirectional invariant must not regress: a locally-deleted hydrated
+            // file in bidirectional mode is a user delete that propagates to remote.
+            val filePath = "/user-deleted.txt"
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = filePath,
+                    remoteId = "id-user-deleted",
+                    remoteHash = "hash-x",
+                    remoteSize = 50,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 50,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            // Local file absent; cloud delta carries no change.
+            provider.deltaItems = emptyList()
+            // Seed sync_root with at least one file so the empty-sync_root guard doesn't
+            // fire (guard needs >10 hydrated entries; we only have 1 here).
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+            // Remote delete must have been called for the locally-deleted path.
+            assertTrue(
+                provider.deletedPaths.contains(filePath),
+                "bidirectional locally-deleted hydrated row must propagate as DeleteRemote; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    @Test
     fun `#137 bidirectional with empty sync_root and hydrated DB still fires the empty-sync_root guard`() =
         runTest {
             // Data-safety preserved: bidirectional sync with empty local + hydrated DB
@@ -946,6 +1021,86 @@ class SyncEngineTest {
                 Files.exists(guardSyncRoot),
                 "aborted guard run must not create empty sync_root at $guardSyncRoot",
             )
+        }
+
+    // PR #195 P2-2 — watcher/guard/dir-create ordering: syncOnce creates sync_root
+    // before returning so LocalWatcher.start() can walk it without throwing.
+
+    @Test
+    fun `#137 PR195-P2-2 syncOnce creates sync_root so a subsequent watcher start does not throw`() =
+        runTest {
+            // Fresh sync on a non-existent sync_root that passes the guard (empty DB).
+            // After syncOnce, sync_root must exist — the watcher can walk it.
+            val freshSyncRoot = Files.createTempDirectory("unidrive-p2test-parent").resolve("new-root")
+            assertFalse(Files.exists(freshSyncRoot), "precondition: sync_root must not exist before syncOnce")
+            val freshDb = StateDatabase(Files.createTempDirectory("unidrive-p2db").resolve("state.db"))
+            freshDb.initialize()
+            val freshEngine = SyncEngine(
+                provider = FakeCloudProvider().also { it.deltaItems = emptyList() },
+                db = freshDb,
+                syncRoot = freshSyncRoot,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+            )
+            freshEngine.syncOnce(dryRun = false)
+            assertTrue(
+                Files.isDirectory(freshSyncRoot),
+                "sync_root must exist after syncOnce so the watcher can start without throwing",
+            )
+            // Verify the watcher can start on the now-existing directory without throwing.
+            val watcher = LocalWatcher(freshSyncRoot, debounceMs = 50L)
+            try {
+                watcher.start() // must not throw
+            } finally {
+                watcher.stop()
+                freshDb.close()
+            }
+        }
+
+    @Test
+    fun `#137 PR195-P2-2 guard-aborted syncOnce does not create sync_root so watcher start throws`() =
+        runTest {
+            // Guard fires (hydrated DB entries + empty sync_root) → syncOnce throws
+            // without creating sync_root. A watcher started on a non-existent
+            // sync_root must throw — proving that if the guard fires the watcher
+            // must not be started (which is the SyncCommand ordering invariant).
+            val guardSyncRoot2 = Files.createTempDirectory("unidrive-p2guard-parent").resolve("absent")
+            val guardDb2 = StateDatabase(Files.createTempDirectory("unidrive-p2guarddb").resolve("state.db"))
+            guardDb2.initialize()
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            for (i in 0 until 50) {
+                guardDb2.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/seeded-$i.txt",
+                        remoteId = "id-$i",
+                        remoteHash = "hash-$i",
+                        remoteSize = 100,
+                        remoteModified = now,
+                        localMtime = now.toEpochMilli(),
+                        localSize = 100,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = now,
+                    ),
+                )
+            }
+            guardDb2.setSyncState("delta_cursor", "seeded-cursor")
+            val guardEngine2 = SyncEngine(
+                provider = FakeCloudProvider().also { it.deltaItems = emptyList() },
+                db = guardDb2,
+                syncRoot = guardSyncRoot2,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+                syncDirection = SyncDirection.BIDIRECTIONAL,
+            )
+            assertFailsWith<IllegalStateException> { guardEngine2.syncOnce(dryRun = false) }
+            assertFalse(Files.exists(guardSyncRoot2), "guard-aborted run must not create sync_root")
+            // Watcher started on the absent directory must throw, confirming that
+            // starting it BEFORE syncOnce (the old bug) would have failed here.
+            val watcher2 = LocalWatcher(guardSyncRoot2, debounceMs = 50L)
+            assertFailsWith<java.io.IOException> { watcher2.start() }
+            guardDb2.close()
         }
 
     // UD-298 — apply percentage deletion safeguard in dry-run as warning

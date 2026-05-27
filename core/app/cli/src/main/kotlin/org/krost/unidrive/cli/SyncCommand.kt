@@ -549,7 +549,6 @@ open class SyncCommand : Runnable {
 
                 if (watch) {
                     println("Starting continuous sync to ${config.syncRoot}")
-                    watcher!!.start()
 
                     // Coalesced channel for provider-emitted remote-change wake
                     // hints (Internxt notifications WS). The engine debounces
@@ -580,7 +579,7 @@ open class SyncCommand : Runnable {
                     Runtime.getRuntime().addShutdownHook(
                         Thread {
                             println("\nShutting down...")
-                            watcher.stop()
+                            watcher!!.stop()
                             ipcServer.close()
                             renewalScheduler?.cancelAll()
                             subscriptionStore.close()
@@ -591,7 +590,42 @@ open class SyncCommand : Runnable {
                     var cycleFailures = 0
                     var idleCycles = 3 // start in NORMAL state
                     var lastState = pollStateName(idleCycles)
-                    var firstCycle = true
+
+                    // #137 / PR #195 P2-2: run the BOOT sync first so engine.syncOnce
+                    // creates sync_root (Files.createDirectories) before LocalWatcher
+                    // walks it. Without this ordering, watcher.start() throws on a
+                    // non-existent sync_root — the engine only creates it inside
+                    // doSyncOnce, which previously ran after watcher.start(). The
+                    // empty-sync_root guard property from #137 is preserved: if the
+                    // guard fires here it aborts before both dir-creation and watcher-
+                    // start, leaving no empty sync_root behind.
+                    ipcReporter.emitSyncStarted()
+                    try {
+                        if (rpConfig?.webhook == true) {
+                            ensureSubscription(rawProvider, subscriptionStore, profile.name, rpConfig, renewalScheduler)
+                        }
+                        engine.syncOnce(forceDelete = forceDelete, reason = org.krost.unidrive.sync.SyncReason.BOOT)
+                        cycleFailures = 0
+                        val hadBootChanges = (cliReporter.lastDownloaded + cliReporter.lastUploaded + cliReporter.lastConflicts) > 0
+                        if (hadBootChanges) idleCycles = 0 else idleCycles++
+                    } catch (e: AuthenticationException) {
+                        ipcReporter.emitSyncError(e.message ?: "Authentication error")
+                        System.err.println("Authentication error, stopping: ${e.message}")
+                        return@runBlocking
+                    } catch (e: Exception) {
+                        ipcReporter.emitSyncError(e.message ?: "Sync failed")
+                        cycleFailures++
+                        System.err.println("Boot sync failed: ${e.message}")
+                        // Fall through: watcher still starts so subsequent poll
+                        // cycles can recover. sync_root may not exist yet; watcher
+                        // start may fail — let the exception propagate naturally.
+                    }
+
+                    // sync_root now exists (engine.syncOnce ran createDirectories).
+                    // Start the watcher only after the boot sync so it never walks
+                    // a directory that doesn't exist yet.
+                    watcher!!.start()
+
                     while (true) {
                         var hadChanges = false
                         try {
@@ -601,16 +635,7 @@ open class SyncCommand : Runnable {
                             }
 
                             ipcReporter.emitSyncStarted()
-                            // UD-254: classify each pass. First iteration after daemon
-                            // boot is BOOT; subsequent iterations are WATCH_POLL unless
-                            // LocalWatcher fired a change (EVENT_DRIVEN, tracked below).
-                            val reason =
-                                when {
-                                    firstCycle -> org.krost.unidrive.sync.SyncReason.BOOT
-                                    else -> org.krost.unidrive.sync.SyncReason.WATCH_POLL
-                                }
-                            engine.syncOnce(forceDelete = forceDelete, reason = reason)
-                            firstCycle = false
+                            engine.syncOnce(forceDelete = forceDelete, reason = org.krost.unidrive.sync.SyncReason.WATCH_POLL)
                             cycleFailures = 0
                             hadChanges = (cliReporter.lastDownloaded + cliReporter.lastUploaded + cliReporter.lastConflicts) > 0
                         } catch (e: AuthenticationException) {

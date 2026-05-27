@@ -1019,9 +1019,11 @@ open class SyncEngine(
         // and final sort run exactly once against the full action set.
         val reconciledActions =
             if (streamingActions != null) {
-                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath)
+                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath,
+                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD)
             } else {
-                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath)
+                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath,
+                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD)
             }
         logUnhydratedFolderSkips()
 
@@ -2121,6 +2123,7 @@ open class SyncEngine(
                                 localChanges,
                                 syncPath,
                                 pageSlice.stableRemoteTopLevelNames,
+                                downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                             )
                         val safeNow = buffer.classify(pageActions)
                         safeAccumulator.addAll(safeNow)

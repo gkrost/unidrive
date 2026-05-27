@@ -320,6 +320,55 @@ class ReconcilerTest {
         assertIs<SyncAction.DeleteRemote>(actions[0])
     }
 
+    // #160 — download-only rehydrate: hydrated-but-locally-missing rows must re-download
+
+    @Test
+    fun `#160 download-only hydrated-row local-missing with remoteItem in delta emits DownloadContent`() {
+        // Core invariant: in download-only mode a hydrated row whose local file is
+        // absent (localChanges = DELETED, unchanged cloud delta) must produce a
+        // DownloadContent (re-download), NOT a DeleteRemote that the direction
+        // filter would discard — making the file unreachable forever.
+        db.upsertEntry(dbEntry("/doc.txt", isHydrated = true))
+        val remoteChanges = mapOf("/doc.txt" to cloudItem("/doc.txt"))
+        val localChanges = mapOf("/doc.txt" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges, downloadOnly = true)
+        assertEquals(1, actions.size, "expected exactly one action, got $actions")
+        assertIs<SyncAction.DownloadContent>(actions[0])
+        assertEquals("/doc.txt", actions[0].path)
+    }
+
+    @Test
+    fun `#160 download-only hydrated-row local-missing with ABSENT delta synthesises CloudItem`() {
+        // Common rehydrate scenario: the cloud delta is unchanged (no new remote
+        // events), so remoteChanges is empty. The reconciler must synthesise a
+        // CloudItem from the DB row's metadata and emit DownloadContent.
+        db.upsertEntry(dbEntry("/photo.jpg", isHydrated = true))
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/photo.jpg" to ChangeState.DELETED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges, downloadOnly = true)
+        assertEquals(1, actions.size, "expected exactly one action when delta is absent, got $actions")
+        val action = actions[0]
+        assertIs<SyncAction.DownloadContent>(action)
+        assertEquals("/photo.jpg", action.path)
+        // Synthesised CloudItem must carry the DB's remoteId so Pass 2 can
+        // downloadById without a path-based delta lookup.
+        assertEquals("id-/photo.jpg", action.remoteItem.id)
+        assertEquals(100L, action.remoteItem.size)
+    }
+
+    @Test
+    fun `#160 bidirectional unchanged - hydrated-row local-missing still emits DeleteRemote`() {
+        // Bidirectional invariant must not regress: a locally-deleted hydrated file
+        // in bidirectional mode is a user delete that propagates to remote.
+        db.upsertEntry(dbEntry("/deleted-by-user.txt", isHydrated = true))
+        val remoteChanges = mapOf("/deleted-by-user.txt" to cloudItem("/deleted-by-user.txt"))
+        val localChanges = mapOf("/deleted-by-user.txt" to ChangeState.DELETED)
+        // downloadOnly=false (the default) — bidirectional behaviour must be unchanged.
+        val actions = reconciler.reconcile(remoteChanges, localChanges, downloadOnly = false)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.DeleteRemote>(actions[0])
+    }
+
     @Test
     fun `both modified with different remote hash is Conflict`() {
         // Invariant: if the remote hash has moved (between last-sync and now)

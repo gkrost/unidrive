@@ -62,6 +62,11 @@ class Reconciler(
         // unrelated orphans surfaced when the user asked for ~106 in-scope
         // changes.
         syncPath: String? = null,
+        // #160: when true, a hydrated row whose local file is absent is planned
+        // as a re-download instead of DeleteRemote. Only safe in download-only
+        // mode — in bidirectional mode a locally-deleted hydrated file is a
+        // legitimate user delete that must propagate to remote.
+        downloadOnly: Boolean = false,
     ): List<SyncAction> {
         // UD-240g: bookend the reconcile pass with log breadcrumbs. Before this,
         // the phase between `Delta: N items, hasMore=false` (gatherRemoteChanges)
@@ -193,7 +198,7 @@ class Reconciler(
             // Skip if nothing changed on either side
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
 
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias, downloadOnly)
             if (action != null) actions.add(action)
             processed++
             heartbeat.tick(processed)
@@ -391,6 +396,9 @@ class Reconciler(
         // alias context falls back to deriving top-level names from pageRemote alone
         // — which is the pre-fix behaviour and is correct for non-streaming callers.
         stableRemoteTopLevelNames: Set<String>? = null,
+        // #160: mirror of the same flag on reconcile() — re-download hydrated rows
+        // whose local file is absent instead of emitting DeleteRemote.
+        downloadOnly: Boolean = false,
     ): List<SyncAction> {
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
@@ -430,7 +438,7 @@ class Reconciler(
                 }
 
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias, downloadOnly)
             if (action != null) actions.add(action)
         }
         return actions
@@ -456,6 +464,10 @@ class Reconciler(
         fullRemote: Map<String, CloudItem>,
         fullLocal: Map<String, ChangeState>,
         syncPath: String? = null,
+        // #160: mirror of the same flag on reconcile(). The streamed actions
+        // from resolveSlice already used this flag; finalizeStreaming receives
+        // it only for completeness (the recovery loops don't call resolveAction).
+        @Suppress("UNUSED_PARAMETER") downloadOnly: Boolean = false,
     ): List<SyncAction> {
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
@@ -691,6 +703,10 @@ class Reconciler(
         // resolve it directly via resolveLocal, REMOTE-write actions carry the
         // canonical remote path out-of-band via remoteTarget.
         alias: AliasContext = AliasContext.IDENTITY,
+        // #160: when true, a hydrated row whose local file is absent is re-downloaded
+        // instead of propagated as DeleteRemote. Only safe in download-only mode —
+        // in bidirectional mode the same state is a legitimate user delete.
+        downloadOnly: Boolean = false,
     ): SyncAction? =
         when {
             // Both deleted
@@ -835,6 +851,26 @@ class Reconciler(
                                 )
                             SyncAction.DownloadContent(path, item)
                         }
+                    }
+                    // #160: download-only mode — a hydrated row whose local file is
+                    // absent must be re-downloaded, not propagated as DeleteRemote
+                    // (which the direction filter would drop, making the file
+                    // unreachable forever). In bidirectional mode the same state is
+                    // a legitimate user delete and must propagate.
+                    downloadOnly && entry != null && entry.isHydrated && !entry.isFolder -> {
+                        val item =
+                            remoteItem ?: CloudItem(
+                                id = entry.remoteId ?: "",
+                                name = path.substringAfterLast('/'),
+                                path = path,
+                                size = entry.remoteSize,
+                                isFolder = false,
+                                modified = entry.remoteModified,
+                                created = null,
+                                hash = entry.remoteHash,
+                                mimeType = null,
+                            )
+                        SyncAction.DownloadContent(path, item)
                     }
                     // Otherwise: real user delete on a hydrated row → propagate.
                     else -> SyncAction.DeleteRemote(path)
