@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.HashAlgorithm
 import org.krost.unidrive.sync.model.ChangeState
 import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.LoggerFactory
@@ -15,6 +16,9 @@ class LocalScanner(
     private val syncRoot: Path,
     private val db: StateDatabase,
     private val excludePatterns: List<String> = emptyList(),
+    // #112: algorithm used to compute remoteHash strings for this provider.
+    // Null means "no verifiable hash" — fall back to mtime+size only.
+    private val hashAlgorithm: HashAlgorithm? = null,
 ) {
     private val log = LoggerFactory.getLogger(LocalScanner::class.java)
 
@@ -99,7 +103,26 @@ class LocalScanner(
                         val currentMtime = attrs.lastModifiedTime().toMillis()
                         val currentSize = attrs.size()
                         if (currentMtime != entry.localMtime || currentSize != entry.localSize) {
-                            changes[relativePath] = ChangeState.MODIFIED
+                            // #112: mtime changed but size is the same — potential touch-only.
+                            // Hash-compare to avoid a needless re-upload when content is identical.
+                            // Only gate on size-unchanged to skip large-file hashing on real edits.
+                            val isTouchOnly =
+                                currentMtime != entry.localMtime &&
+                                    currentSize == entry.localSize &&
+                                    hashAlgorithm != null &&
+                                    !entry.remoteHash.isNullOrEmpty()
+                            if (isTouchOnly) {
+                                val localHash = HashVerifier.computeHash(file, hashAlgorithm)
+                                if (localHash == entry.remoteHash) {
+                                    // Content unchanged — refresh tracked mtime so this file
+                                    // isn't re-hashed on every subsequent scan.
+                                    db.upsertEntry(entry.copy(localMtime = currentMtime))
+                                } else {
+                                    changes[relativePath] = ChangeState.MODIFIED
+                                }
+                            } else {
+                                changes[relativePath] = ChangeState.MODIFIED
+                            }
                         }
                     }
                     // Skip dehydrated files for modification check (mtime is synthetic)

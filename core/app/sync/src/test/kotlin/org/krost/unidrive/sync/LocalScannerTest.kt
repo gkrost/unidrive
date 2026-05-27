@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.HashAlgorithm
 import org.krost.unidrive.sync.model.ChangeState
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
@@ -348,5 +349,121 @@ class LocalScannerTest {
         assertNull(changes["/~\$report.docx"], "Office lock file must be excluded")
         assertNull(changes["/notes.txt.swp"], "vim swap must be excluded")
         assertNull(changes["/draft.tmp"], "temp file must be excluded")
+    }
+
+    // #112 — hash-compare touch-only local changes
+
+    @Test
+    fun `#112 touch-only change is not flagged for re-upload when hash matches`() {
+        val file = syncRoot.resolve("touch.txt")
+        val content = "identical content"
+        Files.writeString(file, content)
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val size = Files.size(file)
+        // Compute the MD5 hash that the provider would have stored
+        val storedHash = HashVerifier.computeMd5Hex(file)
+
+        db.upsertEntry(
+            SyncEntry(
+                path = "/touch.txt",
+                remoteId = "id",
+                remoteHash = storedHash,
+                remoteSize = size,
+                remoteModified = Instant.now(),
+                localMtime = originalMtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+
+        // Simulate a touch (bump mtime without changing content)
+        Thread.sleep(50)
+        val newMtime = originalMtime + 1000L
+        file.toFile().setLastModified(newMtime)
+
+        val hashScanner = LocalScanner(syncRoot, db, hashAlgorithm = HashAlgorithm.Md5Hex)
+        val changes = hashScanner.scan()
+
+        assertNull(changes["/touch.txt"], "touch-only must not be flagged MODIFIED")
+
+        // Tracked mtime must be refreshed so the file isn't re-hashed every scan
+        val updated = db.getEntry("/touch.txt")
+        assertNotNull(updated)
+        assertNotEquals(originalMtime, updated.localMtime, "localMtime must be updated after touch-only skip")
+    }
+
+    @Test
+    fun `#112 real content change with same size IS flagged MODIFIED`() {
+        val file = syncRoot.resolve("edited.txt")
+        // Same byte-length, different content
+        Files.writeString(file, "aaa")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val size = Files.size(file)
+        val storedHash = HashVerifier.computeMd5Hex(file)
+
+        db.upsertEntry(
+            SyncEntry(
+                path = "/edited.txt",
+                remoteId = "id",
+                remoteHash = storedHash,
+                remoteSize = size,
+                remoteModified = Instant.now(),
+                localMtime = originalMtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+
+        // Write different bytes of the same length, bump mtime
+        Thread.sleep(50)
+        Files.writeString(file, "bbb")
+
+        val hashScanner = LocalScanner(syncRoot, db, hashAlgorithm = HashAlgorithm.Md5Hex)
+        val changes = hashScanner.scan()
+
+        assertEquals(ChangeState.MODIFIED, changes["/edited.txt"], "content change must be flagged MODIFIED")
+    }
+
+    @Test
+    fun `#112 no stored remoteHash falls back to mtime+size behaviour`() {
+        val file = syncRoot.resolve("nohash.txt")
+        Files.writeString(file, "original")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val size = Files.size(file)
+
+        db.upsertEntry(
+            SyncEntry(
+                path = "/nohash.txt",
+                remoteId = "id",
+                remoteHash = null,  // no stored hash
+                remoteSize = size,
+                remoteModified = Instant.now(),
+                localMtime = originalMtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+
+        // Touch only
+        Thread.sleep(50)
+        file.toFile().setLastModified(originalMtime + 1000L)
+
+        val hashScanner = LocalScanner(syncRoot, db, hashAlgorithm = HashAlgorithm.Md5Hex)
+        val changes = hashScanner.scan()
+
+        assertEquals(
+            ChangeState.MODIFIED,
+            changes["/nohash.txt"],
+            "without stored hash, mtime change must fall back to MODIFIED",
+        )
     }
 }

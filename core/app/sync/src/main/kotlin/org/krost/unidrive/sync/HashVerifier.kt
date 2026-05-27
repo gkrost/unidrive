@@ -35,18 +35,7 @@ object HashVerifier {
     private fun verifySha256Hex(
         localPath: java.nio.file.Path,
         expectedHex: String,
-    ): Boolean {
-        val md = java.security.MessageDigest.getInstance("SHA-256")
-        java.nio.file.Files.newInputStream(localPath).use { input ->
-            val buffer = ByteArray(8192)
-            var read: Int
-            while (input.read(buffer).also { read = it } != -1) {
-                md.update(buffer, 0, read)
-            }
-        }
-        val computed = md.digest().joinToString("") { "%02x".format(it) }
-        return computed.equals(expectedHex, ignoreCase = true)
-    }
+    ): Boolean = computeSha256Hex(localPath).equals(expectedHex, ignoreCase = true)
 
     private fun verifyQuickXorHash(
         localPath: Path,
@@ -65,6 +54,33 @@ object HashVerifier {
 
         val computed = computeMd5Hex(localPath)
         return computed.equals(expectedETag, ignoreCase = true)
+    }
+
+    /**
+     * Compute the content hash for [path] using [algorithm].
+     * Returns null when [algorithm] is null (provider has no verifiable hash).
+     */
+    internal fun computeHash(
+        path: Path,
+        algorithm: org.krost.unidrive.HashAlgorithm?,
+    ): String? =
+        when (algorithm) {
+            org.krost.unidrive.HashAlgorithm.QuickXor -> computeQuickXorHash(path)
+            org.krost.unidrive.HashAlgorithm.Md5Hex -> computeMd5Hex(path)
+            org.krost.unidrive.HashAlgorithm.Sha256Hex -> computeSha256Hex(path)
+            null -> null
+        }
+
+    internal fun computeSha256Hex(path: Path): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(8192)
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                md.update(buffer, 0, read)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     internal fun computeMd5Hex(path: Path): String {
