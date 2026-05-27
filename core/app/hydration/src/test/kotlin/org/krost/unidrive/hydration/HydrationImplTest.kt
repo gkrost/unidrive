@@ -643,6 +643,22 @@ class HydrationImplTest {
         assertEquals(true, e.isHydrated)
     }
 
+    // A stale / i32-overflowed remoteSize (e.g. a multi-GB folder size that wrapped
+    // past Int.MAX to a negative) must never reach the wire: a negative size breaks
+    // strict u64 list-entry parsers (the FUSE co-daemon EIO'd the whole directory on
+    // it). list() clamps size to >= 0 at the source.
+    @Test
+    fun `list clamps a negative remote size to zero`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/gernot", remoteSize = -650676500L)
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = (r as ListResult.Ok).entries.single { it.path == "/gernot" }
+        assertEquals(0L, e.size, "a negative remote size must clamp to 0, never reach the wire")
+    }
+
     @Test
     fun `events flow emits Failed when download throws`() = runTest {
         val env = HydrationTestEnv()
