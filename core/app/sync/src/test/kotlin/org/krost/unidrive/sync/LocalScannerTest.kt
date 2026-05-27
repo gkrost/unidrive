@@ -431,6 +431,52 @@ class LocalScannerTest {
     }
 
     @Test
+    fun `#112 OneDrive touch-only skip works with QuickXor stored hash`() {
+        // Regression for PR #193: when OneDrive's toCloudItem() stored sha256Hash in
+        // remoteHash (the old precedence) but the provider's hashAlgorithm() returns
+        // QuickXor, #112 computed a QuickXor local hash and compared it against SHA-256
+        // → always mismatch → touch-only files were always re-uploaded. After the fix,
+        // toCloudItem() stores quickXorHash, so this test must pass.
+        val file = syncRoot.resolve("onedrive-touch.txt")
+        val content = "OneDrive touch-only content"
+        Files.writeString(file, content)
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val size = Files.size(file)
+        // The stored remoteHash is now a QuickXor hash (base64), matching hashAlgorithm()
+        val storedHash = HashVerifier.computeQuickXorHash(file)
+
+        db.upsertEntry(
+            SyncEntry(
+                path = "/onedrive-touch.txt",
+                remoteId = "id",
+                remoteHash = storedHash,
+                remoteSize = size,
+                remoteModified = Instant.now(),
+                localMtime = originalMtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+
+        // Simulate a touch (bump mtime without changing content)
+        Thread.sleep(50)
+        file.toFile().setLastModified(originalMtime + 1000L)
+
+        val hashScanner = LocalScanner(syncRoot, db, hashAlgorithm = HashAlgorithm.QuickXor)
+        val changes = hashScanner.scan()
+
+        assertNull(changes["/onedrive-touch.txt"], "OneDrive touch-only must not be flagged MODIFIED with QuickXor hash")
+
+        // Tracked mtime must be refreshed
+        val updated = db.getEntry("/onedrive-touch.txt")
+        assertNotNull(updated)
+        assertNotEquals(originalMtime, updated.localMtime, "localMtime must be updated after touch-only skip")
+    }
+
+    @Test
     fun `#112 no stored remoteHash falls back to mtime+size behaviour`() {
         val file = syncRoot.resolve("nohash.txt")
         Files.writeString(file, "original")
