@@ -136,6 +136,25 @@ open class SyncEngine(
     // missing. Resets on restart (conservative: re-defers).
     private var deferredMissing: Set<String> = emptySet()
 
+    // Paths the engine itself uploaded, mapped to the upload instant. Consulted by
+    // detectMissingAfterFullSync to defer the absence-implies-deletion verdict for a
+    // path whose remote write the eventually-consistent delta feed hasn't reflected
+    // yet — the re-upload churn class. Daemon-scoped in-memory state (same lifetime as
+    // deferredMissing); pruned past RECENT_UPLOAD_REAP_GRACE so a genuinely-deleted
+    // path is reaped once the window lapses and the map can't grow unbounded.
+    private val recentlyUploaded = java.util.concurrent.ConcurrentHashMap<String, Instant>()
+
+    /** Record that the engine just uploaded [path]; starts its reap-grace window. */
+    private fun markRecentlyUploaded(path: String) {
+        recentlyUploaded[path] = Instant.now()
+    }
+
+    /** Drop recently-uploaded marks older than the grace window. */
+    private fun pruneRecentlyUploaded() {
+        val cutoff = Instant.now().minus(RECENT_UPLOAD_REAP_GRACE)
+        recentlyUploaded.entries.removeIf { it.value.isBefore(cutoff) }
+    }
+
     // Single-flight guard for enumerateRemoteIntoState across ALL callers: the
     // --poll-interval poller, the sync.enumerate verb (EnumerateRpcHandler), and
     // mount-routed refresh.run (RefreshRpcHandler calls the engine directly).
@@ -315,6 +334,9 @@ open class SyncEngine(
                 )
                 throw e
             }
+        // Defer the absence sweep's deletion verdict while the delta feed catches up
+        // to this just-written remote item (see markRecentlyUploaded).
+        markRecentlyUploaded(path)
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
@@ -2195,14 +2217,38 @@ open class SyncEngine(
      * After a full delta (cursor was null), the response contains ALL items in the drive.
      * Any DB entry whose remoteId is NOT in the full set must have been deleted.
      * This is a pure set comparison — zero extra API calls.
+     *
+     * One exception: a path the engine itself uploaded within
+     * [RECENT_UPLOAD_REAP_GRACE] is NOT marked deleted on its absence. Cloud delta
+     * feeds are eventually consistent, so a just-uploaded item can legitimately be
+     * missing from the very next full enumeration. Reaping it there queued a deletion
+     * the next cycle re-detected and re-uploaded — steady-state churn. The guard keys
+     * off [recentlyUploaded] (stamped at upload time), so it protects ONLY paths the
+     * engine itself pushed; a remote-observed or freshly-downloaded path is never
+     * protected, so a genuinely-deleted remote item still reaps. The grace window only
+     * defers the verdict: once it lapses the path's mark is dropped and a later
+     * enumeration reaps it if it is still absent.
      */
     private fun detectMissingAfterFullSync(remoteChanges: MutableMap<String, CloudItem>) {
         val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
+        pruneRecentlyUploaded()
 
         for (entry in db.getAllEntries()) {
             if (entry.remoteId == null) continue
             if (entry.remoteId in seenRemoteIds) continue
             if (entry.path in remoteChanges) continue
+
+            val uploadedAt = recentlyUploaded[entry.path]
+            if (uploadedAt != null) {
+                log.debug(
+                    "Full sync: DB entry {} (remoteId={}) not in delta but uploaded {}s ago; " +
+                        "within the recent-upload grace window, deferring the deletion verdict",
+                    entry.path,
+                    entry.remoteId,
+                    java.time.Duration.between(uploadedAt, Instant.now()).seconds,
+                )
+                continue
+            }
 
             log.debug("Full sync: DB entry {} (remoteId={}) not in delta, marking deleted", entry.path, entry.remoteId)
             remoteChanges[entry.path] =
@@ -2389,6 +2435,10 @@ open class SyncEngine(
                 )
                 throw e
             }
+        // The eventually-consistent delta feed may not list this just-written remote
+        // item on the next full enumeration; mark it so the absence sweep defers its
+        // deletion verdict instead of reaping + re-uploading in a loop.
+        markRecentlyUploaded(action.path)
         val mtime = Files.getLastModifiedTime(localPath).toMillis()
         val size = Files.size(localPath)
         db.upsertEntry(
@@ -3140,6 +3190,21 @@ open class SyncEngine(
         // rows) to deleted defers reaping until a second complete enumeration corroborates.
         const val BULK_REAP_ABSOLUTE: Int = 50
         const val BULK_REAP_FRACTION: Double = 0.20
+
+        /**
+         * Grace window protecting a just-uploaded path from the absence-implies-deletion
+         * sweep. Cloud delta feeds are eventually consistent: a path the engine itself
+         * uploaded a moment ago is not yet guaranteed to appear in the next full
+         * enumeration. Reaping it on that absence queues a deletion that the next cycle
+         * re-detects and re-uploads — steady-state churn. A path whose recorded upload
+         * instant falls inside this window is skipped by the sweep; once the window
+         * lapses the mark is pruned and the path reaps normally if still absent (the
+         * guard narrows the sweep, it does not disable genuine deletes). Sized to cover
+         * observed Graph delta propagation lag with margin while staying far below a
+         * normal poll cadence, so a real delete is never masked beyond one short window.
+         */
+        @JvmField
+        val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)
 
         /**
          * Age at which a resumable-scan checkpoint is considered stale and

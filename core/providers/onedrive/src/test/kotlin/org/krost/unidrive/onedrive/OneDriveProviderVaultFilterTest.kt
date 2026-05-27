@@ -200,14 +200,18 @@ class OneDriveProviderVaultFilterTest {
         }
 
     @Test
-    fun `delta surfaces both removed and deleted facets as deleted CloudItems with state-aware logging`() =
+    fun `delta maps hard deletions to deleted CloudItems but not a soft removal with state-aware logging`() =
         runTest {
             // Mixed-state delta page: one hard-delete (state=deleted), one soft-remove
             // (state=removed), one stateless removed marker (pre-2017 schema), and one
-            // top-level `deleted` facet. All four must surface as `CloudItem.deleted = true`,
-            // and the provider's DEBUG log must distinguish hard from soft for diagnostics.
-            // Real-world delta deletion items just carry id + removal marker (no name, no
-            // facets) — anything richer would trip the facet-less zero-size vault filter.
+            // top-level `deleted` facet. The three HARD signals surface as
+            // CloudItem.deleted = true; the SOFT removal (state=removed) must NOT — the
+            // item still exists, the user merely lost access, and reaping the local copy
+            // would destroy still-valid data. The provider's DEBUG log still distinguishes
+            // hard from soft from unspecified for diagnostics (logDeletionStateSummary is
+            // independent of the deleted-flag decision). Real-world delta deletion items
+            // just carry id + removal marker (no name, no facets) — anything richer would
+            // trip the facet-less zero-size vault filter.
             val body =
                 """
                 {
@@ -236,7 +240,15 @@ class OneDriveProviderVaultFilterTest {
                 val page = provider.delta(cursor = "old-cursor")
 
                 assertEquals(5, page.items.size, "All five items surface; deleted ones still appear (engine consumes the flag)")
-                assertEquals(4, page.items.count { it.deleted }, "Four deletion signals must all flag deleted=true")
+                assertEquals(
+                    3,
+                    page.items.count { it.deleted },
+                    "Only the three HARD signals (state=deleted, stateless removed, deleted-facet) flag deleted=true",
+                )
+                assertTrue(
+                    page.items.single { it.id == "sr" }.deleted.not(),
+                    "the soft removal (state=removed) must NOT be flagged deleted",
+                )
                 assertEquals(1, page.items.count { !it.deleted && it.name == "alive.txt" })
 
                 val debug =
