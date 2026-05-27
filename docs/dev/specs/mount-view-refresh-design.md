@@ -66,13 +66,37 @@ Defaults rationale (prior-art doc): 60s balances freshness vs API cost on a 195k
 
 ## 6. FUSE cache invalidation (cross-repo, `unidrive-mount-linux`)
 
-The Rust co-daemon caches `getattr`/`readdir` results (`CachedAttr`). After an enumeration mutates `state.db`, the co-daemon must drop stale entries or the kernel keeps serving them. Two options:
-- **(a)** Push via the existing `hydration.subscribe` NDJSON event stream: emit a `view.invalidated` event (path or subtree) that the co-daemon consumes to drop its cache entry / call `notify_inval_entry`. Preferred (event-driven, no polling on the Rust side).
-- **(b)** Co-daemon sets a short attr/entry TTL so `ls` re-reads within seconds. Cheaper interim.
+The Rust co-daemon caches `getattr`/`readdir` results (`CachedAttr`). After an enumeration mutates `state.db`, the co-daemon must drop stale entries or the kernel keeps serving them.
 
-Phase 3 (sibling repo). Phase 1 can ship with the JVM side correct and rely on the co-daemon's existing re-read behaviour / a short TTL; the event-push is the clean finish. **This is a `unidrive-mount-linux` BACKLOG entry**, filed when Phase 1 lands.
+### 6.1 JVM half — IMPLEMENTED (`feat/view-invalidated-emit`, MF-1)
 
-**Eviction/read race [review gap 7]:** enumerate evicts a cache file (step 5) while the co-daemon may hold it open. Linux fd semantics keep existing opens valid; a *new* `open()` after eviction gets ENOENT — but the row was also `markDeleted` (the path is gone on the remote), so `open_read` resolving a deleted row should fail cleanly (ENOENT to the kernel), not hang. For a row that is merely *re-hydratable* (not deleted), `open_read`'s existing cache-miss path re-downloads. The Phase-3 task must verify the co-daemon's ENOENT-on-open path for a reaped path.
+After `enumerateRemoteIntoStateLocked` mutates `state.db` (upserts **and/or** reaps rows), the engine calls an injected `viewInvalidationSink: (Set<String>) -> Unit` **exactly once**, with the union of upserted and reaped paths. The sink is a no-op default; the daemon (`DaemonRuntime`) wires it to emit a `HydrationEvent.ViewInvalidated` directly into the `HydrationIpcHandler` fan-out (`dispatchEvent`), reaching all `hydration.subscribe` subscribers as a NDJSON line.
+
+**Wire contract** (NDJSON line on `hydration.subscribe` stream):
+
+| Condition | Emitted line |
+|---|---|
+| ≤ 256 changed paths | `{"event":"view.invalidated","paths":["/a","/b",…]}` |
+| > 256 changed paths | `{"event":"view.invalidated","full":true}` |
+
+The cap (256) is `HydrationEvent.VIEW_INVALIDATED_PATH_CAP`. A `full:true` event means the co-daemon should invalidate its entire cache, not just the listed paths.
+
+**When it fires:** after a `state.db`-mutating enumeration, once per pass, only when `upserted > 0 || reaped > 0`. A quiescent incremental delta (no cloud changes) does not fire the sink.
+
+**Skipped/failed enumeration:** the sink is never called when `enumerateRemoteIntoState` returns `skipped=true` (single-flight no-op) or `ok=false` (provider error) — state.db was not mutated in those cases.
+
+**Dependency direction:** `app:sync` does not import `app:hydration`. The `viewInvalidationSink` lambda is the seam. `DaemonRuntime` wires the lambda after constructing both `SyncEngine` and `HydrationIpcHandler` via a captured `var` slot; the lambda is only invoked after `enumerateRemoteIntoState` returns, by which time the ipc handler is fully initialised.
+
+### 6.2 Rust co-daemon half — REMAINING (issues #30, #31)
+
+Two remaining cross-repo tasks in `unidrive-mount-linux`:
+
+- **Subscribe on mount** (#30): the co-daemon must issue `hydration.subscribe` on mount so the daemon's subscriber set is non-empty before the first user `ls`. Until then the `view.invalidated` event is produced on the JVM side but no subscriber receives it.
+- **Consume `view.invalidated` + call `notify_inval_entry`** (#31): the co-daemon's subscribe reader must handle `event == "view.invalidated"`, parse `paths` or `full`, and call `fuse_lowlevel::notify_inval_entry` / `notify_inval_inode` for each affected path (requires `fuse3 ≥ 0.10`). With `full:true`, invalidate all cached `CachedAttr` entries.
+
+Option **(b)** — short attr/entry TTL — remains a valid cheaper interim until #30/#31 land.
+
+**Eviction/read race [review gap 7]:** enumerate evicts a cache file (step 5) while the co-daemon may hold it open. Linux fd semantics keep existing opens valid; a *new* `open()` after eviction gets ENOENT — but the row was also `markDeleted` (the path is gone on the remote), so `open_read` resolving a deleted row should fail cleanly (ENOENT to the kernel), not hang. For a row that is merely *re-hydratable* (not deleted), `open_read`'s existing cache-miss path re-downloads. The #31 task must verify the co-daemon's ENOENT-on-open path for a reaped path.
 
 ## 7. Constraints any implementation must satisfy (from the knot doc §6–7)
 
