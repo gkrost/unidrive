@@ -634,8 +634,6 @@ class InternxtApiService(
         }
     }
 
-    // --- Bridge API ---
-
     private val bridgeUrl = "https://api.internxt.com"
 
     private suspend fun bridgeGet(
@@ -883,13 +881,11 @@ class InternxtApiService(
         applyInternxtHeaders(config)
     }
 
-    /**
-     * UD-203: pull the Internxt server-side request id off a response.
-     * Header name confirmed from the upstream SDK
-     * (`AxiosResponseError.xRequestId` — extracted at error-normalization
-     * time). Returns null if the header isn't present (e.g. synthetic
-     * MockEngine responses, pre-flight failures).
-     */
+    // UD-203: pull the Internxt server-side request id off a response.
+    // Header name confirmed from the upstream SDK
+    // (`AxiosResponseError.xRequestId` — extracted at error-normalization
+    // time). Returns null if the header isn't present (e.g. synthetic
+    // MockEngine responses, pre-flight failures).
     private fun extractRequestId(response: HttpResponse): String? = response.headers["x-request-id"]
 
     private suspend fun checkResponse(response: HttpResponse) {
@@ -915,24 +911,22 @@ class InternxtApiService(
     }
 
 
-    /**
-     * Single-shot 401 → refresh-and-replay. Mirrors OneDrive's
-     * `GraphApiService.authenticatedRequest` ladder: fetch creds, run the
-     * body, and if it surfaces an [AuthenticationException] (401 mapped by
-     * [checkResponse]) and we haven't refreshed yet, ask the
-     * `credentialsProvider` for a forced refresh and retry once. A second
-     * consecutive 401 propagates — it indicates either a refresh that
-     * silently failed or a new token the server also rejects, both of which
-     * are auth-flow bugs the user must see.
-     *
-     * Concurrent forced-refresh callers coalesce inside
-     * [AuthService.refreshToken]'s [RefreshableTokenLatch], so the second
-     * and Nth replays cost one shared HTTP refresh, not N.
-     *
-     * Bridge calls (HTTP Basic auth) MUST NOT be wrapped: a 401 from the
-     * Bridge surface means the credentials themselves are wrong, not that
-     * the JWT expired, and a JWT refresh wouldn't help.
-     */
+    // Single-shot 401 → refresh-and-replay. Mirrors OneDrive's
+    // `GraphApiService.authenticatedRequest` ladder: fetch creds, run the
+    // body, and if it surfaces an [AuthenticationException] (401 mapped by
+    // [checkResponse]) and we haven't refreshed yet, ask the
+    // `credentialsProvider` for a forced refresh and retry once. A second
+    // consecutive 401 propagates — it indicates either a refresh that
+    // silently failed or a new token the server also rejects, both of which
+    // are auth-flow bugs the user must see.
+    //
+    // Concurrent forced-refresh callers coalesce inside
+    // [AuthService.refreshToken]'s [RefreshableTokenLatch], so the second
+    // and Nth replays cost one shared HTTP refresh, not N.
+    //
+    // Bridge calls (HTTP Basic auth) MUST NOT be wrapped: a 401 from the
+    // Bridge surface means the credentials themselves are wrong, not that
+    // the JWT expired, and a JWT refresh wouldn't help.
     private suspend fun <T> withAuthRetry(body: suspend (InternxtCredentials) -> T): T {
         var refreshed = false
         while (true) {

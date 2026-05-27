@@ -53,7 +53,6 @@ class LocalScanner(
         var batchCommitted = false
         try {
 
-        // Walk local filesystem
         Files.walkFileTree(
             syncRoot,
             object : SimpleFileVisitor<Path>() {
@@ -150,7 +149,6 @@ class LocalScanner(
 
         lastScanSkipped = skipped
 
-        // Check for deletions: entries in DB but not on disk
         for (entry in dbEntries.values) {
             if (entry.path !in seenPaths) {
                 if (isExcluded(entry.path)) continue

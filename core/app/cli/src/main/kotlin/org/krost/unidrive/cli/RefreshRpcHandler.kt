@@ -115,7 +115,6 @@ class RefreshRpcHandler(
     fun isInFlight(): Boolean = inFlight.get() != null
     fun inFlightJobId(): String? = inFlight.get()?.id
 
-    /** Test hook: join the currently-launched refresh job, if any. */
     suspend fun awaitInFlight() {
         inFlight.get()?.job?.join()
     }

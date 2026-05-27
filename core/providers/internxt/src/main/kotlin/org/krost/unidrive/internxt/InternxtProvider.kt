@@ -262,8 +262,6 @@ class InternxtProvider(
         // TRUNCATE_EXISTING on the destination open mode (inside
         // downloadFileStreaming) discards any partial prior attempt's bytes.
         return retryShardCommit {
-            // 1. Get encryption index from bridge (fresh per attempt — picks up
-            // a new presigned shard URL if the prior one expired).
             val bridgeInfo =
                 try {
                     api.getBridgeFileInfo(bucket, fileId)
@@ -283,13 +281,11 @@ class InternxtProvider(
             val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
             val iv = indexBytes.copyOfRange(0, 16)
 
-            // 2. Derive file key: mnemonic → seed → bucketKey → fileKey
             val creds = authService.getValidCredentials()
             val seed = crypto.mnemonicToSeed(creds.mnemonic)
             val bucketKey = crypto.deriveBucketKey(seed, bucket)
             val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
-            // 3. Stream: encrypted bytes → CipherInputStream(AES-256-CTR) → disk
             val downloadUrl =
                 bridgeInfo.shards.firstOrNull { it.url.isNotBlank() }?.url
                     ?: throw ProviderException("No download URL in bridge info for $remotePath")
@@ -341,27 +337,23 @@ class InternxtProvider(
         }
     }
 
-    /**
-     * Recognise the Internxt 404 shape that means "the bucket entry is
-     * permanently gone, retry won't recover it". The bridge returns
-     * `{"error":"Bucket entry … not found"}` with HTTP 404 when the upstream
-     * record has been hard-deleted; the wrapper's `checkResponse` packs that
-     * body into the exception's message. We match on (statusCode=404) AND
-     * the literal substring so a different 404 path doesn't accidentally
-     * quarantine a transient miss.
-     */
+    // Recognise the Internxt 404 shape that means "the bucket entry is
+    // permanently gone, retry won't recover it". The bridge returns
+    // `{"error":"Bucket entry … not found"}` with HTTP 404 when the upstream
+    // record has been hard-deleted; the wrapper's `checkResponse` packs that
+    // body into the exception's message. We match on (statusCode=404) AND
+    // the literal substring so a different 404 path doesn't accidentally
+    // quarantine a transient miss.
     private fun isBucketEntryNotFound(e: InternxtApiException): Boolean {
         if (e.statusCode != 404) return false
         val msg = e.message ?: return false
         return msg.contains("Bucket entry") && msg.contains("not found")
     }
 
-    /**
-     * Build the permanent-download-failure exception the engine catches.
-     * The original [cause] is attached so the audit log retains the
-     * underlying bridge / metadata diagnostic; the message wraps it in a
-     * shape the operator can grep for.
-     */
+    // Build the permanent-download-failure exception the engine catches.
+    // The original [cause] is attached so the audit log retains the
+    // underlying bridge / metadata diagnostic; the message wraps it in a
+    // shape the operator can grep for.
     private fun permanentDownloadFailure(
         remotePath: String,
         cause: InternxtApiException,
@@ -373,17 +365,14 @@ class InternxtProvider(
             requestId = cause.requestId,
         )
 
-    /**
-     * Destructive-overwrite guard: rename the file at [existingRemoteId] to
-     * `${plainName}.unidrive-prev-${utcStamp}` so a subsequent createFile
-     * lands the new content as a fresh row without dropping the prior bytes.
-     *
-     * On 409 (collision — two replaces inside one wall-clock second) walks
-     * the counter suffix (`-2`, `-3`, ...) up to [MAX_KEEP_OVERWRITTEN_RETRIES].
-     * Returns true on success, false on any failure (collision-exhausted,
-     * 5xx, IO). On false the caller falls through to the destructive
-     * `replaceFile` rather than stranding the local edit.
-     */
+    // Destructive-overwrite guard: rename the file at [existingRemoteId] to
+    // `${plainName}.unidrive-prev-${utcStamp}` so a subsequent createFile
+    // lands the new content as a fresh row without dropping the prior bytes.
+    // On 409 (collision — two replaces inside one wall-clock second) walks
+    // the counter suffix (`-2`, `-3`, ...) up to [MAX_KEEP_OVERWRITTEN_RETRIES].
+    // Returns true on success, false on any failure (collision-exhausted,
+    // 5xx, IO). On false the caller falls through to the destructive
+    // `replaceFile` rather than stranding the local edit.
     private suspend fun tryKeepOverwrittenRename(
         existingRemoteId: String,
         plainName: String,
@@ -532,8 +521,8 @@ class InternxtProvider(
         val uploadStartedAtMillis = tomb?.startedAtMillis ?: nowMillis
         val uploadStartedAt = Instant.ofEpochMilli(uploadStartedAtMillis)
 
-        // Stage 1 entry: persist the initial tombstone BEFORE we touch the
-        // ciphertext. A kill mid-encrypt resumes with the same indexBytes and
+        // Persist the initial tombstone BEFORE we touch the ciphertext.
+        // A kill mid-encrypt resumes with the same indexBytes and
         // re-encrypts to the same deterministic temp path.
         var currentTomb =
             tomb ?: UploadTombstone(
@@ -554,10 +543,10 @@ class InternxtProvider(
             withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
         }
 
-        // Stage 3-4 — encrypt to deterministic .enc temp file. Skipped on
-        // resume from PUT_PENDING or later (the ciphertext + hash + size are
-        // already pinned in the tombstone, and the .enc on disk must round-
-        // trip the recorded encryptedSize or we re-encrypt as a safety net).
+        // Encrypt to deterministic .enc temp file. Skipped on resume from
+        // PUT_PENDING or later (the ciphertext + hash + size are already pinned
+        // in the tombstone, and the .enc on disk must round-trip the recorded
+        // encryptedSize or we re-encrypt as a safety net).
         val needsEncrypt =
             currentTomb.stage == UploadTombstone.Stage.ENCRYPTING ||
                 currentTomb.encryptedSize == null ||
@@ -618,12 +607,12 @@ class InternxtProvider(
         // can resume cleanly.
         val bucketEntry =
             retryShardCommit {
-                // 5. Start upload → fresh PUT URL when the cached one is null
-                //    (cold start), absent, or older than URL_TTL_MS (the OVH
-                //    presigned-URL safety margin). The ciphertext + indexBytes +
-                //    hashHex stay pinned across the URL refresh — only the
-                //    server-allocated shardUuid changes, and commitWithRetry's
-                //    reconcile keys on plainName+size+window, not on shardUuid.
+                // Start upload — fresh PUT URL when the cached one is null
+                // (cold start), absent, or older than URL_TTL_MS (the OVH
+                // presigned-URL safety margin). The ciphertext + indexBytes +
+                // hashHex stay pinned across the URL refresh — only the
+                // server-allocated shardUuid changes, and commitWithRetry's
+                // reconcile keys on plainName+size+window, not on shardUuid.
                 val urlAgeMs = System.currentTimeMillis() - currentTomb.tombstoneWrittenAtMillis
                 val urlExpired = urlAgeMs > InternxtConfig.URL_TTL_MS
                 val shardUuid: String
@@ -656,8 +645,8 @@ class InternxtProvider(
                     putUrl = currentTomb.bridgePutUrl!!
                 }
 
-                // 6. PUT encrypted shard from temp file. Skipped on PUT_DONE
-                //    resume (idempotent at the S3 layer but a no-op is cheaper).
+                // PUT encrypted shard from temp file. Skipped on PUT_DONE
+                // resume (idempotent at the S3 layer but a no-op is cheaper).
                 if (currentTomb.stage == UploadTombstone.Stage.ENCRYPTING ||
                     currentTomb.stage == UploadTombstone.Stage.PUT_PENDING
                 ) {
@@ -670,9 +659,9 @@ class InternxtProvider(
                     withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
                 }
 
-                // 7-8. Finish upload (with 409-reconcile idempotency) → get
-                //      bridge fileId. Skipped on FINISH_DONE resume (the
-                //      tombstone-carried bucket entry id is already in hand).
+                // Finish upload (with 409-reconcile idempotency) → get
+                // bridge fileId. Skipped on FINISH_DONE resume (the
+                // tombstone-carried bucket entry id is already in hand).
                 val entry =
                     if (currentTomb.stage == UploadTombstone.Stage.FINISH_DONE) {
                         // We landed here from a crash between finishUpload-OK
@@ -720,7 +709,6 @@ class InternxtProvider(
                 entry
             }
 
-        // 9. Register file in drive metadata.
         // UD-366: MODIFIED uploads route through PUT /files/{uuid} (replace-in-place);
         // NEW uploads POST /files (create). Defensive fallback below catches the 409 that
         // appears when the reconciler thought a path was new but the remote already has it.
@@ -1308,19 +1296,17 @@ class InternxtProvider(
         )
     }
 
-    /**
-     * Coalesces files + folders page arrivals into a single [persistPage] call
-     * per page boundary so the checkpoint marker advances atomically and the
-     * staged-row INSERTs ride a single SQLite transaction. Stream offsets are
-     * tracked independently so a resume from the persisted marker lands each
-     * stream at the right position.
-     *
-     * The class is stateful and the two notify methods are called from
-     * concurrent coroutines, so writes go through a [kotlinx.coroutines.sync.Mutex]
-     * to serialise the SQL transactions — concurrent persistPage calls on the
-     * same DB connection would deadlock SQLite's per-connection serialised
-     * write model.
-     */
+    // Coalesces files + folders page arrivals into a single [persistPage] call
+    // per page boundary so the checkpoint marker advances atomically and the
+    // staged-row INSERTs ride a single SQLite transaction. Stream offsets are
+    // tracked independently so a resume from the persisted marker lands each
+    // stream at the right position.
+    //
+    // The class is stateful and the two notify methods are called from
+    // concurrent coroutines, so writes go through a [kotlinx.coroutines.sync.Mutex]
+    // to serialise the SQL transactions — concurrent persistPage calls on the
+    // same DB connection would deadlock SQLite's per-connection serialised
+    // write model.
     private class PageBoundaryPersister(
         private val persistPage: suspend (items: List<org.krost.unidrive.CloudItem>, marker: String) -> Unit,
         private val creds: org.krost.unidrive.internxt.model.InternxtCredentials,
@@ -1364,27 +1350,25 @@ class InternxtProvider(
         }
     }
 
-    /**
-     * Two-wide speculative page fetcher used by [delta]. Keeps up to 2 in-flight
-     * [fetchPage] calls; when a page comes back with `size < limit` (the last
-     * page), any speculative siblings are cancelled rather than waited on — under
-     * the live 28-52s per-page latency, one wasted fetch is much cheaper than
-     * one extra round-trip's worth of wall-clock. Pages are appended in offset
-     * order so the resulting list matches the sequential walk.
-     *
-     * [startOffset] supports the resumable-scan handshake: a resumed scan
-     * begins paginating from the persisted boundary rather than offset 0.
-     *
-     * [onPage], when supplied, fires once per successfully-fetched page with
-     * the page contents and the offset the NEXT page would start at. Resumable-
-     * scan staging hooks here so each page is durably persisted before the
-     * pipeline tops up.
-     *
-     * [runningCount] is incremented as pages arrive; [combinedTotal] reads it
-     * alongside the sibling stream's counter so the heartbeat fires with a
-     * monotonic file+folder total without cross-coroutine list synchronization
-     * on the merge path.
-     */
+    // Two-wide speculative page fetcher used by [delta]. Keeps up to 2 in-flight
+    // [fetchPage] calls; when a page comes back with `size < limit` (the last
+    // page), any speculative siblings are cancelled rather than waited on — under
+    // the live 28-52s per-page latency, one wasted fetch is much cheaper than
+    // one extra round-trip's worth of wall-clock. Pages are appended in offset
+    // order so the resulting list matches the sequential walk.
+    //
+    // [startOffset] supports the resumable-scan handshake: a resumed scan
+    // begins paginating from the persisted boundary rather than offset 0.
+    //
+    // [onPage], when supplied, fires once per successfully-fetched page with
+    // the page contents and the offset the NEXT page would start at. Resumable-
+    // scan staging hooks here so each page is durably persisted before the
+    // pipeline tops up.
+    //
+    // [runningCount] is incremented as pages arrive; [combinedTotal] reads it
+    // alongside the sibling stream's counter so the heartbeat fires with a
+    // monotonic file+folder total without cross-coroutine list synchronization
+    // on the merge path.
     private suspend fun <T> speculativeFetchPages(
         limit: Int,
         runningCount: AtomicInteger,
@@ -1553,37 +1537,33 @@ class InternxtProvider(
         // honour Retry-After and retry the same call.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
 
-        /**
-         * Cap on consecutive 409 collisions tolerated when the destructive-
-         * overwrite guard tries to rename the prior cloud file to an archive
-         * name. Two replaces of the same file inside one wall-clock second
-         * collide on the timestamp suffix; the counter (`-2`, `-3`, ...)
-         * disambiguates. After this many failed attempts, fall through to
-         * the destructive `replaceFile` rather than block the local edit.
-         */
+        // Cap on consecutive 409 collisions tolerated when the destructive-
+        // overwrite guard tries to rename the prior cloud file to an archive
+        // name. Two replaces of the same file inside one wall-clock second
+        // collide on the timestamp suffix; the counter (`-2`, `-3`, ...)
+        // disambiguates. After this many failed attempts, fall through to
+        // the destructive `replaceFile` rather than block the local edit.
         internal const val MAX_KEEP_OVERWRITTEN_RETRIES: Int = 5
 
-        /**
-         * UD-361: testable recursion driver. Walks the folder tree rooted at
-         * [folderUuid], accumulating files into [accumulator] and the folders
-         * it descended through into [folderAccumulator]. On 500/503 from
-         * [getContents], increments [skipped] and returns (the subtree is
-         * silently dropped — caller is responsible for inspecting [skipped]
-         * and rejecting partial gathers). Other exceptions propagate.
-         * Increments [scanned] for every successfully walked folder, then
-         * invokes [onProgress] so the caller can tick a heartbeat from
-         * within the walk.
-         *
-         * Each child folder stamped into [folderAccumulator] has its
-         * `parentUuid` set from the recursion context (the `folderUuid`
-         * arg). The /folders/:uuid/content endpoint omits `parentUuid` on
-         * the children listing — without this stamp, downstream
-         * `buildFolderPath` would treat the child as a root child and
-         * compute the wrong path. Threading these folders into the caller's
-         * `allFolders` is what closes the ancestor-uuid-drop gap when the
-         * fallback fires (otherwise `folderMap` only contains the
-         * cursor-filtered /folders delta and most files get dropped).
-         */
+        // UD-361: testable recursion driver. Walks the folder tree rooted at
+        // [folderUuid], accumulating files into [accumulator] and the folders
+        // it descended through into [folderAccumulator]. On 500/503 from
+        // [getContents], increments [skipped] and returns (the subtree is
+        // silently dropped — caller is responsible for inspecting [skipped]
+        // and rejecting partial gathers). Other exceptions propagate.
+        // Increments [scanned] for every successfully walked folder, then
+        // invokes [onProgress] so the caller can tick a heartbeat from
+        // within the walk.
+        //
+        // Each child folder stamped into [folderAccumulator] has its
+        // `parentUuid` set from the recursion context (the `folderUuid`
+        // arg). The /folders/:uuid/content endpoint omits `parentUuid` on
+        // the children listing — without this stamp, downstream
+        // `buildFolderPath` would treat the child as a root child and
+        // compute the wrong path. Threading these folders into the caller's
+        // `allFolders` is what closes the ancestor-uuid-drop gap when the
+        // fallback fires (otherwise `folderMap` only contains the
+        // cursor-filtered /folders delta and most files get dropped).
         internal suspend fun collectFilesFromFoldersImpl(
             getContents: suspend (String) -> FolderContentResponse,
             folderUuid: String,
@@ -1655,13 +1635,11 @@ class InternxtProvider(
 
         fun pathSegments(path: String): List<String> = path.removePrefix("/").split("/").filter { it.isNotEmpty() }
 
-        /**
-         * Build the archive plainName for the destructive-overwrite guard.
-         * Returns `${plainName}.unidrive-prev-${yyyy-MM-dd'T'HH-mm-ss}` in UTC
-         * (`-` instead of `:` for NTFS portability). [counter] > 1 appends a
-         * `-N` suffix to break collisions when two replaces of the same file
-         * fall inside the same wall-clock second.
-         */
+        // Build the archive plainName for the destructive-overwrite guard.
+        // Returns `${plainName}.unidrive-prev-${yyyy-MM-dd'T'HH-mm-ss}` in UTC
+        // (`-` instead of `:` for NTFS portability). [counter] > 1 appends a
+        // `-N` suffix to break collisions when two replaces of the same file
+        // fall inside the same wall-clock second.
         internal fun keepOverwrittenArchiveName(
             plainName: String,
             now: java.time.Instant,
@@ -1676,12 +1654,10 @@ class InternxtProvider(
             return if (counter <= 1) base else "$base-$counter"
         }
 
-        /**
-         * UD-366: build the conflict-copy plainName for the keep-both collision
-         * handler.  Format: `$plainName (conflict $date)` for counter=1, then
-         * `$plainName (conflict $date) (N)` for N ≥ 2.  [date] is a yyyy-MM-dd
-         * string passed by the caller so it can be pinned in tests.
-         */
+        // UD-366: build the conflict-copy plainName for the keep-both collision
+        // handler.  Format: `$plainName (conflict $date)` for counter=1, then
+        // `$plainName (conflict $date) (N)` for N ≥ 2.  [date] is a yyyy-MM-dd
+        // string passed by the caller so it can be pinned in tests.
         internal fun conflictName(
             plainName: String,
             date: String,
@@ -1715,7 +1691,7 @@ class InternxtProvider(
         private fun InternxtFolder.isTombstoned(): Boolean =
             status == "TRASHED" || status == "DELETED" || removed || deleted
 
-        /** UD-317: pure converter for `listChildren` / `getMetadata` file entries. */
+        // UD-317: pure converter for `listChildren` / `getMetadata` file entries.
         internal fun fileToCloudItem(
             file: InternxtFile,
             parentPath: String,
@@ -1762,7 +1738,7 @@ class InternxtProvider(
             )
         }
 
-        /** UD-317: pure converter for `listChildren` folder entries. */
+        // UD-317: pure converter for `listChildren` folder entries.
         internal fun folderToCloudItem(
             folder: InternxtFolder,
             parentPath: String,
@@ -1784,7 +1760,7 @@ class InternxtProvider(
             )
         }
 
-        /** UD-317: pure converter for delta file entries (parentPath already resolved by caller). */
+        // UD-317: pure converter for delta file entries (parentPath already resolved by caller).
         internal fun fileToDeltaCloudItem(
             file: InternxtFile,
             parentPath: String,
@@ -1825,21 +1801,19 @@ class InternxtProvider(
             )
         }
 
-        /**
-         * Resolves the absolute path of a folder uuid by walking ancestors
-         * through [folderMap]. Returns the empty string for [rootUuid]
-         * (parentPath sentinel) and `null` when any non-root ancestor is
-         * absent from [folderMap].
-         *
-         * A null return signals that the caller cannot safely construct a
-         * full path for an item under this uuid — typically because the
-         * /folders delta page returned a changed leaf without its
-         * unchanged ancestors. Callers must drop the item and signal
-         * `complete = false` upstream rather than silently rooting it at
-         * `/` (the prior silent-empty fallback produced ~84k duplicate
-         * `remote_id` rows in user state.db). See
-         * docs/audits/internxt-phantom-investigation.md.
-         */
+        // Resolves the absolute path of a folder uuid by walking ancestors
+        // through [folderMap]. Returns the empty string for [rootUuid]
+        // (parentPath sentinel) and `null` when any non-root ancestor is
+        // absent from [folderMap].
+        //
+        // A null return signals that the caller cannot safely construct a
+        // full path for an item under this uuid — typically because the
+        // /folders delta page returned a changed leaf without its
+        // unchanged ancestors. Callers must drop the item and signal
+        // `complete = false` upstream rather than silently rooting it at
+        // `/` (the prior silent-empty fallback produced ~84k duplicate
+        // `remote_id` rows in user state.db). See
+        // docs/audits/internxt-phantom-investigation.md.
         internal fun buildFolderPath(
             uuid: String,
             folderMap: Map<String, InternxtFolder>,
@@ -1856,30 +1830,28 @@ class InternxtProvider(
             return "$parentPath/$name"
         }
 
-        /**
-         * Self-healing variant of [buildFolderPath]: when an ancestor uuid is
-         * absent from [folderMap] (typical when the /folders delta page returned
-         * a changed leaf without its unchanged ancestors), fetch that folder's
-         * metadata via [fetchFolder] and walk up, inserting each fetched
-         * ancestor into [folderMap] before resolving the path. Without this an
-         * unchanged remote keeps reproducing the same ancestor-uuid drop on
-         * every pass — the gather never reaches `complete=true`, so the engine
-         * suppresses deletes indefinitely.
-         *
-         * Memoisation, bounded to one fetch per missing uuid per pass:
-         *  - a successful fetch is written into [folderMap], so any later item
-         *    under the same ancestor finds it already present (no re-fetch);
-         *  - an unfetchable uuid (404 / trashed / gone → [fetchFolder] returns
-         *    null) is recorded in [unfetchable], so a known-gone ancestor is
-         *    never re-requested.
-         * Both maps are shared across the whole delta() pass; at ~196k-file
-         * scale this caps the re-fetch at the number of distinct missing
-         * ancestors, not the number of orphaned leaves.
-         *
-         * Returns null exactly as [buildFolderPath] does when an ancestor
-         * cannot be resolved — the caller drops the item, counts it, and lets
-         * `complete=false` stand for the pass.
-         */
+        // Self-healing variant of [buildFolderPath]: when an ancestor uuid is
+        // absent from [folderMap] (typical when the /folders delta page returned
+        // a changed leaf without its unchanged ancestors), fetch that folder's
+        // metadata via [fetchFolder] and walk up, inserting each fetched
+        // ancestor into [folderMap] before resolving the path. Without this an
+        // unchanged remote keeps reproducing the same ancestor-uuid drop on
+        // every pass — the gather never reaches `complete=true`, so the engine
+        // suppresses deletes indefinitely.
+        //
+        // Memoisation, bounded to one fetch per missing uuid per pass:
+        //  - a successful fetch is written into [folderMap], so any later item
+        //    under the same ancestor finds it already present (no re-fetch);
+        //  - an unfetchable uuid (404 / trashed / gone → [fetchFolder] returns
+        //    null) is recorded in [unfetchable], so a known-gone ancestor is
+        //    never re-requested.
+        // Both maps are shared across the whole delta() pass; at ~196k-file
+        // scale this caps the re-fetch at the number of distinct missing
+        // ancestors, not the number of orphaned leaves.
+        //
+        // Returns null exactly as [buildFolderPath] does when an ancestor
+        // cannot be resolved — the caller drops the item, counts it, and lets
+        // `complete=false` stand for the pass.
         internal suspend fun buildFolderPathFetching(
             uuid: String,
             folderMap: MutableMap<String, InternxtFolder>,
@@ -1910,7 +1882,7 @@ class InternxtProvider(
             return "$parentPath/$name"
         }
 
-        /** UD-317: pure converter for delta folder entries (parentPath already resolved by caller). */
+        // UD-317: pure converter for delta folder entries (parentPath already resolved by caller).
         internal fun folderToDeltaCloudItem(
             folder: InternxtFolder,
             parentPath: String,
@@ -1933,21 +1905,19 @@ class InternxtProvider(
 
         // ---- Resumable-scan helpers ----
 
-        /**
-         * Compute the cursor to return from a delta gather. Internxt cursors
-         * are ISO-8601 timestamps that the gateway uses as a "items modified
-         * since X" filter. Returns `max(seenMax, requestCursor)` so:
-         *  - A gather that fetched items advances to the freshest updatedAt
-         *    seen across all completed pages.
-         *  - A gather that fetched no items (every page empty, or every
-         *    folder hit the 503 fallback) leaves the cursor where it was
-         *    rather than regressing to `Instant.now()` and skipping past
-         *    items modified before now.
-         *  - Both null (first scan, no items) falls back to `Instant.now()`
-         *    so the next launch doesn't ask the gateway for "since epoch".
-         * Lexicographic comparison is sound because the timestamps are
-         * always ISO-8601 with the same timezone suffix (`Z` from the API).
-         */
+        // Compute the cursor to return from a delta gather. Internxt cursors
+        // are ISO-8601 timestamps that the gateway uses as a "items modified
+        // since X" filter. Returns `max(seenMax, requestCursor)` so:
+        //  - A gather that fetched items advances to the freshest updatedAt
+        //    seen across all completed pages.
+        //  - A gather that fetched no items (every page empty, or every
+        //    folder hit the 503 fallback) leaves the cursor where it was
+        //    rather than regressing to `Instant.now()` and skipping past
+        //    items modified before now.
+        //  - Both null (first scan, no items) falls back to `Instant.now()`
+        //    so the next launch doesn't ask the gateway for "since epoch".
+        // Lexicographic comparison is sound because the timestamps are
+        // always ISO-8601 with the same timezone suffix (`Z` from the API).
         internal fun advanceCursor(
             seenMax: String?,
             requestCursor: String?,
@@ -1960,12 +1930,10 @@ class InternxtProvider(
                 else -> Instant.now().toString()
             }
 
-        /**
-         * Marker format used by the page-boundary persister. Two non-negative
-         * integers separated by `|`: files offset first, folders offset
-         * second. Stored verbatim in `sync_state.scan_in_progress_marker` and
-         * parsed back via [parseResumeOffsets] on resume.
-         */
+        // Marker format used by the page-boundary persister. Two non-negative
+        // integers separated by `|`: files offset first, folders offset
+        // second. Stored verbatim in `sync_state.scan_in_progress_marker` and
+        // parsed back via [parseResumeOffsets] on resume.
         internal fun buildMarker(
             filesOffset: Int,
             foldersOffset: Int,
@@ -1986,12 +1954,10 @@ class InternxtProvider(
 
         internal data class ResumeOffsets(val filesOffset: Int, val foldersOffset: Int)
 
-        /**
-         * Convert a freshly-fetched [InternxtFile] into the [CloudItem] shape
-         * that the staging slice persists. The `path` field is left empty
-         * because the folder graph isn't complete mid-scan — the resume path
-         * re-resolves it from `parentId` against the rebuilt graph.
-         */
+        // Convert a freshly-fetched [InternxtFile] into the [CloudItem] shape
+        // that the staging slice persists. The `path` field is left empty
+        // because the folder graph isn't complete mid-scan — the resume path
+        // re-resolves it from `parentId` against the rebuilt graph.
         internal fun InternxtFile.toStagedCloudItem(rootUuid: String): CloudItem {
             val baseName = sanitizeName(plainName ?: name ?: "")
             val cleanType = type?.let { sanitizeName(it) }
@@ -2020,7 +1986,7 @@ class InternxtProvider(
             )
         }
 
-        /** Folder equivalent of [toStagedCloudItem]. */
+        // Folder equivalent of [toStagedCloudItem].
         internal fun InternxtFolder.toStagedCloudItem(rootUuid: String): CloudItem {
             val resolvedName = sanitizeName(plainName ?: name ?: "")
             val pid = parentUuid?.takeIf { it != rootUuid }
@@ -2038,15 +2004,13 @@ class InternxtProvider(
             )
         }
 
-        /**
-         * Re-inflate a resumed-from-staging [CloudItem] back into the
-         * Internxt model object that the gather loop consumes. The staged
-         * row preserves cloud identity (uuid, plainName, parentUuid,
-         * size, modified, hash) — everything the folder-graph reconstruction
-         * needs. `updatedAt` is unknown post-staging (the engine strips it),
-         * which is fine: the cursor-advance computation in delta() looks at
-         * the freshly-fetched pages, which set the high-water mark.
-         */
+        // Re-inflate a resumed-from-staging [CloudItem] back into the
+        // Internxt model object that the gather loop consumes. The staged
+        // row preserves cloud identity (uuid, plainName, parentUuid,
+        // size, modified, hash) — everything the folder-graph reconstruction
+        // needs. `updatedAt` is unknown post-staging (the engine strips it),
+        // which is fine: the cursor-advance computation in delta() looks at
+        // the freshly-fetched pages, which set the high-water mark.
         internal fun CloudItem.toResumedFile(): InternxtFile =
             InternxtFile(
                 uuid = id,
