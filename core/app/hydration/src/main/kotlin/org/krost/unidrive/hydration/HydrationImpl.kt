@@ -57,19 +57,18 @@ class HydrationImpl(
     // a newer one, overwriting the remote with stale bytes and marking
     // the row synced with the wrong mtime.
     //
-    // uploadMutexes: each path gets a Mutex; background upload coroutines
-    // acquire it before calling uploadFromCache so same-path uploads queue
-    // FIFO while different-path uploads run concurrently.
-    //
-    // uploadPendingCounts: tracks how many uploads are in-flight (queued or
-    // running) for each path. Incremented before launching, decremented
-    // after the upload body completes (inside the coroutine, outside the
-    // lock). When the count reaches zero, both entries are removed to
-    // prevent unbounded map growth. The count is incremented before
-    // computeIfAbsent so the mutex is never removed while a new caller
-    // has just bumped the count but hasn't yet observed the mutex entry.
-    private val uploadMutexes = ConcurrentHashMap<String, Mutex>()
-    private val uploadPendingCounts = ConcurrentHashMap<String, AtomicInteger>()
+    // A single ConcurrentHashMap<String, UploadSlot> replaces the former
+    // two-map design (uploadMutexes + uploadPendingCounts). Using
+    // ConcurrentHashMap.compute() for both the increment-or-create and the
+    // decrement-and-remove operations makes each of those steps atomic under
+    // the map's bin lock. This closes the race in the old design where
+    // coroutine A's decrementAndGet()→0 and its subsequent remove() were NOT
+    // atomic: a concurrent submitter B could bump the count and computeIfAbsent
+    // the same mutex between A's decrement and A's remove, leaving B holding a
+    // mutex that A then deleted, causing a later submitter C to create a fresh
+    // mutex — so B and C would run concurrently for the same path.
+    private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
+    private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
@@ -135,23 +134,26 @@ class HydrationImpl(
     }
 
     // Launches a background upload for [path] from [cachePath], serialized per-path
-    // via [uploadMutexes]. Same-path uploads queue FIFO; different-path uploads run
-    // concurrently. The cache file is read after acquiring the lock so the last
-    // submitted upload always reads the latest content.
+    // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
+    // uploads run concurrently. The cache file is read after acquiring the lock so
+    // the last submitted upload always reads the latest content.
     //
-    // Map cleanup: [uploadPendingCounts] is incremented before the mutex is looked up
-    // (so the mutex is never removed while a new caller has bumped the count but
-    // hasn't yet acquired it) and decremented after the upload body completes. When
-    // the count reaches zero both entries are removed from their respective maps.
+    // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
+    // increment-or-create (on launch) and the decrement-and-remove (in the finally
+    // block). Because compute() holds the map's bin lock for the duration of the
+    // lambda, a concurrent launch's compute() cannot interleave between the
+    // decrement and the removal. This guarantees a slot is never removed while
+    // another submitter is in the process of bumping its pending count.
     private fun launchSerializedUpload(path: String, cachePath: Path) {
-        // Bump the pending count BEFORE computing/obtaining the mutex entry so the
-        // cleanup logic can never remove the mutex between this increment and the
-        // coroutine's withLock call.
-        uploadPendingCounts.computeIfAbsent(path) { AtomicInteger(0) }.incrementAndGet()
-        val mutex = uploadMutexes.computeIfAbsent(path) { Mutex() }
+        // Atomically create-or-get the slot and bump its pending count. The bin lock
+        // held by compute() ensures that no concurrent finally-block can remove the
+        // slot between the moment we decide to reuse it and the moment we increment.
+        val slot = uploadSlots.compute(path) { _, s ->
+            (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
+        }!!
         recoveryUploadScope.launch {
             try {
-                mutex.withLock {
+                slot.mutex.withLock {
                     try {
                         _events.emit(HydrationEvent.Hydrating(path))
                         syncEngine.uploadFromCache(path, cachePath)
@@ -164,13 +166,13 @@ class HydrationImpl(
                     }
                 }
             } finally {
-                // Decrement outside the lock: the upload body is done, whether it
-                // succeeded or failed. If we're the last pending upload for this
-                // path, remove both map entries to avoid unbounded growth.
-                val remaining = uploadPendingCounts[path]?.decrementAndGet() ?: 0
-                if (remaining <= 0) {
-                    uploadPendingCounts.remove(path)
-                    uploadMutexes.remove(path)
+                // Atomically decrement and remove-when-zero. The bin lock held by
+                // compute() ensures no concurrent launch's compute() can observe the
+                // slot between the decrement and the null-return (removal). If
+                // pending reaches zero the lambda returns null → ConcurrentHashMap
+                // removes the entry; otherwise the existing slot is kept.
+                uploadSlots.compute(path) { _, s ->
+                    if (s == null || s.pending.decrementAndGet() == 0) null else s
                 }
             }
         }

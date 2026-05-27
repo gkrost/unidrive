@@ -935,4 +935,76 @@ class HydrationImplTest {
             "final remote content must be from the last submission (v2), not the stale first one",
         )
     }
+
+    // Invariant: after a path's upload slot has been fully drained (pending count
+    // reaches zero and the slot is removed), subsequent uploads for the SAME path
+    // must still be serialized correctly by the re-created slot.
+    //
+    // This exercises the create→drain→recreate path that the old two-map cleanup
+    // could corrupt: coroutine A's decrementAndGet()→0 and its remove() were not
+    // atomic, so a concurrent submitter B could see the stale mutex just before A
+    // deleted it, causing a later submitter C to create a fresh mutex and run
+    // concurrently with B.
+    //
+    // Mechanism:
+    //   Round 1 — submit one gated upload; let it fully drain (slot removed).
+    //   Round 2 — submit two more gated uploads for the same path; hold the gate.
+    //             Assert peak concurrency is still 1 (new slot serializes them).
+    //             Release the gate; assert final content is the latest submission.
+    @Test
+    fun `upload_slot_recreated_after_drain_still_serializes_same_path_uploads`() = runTest {
+        val gate1 = CompletableDeferred<Unit>()
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/report.txt", localSize = 2)
+
+        val cacheV0 = env.tempDir.resolve("report-v0.txt").also { Files.writeString(it, "v0") }
+        val cacheV1 = env.tempDir.resolve("report-v1.txt").also { Files.writeString(it, "v1") }
+        val cacheV2 = env.tempDir.resolve("report-v2.txt").also { Files.writeString(it, "v2") }
+
+        // ── Round 1: single upload; drain completely ─────────────────────────────
+        env.syncEngine.setUploadGate(gate1)
+        env.hydration.openForWrite("conn1", "h0", "/report.txt", cacheV0)
+        gate1.complete(Unit)          // let it through immediately
+        advanceUntilIdle()            // drain: slot pending→0, slot removed
+        assertEquals("v0", env.syncEngine.remoteContentSeen("/report.txt"), "round-1 upload must complete")
+
+        // ── Round 2: two rapid uploads; slot must be re-created and still serialize ─
+        // Reset the peak counter by reinstalling a fresh gate that suspends.
+        val gate2 = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate2)
+
+        val r1 = env.hydration.openForWrite("conn1", "h1", "/report.txt", cacheV1)
+        val r2 = env.hydration.openForWrite("conn1", "h2", "/report.txt", cacheV2)
+        assertTrue(r1 is OpenResult.Ok && r2 is OpenResult.Ok, "both round-2 openForWrite calls must return Ok immediately")
+
+        // Drive: first upload acquires the re-created slot's mutex and suspends on gate2.
+        // Second upload is queued behind the mutex — not inside provider.upload() yet.
+        advanceUntilIdle()
+        // Only v0 has been fully uploaded so far; neither v1 nor v2 has completed yet.
+        assertEquals(
+            "v0",
+            env.syncEngine.remoteContentSeen("/report.txt"),
+            "no round-2 upload must have completed while gate2 is closed",
+        )
+        assertEquals(
+            1,
+            env.syncEngine.maxConcurrentUploadsForPath("/report.txt"),
+            "re-created slot must still serialize: at most 1 concurrent upload per path",
+        )
+
+        // Release: both round-2 uploads finish in FIFO order.
+        gate2.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            1,
+            env.syncEngine.maxConcurrentUploadsForPath("/report.txt"),
+            "peak concurrency must remain 1 after both round-2 uploads complete",
+        )
+        assertEquals(
+            "v2",
+            env.syncEngine.remoteContentSeen("/report.txt"),
+            "final content must be from the last round-2 submission (v2)",
+        )
+    }
 }
