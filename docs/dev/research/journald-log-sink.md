@@ -82,7 +82,10 @@ stale-file confusion, and gives client-setup debugging a clear, queryable trail.
   - `scan` — short random scan id (UD-254, `SyncEngine.kt:580`+) and relocate migration
     id (`RelocateMdc.kt`).
   - MDC is propagated across coroutines via `kotlinx-coroutines-slf4j` `MDCContext`
-    (`core/app/sync/build.gradle.kts:24`, `RelocateCommand.kt`).
+    (`core/app/sync/build.gradle.kts:24`, `RelocateCommand.kt`) — **but only on
+    entrypoints that install it**; the IPC-served sync-daemon path does not (see the
+    correlation-id caveat in the cross-process correlation section before relying on
+    this for the breadcrumb).
 - **HTTP correlation already exists but is message-text only, not MDC.** `RequestIdPlugin`
   (`core/app/core/src/main/kotlin/org/krost/unidrive/http/RequestIdPlugin.kt`) assigns an
   8-char `req=<id>`, injects `X-Unidrive-Request-Id`, and logs `→ req=… / ← req=…`. Its
@@ -282,14 +285,35 @@ Add **one optional top-level field** to the IPC request envelope:
 - **Rust side** (`mount/src/ipc.rs`): each verb builder adds `"cid": cid` from the current
   op's span. (`round_trip` could inject it centrally if the cid is carried on the client,
   but per-verb is explicit and avoids hidden state.)
-- **JVM side** (`HydrationIpcHandler`): parse the optional `cid`, and **seed it into MDC**
-  (`MDC.put("cid", cid)`) for the duration of the handler, inside the existing
-  `withContext(handlerDispatcher)` dispatch in `IpcServer.dispatchRequest`. Because the
-  daemon already propagates MDC across coroutines via `MDCContext`, the cid then rides
-  along into the provider call automatically — and the JVM appender emits it as
-  `UNIDRIVE_CID` on every line of that handler, including the `RequestIdPlugin` lines (so
-  `UNIDRIVE_CID` and `UNIDRIVE_REQUEST_ID` co-occur, linking the IPC verb to its HTTP
-  call).
+- **JVM side** (`HydrationIpcHandler`): parse the optional `cid` and put it into MDC
+  (`MDC.put("cid", cid)`) for the duration of the handler.
+
+  **Caveat — MDC does NOT auto-propagate on the sync-daemon path** (raised in review):
+  `IpcServer.dispatchRequest` only does `withContext(handlerDispatcher)` — it does **not**
+  install an `MDCContext` element — and the sync daemon's `runBlocking` entrypoint in
+  `SyncCommand.kt` *deliberately omits* `MDCContext()` (it was removed after a live profile
+  showed it parking worker threads). So a bare `MDC.put("cid", …)` set in the handler will
+  **not** survive the first suspension point into `SyncEngine`/provider coroutines — the
+  breadcrumb would silently vanish from the provider/HTTP log lines, which is exactly where
+  it is most useful. `MDCContext` *is* wired on other entrypoints (`RelocateCommand`,
+  `Main`), so this gap is specific to the IPC-served sync path.
+
+  Two viable fixes (pick per perf budget):
+  1. **Scoped `MDCContext`** — wrap only the IPC handler + the provider work it drives in
+     `withContext(handlerDispatcher + MDCContext())`. This re-captures the current MDC map
+     (now carrying `cid`) at the suspension boundary *for that handler only*, avoiding the
+     daemon-wide cost that caused `MDCContext()` to be dropped from the global `runBlocking`.
+     Validate against the same parking concern before adopting.
+  2. **Explicit cid threading** — pass `cid` as a parameter (or a small context object) down
+     the `SyncEngine`/provider call path and set it into MDC at each log-emitting site (or
+     attach it to the `RequestIdPlugin` request attribute). More plumbing, but no
+     `MDCContext` dependency and no suspension-propagation risk.
+
+  Either way the appender then emits `UNIDRIVE_CID` on the handler's lines, including the
+  `RequestIdPlugin` HTTP lines, so `UNIDRIVE_CID` and `UNIDRIVE_REQUEST_ID` co-occur and link
+  the IPC verb to its HTTP call. **Do not rely on implicit MDC propagation here** — the
+  end-to-end breadcrumb only works if one of the two mechanisms above is in place on the
+  sync path.
 
 Backward/forward compatibility: §3.3 established that both parsers ignore unknown
 top-level keys, so adding `cid` is wire-compatible — a new mount talking to an old daemon
