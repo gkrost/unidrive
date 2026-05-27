@@ -206,6 +206,19 @@ class OneDriveProvider(
         return graphApi.moveItem(item.id, toPath, fromPath, ifMatchETag = item.eTag).toCloudItem()
     }
 
+    // 410 Gone on any delta call = cursor aged out / drive re-keyed.  Convert to a
+    // typed DeltaCursorExpiredException so callers can self-heal with a full
+    // re-enumeration.  Any other status propagates unchanged.
+    private suspend fun getDeltaConverting410(cursor: String?) =
+        try {
+            graphApi.getDelta(cursor)
+        } catch (e: GraphApiException) {
+            if (e.statusCode == 410) {
+                throw DeltaCursorExpiredException(e.message ?: "Delta cursor expired (410 Gone)", e, e.requestId)
+            }
+            throw e
+        }
+
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -216,20 +229,7 @@ class OneDriveProvider(
         // staging slice is therefore redundant here and the parameter is
         // intentionally unused. Left in the signature so the SPI shape is
         // uniform across providers — see CloudProvider.kt for the contract.
-        val result =
-            try {
-                graphApi.getDelta(cursor)
-            } catch (e: GraphApiException) {
-                // 410 Gone on the delta endpoint = the cursor aged out / the
-                // drive was re-keyed; delta continuity is lost. Re-raise as a
-                // typed signal so cursor-persisting callers (tracking engine)
-                // can clear the cursor and full-resync, while legacy callers
-                // that only catch ProviderException keep their behaviour.
-                if (e.statusCode == 410) {
-                    throw DeltaCursorExpiredException(e.message ?: "Delta cursor expired (410 Gone)", e, e.requestId)
-                }
-                throw e
-            }
+        val result = getDeltaConverting410(cursor)
         val visibleItems =
             result.items
                 .filterNot { it.isRootItem() }
@@ -293,7 +293,7 @@ class OneDriveProvider(
                 "includeShared is disabled in provider config",
             )
         }
-        val result = graphApi.getDelta(cursor)
+        val result = getDeltaConverting410(cursor)
 
         val mainItems =
             result.items

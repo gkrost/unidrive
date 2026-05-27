@@ -2180,6 +2180,11 @@ class SyncEngineTest {
         var deleteFailCount = 0
         var deltaFailCount = 0
         var authFailOnDownload = false
+        // #110: when true, delta() throws DeltaCursorExpiredException if called
+        // with a non-null cursor (simulating an aged-out OneDrive delta cursor),
+        // and clears itself after the first throw so the recovery full-enum
+        // (cursor=null) proceeds normally.
+        var deltaThrowExpiredOnResumedCursor = false
 
         // Paths for which downloadById / download should throw the
         // permanent-failure signal (e.g. Internxt "Bucket entry … not found").
@@ -2337,6 +2342,10 @@ class SyncEngineTest {
         ): DeltaPage {
             deltaCalls++
             lastScanContext = scanContext
+            if (deltaThrowExpiredOnResumedCursor && cursor != null) {
+                deltaThrowExpiredOnResumedCursor = false // self-clearing; recovery pass uses cursor=null
+                throw org.krost.unidrive.DeltaCursorExpiredException("410 Gone — delta token is too old (test)")
+            }
             if (deltaFailCount > 0) {
                 deltaFailCount--
                 throw ProviderException("Network timeout on delta")

@@ -9,6 +9,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
@@ -1498,8 +1499,8 @@ open class SyncEngine(
     private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
-        val isFullSync = cursor == null
-        val changes = mutableMapOf<String, CloudItem>()
+        var isFullSync = cursor == null
+        var changes = mutableMapOf<String, CloudItem>()
 
         // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
         // cursor without enumerating. Provider must declare FastBootstrap; otherwise
@@ -1657,26 +1658,96 @@ open class SyncEngine(
             db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
         }
 
-        var page = nextPage(cursor)
-        for (item in page.items) {
-            val resolved = resolveItemPath(item) ?: continue
-            changes[resolved.path] = resolved
-        }
-        persistPendingCursor(page.cursor)
-        // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
-        // so a 113k-item drive emits ~2260 update events — cheap, and the
-        // reporter is responsible for throttling display (CliProgressReporter
-        // overwrites the same line via printInline).
-        reporter.onScanProgress("remote", changes.size)
-
-        while (page.hasMore) {
-            page = nextPage(page.cursor)
+        // #110: a persisted delta cursor can age out (OneDrive Graph 410 Gone).
+        // Catch DeltaCursorExpiredException specifically — NOT the generic
+        // ProviderException — so non-410 failures keep their existing behaviour.
+        // On 410: clear the cursor, discard partial results, and re-run a full
+        // enumeration from cursor=null so genuine deletes in the stale window
+        // are reaped and unchanged paths are spared. If the recovery pass itself
+        // throws ProviderException the exception propagates to the caller which
+        // treats it as an enumeration failure (deletes suppressed) — no infinite
+        // loop, no recursive recovery.
+        try {
+            var page = nextPage(cursor)
             for (item in page.items) {
                 val resolved = resolveItemPath(item) ?: continue
                 changes[resolved.path] = resolved
             }
             persistPendingCursor(page.cursor)
+            // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
+            // so a 113k-item drive emits ~2260 update events — cheap, and the
+            // reporter is responsible for throttling display (CliProgressReporter
+            // overwrites the same line via printInline).
             reporter.onScanProgress("remote", changes.size)
+
+            while (page.hasMore) {
+                page = nextPage(page.cursor)
+                for (item in page.items) {
+                    val resolved = resolveItemPath(item) ?: continue
+                    changes[resolved.path] = resolved
+                }
+                persistPendingCursor(page.cursor)
+                reporter.onScanProgress("remote", changes.size)
+            }
+        } catch (e: DeltaCursorExpiredException) {
+            // The resumed cursor aged out / the drive re-keyed (Graph 410). Clear the
+            // persisted cursor and re-enumerate the FULL inventory from a null cursor
+            // (incremental = false), so genuine deletes during the stale window are
+            // reaped and unchanged paths are not.
+            log.warn(
+                "#110: delta cursor expired ({}); clearing it and re-enumerating the full inventory.",
+                e.message,
+            )
+            db.setSyncState("delta_cursor", "")
+            // Abandon the stale scan context and start a fresh one for the full re-enum.
+            db.completeScan(scanId)
+            val recoveryScanId = db.beginScan(initialMarker = null)
+            val recoveryScanContext =
+                org.krost.unidrive.ScanContext(
+                    resumeMarker = null,
+                    resumedItems = emptyList(),
+                    persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
+                )
+            suspend fun nextPageRecovery(c: String?): DeltaPage {
+                val p =
+                    if (useShared) {
+                        when (val r = provider.deltaWithShared(c)) {
+                            is CapabilityResult.Success -> r.value
+                            is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress, recoveryScanContext)
+                        }
+                    } else {
+                        provider.delta(c, onPageProgress, recoveryScanContext)
+                    }
+                log.debug("Delta (recovery): {} items, hasMore={}", p.items.size, p.hasMore)
+                if (!p.complete) allComplete = false
+                return p
+            }
+            // Reset all mutable accumulation state for the recovery pass.
+            changes = mutableMapOf()
+            allComplete = true
+            isFullSync = true
+            // Recovery: full enumeration from null cursor. Any ProviderException here
+            // propagates to the caller (treated as an enumeration failure, deletes
+            // suppressed) — never recover recursively.
+            var rPage = nextPageRecovery(null)
+            for (item in rPage.items) {
+                val resolved = resolveItemPath(item) ?: continue
+                changes[resolved.path] = resolved
+            }
+            persistPendingCursor(rPage.cursor)
+            reporter.onScanProgress("remote", changes.size)
+            while (rPage.hasMore) {
+                rPage = nextPageRecovery(rPage.cursor)
+                for (item in rPage.items) {
+                    val resolved = resolveItemPath(item) ?: continue
+                    changes[resolved.path] = resolved
+                }
+                persistPendingCursor(rPage.cursor)
+                reporter.onScanProgress("remote", changes.size)
+            }
+            if (allComplete) {
+                db.completeScan(recoveryScanId)
+            }
         }
 
         // Staged inventory has been consumed by this gather pass — the live

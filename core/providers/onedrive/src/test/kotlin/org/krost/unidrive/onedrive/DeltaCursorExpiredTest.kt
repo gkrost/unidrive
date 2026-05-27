@@ -26,6 +26,7 @@ class DeltaCursorExpiredTest {
     private fun mockedProvider(
         status: HttpStatusCode,
         responseBody: String,
+        includeShared: Boolean = false,
     ): OneDriveProvider {
         val engine =
             MockEngine { _ ->
@@ -35,7 +36,7 @@ class DeltaCursorExpiredTest {
                     headers = headersOf(HttpHeaders.ContentType, "application/json"),
                 )
             }
-        val provider = OneDriveProvider()
+        val provider = OneDriveProvider(OneDriveConfig(includeShared = includeShared))
 
         val freshGraphApi =
             GraphApiService(
@@ -96,6 +97,27 @@ class DeltaCursorExpiredTest {
                     provider.delta("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=ABC")
                 }
             assertTrue(ex !is DeltaCursorExpiredException, "500 must NOT be classified as cursor-expired")
+            provider.close()
+        }
+
+    @Test
+    fun `deltaWithShared 410 Gone surfaces as DeltaCursorExpiredException not a raw GraphApiException`() =
+        runTest {
+            val provider =
+                mockedProvider(
+                    HttpStatusCode.Gone,
+                    """{"error":{"code":"resyncRequired","message":"The delta token is too old."}}""",
+                    includeShared = true,
+                )
+
+            val ex =
+                assertFailsWith<DeltaCursorExpiredException> {
+                    provider.deltaWithShared("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=STALE")
+                }
+            assertTrue(
+                ex.message!!.contains("410") || ex.message!!.contains("Gone"),
+                "message should name the 410: ${ex.message}",
+            )
             provider.close()
         }
 }
