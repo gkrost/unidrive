@@ -185,7 +185,11 @@ class HydrationImpl(
             val rows = stateDb.listDirectChildren(normalised)
             ListResult.Ok(
                 rows.map { e ->
-                    val size = if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize
+                    // Clamp to >= 0: a stale / i32-overflowed remoteSize (e.g. a multi-GB
+                    // folder size wrapped past Int.MAX to a negative) must never reach the
+                    // wire — a negative size breaks strict u64 list parsers and EIO'd the
+                    // FUSE co-daemon's whole directory listing.
+                    val size = (if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize).coerceAtLeast(0L)
                     ListResult.Entry(
                         path = e.path,
                         size = size,
