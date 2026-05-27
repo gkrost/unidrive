@@ -127,7 +127,7 @@ open class SyncEngine(
         validateExcludePatterns(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
-    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
+    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm())
 
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries

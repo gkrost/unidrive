@@ -382,7 +382,15 @@ class OneDriveProvider(
             isFolder = folder != null,
             modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
             created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
-            hash = file?.hashes?.sha256Hash ?: file?.hashes?.quickXorHash,
+            // #112 / PR #193: prefer quickXorHash so remoteHash is consistent with
+            // hashAlgorithm()=QuickXor. Personal OneDrive reliably supplies quickXorHash
+            // for all files; sha256Hash is a fallback for drives that omit it (e.g. some
+            // SharePoint/business tenants). When neither field is present (folder, root,
+            // or draft item) hash is null and #112's isTouchOnly guard (remoteHash != null)
+            // safely falls back to mtime+size. One-time effect: existing DB entries whose
+            // stored remoteHash was SHA-256 will mismatch on the next enumeration and get
+            // re-stored as QuickXor — a single re-compare, not data loss.
+            hash = file?.hashes?.quickXorHash ?: file?.hashes?.sha256Hash,
             mimeType = file?.mimeType,
             deleted = isHardDeleted(),
         )
