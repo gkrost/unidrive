@@ -1,5 +1,7 @@
 package org.krost.unidrive.sync
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
@@ -141,6 +143,67 @@ class EnumerateRemoteIntoStateTest {
             assertEquals(null, provider.deltaCursorsSeen[2])
         }
 
+    // Invariant (Codex #91 P1): enumerateRemoteIntoState is single-flight across ALL
+    // callers (poller, sync.enumerate verb, mount-routed refresh.run). A pass that
+    // starts while another is in flight is a no-op (skipped=true) — it must NOT run a
+    // concurrent pass that could race delta_cursor promotion / corroboration state.
+    @Test
+    fun `concurrent enumerate is single-flighted — the loser is a skipped no-op`() =
+        runTest {
+            provider.putRemote("/a.txt", "A")
+            val entered = CompletableDeferred<Unit>()
+            val gate = CompletableDeferred<Unit>()
+            provider.deltaEntered = entered
+            provider.deltaGate = gate
+
+            // First pass acquires the guard and parks inside delta() on the gate.
+            val first = async { engine.enumerateRemoteIntoState(reset = false) }
+            entered.await()
+
+            // Second pass, started while the first holds the guard, must CAS-fail and
+            // return immediately — it never reaches the (gated) provider.
+            val second = engine.enumerateRemoteIntoState(reset = false)
+            assertTrue(second.ok)
+            assertTrue(second.skipped, "a concurrent enumerate must be a single-flight no-op")
+            assertEquals(1, provider.deltaCursorsSeen.size, "the skipped pass must not call the provider")
+
+            gate.complete(Unit)
+            val firstResult = first.await()
+            assertTrue(firstResult.ok)
+            assertFalse(firstResult.skipped, "the pass that won the guard actually ran")
+            assertEquals(1, provider.deltaCursorsSeen.size, "only the winning pass called the provider")
+        }
+
+    // Invariant (Codex #91 P2): an INCOMPLETE enumeration resets the bulk-disappearance
+    // deferred set, so a later COMPLETE pass must re-defer rather than reap against stale
+    // corroboration state. Bulk reaping requires confirmation by CONSECUTIVE complete
+    // enumerations; an incomplete pass breaks the chain.
+    @Test
+    fun `incomplete pass resets bulk-deferred state so the next complete pass re-defers not reaps`() =
+        runTest {
+            // > BULK_REAP_ABSOLUTE (50) so removing all trips the bulk-disappearance guard.
+            repeat(60) { provider.putRemote("/f$it.txt", "x") }
+            engine.enumerateRemoteIntoState(reset = true)
+
+            // Remove all 60: a complete pass sees 60 missing > threshold 50 → BULK → defers
+            // all (deferredMissing was empty), reaps nothing, carries the 60 forward.
+            repeat(60) { provider.removeRemote("/f$it.txt") }
+            val firstComplete = engine.enumerateRemoteIntoState(reset = true)
+            assertEquals(0, firstComplete.reaped, "first bulk pass defers, reaps nothing")
+
+            // An INCOMPLETE pass in between must reset the deferred set.
+            provider.markNextDeltaIncomplete()
+            val incomplete = engine.enumerateRemoteIntoState(reset = false)
+            assertFalse(incomplete.complete)
+            assertEquals(0, incomplete.reaped)
+
+            // Next COMPLETE pass: with the reset, the 60 still-missing paths are re-deferred,
+            // NOT reaped. Without the fix the stale deferred set would reap all 60 here.
+            val secondComplete = engine.enumerateRemoteIntoState(reset = true)
+            assertEquals(0, secondComplete.reaped, "incomplete pass broke corroboration; must re-defer, not reap")
+            assertNotNull(db.getEntry("/f0.txt"), "deferred paths must survive (not reaped)")
+        }
+
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an
@@ -165,6 +228,13 @@ class EnumerateRemoteIntoStateTest {
         private var nextCursorSeq = 0
         private var nextDeltaIncomplete = false
         private var nextDeltaTombstones = listOf<String>()
+
+        // Single-flight test hooks: delta() completes [deltaEntered] (signalling the
+        // pass has acquired the in-flight guard and reached the provider) then awaits
+        // [deltaGate], letting a test hold one enumerate pass mid-flight while it starts
+        // a second one. Both default to null (no gating).
+        var deltaEntered: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        var deltaGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
         fun putRemote(path: String, content: String = "", isFolder: Boolean = false) {
             remote[path] =
@@ -224,6 +294,8 @@ class EnumerateRemoteIntoStateTest {
             scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage {
             deltaCursorsSeen.add(cursor)
+            deltaEntered?.complete(Unit)
+            deltaGate?.await()
             val complete = !nextDeltaIncomplete
             // On an incomplete delta, return only the explicit tombstones (a throttled
             // subtree skip that still reported some deletions) — the engine must NOT

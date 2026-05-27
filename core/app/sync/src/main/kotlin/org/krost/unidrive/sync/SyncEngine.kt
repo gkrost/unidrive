@@ -136,6 +136,14 @@ open class SyncEngine(
     // missing. Resets on restart (conservative: re-defers).
     private var deferredMissing: Set<String> = emptySet()
 
+    // Single-flight guard for enumerateRemoteIntoState across ALL callers: the
+    // --poll-interval poller, the sync.enumerate verb (EnumerateRpcHandler), and
+    // mount-routed refresh.run (RefreshRpcHandler calls the engine directly).
+    // Per-handler guards don't serialize across handlers, so two passes could
+    // otherwise race delta_cursor promotion and deferredMissing corroboration
+    // state. A caller that loses the CAS is a no-op (skipped=true).
+    private val enumerateInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
      * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
@@ -467,6 +475,20 @@ open class SyncEngine(
      * docs/dev/specs/mount-view-refresh-design.md.
      */
     open suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
+        // Single-flight: a caller that loses the CAS returns immediately as a no-op so
+        // it can never run a concurrent pass against the same engine/DB state (cursor
+        // promotion, corroboration). The winning pass is already refreshing the view.
+        if (!enumerateInFlight.compareAndSet(false, true)) {
+            return EnumerateResult(ok = true, skipped = true)
+        }
+        return try {
+            enumerateRemoteIntoStateLocked(reset)
+        } finally {
+            enumerateInFlight.set(false)
+        }
+    }
+
+    private suspend fun enumerateRemoteIntoStateLocked(reset: Boolean): EnumerateResult {
         // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
         // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
         // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
@@ -521,7 +543,13 @@ open class SyncEngine(
                 }
             }
         }
-        if (complete) deferredMissing = nextDeferred
+        // A bulk disappearance must be corroborated by CONSECUTIVE complete enumerations.
+        // On a complete pass, carry this pass's candidate set forward. On an INCOMPLETE
+        // pass, RESET the deferred set: an incomplete pass means we had no clean run, so
+        // a later complete pass must re-defer rather than reap against stale corroboration
+        // state (conservative — favors not reaping, since reaping evicts cache + marks
+        // deleted).
+        deferredMissing = if (complete) nextDeferred else emptySet()
         promotePendingCursor()
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }
