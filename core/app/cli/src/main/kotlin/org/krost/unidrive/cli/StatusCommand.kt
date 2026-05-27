@@ -242,15 +242,25 @@ class StatusCommand : Runnable {
 
     private fun showSingleProviderStatus() {
         val baseDir = parent.configBaseDir()
-        // #117: resolve via the unified FS-scan so that an orphan profile (dir on
-        // disk, no config.toml section) is reachable with `-p <name>` just like
-        // any declared profile.  Fall back to resolveCurrentProfile() for the
-        // declared-profile path so that all existing config resolution (default_profile,
-        // type-by-name, etc.) is unchanged for the normal case.
         val requestedName = parent.provider ?: SyncConfig.resolveDefaultProfile(baseDir)
-        val allProfiles = discoverProfiles(baseDir)
-        val profile = allProfiles.find { it.name == requestedName }
-            ?: parent.resolveCurrentProfile()
+        val configFile = baseDir.resolve("config.toml")
+        val raw =
+            if (Files.exists(configFile)) SyncConfig.parseRaw(Files.readString(configFile))
+            else SyncConfig.parseRaw("[general]\n")
+        val profile =
+            if (resolvesSingleProfileViaConfig(requestedName, raw)) {
+                // Name resolves to a configured / type-resolved profile — use the
+                // full resolution path so side-effects (MDC stamp, memoisation,
+                // error formatting) are unchanged.  This is the pre-#117 path and
+                // must run FIRST (PR #196 review fix).
+                parent.resolveCurrentProfile()
+            } else {
+                // No configured profile matched: look for an orphan dir with that
+                // exact name (#117 addition). If none exists either, let
+                // resolveCurrentProfile handle the error surface (exits with code 1).
+                discoverProfiles(baseDir).find { it.name == requestedName && it.isOrphan }
+                    ?: parent.resolveCurrentProfile()
+            }
         val configDir = baseDir.resolve(profile.name)
         val row = buildAccountRow(profile, baseDir, configDir, fetchQuotaUsedIfSupported(profile, configDir))
         val group = ProviderGroup(profile.type, providerDisplayName(profile.type), listOf(row))
@@ -896,3 +906,44 @@ internal fun buildOrphanProfile(dirName: String): ProfileInfo =
         rawProvider = null,
         isOrphan = true,
     )
+
+/**
+ * PR #196 review fix: pure predicate for the precedence gate in
+ * [StatusCommand.showSingleProviderStatus].
+ *
+ * Returns `true` when [requestedName] resolves to a configured or type-known
+ * profile via the standard config path — meaning [Main.resolveCurrentProfile]
+ * should be called first (not the orphan-dir fallback).  Specifically:
+ *
+ *   - [requestedName] appears as a key in [raw.providers], OR
+ *   - [requestedName] is a known provider type (so [SyncConfig.resolveProfile]
+ *     would construct a synthetic no-credentials profile rather than throw), OR
+ *   - exactly one profile in [raw] has the given type
+ *     ([tryResolveByType] would succeed via the catch branch in
+ *     [Main.resolveCurrentProfile]).
+ *
+ * Returns `false` only when the name is genuinely absent from all config paths
+ * (no section, no type match, no single-type disambiguation) — in that case
+ * the caller may look for an orphan directory with that name (#117 addition).
+ *
+ * The distinction matters: an orphan dir named `onedrive` with a configured
+ * `[providers.personal] type = "onedrive"` must NOT render as `[? ORPHAN]` —
+ * `resolvesSingleProfileViaConfig` returns `true` here so the configured path
+ * is taken instead.
+ */
+internal fun resolvesSingleProfileViaConfig(
+    requestedName: String,
+    raw: org.krost.unidrive.sync.RawSyncConfig,
+): Boolean {
+    // Fast path 1: explicit section in config.toml
+    if (requestedName in raw.providers) return true
+    // Fast path 2: requestedName IS a known provider type (e.g. "onedrive",
+    // "internxt") — SyncConfig.resolveProfile returns a synthetic profile for
+    // these even when there is no matching config section.
+    if (requestedName in SyncConfig.KNOWN_TYPES) return true
+    // Fast path 3: type-alias disambiguation (e.g. "-p Internxt" with one
+    // internxt profile configured) — mirrors the tryResolveByType catch branch
+    // in Main.resolveCurrentProfile.
+    if (tryResolveByType(requestedName, raw) != null) return true
+    return false
+}

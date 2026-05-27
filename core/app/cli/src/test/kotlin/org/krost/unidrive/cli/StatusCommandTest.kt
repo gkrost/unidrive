@@ -354,6 +354,78 @@ class StatusCommandTest {
         assertFalse(profile.rawProvider != null, "orphan has no rawProvider")
     }
 
+    // ── PR #196 review fix: configured/type profiles take precedence over orphan-dir ──
+
+    @Test
+    fun `PR196 configured type=onedrive profile AND stale orphan dir named onedrive resolves via config not orphan`() {
+        // Regression guard: with a [providers.personal] type="onedrive" config AND an
+        // orphan dir literally named "onedrive/", `-p onedrive status` must go through
+        // the config path — NOT the orphan-dir fallback.  Pre-fix: discoverProfiles()
+        // found the orphan dir first and returned it with isOrphan=true, producing
+        // "[? ORPHAN]" instead of the configured account's real status.
+        val toml =
+            """
+            |[general]
+            |
+            |[providers.personal]
+            |type = "onedrive"
+            |sync_root = "~/OneDrive"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("pr196-test-")
+        try {
+            // Stale orphan dir — present on disk, no matching [providers.onedrive] section
+            Files.createDirectories(baseDir.resolve("onedrive"))
+
+            // The precedence gate must return true for "onedrive" because "onedrive"
+            // is a known provider type — resolveCurrentProfile() takes priority.
+            assertTrue(
+                resolvesSingleProfileViaConfig("onedrive", raw),
+                "known provider type 'onedrive' must route through the config path, not the orphan fallback",
+            )
+            // Also assert the stale dir IS visible as an orphan in --all view (unchanged #117 behaviour)
+            val allProfiles = discoverProfilesFromRaw(raw, baseDir)
+            val orphan = allProfiles.find { it.name == "onedrive" }
+            assertNotNull(orphan, "orphan dir must still appear in --all view (#117 behaviour preserved)")
+            assertTrue(orphan.isOrphan, "orphan dir must be flagged isOrphan=true in --all view")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `PR196 genuinely orphan name (no configured profile no type match) routes to orphan fallback`() {
+        // The #117 addition must still work for names that have NO config section
+        // AND are not a known provider type (e.g. a custom profile dir the user
+        // created by hand before adding the config.toml section).
+        val toml =
+            """
+            |[general]
+            |
+            |[providers.onedrive]
+            |type = "onedrive"
+            |sync_root = "~/OneDrive"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("pr196-test-")
+        try {
+            Files.createDirectories(baseDir.resolve("my-lost-profile"))
+
+            // "my-lost-profile" is neither in raw.providers nor a known type
+            assertFalse(
+                resolvesSingleProfileViaConfig("my-lost-profile", raw),
+                "non-configured non-type name must NOT route through config path",
+            )
+            // The orphan dir IS visible in --all view (unchanged #117 behaviour)
+            val allProfiles = discoverProfilesFromRaw(raw, baseDir)
+            val orphan = allProfiles.find { it.name == "my-lost-profile" }
+            assertNotNull(orphan, "orphan dir must appear in --all view")
+            assertTrue(orphan.isOrphan, "orphan dir must be flagged isOrphan=true")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun `#117 declared and orphan profiles share identical column structure via AccountRow`() {
         // Rendering parity: both a declared profile row and an orphan profile row
