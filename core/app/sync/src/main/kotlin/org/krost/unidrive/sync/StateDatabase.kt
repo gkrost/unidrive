@@ -114,6 +114,7 @@ class StateDatabase(
                     remote_id            TEXT PRIMARY KEY,
                     parent_uuid          TEXT,
                     path                 TEXT NOT NULL,
+                    remote_path          TEXT,
                     remote_hash          TEXT,
                     remote_size          INTEGER NOT NULL DEFAULT 0,
                     remote_modified      TEXT,
@@ -244,6 +245,21 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN last_error_at TEXT",
                 )
             }
+            // #115: canonical REMOTE path for XDG locale-aliased rows. Mirrors
+            // the additive-column pattern above — no schema_version bump
+            // because the column carries a safe default (NULL = remote path
+            // equals `path`), so any pre-#115 row reads as non-aliased, which
+            // is the correct, byte-identical-to-today initial state. Existing
+            // deployed state.db files open unchanged: the ADD COLUMN runs once
+            // when the column is missing, every existing row's remote_path is
+            // NULL, and the effective-remote-path = `remote_path ?: path`
+            // semantic collapses to today's `path`-only behaviour. The CREATE
+            // TABLE above already includes it for fresh installs.
+            if (!columnExists("sync_entries", "remote_path")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN remote_path TEXT",
+                )
+            }
         }
     }
 
@@ -359,28 +375,29 @@ class StateDatabase(
             .prepareStatement(
                 """
             INSERT OR REPLACE INTO sync_entries
-                (remote_id, parent_uuid, path, remote_hash, remote_size, remote_modified,
+                (remote_id, parent_uuid, path, remote_path, remote_hash, remote_size, remote_modified,
                  local_mtime, local_size, is_folder, is_pinned, is_hydrated, last_synced, status,
                  download_quarantined, last_error_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             ).use { stmt ->
                 val storedId = entry.remoteId ?: pickSyntheticIdForPath(entry.path)
                 stmt.setString(1, storedId)
                 stmt.setString(2, entry.parentUuid)
                 stmt.setString(3, entry.path)
-                stmt.setString(4, entry.remoteHash)
-                stmt.setLong(5, entry.remoteSize)
-                stmt.setString(6, entry.remoteModified?.toString())
-                entry.localMtime?.let { stmt.setLong(7, it) } ?: stmt.setNull(7, java.sql.Types.BIGINT)
-                entry.localSize?.let { stmt.setLong(8, it) } ?: stmt.setNull(8, java.sql.Types.BIGINT)
-                stmt.setInt(9, if (entry.isFolder) 1 else 0)
-                stmt.setInt(10, if (entry.isPinned) 1 else 0)
-                stmt.setInt(11, if (entry.isHydrated) 1 else 0)
-                stmt.setString(12, entry.lastSynced.toString())
-                stmt.setString(13, entry.status.name)
-                stmt.setInt(14, if (entry.downloadQuarantined) 1 else 0)
-                stmt.setString(15, entry.lastErrorAt?.toString())
+                stmt.setString(4, entry.remotePath)
+                stmt.setString(5, entry.remoteHash)
+                stmt.setLong(6, entry.remoteSize)
+                stmt.setString(7, entry.remoteModified?.toString())
+                entry.localMtime?.let { stmt.setLong(8, it) } ?: stmt.setNull(8, java.sql.Types.BIGINT)
+                entry.localSize?.let { stmt.setLong(9, it) } ?: stmt.setNull(9, java.sql.Types.BIGINT)
+                stmt.setInt(10, if (entry.isFolder) 1 else 0)
+                stmt.setInt(11, if (entry.isPinned) 1 else 0)
+                stmt.setInt(12, if (entry.isHydrated) 1 else 0)
+                stmt.setString(13, entry.lastSynced.toString())
+                stmt.setString(14, entry.status.name)
+                stmt.setInt(15, if (entry.downloadQuarantined) 1 else 0)
+                stmt.setString(16, entry.lastErrorAt?.toString())
                 stmt.executeUpdate()
             }
     }
@@ -421,6 +438,25 @@ class StateDatabase(
     fun getEntryByRemoteId(remoteId: String): SyncEntry? {
         conn.prepareStatement("SELECT * FROM alive_entries WHERE remote_id = ?").use { stmt ->
             stmt.setString(1, remoteId)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.toSyncEntry() else null
+        }
+    }
+
+    /**
+     * #115: lookup by EFFECTIVE remote path (`remote_path` when set, else
+     * `path`). A locale-aliased row keyed at the real-local `path`
+     * (e.g. /Bilder/x.jpg) carries its canonical remote path
+     * (/Pictures/x.jpg) in `remote_path`; a delta reported at the canonical
+     * key finds it here. Non-aliased rows have `remote_path` NULL, so this
+     * collapses to a plain `path` match — identical to [getEntry].
+     */
+    @Synchronized
+    fun getEntryByRemotePath(remotePath: String): SyncEntry? {
+        conn.prepareStatement(
+            "SELECT * FROM alive_entries WHERE COALESCE(remote_path, path) = ?",
+        ).use { stmt ->
+            stmt.setString(1, remotePath)
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.toSyncEntry() else null
         }
@@ -1162,6 +1198,7 @@ class StateDatabase(
         val surfacedId = if (storedId != null && storedId.startsWith("local:")) null else storedId
         return SyncEntry(
             path = getString("path"),
+            remotePath = getString("remote_path"),
             remoteId = surfacedId,
             parentUuid = getString("parent_uuid"),
             remoteHash = getString("remote_hash"),

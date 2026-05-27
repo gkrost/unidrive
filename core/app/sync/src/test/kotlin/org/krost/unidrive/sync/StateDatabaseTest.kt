@@ -1022,6 +1022,99 @@ class StateDatabaseTest {
     }
 
     @Test
+    fun `migration — remote_path column is added in-place to an existing v2 DB and existing rows read as non-aliased`() {
+        // #115: simulate a DEPLOYED v2 DB whose sync_entries predates the
+        // remote_path column (the universal shipped shape: includes the
+        // download_quarantined / last_error_at additive columns but NOT
+        // remote_path). The next initialize() must ADD the column without
+        // truncating rows or bumping schema_version, and every existing row
+        // must read back with remotePath=null → identical, non-aliased behaviour.
+        val tmpDir = Files.createTempDirectory("unidrive-remotepath-migration")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        remote_id            TEXT PRIMARY KEY,
+                        parent_uuid          TEXT,
+                        path                 TEXT NOT NULL,
+                        remote_hash          TEXT,
+                        remote_size          INTEGER NOT NULL DEFAULT 0,
+                        remote_modified      TEXT,
+                        local_mtime          INTEGER,
+                        local_size           INTEGER,
+                        is_folder            INTEGER NOT NULL DEFAULT 0,
+                        is_pinned            INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated          INTEGER NOT NULL DEFAULT 0,
+                        last_synced          TEXT NOT NULL,
+                        status               TEXT NOT NULL DEFAULT 'EXISTS'
+                                             CHECK (status IN ('EXISTS','TRASHED','DELETED')),
+                        download_quarantined INTEGER NOT NULL DEFAULT 0,
+                        last_error_at        TEXT
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "CREATE VIEW alive_entries AS SELECT * FROM sync_entries WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state VALUES ('${StateDatabase.SCHEMA_VERSION_KEY}', " +
+                        "'${StateDatabase.SCHEMA_VERSION}')",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_entries (remote_id, path, remote_hash, last_synced) " +
+                        "VALUES ('u-existing', '/Docs/report.pdf', 'h1', '2026-01-01T00:00:00Z')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            // The existing row survives and reads as non-aliased (remotePath null).
+            val row = upgraded.getEntry("/Docs/report.pdf")
+            assertNotNull(row, "pre-#115 row must survive the additive migration")
+            assertNull(row.remotePath, "an existing row has no remote_path → reads as null (non-aliased)")
+            // getEntryByRemotePath collapses to a plain path match for null rows.
+            assertEquals("/Docs/report.pdf", upgraded.getEntryByRemotePath("/Docs/report.pdf")?.path)
+            // schema_version is unchanged (additive column, no bump).
+            assertEquals(
+                StateDatabase.SCHEMA_VERSION.toString(),
+                upgraded.getSyncState(StateDatabase.SCHEMA_VERSION_KEY),
+            )
+            // An aliased upsert round-trips remotePath correctly on the migrated DB.
+            upgraded.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/Bilder/x.jpg",
+                    remotePath = "/Pictures/x.jpg",
+                    remoteId = "u-alias",
+                    remoteHash = "h2",
+                    remoteSize = 10,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = java.time.Instant.parse("2026-01-02T00:00:00Z"),
+                ),
+            )
+            assertEquals("/Pictures/x.jpg", upgraded.getEntry("/Bilder/x.jpg")?.remotePath)
+            // Found by its canonical effective remote path.
+            assertEquals("/Bilder/x.jpg", upgraded.getEntryByRemotePath("/Pictures/x.jpg")?.path)
+            // Second initialize() is idempotent (column already present).
+            upgraded.initialize()
+            assertNotNull(upgraded.getEntry("/Bilder/x.jpg"))
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    @Test
     fun `staging — scan_staging is added in-place to an existing v2 DB without disturbing rows`() {
         // Simulate a v2 DB created before the resumable-scan slice landed:
         // sync_entries + alive_entries + indexes are present, schema_version
