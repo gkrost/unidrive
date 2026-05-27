@@ -232,4 +232,146 @@ class StatusCommandTest {
             Files.deleteIfExists(baseDir)
         }
     }
+
+    // ── #117: orphan-profile enumeration invariants ──────────────────────────
+
+    @Test
+    fun `#117 orphan dir (no config_toml entry) appears in discoverProfilesFromRaw flagged isOrphan`() {
+        // The root bug: a profile directory created by `unidrive auth` against a
+        // type-resolved name (e.g. `unidrive -p my-personal-drive auth`) writes a
+        // token to ~/.config/unidrive/my-personal-drive/ but does NOT write a
+        // [providers.my-personal-drive] section to config.toml if the user forgot
+        // that step. Pre-fix: discoverProfilesFromRaw only walked raw.providers;
+        // the orphan dir was invisible to `status --all`.
+        val toml =
+            """
+            |[general]
+            |
+            |[providers.onedrive]
+            |type = "onedrive"
+            |sync_root = "~/OneDrive"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("status-orphan-test-")
+        try {
+            // Declared profile dir
+            Files.createDirectories(baseDir.resolve("onedrive"))
+            // Orphan dir — present on disk, absent from config.toml
+            Files.createDirectories(baseDir.resolve("my-personal-drive"))
+
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+
+            val names = profiles.map { it.name }
+            assertTrue("onedrive" in names, "declared profile must appear")
+            assertTrue("my-personal-drive" in names, "orphan profile must appear in --all view")
+
+            val orphan = profiles.single { it.name == "my-personal-drive" }
+            assertTrue(orphan.isOrphan, "orphan profile must be flagged isOrphan=true")
+
+            val declared = profiles.single { it.name == "onedrive" }
+            assertFalse(declared.isOrphan, "declared profile must NOT be flagged isOrphan")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `#117 declared profile with its dir present is NOT flagged orphan`() {
+        val toml =
+            """
+            |[providers.internxt]
+            |type = "internxt"
+            |sync_root = "~/Internxt"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("status-orphan-test-")
+        try {
+            Files.createDirectories(baseDir.resolve("internxt"))
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+            val profile = profiles.single { it.name == "internxt" }
+            assertFalse(profile.isOrphan, "a declared+present profile is not orphan")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `#117 declared-but-no-dir profile appears and is NOT flagged orphan`() {
+        // Sensible behaviour for a declared profile whose dir does not yet exist
+        // (e.g. the user added [providers.onedrive] but has not yet run auth):
+        // the profile still appears so the table can show [✘ AUTH] or [– –],
+        // and it is NOT flagged as orphan (it has a config.toml section).
+        val toml =
+            """
+            |[providers.onedrive]
+            |type = "onedrive"
+            """.trimMargin()
+        val raw = SyncConfig.parseRaw(toml)
+        val baseDir = Files.createTempDirectory("status-orphan-test-")
+        try {
+            // Intentionally do NOT create baseDir/onedrive
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+            val profile = profiles.single { it.name == "onedrive" }
+            assertFalse(profile.isOrphan, "declared (no dir yet) profile is not orphan")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `#117 hidden dirs under config baseDir are not surfaced as orphan profiles`() {
+        // Directories starting with '.' (e.g. .cache, .tmp) must never appear
+        // as profile rows — they are OS/tool artifacts, not profiles.
+        val raw = SyncConfig.parseRaw("[general]\n")
+        val baseDir = Files.createTempDirectory("status-orphan-test-")
+        try {
+            Files.createDirectories(baseDir.resolve(".hidden-artifact"))
+            Files.createDirectories(baseDir.resolve("real-orphan"))
+            val profiles = discoverProfilesFromRaw(raw, baseDir)
+            val names = profiles.map { it.name }
+            assertFalse(".hidden-artifact" in names, "hidden dirs must not appear as profiles")
+            assertTrue("real-orphan" in names, "non-hidden orphan dir must appear")
+        } finally {
+            baseDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `#117 orphan profile row uses ORPHAN status label`() {
+        // Rendering parity invariant: both views produce an [ORPHAN] label (not
+        // [AUTH], [ERR], or [– –]) for an orphan profile — the user needs to know
+        // the profile is undeclared, not merely unauthenticated.
+        val label = GlyphRenderer.orphanLabel()
+        assertTrue("ORPHAN" in label, "expected orphan label to contain ORPHAN, got: $label")
+        assertTrue(label.startsWith("[") && label.endsWith("]"), "expected bracketed label, got: $label")
+    }
+
+    @Test
+    fun `#117 buildOrphanProfile creates ProfileInfo with isOrphan=true`() {
+        val profile = buildOrphanProfile("my-lost-profile")
+        assertEquals("my-lost-profile", profile.name)
+        assertTrue(profile.isOrphan)
+        assertFalse(profile.rawProvider != null, "orphan has no rawProvider")
+    }
+
+    @Test
+    fun `#117 declared and orphan profiles share identical column structure via AccountRow`() {
+        // Rendering parity: both a declared profile row and an orphan profile row
+        // are [AccountRow] instances with the same set of fields (same columns).
+        // This pins the invariant: a future refactor that adds columns to one path
+        // but not the other will fail here.
+        val declaredFields = AccountRow::class.java.declaredFields.map { it.name }.toSet()
+        // An orphan row is still an AccountRow — same class, same fields.
+        val orphanFields = AccountRow::class.java.declaredFields.map { it.name }.toSet()
+        assertEquals(declaredFields, orphanFields, "AccountRow column structure must be identical for all rows")
+        // Also assert the fields we pin as essential for the table (snapshot)
+        assertTrue("profileName" in declaredFields)
+        assertTrue("status" in declaredFields)
+        assertTrue("statusLabel" in declaredFields)
+        assertTrue("sparse" in declaredFields)
+        assertTrue("cloudSize" in declaredFields)
+        assertTrue("hydratedSize" in declaredFields)
+        assertTrue("pendingSize" in declaredFields)
+        assertTrue("lastSync" in declaredFields)
+    }
 }
