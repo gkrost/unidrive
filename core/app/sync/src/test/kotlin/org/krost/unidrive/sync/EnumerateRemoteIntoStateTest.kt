@@ -266,6 +266,48 @@ class EnumerateRemoteIntoStateTest {
             assertEquals(0, sinkInvocations.size, "sink must NOT be called when nothing changed")
         }
 
+    @Test
+    fun `enumerate_emits_view_invalidation_with_aliased_view_path_not_canonical_remote_key`() =
+        runTest {
+            Files.createDirectories(syncRoot.resolve("Dokumente"))
+
+            val sinkInvocations = mutableListOf<Set<String>>()
+            val engineWithSink =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    cacheKey = "enum-test",
+                    viewInvalidationSink = { paths -> sinkInvocations.add(paths) },
+                    xdgUserDirsOverridesForTest = emptyMap(),
+                )
+
+            provider.putRemote("/Documents", isFolder = true)
+            provider.putRemote("/Documents/a.txt", "HELLO")
+            engineWithSink.enumerateRemoteIntoState(reset = false)
+
+            assertEquals(1, sinkInvocations.size, "sink must fire on first enumerate with new paths")
+            val emittedPaths = sinkInvocations[0]
+
+            assertTrue(
+                "/Dokumente/a.txt" in emittedPaths,
+                "sink must receive the VIEW path /Dokumente/a.txt; got $emittedPaths",
+            )
+            assertTrue(
+                "/Dokumente" in emittedPaths,
+                "sink must receive the VIEW path /Dokumente for the folder; got $emittedPaths",
+            )
+            assertFalse(
+                "/Documents/a.txt" in emittedPaths,
+                "sink must NOT receive the canonical /Documents/a.txt; got $emittedPaths",
+            )
+            assertFalse(
+                "/Documents" in emittedPaths,
+                "sink must NOT receive the canonical /Documents; got $emittedPaths",
+            )
+        }
     // ── Top-level fake provider — follows the ThrottledProviderTest /
     // CloudRelocatorTest per-test fake convention. Adds the hooks the
     // enumerate path needs: a settable remote, recorded cursors, and an

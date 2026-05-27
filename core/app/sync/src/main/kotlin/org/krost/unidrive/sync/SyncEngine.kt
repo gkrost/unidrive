@@ -119,6 +119,7 @@ open class SyncEngine(
     // keeping this as a plain lambda avoids a circular import (HydrationEvent lives
     // in app:hydration which depends on app:sync, not the other way around).
     private val viewInvalidationSink: (changedPaths: Set<String>) -> Unit = {},
+    xdgUserDirsOverridesForTest: Map<String, String>? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
     private val effectiveExcludePatterns =
@@ -131,7 +132,7 @@ open class SyncEngine(
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
     // (canonical→real-local reverse map for newly-arrived aliased rows).
     private val xdgUserDirsOverrides: Map<String, String> =
-        parseUserDirsFile(
+        xdgUserDirsOverridesForTest ?: parseUserDirsFile(
             Paths.get(
                 System.getenv("HOME") ?: System.getProperty("user.home"),
                 ".config", "user-dirs.dirs",
@@ -540,8 +541,10 @@ open class SyncEngine(
             }
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
-        val upsertedPaths = remoteChanges.filterValues { !it.deleted }.keys
-        val upserted = upsertedPaths.size
+        val canonicalToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
+        val upsertedViewPaths = remoteChanges.filterValues { !it.deleted }.keys
+            .mapTo(mutableSetOf()) { applyReverseTop(it, canonicalToLocalTop) }
+        val upserted = upsertedViewPaths.size
         // Bulk-disappearance corroboration guard (spec §3.2). A complete enumeration that
         // would flip more than max(50, 20% of tracked rows) to deleted is suspicious (e.g.
         // Internxt /files lag); reap only paths a PRIOR complete enumeration also saw
@@ -549,7 +552,7 @@ open class SyncEngine(
         val trackedRows = db.getEntryCount()
         val bulkThreshold = maxOf(BULK_REAP_ABSOLUTE, (trackedRows * BULK_REAP_FRACTION).toInt())
         var reaped = 0
-        val reapedPaths = mutableSetOf<String>()
+        val reapedViewPaths = mutableSetOf<String>()
         var nextDeferred = emptySet<String>()
         db.batch {
             updateRemoteEntries(remoteChanges)
@@ -567,7 +570,7 @@ open class SyncEngine(
                 for (path in toReap) {
                     db.markDeleted(path)
                     runCatching { Files.deleteIfExists(resolveCachePath(path)) }
-                    reapedPaths.add(path)
+                    reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }
                 if (bulk) {
@@ -599,7 +602,7 @@ open class SyncEngine(
         // app:hydration can wire HydrationEvent.ViewInvalidated without creating a circular
         // import (app:hydration depends on app:sync, not vice versa).
         if (upserted > 0 || reaped > 0) {
-            val changedPaths: Set<String> = upsertedPaths + reapedPaths
+            val changedPaths: Set<String> = upsertedViewPaths + reapedViewPaths
             viewInvalidationSink(changedPaths)
         }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
