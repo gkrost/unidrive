@@ -241,8 +241,26 @@ class StatusCommand : Runnable {
     }
 
     private fun showSingleProviderStatus() {
-        val profile = parent.resolveCurrentProfile()
         val baseDir = parent.configBaseDir()
+        val requestedName = parent.provider ?: SyncConfig.resolveDefaultProfile(baseDir)
+        val configFile = baseDir.resolve("config.toml")
+        val raw =
+            if (Files.exists(configFile)) SyncConfig.parseRaw(Files.readString(configFile))
+            else SyncConfig.parseRaw("[general]\n")
+        val profile =
+            if (resolvesSingleProfileViaConfig(requestedName, raw)) {
+                // Name resolves to a configured / type-resolved profile — use the
+                // full resolution path so side-effects (MDC stamp, memoisation,
+                // error formatting) are unchanged.  This is the pre-#117 path and
+                // must run FIRST (PR #196 review fix).
+                parent.resolveCurrentProfile()
+            } else {
+                // No configured profile matched: look for an orphan dir with that
+                // exact name (#117 addition). If none exists either, let
+                // resolveCurrentProfile handle the error surface (exits with code 1).
+                discoverProfiles(baseDir).find { it.name == requestedName && it.isOrphan }
+                    ?: parent.resolveCurrentProfile()
+            }
         val configDir = baseDir.resolve(profile.name)
         val row = buildAccountRow(profile, baseDir, configDir, fetchQuotaUsedIfSupported(profile, configDir))
         val group = ProviderGroup(profile.type, providerDisplayName(profile.type), listOf(row))
@@ -373,6 +391,14 @@ class StatusCommand : Runnable {
         // next to `onedrive-test`).
         val label = profile.name
 
+        // #117: orphan profiles (dir on disk, no config.toml declaration) are
+        // surfaced with an explicit [ORPHAN] marker. They have no provider type
+        // to authenticate against; we read state.db if it exists so we can show
+        // whatever was synced before the profile lost its config.toml section.
+        if (profile.isOrphan) {
+            return buildOrphanAccountRow(label, stateDbPath, hasDb)
+        }
+
         val health = parent.checkCredentialHealth(profile, configDir)
         val effectiveCanAuth =
             health is org.krost.unidrive.CredentialHealth.Ok ||
@@ -463,6 +489,63 @@ class StatusCommand : Runnable {
                 profileName = label,
                 status = "err",
                 statusLabel = GlyphRenderer.errLabel(),
+                sparse = 0,
+                cloudSize = "0 B",
+                hydratedSize = "0 B",
+                pendingSize = "0 B",
+                lastSync = "unknown",
+            )
+        }
+    }
+
+    /**
+     * Build an [AccountRow] for an orphan profile — a directory present on disk
+     * with no matching `[providers.*]` config.toml section. We read state.db if
+     * it exists (to surface whatever was previously synced), otherwise zeros.
+     * The STATUS column always shows `[? ORPHAN]` regardless of what state.db
+     * contains, because there is no provider type to authenticate or verify.
+     */
+    private fun buildOrphanAccountRow(
+        label: String,
+        stateDbPath: Path,
+        hasDb: Boolean,
+    ): AccountRow {
+        if (!hasDb) {
+            return AccountRow(
+                profileName = label,
+                status = "orphan",
+                statusLabel = GlyphRenderer.orphanLabel(),
+                sparse = 0,
+                cloudSize = "0 B",
+                hydratedSize = "0 B",
+                pendingSize = "0 B",
+                lastSync = "never",
+            )
+        }
+        return try {
+            val db = StateDatabase(stateDbPath)
+            db.initialize()
+            val entries = db.getAllEntries()
+            val sparseCount = entries.count { !it.isHydrated && !it.isFolder }
+            val totalRemoteSize = entries.filter { !it.isFolder }.sumOf { it.remoteSize }
+            val buckets = computeLocalSizeBuckets(entries)
+            val lastSyncRaw = db.getSyncState("last_full_scan")
+            db.close()
+            AccountRow(
+                profileName = label,
+                status = "orphan",
+                statusLabel = GlyphRenderer.orphanLabel(),
+                sparse = sparseCount,
+                cloudSize = CliProgressReporter.formatSize(totalRemoteSize),
+                hydratedSize = CliProgressReporter.formatSize(buckets.hydratedBytes),
+                pendingSize = CliProgressReporter.formatSize(buckets.pendingBytes),
+                lastSync = formatLastSync(lastSyncRaw),
+            )
+        } catch (_: Exception) {
+            AccountRow(
+                profileName = label,
+                status = "orphan",
+                statusLabel = GlyphRenderer.orphanLabel(),
                 sparse = 0,
                 cloudSize = "0 B",
                 hydratedSize = "0 B",
@@ -712,7 +795,13 @@ internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = hea
  *      declared in `config.toml` but somehow missed step 1. Sorted for
  *      deterministic output; in practice this step is empty because step 1
  *      already covers everything `in raw.providers`.
- *   3. If nothing was discovered at all, fall back to the registered
+ *   3. Orphan directories — dirs under [baseDir] that exist on disk but have
+ *      no matching `[providers.*]` section in config.toml. These appear after
+ *      declared profiles, sorted alphabetically. Each is represented as a
+ *      [ProfileInfo] with `isOrphan = true`. Common after `unidrive auth`
+ *      against a type-resolved name (the auth creates the dir but does not
+ *      write a config.toml section). Rendered with the `[ORPHAN]` status glyph.
+ *   4. If nothing was discovered at all, fall back to the registered
  *      provider types so an out-of-the-box `status --all` (no config) still
  *      shows useful rows.
  */
@@ -757,7 +846,36 @@ internal fun discoverProfilesFromRaw(
         }
     }
 
-    // 3. Fallback: known types not yet seen (only if NO profiles discovered)
+    // 3. Orphan dirs — directories present on disk with no config.toml section.
+    //    The dir itself is the only signal; we use the dirname as both name and
+    //    type (best-effort display) and mark isOrphan = true. The caller renders
+    //    these with the [ORPHAN] status glyph.
+    if (Files.isDirectory(baseDir)) {
+        Files.list(baseDir).use { stream ->
+            stream
+                .filter { Files.isDirectory(it) }
+                .map { it.fileName.toString() }
+                .filter { it !in seen && it !in raw.providers }
+                .sorted()
+                .forEach { dirName ->
+                    // Skip hidden dirs (e.g. .lock, .tmp) and the config.toml file itself
+                    if (!dirName.startsWith(".")) {
+                        profiles.add(
+                            ProfileInfo(
+                                name = dirName,
+                                type = dirName,
+                                syncRoot = SyncConfig.defaultSyncRoot(dirName),
+                                rawProvider = null,
+                                isOrphan = true,
+                            ),
+                        )
+                        seen.add(dirName)
+                    }
+                }
+        }
+    }
+
+    // 4. Fallback: known types not yet seen (only if NO profiles discovered)
     if (profiles.isEmpty()) {
         for (type in SyncConfig.KNOWN_TYPES.sorted()) {
             if (type !in seen) {
@@ -768,4 +886,64 @@ internal fun discoverProfilesFromRaw(
     }
 
     return profiles
+}
+
+/**
+ * Build a [ProfileInfo] for an orphan profile directory — a directory present
+ * under [baseDir] with no matching `[providers.<name>]` section in config.toml.
+ *
+ * Uses the directory name as both the profile name and best-guess type. If the
+ * dirname happens to match a known provider type, that type is used directly
+ * (this matches the behaviour of [SyncConfig.resolveProfile] for the case where
+ * `name in KNOWN_TYPES`). Otherwise the dirname is used as the type label for
+ * display purposes only — no real provider operations are performed.
+ */
+internal fun buildOrphanProfile(dirName: String): ProfileInfo =
+    ProfileInfo(
+        name = dirName,
+        type = dirName,
+        syncRoot = SyncConfig.defaultSyncRoot(dirName),
+        rawProvider = null,
+        isOrphan = true,
+    )
+
+/**
+ * PR #196 review fix: pure predicate for the precedence gate in
+ * [StatusCommand.showSingleProviderStatus].
+ *
+ * Returns `true` when [requestedName] resolves to a configured or type-known
+ * profile via the standard config path — meaning [Main.resolveCurrentProfile]
+ * should be called first (not the orphan-dir fallback).  Specifically:
+ *
+ *   - [requestedName] appears as a key in [raw.providers], OR
+ *   - [requestedName] is a known provider type (so [SyncConfig.resolveProfile]
+ *     would construct a synthetic no-credentials profile rather than throw), OR
+ *   - exactly one profile in [raw] has the given type
+ *     ([tryResolveByType] would succeed via the catch branch in
+ *     [Main.resolveCurrentProfile]).
+ *
+ * Returns `false` only when the name is genuinely absent from all config paths
+ * (no section, no type match, no single-type disambiguation) — in that case
+ * the caller may look for an orphan directory with that name (#117 addition).
+ *
+ * The distinction matters: an orphan dir named `onedrive` with a configured
+ * `[providers.personal] type = "onedrive"` must NOT render as `[? ORPHAN]` —
+ * `resolvesSingleProfileViaConfig` returns `true` here so the configured path
+ * is taken instead.
+ */
+internal fun resolvesSingleProfileViaConfig(
+    requestedName: String,
+    raw: org.krost.unidrive.sync.RawSyncConfig,
+): Boolean {
+    // Fast path 1: explicit section in config.toml
+    if (requestedName in raw.providers) return true
+    // Fast path 2: requestedName IS a known provider type (e.g. "onedrive",
+    // "internxt") — SyncConfig.resolveProfile returns a synthetic profile for
+    // these even when there is no matching config section.
+    if (requestedName in SyncConfig.KNOWN_TYPES) return true
+    // Fast path 3: type-alias disambiguation (e.g. "-p Internxt" with one
+    // internxt profile configured) — mirrors the tryResolveByType catch branch
+    // in Main.resolveCurrentProfile.
+    if (tryResolveByType(requestedName, raw) != null) return true
+    return false
 }

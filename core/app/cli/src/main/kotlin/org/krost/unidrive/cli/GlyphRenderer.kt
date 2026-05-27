@@ -219,6 +219,14 @@ object GlyphRenderer {
     /** `[<warn> <msg>]` or `[! <msg>]`. */
     fun warnLabel(msg: String): String = if (isEmojiSafe()) "[\u26A0$VS15 $msg]" else "[! $msg]"
 
+    /**
+     * `[? ORPHAN]` status label for a profile directory that has no matching
+     * `[providers.*]` section in config.toml (#117). A question-mark is used
+     * because the provider type is unknown (no config.toml declaration to read
+     * it from), making ticked-OK, crossed-AUTH, and other typed glyphs wrong.
+     */
+    fun orphanLabel(): String = "[? ORPHAN]"
+
     // ── Compatibility shim ───────────────────────────────────────────────────
 
     /**

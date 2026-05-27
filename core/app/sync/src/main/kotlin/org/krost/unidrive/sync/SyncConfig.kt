@@ -268,6 +268,14 @@ data class ProfileInfo(
     val type: String,
     val syncRoot: Path,
     val rawProvider: RawProvider?,
+    /**
+     * True when this profile was discovered from a directory on disk that has
+     * no matching `[providers.<name>]` section in config.toml. An orphan profile
+     * has no declared type, credentials, or sync_root — treat it as read-only
+     * diagnostic data. The profile dir may contain a state.db from a prior
+     * `unidrive auth` run against a type-resolved name.
+     */
+    val isOrphan: Boolean = false,
 )
 
 data class SyncConfig(
