@@ -38,6 +38,26 @@ open class AuthenticationException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * Signals a transient network failure (DNS blip, connection reset, timeout)
+ * during an operation that retrying may recover — distinct from a permanent
+ * auth failure. It is deliberately NOT an [AuthenticationException]: a
+ * transient blip during token refresh must not latch the session as
+ * "expired → re-authenticate."
+ *
+ * Live evidence: a token refresh that hit a transient
+ * `java.nio.channels.UnresolvedAddressException` surfaced
+ * "Authentication expired. Please re-authenticate." and latched the session
+ * dead — even though a later live Graph `quota` call proved the token was
+ * still valid. Classifying that blip as transient keeps the session alive
+ * for the next attempt.
+ */
+open class TransientNetworkException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
+/**
  * Signals a permanent download failure that retrying would not resolve —
  * the remote object is gone (404 from a stable identifier) and no future
  * attempt against the same identifier will succeed. The engine catches
