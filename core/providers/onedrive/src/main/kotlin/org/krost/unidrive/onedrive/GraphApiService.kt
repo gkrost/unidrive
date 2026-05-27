@@ -556,7 +556,7 @@ class GraphApiService(
         fileSystemInfo: FileSystemInfo?,
         conflictBehavior: String = "replace",
     ): DriveItem {
-        val (uploadUrl, initialOffset) = resolveUploadSession(remotePath, cleanPath, encoded, fileSystemInfo, conflictBehavior)
+        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, cleanPath, encoded, fileSize, fileSystemInfo, conflictBehavior)
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
@@ -606,13 +606,32 @@ class GraphApiService(
      * the committed offset.  If none, creates a fresh session and persists it.
      */
     private suspend fun resolveUploadSession(
+        localPath: Path,
         remotePath: String,
         cleanPath: String,
         encoded: String,
+        fileSize: Long,
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
     ): Pair<String, Long> {
-        val stored = sessionStore.get(remotePath)
+        val localMtimeMillis = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toMillis() }
+        val storedSession = sessionStore.getSession(remotePath)
+        // Bind the session to the local file's identity: resuming a session whose committed
+        // offset points into different local bytes would assemble OLD[0..offset) + NEW[offset..)
+        // on the remote — silent corruption. Any size/mtime mismatch (or a legacy entry that
+        // getSession dropped) discards the stale session and forces a fresh one.
+        if (storedSession != null && (storedSession.localSize != fileSize || storedSession.localMtimeMillis != localMtimeMillis)) {
+            log.info(
+                "OneDrive upload session for {} was for a different local revision (stored {}B/{}, now {}B/{}); discarding and creating a fresh session",
+                remotePath,
+                storedSession.localSize,
+                storedSession.localMtimeMillis,
+                fileSize,
+                localMtimeMillis,
+            )
+            sessionStore.delete(remotePath)
+        }
+        val stored = storedSession?.takeIf { it.localSize == fileSize && it.localMtimeMillis == localMtimeMillis }?.uploadUrl
         if (stored != null) {
             // Probe the stored URL — Graph extends session lifetime on activity, so our
             // locally stored expiresAt is an upper-bound hint, not authoritative. A network
@@ -628,7 +647,7 @@ class GraphApiService(
                 // shrinks toward its original expiry, an active one stretches up to 14 d.
                 parsedSession.expirationDateTime
                     ?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
-                    ?.let { sessionStore.put(remotePath, stored, it) }
+                    ?.let { sessionStore.put(remotePath, stored, it, fileSize, localMtimeMillis) }
                 val committedOffset =
                     parsedSession.nextExpectedRanges
                         ?.firstOrNull()
@@ -692,7 +711,7 @@ class GraphApiService(
                     .now()
                     .plusSeconds(86_400) // fallback: 24 h
 
-        sessionStore.put(remotePath, url, expiresAt)
+        sessionStore.put(remotePath, url, expiresAt, fileSize, localMtimeMillis)
         return url to 0L
     }
 
