@@ -252,6 +252,133 @@ class XdgLocaleAliasingTest {
         )
     }
 
+    // ── Test: nested alias name is NOT rewritten ──────────────────────────────
+
+    /**
+     * Invariant: alias translation is top-level only.  A path whose SECOND
+     * component happens to match a known alias name (e.g. `/SomeDir/Bilder/photo.jpg`)
+     * must NOT be rewritten — only `/Bilder/...` (top-level) is an alias.
+     */
+    @Test
+    fun `nested_alias_name_is_not_rewritten`() {
+        // Cloud state: /Pictures (canonical XDG folder) + /SomeDir (unrelated folder)
+        val remoteChanges = mapOf(
+            "/Pictures" to cloudItem("/Pictures", isFolder = true),
+            "/SomeDir" to cloudItem("/SomeDir", isFolder = true),
+        )
+        mkLocalDir("/SomeDir/Bilder")
+        mkLocalFile("/SomeDir/Bilder/photo.jpg")
+
+        val localChanges = mapOf(
+            "/SomeDir" to ChangeState.UNCHANGED,
+            "/SomeDir/Bilder" to ChangeState.NEW,
+            "/SomeDir/Bilder/photo.jpg" to ChangeState.NEW,
+        )
+
+        val reconciler = Reconciler(
+            db, syncRoot, ConflictPolicy.KEEP_BOTH,
+            xdgUserDirsOverrides = mapOf("XDG_PICTURES_DIR" to "Bilder"),
+        )
+
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+
+        // The nested /SomeDir/Bilder must be created as-is (not rewritten to /SomeDir/Pictures).
+        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
+        assertTrue(
+            mkdirs.any { it == "/SomeDir/Bilder" },
+            "Nested /SomeDir/Bilder must be created normally (not rewritten); got mkdirs=$mkdirs",
+        )
+        assertFalse(
+            mkdirs.any { it == "/SomeDir/Pictures" },
+            "Must NOT rewrite non-top-level Bilder to /SomeDir/Pictures; got mkdirs=$mkdirs",
+        )
+
+        // The file must upload under its original path (no translation).
+        val uploads = actions.filterIsInstance<SyncAction.Upload>().map { it.path }
+        assertTrue(
+            uploads.any { it == "/SomeDir/Bilder/photo.jpg" },
+            "Nested path must upload as-is; got uploads=$uploads",
+        )
+        assertFalse(
+            uploads.any { it == "/SomeDir/Pictures/photo.jpg" },
+            "Must NOT rewrite nested path to /SomeDir/Pictures/photo.jpg; got uploads=$uploads",
+        )
+    }
+
+    // ── Test: file move within aliased folder collapses to server-side move ──
+
+    /**
+     * Invariant: a file renamed inside an aliased folder (e.g. `Bilder/a.jpg` →
+     * `Bilder/b.jpg`) must be detected as a server-side move
+     * (`MoveRemote(/Pictures/a.jpg → /Pictures/b.jpg)`) and NOT degrade to a
+     * `DeleteRemote + Upload` re-upload pair.
+     *
+     * Pre-fix: [detectMoves] probed `resolveLocal(up.path)` = syncRoot/Pictures/b.jpg
+     * which doesn't exist on disk (the real file is at syncRoot/Bilder/b.jpg), so
+     * the upload was excluded from size-based move detection.
+     */
+    @Test
+    fun `file_move_within_aliased_folder_is_detected_as_server_side_move`() {
+        val fileSize = 42
+
+        // DB: /Pictures/a.jpg is tracked as a synced file (remoteId + remoteSize)
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = "/Pictures/a.jpg",
+                remoteId = "id-pictures-a",
+                remoteHash = "hash-a",
+                remoteSize = fileSize.toLong(),
+                remoteModified = java.time.Instant.parse("2026-01-01T00:00:00Z"),
+                localMtime = 1000000L,
+                localSize = fileSize.toLong(),
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = java.time.Instant.parse("2026-01-01T00:00:00Z"),
+            ),
+        )
+
+        // Local filesystem: Bilder/b.jpg exists (same size — the renamed file)
+        mkLocalFile("/Bilder/b.jpg", size = fileSize)
+
+        // localChanges: a.jpg deleted, b.jpg appeared — both under the alias name
+        val localChanges = mapOf(
+            "/Bilder/a.jpg" to ChangeState.DELETED,
+            "/Bilder/b.jpg" to ChangeState.NEW,
+        )
+
+        // Remote: /Pictures folder exists (establishes canonical name for alias resolution).
+        // No delta for /Pictures/a.jpg — the file is unchanged on the cloud side.
+        val remoteChanges = mapOf(
+            "/Pictures" to cloudItem("/Pictures", isFolder = true),
+        )
+
+        val reconciler = Reconciler(
+            db, syncRoot, ConflictPolicy.KEEP_BOTH,
+            xdgUserDirsOverrides = mapOf("XDG_PICTURES_DIR" to "Bilder"),
+        )
+
+        val actions = reconciler.reconcile(remoteChanges, localChanges)
+
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(
+            1, moves.size,
+            "Expected one MoveRemote for alias-folder rename; got: $actions",
+        )
+        assertEquals("/Pictures/b.jpg", moves[0].path, "MoveRemote destination must be canonical path")
+        assertEquals("/Pictures/a.jpg", moves[0].fromPath, "MoveRemote source must be canonical path")
+
+        // The Delete + Upload pair must have been collapsed — must NOT appear separately.
+        assertFalse(
+            actions.any { it is SyncAction.DeleteRemote && it.path == "/Pictures/a.jpg" },
+            "DeleteRemote for /Pictures/a.jpg must be collapsed into MoveRemote; got: $actions",
+        )
+        assertFalse(
+            actions.any { it is SyncAction.Upload && it.path == "/Pictures/b.jpg" },
+            "Upload for /Pictures/b.jpg must be collapsed into MoveRemote; got: $actions",
+        )
+    }
+
     /**
      * Edge case: multiple XDG aliases in a single reconcile.  German locale:
      * Pictures→Bilder, Music→Musik — both already on cloud under English names.

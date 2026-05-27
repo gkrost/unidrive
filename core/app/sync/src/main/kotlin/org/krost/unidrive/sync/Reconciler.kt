@@ -381,7 +381,7 @@ class Reconciler(
             }
         }
 
-        detectMoves(actions, entryByPath)
+        detectMoves(actions, entryByPath, localPathFnForReconcile)
         detectRemoteRenames(actions, remoteChanges, entryByRemoteId)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
@@ -534,6 +534,32 @@ class Reconciler(
             if (xdgAliases.isEmpty) fullLocal
             else fullLocal.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
 
+        val reverseAliasTopLevelForStreaming: Map<String, String> =
+            if (xdgAliases.isEmpty) emptyMap()
+            else {
+                val rev = HashMap<String, String>()
+                for (origPath in fullLocal.keys) {
+                    val origTop = origPath.removePrefix("/").substringBefore('/')
+                    val canonical = xdgAliases.canonicalFor(origTop)
+                    if (canonical != null) rev[canonical] = origTop
+                }
+                rev
+            }
+        val localPathFnForStreaming: (String) -> java.nio.file.Path =
+            if (xdgAliases.isEmpty) ::resolveLocal
+            else { canonicalPath ->
+                val noSlash = canonicalPath.removePrefix("/")
+                val slash = noSlash.indexOf('/')
+                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+                val originalTop = reverseAliasTopLevelForStreaming[top]
+                if (originalTop != null) {
+                    val rest = if (slash < 0) "" else noSlash.substring(slash)
+                    safeResolveLocal(syncRoot, "/$originalTop$rest")
+                } else {
+                    resolveLocal(canonicalPath)
+                }
+            }
+
         // Case-collision detection on new local files — see [reconcile] for rationale.
         for ((path, state) in effectiveFullLocal) {
             if (state != ChangeState.NEW) continue
@@ -633,7 +659,7 @@ class Reconciler(
 
         // Cross-page move detection runs here on the combined action set —
         // per-page detection would miss renames that span page boundaries.
-        detectMoves(actions, entryByPath)
+        detectMoves(actions, entryByPath, localPathFnForStreaming)
         detectRemoteRenames(actions, fullRemote, entryByRemoteId)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
@@ -862,6 +888,7 @@ class Reconciler(
     private fun detectMoves(
         actions: MutableList<SyncAction>,
         entryByPath: Map<String, SyncEntry>,
+        localPathFn: (String) -> java.nio.file.Path = ::resolveLocal,
     ) {
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>()
         if (deletes.isEmpty()) return
@@ -967,7 +994,7 @@ class Reconciler(
         val uploadsBySize: Map<Long, List<SyncAction.Upload>> =
             uploads
                 .mapNotNull { up ->
-                    val info = localFsProbe(resolveLocal(up.path)) ?: return@mapNotNull null
+                    val info = localFsProbe(localPathFn(up.path)) ?: return@mapNotNull null
                     up to info.size
                 }.groupBy({ it.second }, { it.first })
 
