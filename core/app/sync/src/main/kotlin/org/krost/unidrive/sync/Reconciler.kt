@@ -382,14 +382,21 @@ class Reconciler(
         pageRemote: Map<String, CloudItem>,
         localChanges: Map<String, ChangeState>,
         syncPath: String? = null,
+        // #115 streaming fix: stable set of ALL remote top-level folder names known
+        // across all pages, supplied by the streaming gather before any slice fires.
+        // When null (single-shot reconcile or test call without the argument), the
+        // alias context falls back to deriving top-level names from pageRemote alone
+        // — which is the pre-fix behaviour and is correct for non-streaming callers.
+        stableRemoteTopLevelNames: Set<String>? = null,
     ): List<SyncAction> {
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
         val pinRules = db.getPinRules()
 
-        // #115: same locale-alias translation as in reconcile().
+        // #115: same locale-alias translation as in reconcile(), but using the
+        // stable full-scan top-level set when provided by the streaming gather.
         val (effectiveLocalChanges, localPathFnForSlice) =
-            buildAliasContext(pageRemote, localChanges)
+            buildAliasContext(pageRemote, localChanges, stableRemoteTopLevelNames)
 
         val actions = mutableListOf<SyncAction>()
         val allPaths =
@@ -570,12 +577,21 @@ class Reconciler(
     private fun buildAliasContext(
         remoteTopLevelMap: Map<String, CloudItem>,
         rawLocal: Map<String, ChangeState>,
+        // #115 streaming fix: when non-null, use this pre-computed stable set of
+        // top-level remote folder names instead of deriving it from remoteTopLevelMap.
+        // This lets resolveSlice() alias against the FULL set of canonical names known
+        // across ALL pages, not only the names present in the current page — avoiding
+        // the bug where a page carrying only children (no top-level entry) produces an
+        // empty alias context and emits CreateRemoteFolder for the locale alias tree.
+        stableRemoteTopLevelNames: Set<String>? = null,
     ): AliasContext {
-        val xdgAliases = XdgLocaleDirAliases.build(
-            remoteTopLevelNames = remoteTopLevelMap.keys
+        val topLevelNames = stableRemoteTopLevelNames
+            ?: remoteTopLevelMap.keys
                 .filter { it.count { c -> c == '/' } == 1 && !remoteTopLevelMap[it]!!.deleted }
                 .map { it.removePrefix("/") }
-                .toSet(),
+                .toSet()
+        val xdgAliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = topLevelNames,
             userDirsOverrides = xdgUserDirsOverrides,
         )
         val effectiveLocal =

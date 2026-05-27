@@ -380,6 +380,82 @@ class XdgLocaleAliasingTest {
     }
 
     /**
+     * Invariant: the streaming path must alias local Bilder/... to
+     * Pictures/... even when the canonical /Pictures folder entry lands
+     * on a DIFFERENT page than the child items being reconciled.
+     *
+     * Scenario:
+     *   page 1 → /Pictures (folder) only — establishes canonical name
+     *   page 2 → /Pictures/photo.jpg (child) — but local has /Bilder/photo.jpg NEW
+     *
+     * Without the fix: resolveSlice(page2, localChanges) builds alias context
+     * from page2 alone, which has no top-level /Pictures folder → alias is
+     * empty → emits CreateRemoteFolder("/Bilder") + Upload("/Bilder/photo.jpg").
+     *
+     * With the fix: resolveSlice receives the full stable set of remote top-level
+     * folder names ({"Pictures"}) — derived from ALL pages before slice emission —
+     * so the alias fires and NO /Bilder-prefixed action is emitted.
+     */
+    @Test
+    fun `streaming_reconcile_aliases_against_full_remote_top_level_not_just_page`() {
+        // Local filesystem: /Bilder/photo.jpg exists (the aliased local file)
+        mkLocalDir("/Bilder")
+        mkLocalFile("/Bilder/photo.jpg", size = 77)
+
+        val localChanges = mapOf(
+            "/Bilder" to ChangeState.NEW,
+            "/Bilder/photo.jpg" to ChangeState.NEW,
+        )
+
+        // page 1 carries the canonical /Pictures folder — establishes alias
+        val page1Remote = mapOf(
+            "/Pictures" to cloudItem("/Pictures", isFolder = true),
+        )
+        // page 2 carries the child item — NO /Pictures top-level entry
+        val page2Remote = mapOf(
+            "/Pictures/photo.jpg" to cloudItem("/Pictures/photo.jpg", size = 77),
+        )
+
+        // Full stable set of remote top-level names — known across all pages
+        val stableTopLevelNames = setOf("Pictures")
+
+        val reconciler = Reconciler(
+            db, syncRoot, ConflictPolicy.KEEP_BOTH,
+            xdgUserDirsOverrides = mapOf("XDG_PICTURES_DIR" to "Bilder"),
+        )
+
+        // Simulate the streaming path: reconcile each page slice in isolation,
+        // passing the FULL stable top-level name set (the fix) rather than
+        // deriving it only from the current page's entries.
+        val actionsPage1 = reconciler.resolveSlice(
+            pageRemote = page1Remote,
+            localChanges = localChanges,
+            stableRemoteTopLevelNames = stableTopLevelNames,
+        )
+        val actionsPage2 = reconciler.resolveSlice(
+            pageRemote = page2Remote,
+            localChanges = localChanges,
+            stableRemoteTopLevelNames = stableTopLevelNames,
+        )
+
+        val allActions = actionsPage1 + actionsPage2
+
+        // No /Bilder-prefixed action must appear anywhere across both slices.
+        val bilder = allActions.filter { it.path.startsWith("/Bilder") }
+        assertTrue(
+            bilder.isEmpty(),
+            "No action must reference /Bilder across streaming slices; got: $bilder",
+        )
+
+        // The upload must reference the canonical path, not the alias.
+        val uploads = allActions.filterIsInstance<SyncAction.Upload>().map { it.path }
+        assertTrue(
+            uploads.any { it == "/Pictures/photo.jpg" },
+            "Local /Bilder/photo.jpg must upload as /Pictures/photo.jpg; got uploads=$uploads",
+        )
+    }
+
+    /**
      * Edge case: multiple XDG aliases in a single reconcile.  German locale:
      * Pictures→Bilder, Music→Musik — both already on cloud under English names.
      */
