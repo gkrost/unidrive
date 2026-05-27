@@ -119,17 +119,23 @@ open class SyncEngine(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns)
-    private val reconciler = Reconciler(
-        db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns,
-        // #115: wire real user-dirs.dirs content so the reconciler can map locale-
-        // aliased local folder names to their cloud-canonical equivalents.
-        // Mapping is read once at construction — a locale change requires a daemon restart.
-        xdgUserDirsOverrides = parseUserDirsFile(
+
+    // #115: read once at construction — a locale change requires a daemon
+    // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
+    // (canonical→real-local reverse map for newly-arrived aliased rows).
+    private val xdgUserDirsOverrides: Map<String, String> =
+        parseUserDirsFile(
             Paths.get(
                 System.getenv("HOME") ?: System.getProperty("user.home"),
                 ".config", "user-dirs.dirs",
             ),
-        ),
+        )
+
+    private val reconciler = Reconciler(
+        db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns,
+        // #115: wire real user-dirs.dirs content so the reconciler can map locale-
+        // aliased local folder names to their cloud-canonical equivalents.
+        xdgUserDirsOverrides = xdgUserDirsOverrides,
     )
 
     // Debounce state for remote-change wake hints (Internxt notifications WS).
@@ -329,10 +335,15 @@ open class SyncEngine(
         val existingEntry = db.getEntry(path)
         val prevHash = existingEntry?.remoteHash
         val existingRemoteId = existingEntry?.remoteId
+        // #115: if the existing row is a locale-aliased one, its content lives
+        // at the canonical remote path; the FUSE write-back must upload there,
+        // not at the alias `path`. Non-aliased rows have remotePath == null →
+        // upload at `path`, byte-identical to pre-#115.
+        val remotePath = existingEntry?.remotePath ?: path
         val sizeForLog = Files.size(cachePath)
         val result =
             try {
-                provider.upload(cachePath, path, existingRemoteId = existingRemoteId) { transferred, total ->
+                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId) { transferred, total ->
                     reporter.onTransferProgress(path, transferred, total)
                 }
             } catch (e: Exception) {
@@ -346,8 +357,9 @@ open class SyncEngine(
                 throw e
             }
         // Defer the absence sweep's deletion verdict while the delta feed catches up
-        // to this just-written remote item (see markRecentlyUploaded).
-        markRecentlyUploaded(path)
+        // to this just-written remote item (see markRecentlyUploaded). Keyed by the
+        // REMOTE path so the absence sweep (remote namespace) matches.
+        markRecentlyUploaded(remotePath)
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
@@ -2292,9 +2304,14 @@ open class SyncEngine(
         for (entry in db.getAllEntries()) {
             if (entry.remoteId == null) continue
             if (entry.remoteId in seenRemoteIds) continue
-            if (entry.path in remoteChanges) continue
+            // #115: the delta and the recently-uploaded marks live in the REMOTE
+            // namespace, so test against the row's effective remote path
+            // (`remotePath ?: path`). For a non-aliased row this is just
+            // entry.path — byte-identical to pre-#115 behaviour.
+            val effectiveRemote = entry.remotePath ?: entry.path
+            if (effectiveRemote in remoteChanges) continue
 
-            val uploadedAt = recentlyUploaded[entry.path]
+            val uploadedAt = recentlyUploaded[effectiveRemote]
             if (uploadedAt != null) {
                 log.debug(
                     "Full sync: DB entry {} (remoteId={}) not in delta but uploaded {}s ago; " +
@@ -2307,11 +2324,14 @@ open class SyncEngine(
             }
 
             log.debug("Full sync: DB entry {} (remoteId={}) not in delta, marking deleted", entry.path, entry.remoteId)
-            remoteChanges[entry.path] =
+            // Key the synthesized tombstone at the effective remote path so it
+            // flows through the reconciler's canonical→real-local reverse map
+            // alongside genuine deltas.
+            remoteChanges[effectiveRemote] =
                 CloudItem(
                     id = entry.remoteId,
-                    name = entry.path.substringAfterLast("/"),
-                    path = entry.path,
+                    name = effectiveRemote.substringAfterLast("/"),
+                    path = effectiveRemote,
                     size = 0,
                     isFolder = entry.isFolder,
                     modified = null,
@@ -2349,7 +2369,9 @@ open class SyncEngine(
                 // UD-225b: prefer id-based dispatch — path-based download triggers
                 // a per-segment folder traversal in resolveFolder which can fail
                 // on transient 503s or sanitization edge cases (UD-317).
-                downloadByIdOrPath(item, action.path, localPath)
+                // #115: the REMOTE source is item.path (canonical); the local
+                // destination is localPath (resolved from the real-local action.path).
+                downloadByIdOrPath(item, item.path, localPath)
                 placeholder.restoreMtime(action.path, item.modified)
             }
         }
@@ -2371,7 +2393,8 @@ open class SyncEngine(
             if (action.wasHydrated && !item.isFolder) {
                 try {
                     // UD-225b: id-based dispatch (see applyCreatePlaceholder).
-                    downloadByIdOrPath(item, action.path, placeholder.resolveLocal(action.path))
+                    // #115: remote source = item.path (canonical); dest = real-local.
+                    downloadByIdOrPath(item, item.path, placeholder.resolveLocal(action.path))
                     placeholder.restoreMtime(action.path, item.modified)
                 } catch (e: Exception) {
                     restoreToPlaceholder(action.path, item)
@@ -2434,7 +2457,9 @@ open class SyncEngine(
         try {
             withEchoSuppression(action.path) {
                 // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
-                downloadByIdOrPath(action.remoteItem, action.path, localPath)
+                // #115: remote source = remoteItem.path (canonical); local
+                // destination = localPath (resolved from real-local action.path).
+                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, localPath)
                 placeholder.restoreMtime(action.path, action.remoteItem.modified)
             }
 
@@ -2467,10 +2492,15 @@ open class SyncEngine(
     }
 
     private suspend fun applyUpload(action: SyncAction.Upload) {
+        // #115: LOCAL read uses action.path (the real local path); the REMOTE
+        // upload target is action.remoteTarget ?: action.path. For a non-aliased
+        // upload remoteTarget is null, so remotePath == action.path and this is
+        // byte-identical to pre-#115 behaviour.
         val localPath = placeholder.resolveLocal(action.path)
+        val remotePath = action.remoteTarget ?: action.path
         val sizeForLog = if (Files.isRegularFile(localPath)) Files.size(localPath) else -1L
         // UD-753: per-operation log at the engine (was repeated across provider services).
-        log.debug("Upload: {} ({} bytes)", action.path, sizeForLog)
+        log.debug("Upload: {} -> {} ({} bytes)", action.path, remotePath, sizeForLog)
         // UD-113: capture pre-action remote hash so the audit entry's oldHash reflects
         // the version we replaced (or null for a fresh upload).
         val prevHash = db.getEntry(action.path)?.remoteHash
@@ -2478,7 +2508,7 @@ open class SyncEngine(
             try {
                 // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
                 // null for NEW. Internxt routes through PUT /files/{uuid} when non-null.
-                provider.upload(localPath, action.path, existingRemoteId = action.remoteId) { transferred, total ->
+                provider.upload(localPath, remotePath, existingRemoteId = action.remoteId) { transferred, total ->
                     reporter.onTransferProgress(action.path, transferred, total)
                 }
             } catch (e: Exception) {
@@ -2493,13 +2523,18 @@ open class SyncEngine(
             }
         // The eventually-consistent delta feed may not list this just-written remote
         // item on the next full enumeration; mark it so the absence sweep defers its
-        // deletion verdict instead of reaping + re-uploading in a loop.
-        markRecentlyUploaded(action.path)
+        // deletion verdict instead of reaping + re-uploading in a loop. Marked by
+        // the REMOTE path because the absence sweep reasons in the remote namespace.
+        markRecentlyUploaded(remotePath)
         val mtime = Files.getLastModifiedTime(localPath).toMillis()
         val size = Files.size(localPath)
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
+                // #115: persist the canonical remote path so the next sync's
+                // delta (keyed at the canonical) matches this row by effective
+                // remote path — no re-upload, no spurious MoveLocal.
+                remotePath = action.remoteTarget,
                 remoteId = result.id,
                 remoteHash = result.hash,
                 remoteSize = result.size,
@@ -2524,13 +2559,20 @@ open class SyncEngine(
     }
 
     private suspend fun applyMoveRemote(action: SyncAction.MoveRemote) {
-        // UD-753: per-operation log at the engine (was repeated across provider services).
-        log.debug("Move: {} -> {}", action.fromPath, action.path)
+        // #115: action.fromPath / action.path are REAL-LOCAL (DB + resolveLocal
+        // ops below key on them). The REMOTE move runs in the canonical
+        // namespace: source = source row's `remotePath ?: fromPath`, dest =
+        // action.remoteTarget ?: action.path. Non-aliased rows have remotePath
+        // null and remoteTarget null → identical to pre-#115 behaviour.
         val oldEntry = db.getEntry(action.fromPath)
+        val remoteFrom = oldEntry?.remotePath ?: action.fromPath
+        val remoteTo = action.remoteTarget ?: action.path
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Move: {} -> {} (remote {} -> {})", action.fromPath, action.path, remoteFrom, remoteTo)
         val isFolder = oldEntry?.isFolder ?: false
         val result =
             try {
-                provider.move(action.fromPath, action.path)
+                provider.move(remoteFrom, remoteTo)
             } catch (e: Exception) {
                 auditLog?.emit(
                     action = "Move",
@@ -2568,6 +2610,10 @@ open class SyncEngine(
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
+                // #115: persist the canonical remote destination so the next
+                // sync's delta (canonical-keyed) matches this row by effective
+                // remote path.
+                remotePath = action.remoteTarget,
                 remoteId = result.id,
                 remoteHash = result.hash,
                 remoteSize = oldEntry?.remoteSize ?: result.size,
@@ -2646,13 +2692,18 @@ open class SyncEngine(
     }
 
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
-        // UD-753: per-operation log at the engine (was repeated across provider services).
-        log.debug("Delete: {}", action.path)
         // UD-113: capture pre-delete row for the audit entry.
         val priorEntry = db.getEntry(action.path)
+        // #115: DeleteRemote.path is real-local (DB lookup above keys on it).
+        // The REMOTE delete target is the row's effective remote path
+        // (`remotePath ?: path`). Non-aliased rows have remotePath null →
+        // delete at action.path, byte-identical to pre-#115.
+        val remotePath = priorEntry?.remotePath ?: action.path
+        // UD-753: per-operation log at the engine (was repeated across provider services).
+        log.debug("Delete: {} (remote {})", action.path, remotePath)
         var auditResult = "success"
         try {
-            provider.delete(action.path)
+            provider.delete(remotePath)
         } catch (e: ProviderException) {
             // Only a typed already-gone signal (Folder/Item not found) is a
             // safe no-op delete that may fall through and tombstone the row.
@@ -2722,9 +2773,12 @@ open class SyncEngine(
     }
 
     private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
+        // #115: REMOTE create target = remoteTarget ?: path; LOCAL mtime read
+        // uses action.path. Non-aliased: remoteTarget null → identical to today.
+        val remotePath = action.remoteTarget ?: action.path
         val result =
             try {
-                provider.createFolder(action.path)
+                provider.createFolder(remotePath)
             } catch (e: Exception) {
                 auditLog?.emit(
                     action = "CreateRemoteFolder",
@@ -2736,6 +2790,7 @@ open class SyncEngine(
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
+                remotePath = action.remoteTarget,
                 remoteId = result.id,
                 remoteHash = null,
                 remoteSize = 0,
@@ -2894,6 +2949,11 @@ open class SyncEngine(
         isHydrated: Boolean,
     ) = SyncEntry(
         path = path,
+        // #115: when the action's local [path] differs from the remote item's
+        // canonical path, this is a locale-aliased row — persist the canonical
+        // as remotePath so the next delta matches by effective remote path.
+        // Equal paths (the universal case) leave remotePath null → byte-identical.
+        remotePath = if (item.path != path) item.path else null,
         remoteId = item.id,
         remoteHash = item.hash,
         remoteSize = item.size,
@@ -2906,10 +2966,58 @@ open class SyncEngine(
         lastSynced = Instant.now(),
     )
 
+    /**
+     * #115: canonical-top → real-local-top map (e.g. "Pictures" → "Bilder"),
+     * restricted to alias folders that ACTUALLY exist on disk under the sync
+     * root. Mirrors Reconciler.buildAliasContext's reverse-map so
+     * [updateRemoteEntries] keys newly-arrived aliased rows at the same
+     * real-local path the reconciler/executor use. Empty when no alias applies.
+     */
+    private fun buildCanonicalToLocalTopMap(remoteChanges: Map<String, CloudItem>): Map<String, String> {
+        val topLevelNames = remoteChanges.keys
+            .filter { it.count { c -> c == '/' } == 1 && !remoteChanges[it]!!.deleted }
+            .map { it.removePrefix("/") }
+            .toSet()
+        val aliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = topLevelNames,
+            userDirsOverrides = xdgUserDirsOverrides,
+        )
+        if (aliases.isEmpty) return emptyMap()
+        val rev = HashMap<String, String>()
+        for ((localTop, canonical) in aliases.localToCanonicalMap()) {
+            if (canonical in rev.values) continue
+            if (Files.isDirectory(syncRoot.resolve(localTop))) rev[canonical] = localTop
+        }
+        return rev
+    }
+
+    /** #115: substitute the canonical top-level component with its real-local alias. */
+    private fun applyReverseTop(path: String, canonicalToLocalTop: Map<String, String>): String {
+        if (canonicalToLocalTop.isEmpty()) return path
+        val noSlash = path.removePrefix("/")
+        val slash = noSlash.indexOf('/')
+        val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+        val localTop = canonicalToLocalTop[top] ?: return path
+        val rest = if (slash < 0) "" else noSlash.substring(slash)
+        return "/$localTop$rest"
+    }
+
     private fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>) {
+        // #115: the remoteChanges keys are canonical remote paths. Build a
+        // canonical→real-local reverse map so a newly-arrived aliased item is
+        // persisted at its REAL-LOCAL path (with the canonical in remote_path),
+        // not as a phantom canonical-keyed row that LocalScanner can never find
+        // on disk. Existing rows are matched by effective remote path so the
+        // merge preserves their real-local path + remote_path. No alias active
+        // → both helpers are identity and this is byte-identical to pre-#115.
+        val remoteToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
         for ((path, item) in remoteChanges) {
             if (item.deleted) continue // skip deleted items
-            val existing = db.getEntry(path)
+            val realLocalPath = applyReverseTop(path, remoteToLocalTop)
+            val isAliased = realLocalPath != path
+            // Match an existing row by effective remote path (handles aliased
+            // rows keyed at their real-local path).
+            val existing = db.getEntryByRemotePath(path)
             val merged =
                 existing?.copy(
                     remoteId = item.id,
@@ -2927,9 +3035,14 @@ open class SyncEngine(
                     // sees the cleared state too.
                     downloadQuarantined = false,
                     lastErrorAt = null,
-                    // preserve localMtime, localSize, isHydrated, isFolder
+                    // preserve path, remotePath, localMtime, localSize, isHydrated, isFolder
                 ) ?: SyncEntry(
-                    path = path,
+                    // #115: key a newly-arrived aliased item at its real-local
+                    // path; record the canonical in remotePath so LocalScanner
+                    // finds the row and the next delta matches by effective
+                    // remote path.
+                    path = realLocalPath,
+                    remotePath = if (isAliased) path else null,
                     remoteId = item.id,
                     remoteHash = item.hash,
                     remoteSize = item.size,

@@ -69,9 +69,17 @@ class XdgLocaleAliasingTest {
      * Invariant: when the cloud already holds a canonical XDG folder (e.g.
      * `/Pictures`) and the local sync root contains the locale-renamed equivalent
      * (e.g. `/Bilder`), the reconciler must NOT emit a `CreateRemoteFolder` for
-     * the locale name.  The local folder is adopted as the canonical cloud folder,
-     * and a new local file under the alias (`/Bilder/new.jpg`) plans an upload
-     * under the canonical path (`/Pictures/new.jpg`), not the alias path.
+     * the locale name.  The local folder is adopted as the canonical cloud folder.
+     *
+     * Transparent-adoption model (#115): every action's `path` stays the REAL
+     * local path (`/Bilder/...`); REMOTE-write actions carry the canonical
+     * remote path out-of-band via `remoteTarget`. So a new local file under the
+     * alias (`/Bilder/new.jpg`) plans an Upload with `path=/Bilder/new.jpg` and
+     * `remoteTarget=/Pictures/new.jpg`. A cloud file under the canonical
+     * (`/Pictures/cloud-photo.jpg`) plans a DownloadContent with `path` reverse-
+     * mapped to the real local folder (`/Bilder/cloud-photo.jpg`) so the bytes
+     * land in the locale-named folder, while the CloudItem keeps the canonical
+     * remote path for the provider fetch.
      *
      * Pre-fix behaviour: `/Bilder` was seen as a brand-new local folder →
      * `CreateRemoteFolder("/Bilder")` emitted; `/Bilder/new.jpg` uploaded to
@@ -103,47 +111,50 @@ class XdgLocaleAliasingTest {
 
         val actions = reconciler.reconcile(remoteChanges, localChanges)
 
-        // (a) No CreateRemoteFolder for /Bilder
-        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
-        assertFalse(
-            mkdirs.any { it == "/Bilder" },
-            "Must NOT emit CreateRemoteFolder for the locale alias /Bilder; got mkdirs=$mkdirs",
-        )
-
-        // (b) No duplicate parallel tree: there must be no CreateRemoteFolder at all
-        //     for any alias-derived path.
-        assertFalse(
-            mkdirs.any { it.startsWith("/Bilder") },
-            "Must NOT create any folder under /Bilder; got mkdirs=$mkdirs",
-        )
-
-        // (c) The new local file under the alias folder uploads to the canonical path.
-        val uploads = actions.filterIsInstance<SyncAction.Upload>().map { it.path }
+        // (a) No CreateRemoteFolder at all for the adopted alias folder.
+        val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>()
         assertTrue(
-            uploads.any { it == "/Pictures/new.jpg" },
-            "Local /Bilder/new.jpg must upload as /Pictures/new.jpg; got uploads=$uploads",
-        )
-        assertFalse(
-            uploads.any { it.startsWith("/Bilder") },
-            "No upload must reference the alias path /Bilder; got uploads=$uploads",
+            mkdirs.none { it.path == "/Bilder" || it.path.startsWith("/Bilder/") },
+            "Must NOT emit CreateRemoteFolder for the adopted alias folder; got mkdirs=${mkdirs.map { it.path }}",
         )
 
-        // (d) The cloud folder /Pictures is adopted (CreatePlaceholder), not a conflict.
-        val placeholders = actions.filterIsInstance<SyncAction.CreatePlaceholder>().map { it.path }
-        assertTrue(
-            placeholders.any { it == "/Pictures" },
-            "Cloud /Pictures folder must be adopted as a placeholder; got placeholders=$placeholders",
+        // (b) The new local file uploads with real-local path + canonical remoteTarget.
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        val newUpload = uploads.find { it.path == "/Bilder/new.jpg" }
+        assertNotNull(
+            newUpload,
+            "Upload.path must stay the real local path /Bilder/new.jpg; got uploads=${uploads.map { it.path }}",
+        )
+        assertEquals(
+            "/Pictures/new.jpg", newUpload.remoteTarget,
+            "Upload.remoteTarget must be the canonical /Pictures/new.jpg",
         )
 
-        // (e) Cloud file /Pictures/cloud-photo.jpg is downloaded (no Bilder-prefixed download).
-        val downloads = actions.filterIsInstance<SyncAction.DownloadContent>().map { it.path }
-        assertTrue(
-            downloads.any { it == "/Pictures/cloud-photo.jpg" },
-            "Cloud /Pictures/cloud-photo.jpg must be downloaded; got downloads=$downloads",
+        // (c) The cloud folder is adopted (CreatePlaceholder) at the real-local path.
+        val placeholders = actions.filterIsInstance<SyncAction.CreatePlaceholder>()
+        val folderPh = placeholders.find { it.path == "/Bilder" }
+        assertNotNull(
+            folderPh,
+            "Cloud folder must be adopted as a placeholder at the real-local /Bilder; " +
+                "got placeholders=${placeholders.map { it.path }}",
         )
-        assertFalse(
-            downloads.any { it.startsWith("/Bilder") },
-            "No download must reference /Bilder; got downloads=$downloads",
+        assertEquals(
+            "/Pictures", folderPh.remoteItem.path,
+            "The adopted placeholder's CloudItem keeps the canonical remote path",
+        )
+
+        // (d) The cloud file downloads to the real-local /Bilder folder, while the
+        //     CloudItem keeps the canonical remote path for the provider fetch.
+        val downloads = actions.filterIsInstance<SyncAction.DownloadContent>()
+        val dl = downloads.find { it.path == "/Bilder/cloud-photo.jpg" }
+        assertNotNull(
+            dl,
+            "Cloud file must download to the real-local /Bilder/cloud-photo.jpg; " +
+                "got downloads=${downloads.map { it.path }}",
+        )
+        assertEquals(
+            "/Pictures/cloud-photo.jpg", dl.remoteItem.path,
+            "DownloadContent's CloudItem keeps the canonical remote path",
         )
     }
 
@@ -309,22 +320,32 @@ class XdgLocaleAliasingTest {
 
     /**
      * Invariant: a file renamed inside an aliased folder (e.g. `Bilder/a.jpg` →
-     * `Bilder/b.jpg`) must be detected as a server-side move
-     * (`MoveRemote(/Pictures/a.jpg → /Pictures/b.jpg)`) and NOT degrade to a
-     * `DeleteRemote + Upload` re-upload pair.
+     * `Bilder/b.jpg`) must be detected as a server-side move and NOT degrade to
+     * a `DeleteRemote + Upload` re-upload pair.
      *
-     * Pre-fix: [detectMoves] probed `resolveLocal(up.path)` = syncRoot/Pictures/b.jpg
-     * which doesn't exist on disk (the real file is at syncRoot/Bilder/b.jpg), so
-     * the upload was excluded from size-based move detection.
+     * Transparent-adoption model (#115): the DB row is keyed by the REAL local
+     * path (`/Bilder/a.jpg`) and carries the canonical remote path
+     * (`/Pictures/a.jpg`) in `remotePath`. detectMoves runs on real-local paths,
+     * so it pairs DeleteRemote(/Bilder/a.jpg) + Upload(/Bilder/b.jpg) into a
+     * MoveRemote whose `path`/`fromPath` are real-local and whose `remoteTarget`
+     * is the canonical destination. The canonical remote SOURCE is derived in the
+     * executor from the source row's remotePath.
+     *
+     * Pre-fix: [detectMoves] probed `resolveLocal(canonicalPath)` =
+     * syncRoot/Pictures/b.jpg which doesn't exist on disk (the real file is at
+     * syncRoot/Bilder/b.jpg), so the upload was excluded from size-based move
+     * detection.
      */
     @Test
     fun `file_move_within_aliased_folder_is_detected_as_server_side_move`() {
         val fileSize = 42
 
-        // DB: /Pictures/a.jpg is tracked as a synced file (remoteId + remoteSize)
+        // DB: the row is keyed by the REAL local path /Bilder/a.jpg and carries
+        // the canonical remote path /Pictures/a.jpg in remotePath.
         db.upsertEntry(
             org.krost.unidrive.sync.model.SyncEntry(
-                path = "/Pictures/a.jpg",
+                path = "/Bilder/a.jpg",
+                remotePath = "/Pictures/a.jpg",
                 remoteId = "id-pictures-a",
                 remoteHash = "hash-a",
                 remoteSize = fileSize.toLong(),
@@ -365,17 +386,21 @@ class XdgLocaleAliasingTest {
             1, moves.size,
             "Expected one MoveRemote for alias-folder rename; got: $actions",
         )
-        assertEquals("/Pictures/b.jpg", moves[0].path, "MoveRemote destination must be canonical path")
-        assertEquals("/Pictures/a.jpg", moves[0].fromPath, "MoveRemote source must be canonical path")
+        assertEquals("/Bilder/b.jpg", moves[0].path, "MoveRemote destination path stays real-local")
+        assertEquals("/Bilder/a.jpg", moves[0].fromPath, "MoveRemote source path stays real-local")
+        assertEquals(
+            "/Pictures/b.jpg", moves[0].remoteTarget,
+            "MoveRemote.remoteTarget must be the canonical destination",
+        )
 
         // The Delete + Upload pair must have been collapsed — must NOT appear separately.
         assertFalse(
-            actions.any { it is SyncAction.DeleteRemote && it.path == "/Pictures/a.jpg" },
-            "DeleteRemote for /Pictures/a.jpg must be collapsed into MoveRemote; got: $actions",
+            actions.any { it is SyncAction.DeleteRemote && it.path == "/Bilder/a.jpg" },
+            "DeleteRemote for /Bilder/a.jpg must be collapsed into MoveRemote; got: $actions",
         )
         assertFalse(
-            actions.any { it is SyncAction.Upload && it.path == "/Pictures/b.jpg" },
-            "Upload for /Pictures/b.jpg must be collapsed into MoveRemote; got: $actions",
+            actions.any { it is SyncAction.Upload && it.path == "/Bilder/b.jpg" },
+            "Upload for /Bilder/b.jpg must be collapsed into MoveRemote; got: $actions",
         )
     }
 
@@ -400,10 +425,13 @@ class XdgLocaleAliasingTest {
      * so the alias fires from page 1 onward and NO /Bilder-prefixed
      * action is emitted across any of the 4 slices.
      *
-     * The test additionally confirms that calling resolveSlice with the
-     * EMPTY set (simulating the broken 1-page lookahead for page 1) DOES
-     * produce /Bilder-prefixed actions — i.e. the new test would have
-     * caught the pre-fix regression.
+     * Transparent-adoption model (#115): the alias FIRING is now observed via
+     * `remoteTarget`/suppressed CreateRemoteFolder, not via a rewritten action
+     * `path` (which always stays real-local /Bilder). When the alias does NOT
+     * fire (broken empty-set lookahead) the alias folder is created on remote
+     * (CreateRemoteFolder("/Bilder")) and the Upload carries NO remoteTarget;
+     * when it DOES fire, no CreateRemoteFolder for /Bilder is emitted and the
+     * Upload carries remoteTarget=/Pictures/photo.jpg.
      */
     @Test
     fun `streaming_reconcile_aliases_canonical_arriving_pages_later`() {
@@ -441,16 +469,19 @@ class XdgLocaleAliasingTest {
         // Simulate the broken state: when page 1's slice fires under a
         // 1-page lookahead, the look-ahead page is page 2 (/Documents/...) —
         // it adds NO top-level folder name.  Pass emptySet() to model this.
+        // With no alias firing, the alias folder is created on remote and the
+        // upload carries no remoteTarget (regression sentinel).
         val brokenActionsPage1 = reconciler.resolveSlice(
             pageRemote = page1Remote,
             localChanges = localChanges,
             stableRemoteTopLevelNames = emptySet(),   // lookahead didn't reach /Pictures
         )
-        val brokenBilder = brokenActionsPage1.filter { it.path.startsWith("/Bilder") }
+        val brokenMkdir = brokenActionsPage1.filterIsInstance<SyncAction.CreateRemoteFolder>()
+        val brokenUploadTargets = brokenActionsPage1.filterIsInstance<SyncAction.Upload>().mapNotNull { it.remoteTarget }
         assertTrue(
-            brokenBilder.isNotEmpty(),
-            "Broken lookahead must emit /Bilder-prefixed actions (regression sentinel); " +
-                "got brokenActionsPage1=$brokenActionsPage1",
+            brokenMkdir.any { it.path == "/Bilder" } || brokenUploadTargets.isEmpty(),
+            "Broken lookahead must fail to adopt: either mkdir /Bilder or no canonical remoteTarget " +
+                "(regression sentinel); got brokenActionsPage1=$brokenActionsPage1",
         )
 
         // ── Part B: confirm the fix (complete pre-fetched set) PASSES ────────
@@ -480,29 +511,23 @@ class XdgLocaleAliasingTest {
 
         val allActions = actionsPage1 + actionsPage2 + actionsPage3 + actionsPage4
 
-        // (a) No /Bilder-prefixed action anywhere across all 4 slices.
-        val bilder = allActions.filter { it.path.startsWith("/Bilder") }
+        // (a) No CreateRemoteFolder for the adopted alias folder across any slice.
+        val mkdirs = allActions.filterIsInstance<SyncAction.CreateRemoteFolder>()
         assertTrue(
-            bilder.isEmpty(),
-            "No action must reference /Bilder across any of the 4 streaming slices; got: $bilder",
+            mkdirs.none { it.path == "/Bilder" || it.path.startsWith("/Bilder/") },
+            "Must NOT emit CreateRemoteFolder for the adopted alias /Bilder; got mkdirs=${mkdirs.map { it.path }}",
         )
 
-        // (b) No CreateRemoteFolder for /Bilder.
-        val mkdirs = allActions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
-        assertFalse(
-            mkdirs.any { it == "/Bilder" || it.startsWith("/Bilder") },
-            "Must NOT emit CreateRemoteFolder for the locale alias /Bilder; got mkdirs=$mkdirs",
+        // (b) The upload keeps the real-local path and carries the canonical remoteTarget.
+        val uploads = allActions.filterIsInstance<SyncAction.Upload>()
+        val photoUpload = uploads.find { it.path == "/Bilder/photo.jpg" }
+        assertNotNull(
+            photoUpload,
+            "Upload.path must stay real-local /Bilder/photo.jpg; got uploads=${uploads.map { it.path }}",
         )
-
-        // (c) The upload references the canonical path.
-        val uploads = allActions.filterIsInstance<SyncAction.Upload>().map { it.path }
-        assertTrue(
-            uploads.any { it == "/Pictures/photo.jpg" },
-            "Local /Bilder/photo.jpg must upload as /Pictures/photo.jpg; got uploads=$uploads",
-        )
-        assertFalse(
-            uploads.any { it.startsWith("/Bilder") },
-            "No upload must reference /Bilder; got uploads=$uploads",
+        assertEquals(
+            "/Pictures/photo.jpg", photoUpload.remoteTarget,
+            "Upload.remoteTarget must be the canonical /Pictures/photo.jpg across all 4 slices",
         )
     }
 
@@ -539,14 +564,17 @@ class XdgLocaleAliasingTest {
         val actions = reconciler.reconcile(remoteChanges, localChanges)
 
         val mkdirs = actions.filterIsInstance<SyncAction.CreateRemoteFolder>().map { it.path }
-        assertFalse(mkdirs.any { it.startsWith("/Bilder") || it.startsWith("/Musik") },
-            "No CreateRemoteFolder for either alias; got mkdirs=$mkdirs")
+        assertFalse(mkdirs.any { it == "/Bilder" || it == "/Musik" || it.startsWith("/Bilder/") || it.startsWith("/Musik/") },
+            "No CreateRemoteFolder for either adopted alias; got mkdirs=$mkdirs")
 
-        val uploads = actions.filterIsInstance<SyncAction.Upload>().map { it.path }
-        assertTrue(uploads.any { it == "/Pictures/photo.jpg" },
-            "photo.jpg must upload to canonical path; got uploads=$uploads")
-        assertTrue(uploads.any { it == "/Music/song.mp3" },
-            "song.mp3 must upload to canonical path; got uploads=$uploads")
+        // Uploads keep real-local paths; remoteTarget carries the canonical path.
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        val photo = uploads.find { it.path == "/Bilder/photo.jpg" }
+        assertNotNull(photo, "photo.jpg upload must keep real-local /Bilder path; got=${uploads.map { it.path }}")
+        assertEquals("/Pictures/photo.jpg", photo.remoteTarget, "photo.jpg remoteTarget must be canonical")
+        val song = uploads.find { it.path == "/Musik/song.mp3" }
+        assertNotNull(song, "song.mp3 upload must keep real-local /Musik path; got=${uploads.map { it.path }}")
+        assertEquals("/Music/song.mp3", song.remoteTarget, "song.mp3 remoteTarget must be canonical")
     }
 }
 

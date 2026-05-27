@@ -103,6 +103,22 @@ class Reconciler(
         // alive and doesn't double-process. `resurrectedPaths` tracks the
         // paths so the main loop can skip them after we've already emitted
         // (or deliberately not emitted) the right action.
+        // #115: alias context for transparent locale-alias adoption. The action
+        // `path` stays real-local everywhere; the canonical remote path is
+        // carried out-of-band via SyncAction.remoteTarget. Remote-delta keys
+        // (canonical) are reverse-mapped into the real-local namespace so they
+        // pair with the alias-named local row / on-disk folder. Built before the
+        // un-trash pre-pass so resurrected paths are already real-local-keyed
+        // and the main loop's `path in resurrectedPaths` skip matches.
+        val alias = buildAliasContext(remoteChanges)
+
+        // Reverse-map remote-delta keys (canonical) into the real-local
+        // namespace so the main loop reconciles against the alias-named local
+        // folder. Identity when no alias is active.
+        val remoteChangesLocal =
+            if (alias.isEmpty) remoteChanges
+            else remoteChanges.entries.associate { (k, v) -> alias.remoteToLocal(k) to v }
+
         val trashedByRemoteId =
             db.recovery.trashedEntries()
                 .mapNotNull { e -> e.remoteId?.let { it to e } }
@@ -110,7 +126,7 @@ class Reconciler(
         val resurrectedPaths = mutableSetOf<String>()
         val resurrectedActions = mutableListOf<SyncAction>()
         if (trashedByRemoteId.isNotEmpty()) {
-            for ((path, item) in remoteChanges) {
+            for ((path, item) in remoteChangesLocal) {
                 if (item.deleted) continue
                 trashedByRemoteId[item.id] ?: continue
                 if (!db.setStatusExists(item.id)) continue
@@ -119,7 +135,8 @@ class Reconciler(
                 // trashed row's stored path may differ in a rename-during-
                 // trash edge case; v1 is last-write-wins so the cloud path
                 // wins). Folders never need re-download — the metadata flip
-                // is enough.
+                // is enough. `path` here is real-local (reverse-mapped), so
+                // resolveLocal lands on the alias-named on-disk folder.
                 val localPath = resolveLocal(path)
                 if (!item.isFolder && !Files.isRegularFile(localPath)) {
                     resurrectedActions.add(SyncAction.DownloadContent(path, item))
@@ -141,16 +158,8 @@ class Reconciler(
         val actions = mutableListOf<SyncAction>()
         actions.addAll(resurrectedActions)
 
-        // #115: translate locale-aliased local paths to cloud-canonical paths.
-        // e.g. localChanges["/Bilder/photo.jpg"] → localChanges["/Pictures/photo.jpg"]
-        // when the cloud already holds "/Pictures" and "Bilder" is a known locale
-        // alias.  Built from remoteChanges keys so the canonical name is the actual
-        // current cloud state, not a stale snapshot.
-        val (effectiveLocalChanges, localPathFnForReconcile) =
-            buildAliasContext(remoteChanges, localChanges)
-
         val allPaths =
-            (remoteChanges.keys + effectiveLocalChanges.keys)
+            (remoteChangesLocal.keys + localChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
         val pinRules = db.getPinRules()
 
@@ -170,8 +179,8 @@ class Reconciler(
             // pre-flip) would trip the "Local only changes" branch and emit
             // an Upload for an already-synced file.
             if (path in resurrectedPaths) continue
-            val remoteItem = remoteChanges[path]
-            val localState = effectiveLocalChanges[path] ?: ChangeState.UNCHANGED
+            val remoteItem = remoteChangesLocal[path]
+            val localState = localChanges[path] ?: ChangeState.UNCHANGED
             val entry = entryByPath[path]
 
             val remoteState =
@@ -193,7 +202,7 @@ class Reconciler(
             // Skip if nothing changed on either side
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
 
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, localPathFnForReconcile)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias)
             if (action != null) actions.add(action)
             processed++
             heartbeat.tick(processed)
@@ -201,7 +210,7 @@ class Reconciler(
         reporter.onReconcileProgress(totalPaths, totalPaths)
 
         // Detect case collisions for new local files
-        for ((path, state) in effectiveLocalChanges) {
+        for ((path, state) in localChanges) {
             if (state != ChangeState.NEW) continue
             val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
@@ -220,7 +229,7 @@ class Reconciler(
         }
 
         // Detect case collisions between new local files in the same cycle
-        val newLocalPaths = effectiveLocalChanges.filterValues { it == ChangeState.NEW }.keys.toList()
+        val newLocalPaths = localChanges.filterValues { it == ChangeState.NEW }.keys.toList()
         val caseGroups = newLocalPaths.groupBy { it.lowercase() }
         for ((_, paths) in caseGroups) {
             if (paths.size > 1) {
@@ -267,11 +276,15 @@ class Reconciler(
             // clears automatically when a fresh delta event re-reports the
             // same remote_id via SyncEngine.updateRemoteEntries.
             if (entry.downloadQuarantined) continue
+            // #115: the entry's canonical remote path is `remotePath ?: path`;
+            // the delta is keyed there. The DownloadContent `path` stays real-
+            // local (entry.path) so the bytes land in the alias-named folder.
+            val effectiveRemote = entry.remotePath ?: entry.path
             val remoteItem =
-                remoteChanges[entry.path] ?: CloudItem(
+                remoteChanges[effectiveRemote] ?: CloudItem(
                     id = entry.remoteId ?: "",
                     name = entry.path.substringAfterLast('/'),
-                    path = entry.path,
+                    path = effectiveRemote,
                     size = entry.remoteSize,
                     isFolder = false,
                     modified = entry.remoteModified,
@@ -299,7 +312,9 @@ class Reconciler(
             if (!pathInSyncScope(entry.path, syncPath)) continue
             val localPath = safeResolveLocal(syncRoot, entry.path)
             if (!Files.isRegularFile(localPath)) continue
-            actions.add(SyncAction.Upload(entry.path))
+            // #115: preserve any persisted canonical remote path as remoteTarget
+            // so the retry uploads to the same canonical the row was keyed at.
+            actions.add(SyncAction.Upload(entry.path, remoteTarget = entry.remotePath))
         }
 
         // UD-901b: orphan recovery emits Upload (and DownloadContent) for files
@@ -337,13 +352,13 @@ class Reconciler(
                 }
             }
             for (ancestor in ancestorsToCreate.sortedBy { it.count { c -> c == '/' } }) {
-                actions.add(SyncAction.CreateRemoteFolder(ancestor))
+                actions.add(SyncAction.CreateRemoteFolder(ancestor, remoteTarget = aliasTarget(alias, ancestor)))
                 coveredPaths.add(ancestor)
             }
         }
 
-        detectMoves(actions, entryByPath, localPathFnForReconcile)
-        detectRemoteRenames(actions, remoteChanges, entryByRemoteId)
+        detectMoves(actions, entryByPath, alias)
+        detectRemoteRenames(actions, remoteChanges, entryByRemoteId, alias)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
         val sorted = sortActions(actions)
@@ -393,20 +408,26 @@ class Reconciler(
         val entryByPath = allDbEntries.associateBy { it.path }
         val pinRules = db.getPinRules()
 
-        // #115: same locale-alias translation as in reconcile(), but using the
-        // stable full-scan top-level set when provided by the streaming gather.
-        val (effectiveLocalChanges, localPathFnForSlice) =
-            buildAliasContext(pageRemote, localChanges, stableRemoteTopLevelNames)
+        // #115: alias context, using the stable full-scan top-level set when
+        // provided by the streaming gather. Action paths stay real-local; the
+        // canonical remote path is carried out-of-band via remoteTarget.
+        val alias = buildAliasContext(pageRemote, stableRemoteTopLevelNames)
+
+        // Reverse-map this page's remote-delta keys (canonical) into the
+        // real-local namespace so they pair with the alias-named local row.
+        val pageRemoteLocal =
+            if (alias.isEmpty) pageRemote
+            else pageRemote.entries.associate { (k, v) -> alias.remoteToLocal(k) to v }
 
         val actions = mutableListOf<SyncAction>()
         val allPaths =
-            (pageRemote.keys + effectiveLocalChanges.keys)
+            (pageRemoteLocal.keys + localChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
                 .filter { pathInSyncScope(it, syncPath) }
 
         for (path in allPaths) {
-            val remoteItem = pageRemote[path]
-            val localState = effectiveLocalChanges[path] ?: ChangeState.UNCHANGED
+            val remoteItem = pageRemoteLocal[path]
+            val localState = localChanges[path] ?: ChangeState.UNCHANGED
             val entry = entryByPath[path]
 
             val remoteState =
@@ -421,7 +442,7 @@ class Reconciler(
                 }
 
             if (remoteState == ChangeState.UNCHANGED && localState == ChangeState.UNCHANGED) continue
-            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, localPathFnForSlice)
+            val action = resolveAction(path, localState, remoteState, remoteItem, entry, pinRules, alias)
             if (action != null) actions.add(action)
         }
         return actions
@@ -456,12 +477,13 @@ class Reconciler(
         val actions = streamedActions.toMutableList()
         val coveredPaths = actions.mapTo(mutableSetOf()) { it.path }
 
-        // #115: same locale-alias translation as in reconcile() / resolveSlice().
-        val (effectiveFullLocal, localPathFnForStreaming) =
-            buildAliasContext(fullRemote, fullLocal)
+        // #115: alias context. Action paths stay real-local; the canonical
+        // remote path is carried out-of-band via remoteTarget.
+        val alias = buildAliasContext(fullRemote)
 
         // Case-collision detection on new local files — see [reconcile] for rationale.
-        for ((path, state) in effectiveFullLocal) {
+        // fullLocal is real-local-keyed; no translation needed.
+        for ((path, state) in fullLocal) {
             if (state != ChangeState.NEW) continue
             val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
@@ -478,7 +500,7 @@ class Reconciler(
             }
         }
 
-        val newLocalPaths = effectiveFullLocal.filterValues { it == ChangeState.NEW }.keys.toList()
+        val newLocalPaths = fullLocal.filterValues { it == ChangeState.NEW }.keys.toList()
         val caseGroups = newLocalPaths.groupBy { it.lowercase() }
         for ((_, paths) in caseGroups) {
             if (paths.size > 1) {
@@ -507,11 +529,14 @@ class Reconciler(
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             if (!pathInSyncScope(entry.path, syncPath)) continue
+            // #115: delta keyed at the canonical remote path; DownloadContent
+            // path stays real-local so bytes land in the alias-named folder.
+            val effectiveRemote = entry.remotePath ?: entry.path
             val remoteItem =
-                fullRemote[entry.path] ?: CloudItem(
+                fullRemote[effectiveRemote] ?: CloudItem(
                     id = entry.remoteId ?: "",
                     name = entry.path.substringAfterLast('/'),
-                    path = entry.path,
+                    path = effectiveRemote,
                     size = entry.remoteSize,
                     isFolder = false,
                     modified = entry.remoteModified,
@@ -532,7 +557,8 @@ class Reconciler(
             if (!pathInSyncScope(entry.path, syncPath)) continue
             val localPath = safeResolveLocal(syncRoot, entry.path)
             if (!Files.isRegularFile(localPath)) continue
-            actions.add(SyncAction.Upload(entry.path))
+            // #115: preserve persisted canonical remote path as remoteTarget.
+            actions.add(SyncAction.Upload(entry.path, remoteTarget = entry.remotePath))
         }
 
         // UD-901b — synthesize missing-parent CreateRemoteFolder for recovery-emitted actions.
@@ -552,31 +578,53 @@ class Reconciler(
                 }
             }
             for (ancestor in ancestorsToCreate.sortedBy { it.count { c -> c == '/' } }) {
-                actions.add(SyncAction.CreateRemoteFolder(ancestor))
+                actions.add(SyncAction.CreateRemoteFolder(ancestor, remoteTarget = aliasTarget(alias, ancestor)))
                 coveredPaths.add(ancestor)
             }
         }
 
         // Cross-page move detection runs here on the combined action set —
         // per-page detection would miss renames that span page boundaries.
-        detectMoves(actions, entryByPath, localPathFnForStreaming)
-        detectRemoteRenames(actions, fullRemote, entryByRemoteId)
+        detectMoves(actions, entryByPath, alias)
+        detectRemoteRenames(actions, fullRemote, entryByRemoteId, alias)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
         return sortActions(actions)
     }
 
-    // #115: shared alias-context builder — called from reconcile(), resolveSlice(),
-    // and finalizeStreaming(). Extracted to eliminate 3 structurally-identical
-    // ~35-line blocks (I1 code-review finding).
+    // #115: alias-context for transparent locale-alias adoption.
+    //
+    // The action `path` is ALWAYS the real local sync_root-relative path
+    // (LocalScanner keys/scans there); a separate canonical REMOTE path is
+    // carried out-of-band (SyncEntry.remotePath / SyncAction.remoteTarget).
+    // This context provides the two translators that bridge the two
+    // namespaces without ever rewriting `path`:
+    //
+    //  - [localToRemote] maps a real-local path to its canonical remote path
+    //    (top-level alias substitution, e.g. /Bilder/x → /Pictures/x). Used to
+    //    populate remoteTarget on Upload / CreateRemoteFolder / MoveRemote and
+    //    to compute a row's effective remote path. Identity when no alias.
+    //
+    //  - [remoteToLocal] maps a canonical remote path back to the real-local
+    //    path (e.g. /Pictures/x → /Bilder/x) so a remote delta reported at the
+    //    canonical key is reconciled against the alias-named local folder and
+    //    LOCAL ops (Download / placeholder / delete-local) write to the right
+    //    on-disk location. The reverse top-level is resolved against the
+    //    on-disk folder so a host with /Bilder (not /Pictures) maps the
+    //    canonical /Pictures back to /Bilder; absent any matching local alias
+    //    folder it is identity (download into a canonical-named folder).
     private data class AliasContext(
-        val effectiveLocal: Map<String, ChangeState>,
-        val localPathFn: (String) -> java.nio.file.Path,
-    )
+        val isEmpty: Boolean,
+        val localToRemote: (String) -> String,
+        val remoteToLocal: (String) -> String,
+    ) {
+        companion object {
+            val IDENTITY = AliasContext(isEmpty = true, localToRemote = { it }, remoteToLocal = { it })
+        }
+    }
 
     private fun buildAliasContext(
         remoteTopLevelMap: Map<String, CloudItem>,
-        rawLocal: Map<String, ChangeState>,
         // #115 streaming fix: when non-null, use this pre-computed stable set of
         // top-level remote folder names instead of deriving it from remoteTopLevelMap.
         // This lets resolveSlice() alias against the FULL set of canonical names known
@@ -594,37 +642,55 @@ class Reconciler(
             remoteTopLevelNames = topLevelNames,
             userDirsOverrides = xdgUserDirsOverrides,
         )
-        val effectiveLocal =
-            if (xdgAliases.isEmpty) rawLocal
-            else rawLocal.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
+        if (xdgAliases.isEmpty) return AliasContext.IDENTITY
 
-        val reverseAliasTopLevel: Map<String, String> =
-            if (xdgAliases.isEmpty) emptyMap()
-            else {
-                val rev = HashMap<String, String>()
-                for (origPath in rawLocal.keys) {
-                    val origTop = origPath.removePrefix("/").substringBefore('/')
-                    val canonical = xdgAliases.canonicalFor(origTop)
-                    if (canonical != null) rev[canonical] = origTop
-                }
-                rev
+        // Reverse top-level map (canonical → local alias). Built from the
+        // local→canonical mapping, but only for alias folders that ACTUALLY
+        // exist on disk under the sync root — that's the local folder the
+        // canonical remote tree must reconcile against. Multiple locale
+        // variants can share a canonical; the on-disk check disambiguates.
+        val reverseTopLevel = HashMap<String, String>()
+        for ((localTop, canonical) in xdgAliases.localToCanonicalMap()) {
+            if (canonical in reverseTopLevel.values) continue // first on-disk wins
+            if (Files.isDirectory(safeResolveLocal(syncRoot, "/$localTop"))) {
+                reverseTopLevel[canonical] = localTop
             }
-        val localPathFn: (String) -> java.nio.file.Path =
-            if (xdgAliases.isEmpty) ::resolveLocal
-            else { canonicalPath ->
-                val noSlash = canonicalPath.removePrefix("/")
-                val slash = noSlash.indexOf('/')
-                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
-                val originalTop = reverseAliasTopLevel[top]
-                if (originalTop != null) {
-                    val rest = if (slash < 0) "" else noSlash.substring(slash)
-                    safeResolveLocal(syncRoot, "/$originalTop$rest")
-                } else {
-                    resolveLocal(canonicalPath)
-                }
-            }
-        return AliasContext(effectiveLocal, localPathFn)
+        }
+
+        fun substituteTop(path: String, newTop: String): String {
+            val noSlash = path.removePrefix("/")
+            val slash = noSlash.indexOf('/')
+            val rest = if (slash < 0) "" else noSlash.substring(slash)
+            return "/$newTop$rest"
+        }
+
+        val localToRemote: (String) -> String = { path -> xdgAliases.translatePath(path) }
+        val remoteToLocal: (String) -> String = { path ->
+            val noSlash = path.removePrefix("/")
+            val slash = noSlash.indexOf('/')
+            val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+            val localTop = reverseTopLevel[top]
+            if (localTop != null) substituteTop(path, localTop) else path
+        }
+        return AliasContext(isEmpty = false, localToRemote = localToRemote, remoteToLocal = remoteToLocal)
     }
+
+    // #115: canonical remote path for [path] under the current alias context,
+    // or null when it equals [path] (non-aliased → remoteTarget left null so
+    // behaviour is byte-identical to today).
+    private fun aliasTarget(
+        alias: AliasContext,
+        path: String,
+    ): String? {
+        if (alias.isEmpty) return null
+        val remote = alias.localToRemote(path)
+        return if (remote != path) remote else null
+    }
+
+    // #115: a top-level alias folder (e.g. /Bilder) is a single path component.
+    // Only the alias folder ITSELF is adopted (suppress CreateRemoteFolder);
+    // genuine subfolders under it still get created on remote (under canonical).
+    private fun isTopLevelAliasFolder(path: String): Boolean = path.removePrefix("/").count { it == '/' } == 0
 
     private fun resolveAction(
         path: String,
@@ -633,13 +699,10 @@ class Reconciler(
         remoteItem: CloudItem?,
         entry: SyncEntry?,
         pinRules: List<Pair<String, Boolean>>,
-        // #115: resolves a sync-path to the actual local filesystem path.
-        // Defaults to the identity resolver (path → syncRoot/path).  When
-        // XDG alias translation is active, the caller passes an alias-aware
-        // resolver that maps the canonical path back to its real local name
-        // (e.g. "/Pictures" → syncRoot/Bilder) so isDirectory / size checks
-        // work even though the local folder has the locale name.
-        localPathFn: (String) -> java.nio.file.Path = ::resolveLocal,
+        // #115: alias context. `path` is ALWAYS the real-local path; LOCAL ops
+        // resolve it directly via resolveLocal, REMOTE-write actions carry the
+        // canonical remote path out-of-band via remoteTarget.
+        alias: AliasContext = AliasContext.IDENTITY,
     ): SyncAction? =
         when {
             // Both deleted
@@ -648,7 +711,7 @@ class Reconciler(
 
             // Both new
             localState == ChangeState.NEW && remoteState == ChangeState.NEW -> {
-                val localPath = localPathFn(path)
+                val localPath = resolveLocal(path)
                 when {
                     // Both created a folder — merge, no conflict
                     remoteItem != null && remoteItem.isFolder && Files.isDirectory(localPath) ->
@@ -699,18 +762,28 @@ class Reconciler(
 
             // Local only changes
             localState == ChangeState.NEW && remoteState == ChangeState.UNCHANGED -> {
-                val local = localPathFn(path)
+                val local = resolveLocal(path)
                 if (Files.isDirectory(local)) {
-                    SyncAction.CreateRemoteFolder(path)
+                    // #115: an XDG alias top-level folder whose canonical already
+                    // exists on remote is ADOPTED — its remoteTarget resolves to
+                    // the canonical, which already exists, so no CreateRemoteFolder
+                    // is needed for the alias folder itself. Suppress it. Sub-paths
+                    // under an alias still create their (non-aliased) subfolders.
+                    val target = aliasTarget(alias, path)
+                    if (target != null && isTopLevelAliasFolder(path)) {
+                        null
+                    } else {
+                        SyncAction.CreateRemoteFolder(path, remoteTarget = target)
+                    }
                 } else {
-                    SyncAction.Upload(path)
+                    SyncAction.Upload(path, remoteTarget = aliasTarget(alias, path))
                 }
             }
             localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED ->
                 // UD-366: pass the existing remote UUID so the provider can route through
                 // PUT /files/{uuid} (replace-in-place) rather than POSTing a duplicate that
                 // 409s on Internxt.
-                SyncAction.Upload(path, remoteId = entry?.remoteId)
+                SyncAction.Upload(path, remoteId = entry?.remoteId, remoteTarget = aliasTarget(alias, path))
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
                 when {
                     // UD-901: a pending-upload row (entry.remoteId == null) that vanished
@@ -848,7 +921,10 @@ class Reconciler(
     private fun detectMoves(
         actions: MutableList<SyncAction>,
         entryByPath: Map<String, SyncEntry>,
-        localPathFn: (String) -> java.nio.file.Path = ::resolveLocal,
+        // #115: alias context. All action paths are real-local; the MoveRemote
+        // this emits carries the canonical remote source (fromPath = the source
+        // row's effective remote path) and canonical destination (remoteTarget).
+        alias: AliasContext = AliasContext.IDENTITY,
     ) {
         val deletes = actions.filterIsInstance<SyncAction.DeleteRemote>()
         if (deletes.isEmpty()) return
@@ -915,8 +991,13 @@ class Reconciler(
             actions.add(
                 SyncAction.MoveRemote(
                     path = create.path,
+                    // #115: fromPath stays real-local (the source row's path) so
+                    // the executor's DB ops + resolveLocal work; the canonical
+                    // remote source is derived in the executor from the source
+                    // row. remoteTarget carries the canonical destination.
                     fromPath = del.path,
                     remoteId = entry.remoteId!!,
+                    remoteTarget = aliasTarget(alias, create.path),
                 ),
             )
             // Remove the folder delete and create
@@ -954,7 +1035,8 @@ class Reconciler(
         val uploadsBySize: Map<Long, List<SyncAction.Upload>> =
             uploads
                 .mapNotNull { up ->
-                    val info = localFsProbe(localPathFn(up.path)) ?: return@mapNotNull null
+                    // #115: up.path is real-local; probe it directly.
+                    val info = localFsProbe(resolveLocal(up.path)) ?: return@mapNotNull null
                     up to info.size
                 }.groupBy({ it.second }, { it.first })
 
@@ -972,8 +1054,12 @@ class Reconciler(
             actions.add(
                 SyncAction.MoveRemote(
                     path = candidate.path,
+                    // #115: fromPath stays real-local; canonical remote source is
+                    // derived in the executor from the source row. remoteTarget
+                    // carries the canonical destination.
                     fromPath = del.path,
                     remoteId = entry.remoteId,
+                    remoteTarget = aliasTarget(alias, candidate.path),
                 ),
             )
             matchedUploads.add(candidate.path)
@@ -984,6 +1070,15 @@ class Reconciler(
         actions: MutableList<SyncAction>,
         remoteChanges: Map<String, CloudItem>,
         entryByRemoteId: Map<String, SyncEntry>,
+        // #115: alias context. Candidate action paths are real-local; the remote
+        // delta is canonical-keyed. We look the delta up by the candidate's
+        // canonical path and compare the matched row's EFFECTIVE remote path
+        // (remotePath ?: path) against the delta path — NOT against candidate.path.
+        // This defeats single-path failure mode 2: an uploaded-to-canonical row
+        // whose local path is the alias name (e.g. /Bilder/x.jpg ↔ /Pictures/x.jpg)
+        // is NOT mistaken for a rename, so no spurious MoveLocal physically moves
+        // the file out of the locale-named folder.
+        alias: AliasContext = AliasContext.IDENTITY,
     ) {
         // UD-222: renames of remote non-folders now arrive as DownloadContent (not
         // CreatePlaceholder) because hydration moved to Pass 2. Scan both action types.
@@ -994,9 +1089,15 @@ class Reconciler(
         if (candidates.isEmpty()) return
 
         for (candidate in candidates) {
-            val remoteItem = remoteChanges[candidate.path] ?: continue
+            // The remote delta key is canonical; the candidate path is real-local.
+            val canonicalPath = if (alias.isEmpty) candidate.path else alias.localToRemote(candidate.path)
+            val remoteItem = remoteChanges[canonicalPath] ?: continue
             val oldEntry = entryByRemoteId[remoteItem.id] ?: continue
-            if (oldEntry.path == candidate.path) continue
+            // Compare against the row's EFFECTIVE remote path so an aliased row
+            // already living at this canonical path is treated as UNCHANGED, not
+            // a rename. `remoteItem.path` is the canonical delta path.
+            val oldEffectiveRemote = oldEntry.remotePath ?: oldEntry.path
+            if (oldEffectiveRemote == remoteItem.path) continue
 
             actions.remove(candidate)
             actions.removeAll { it is SyncAction.DeleteLocal && it.path == oldEntry.path }
@@ -1009,6 +1110,7 @@ class Reconciler(
             }
             actions.add(
                 SyncAction.MoveLocal(
+                    // candidate.path is real-local — the local move destination.
                     path = candidate.path,
                     fromPath = oldEntry.path,
                     remoteItem = remoteItem,

@@ -141,6 +141,17 @@ class XdgLocaleDirAliases private constructor(
      */
     fun canonicalFor(localName: String): String? = localToCanonical[localName]
 
+    /**
+     * #115: the full `localAliasName → cloudCanonicalName` mapping. Used by
+     * the reconciler to build the reverse (canonical → local alias) lookup so
+     * a remote delta reported at the canonical path (`/Pictures/...`) can be
+     * mapped back to the real local folder (`/Bilder/...`) for the local
+     * filesystem op. The reconciler resolves multi-alias collisions against
+     * the on-disk folder, so this exposes every locale variant, not a
+     * pre-resolved single choice.
+     */
+    fun localToCanonicalMap(): Map<String, String> = localToCanonical
+
     /** True when this instance has no mappings (fast-path no-op). */
     val isEmpty: Boolean get() = localToCanonical.isEmpty()
 
