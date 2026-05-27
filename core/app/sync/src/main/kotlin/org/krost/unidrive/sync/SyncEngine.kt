@@ -168,12 +168,10 @@ open class SyncEngine(
     // path is reaped once the window lapses and the map can't grow unbounded.
     private val recentlyUploaded = java.util.concurrent.ConcurrentHashMap<String, Instant>()
 
-    /** Record that the engine just uploaded [path]; starts its reap-grace window. */
     private fun markRecentlyUploaded(path: String) {
         recentlyUploaded[path] = Instant.now()
     }
 
-    /** Drop recently-uploaded marks older than the grace window. */
     private fun pruneRecentlyUploaded() {
         val cutoff = Instant.now().minus(RECENT_UPLOAD_REAP_GRACE)
         recentlyUploaded.entries.removeIf { it.value.isBefore(cutoff) }
@@ -223,7 +221,6 @@ open class SyncEngine(
         }
     }
 
-    /** Suppress watcher events for [path] during [block], then unsuppress. */
     private inline fun <T> withEchoSuppression(
         path: String,
         block: () -> T,
@@ -235,8 +232,6 @@ open class SyncEngine(
             echoUnsuppress?.invoke(path)
         }
     }
-
-    // ── Hydration SPI — public hooks for app:hydration ───────────────────────
 
     /**
      * Hydrate a single remote path into the local hydration cache. Idempotent —
@@ -294,12 +289,6 @@ open class SyncEngine(
         return cachePath
     }
 
-    /**
-     * Upload the local cache file at [cachePath] as the content for remote
-     * [path]. Used by the hydration write-through path when a FUSE RELEASE
-     * indicates the cache content changed. Updates the DB row with the new
-     * remote metadata (id, hash, size, mtime).
-     */
     private fun isExcluded(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
 
@@ -418,8 +407,6 @@ open class SyncEngine(
             .resolve(cacheKey.ifBlank { "default" })
             .resolve(path.trimStart('/'))
     }
-
-    // ── End Hydration SPI ─────────────────────────────────────────────────────
 
     /**
      * Create a folder on the remote provider and record it in state.db.
@@ -813,11 +800,9 @@ open class SyncEngine(
             }
         }
 
-        // Auto-purge expired trash entries
         trashManager?.purge(trashRetentionDays)
         versionManager?.pruneByAge(versionRetentionDays)
 
-        // Phase 1: Gather changes
         // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
         // for each phase to the reporter so the heartbeat can render a
         // bucketed ETA. First-run / `--reset` scans simply have no key in
@@ -1004,7 +989,7 @@ open class SyncEngine(
             }
         }
 
-        // Phase 2: Reconcile (UD-240g: pass reporter so the phase emits a
+        // UD-240g: pass reporter so the phase emits a
         // heartbeat instead of going silent for many seconds on big first-syncs;
         // UD-901a: pass syncPath so the recovery loops respect scope and don't
         // resurrect orphans outside the user's requested subtree).
@@ -1022,7 +1007,6 @@ open class SyncEngine(
             }
         logUnhydratedFolderSkips()
 
-        // Persist remote metadata for reuse in subsequent runs (UD-260)
         db.batch {
             updateRemoteEntries(allRemoteChanges)
         }
@@ -1046,7 +1030,6 @@ open class SyncEngine(
                 applyTopLevelHydrationGuard(reconciledActions)
             }
 
-        // Phase 2a: Direction filter
         val actions =
             when (syncDirection) {
                 SyncDirection.UPLOAD ->
@@ -1102,8 +1085,6 @@ open class SyncEngine(
             return
         }
 
-        // Phase 2b: Deletion safeguards.
-        //
         // UD-298: legacy whole-inventory percentage check. Still in place for
         // back-compat — preserves the same threshold name and behaviour that
         // operators have come to rely on. Evaluates in dry-run as a warning
@@ -1207,7 +1188,6 @@ open class SyncEngine(
             return
         }
 
-        // Phase 3: Apply
         // perProviderConcurrency + transferSemaphore are now declared at
         // the top of doSyncOnce so the streaming-gather executor and Pass 2
         // share one concurrency budget. The per-provider audit values
@@ -1226,10 +1206,7 @@ open class SyncEngine(
         // below for the headline `failed` count in onSyncComplete.
         val passOneFailures = AtomicInteger(0)
 
-        // Pass 1: sequential actions (placeholder ops, deletes, moves, conflicts, remote folder creates)
         // Batched into one SQLite transaction — avoids one fsync per action.
-        // Pass 1 is user-driven: every action here is either a mkdir, move,
-        // delete, or rename triggered by a local edit observed in this run.
         // Wrap in Priority.Foreground so the provider's throttle coordinator
         // gates the corresponding Drive REST calls in the foreground lane and
         // any concurrent background scan traffic yields.
@@ -1356,7 +1333,6 @@ open class SyncEngine(
             return
         }
 
-        // Pass 2: concurrent transfers (downloads and uploads)
         // UD-222: Pass 2 now carries all hydration for new/modified remote files. Failures are
         // tracked so we (a) rethrow AuthenticationException after the scope exits cleanly, and
         // (b) skip cursor promotion when any transfer failed — otherwise Graph's delta would
@@ -1736,34 +1712,6 @@ open class SyncEngine(
         changes
     }
 
-    /**
-     * Streaming-reconciliation gather. Mirrors [gatherRemoteChanges] but
-     * runs [Reconciler.resolveSlice] on each page as it lands, routing
-     * the verdict through [StreamingReconcileBuffer] to split safe-now
-     * from deferred. Returns the accumulated remote map (kept for
-     * downstream `updateRemoteEntries` + scope-filter consumers) plus
-     * the combined safe-now-followed-by-deferred action list — the
-     * engine's [Reconciler.finalizeStreaming] sees the union, runs the
-     * recovery loops, and produces the final sort.
-     *
-     * Page-by-page state-machine flip on [scan_staging]: after a page's
-     * safe-now actions are buffered (NOT yet executed — the channel +
-     * executor coroutine wiring lands separately), the staged rows for
-     * that page flip from STAGED to RECONCILED so a daemon restart
-     * resuming the scan skips them in the per-page reconciler slice.
-     * The deferred bucket is NOT persisted — re-derive at scan-end from
-     * the final action sweep per spec §5 decision 2.
-     */
-    /**
-     * Per-page streaming dispatch helper for downloads. Mirrors Pass 2's
-     * dispatch shape one-for-one (foreground priority, shared semaphore,
-     * restore-to-placeholder on failure, shared counters) so a streamed
-     * transfer is indistinguishable from a Pass 2 dispatch in terms of
-     * side effects. `gatherScope` is the outer `coroutineScope` in
-     * `gatherStreamingChanges`; cancelling it propagates an auth failure
-     * to the consumer + producer the same way `this@coroutineScope.cancel()`
-     * does in Pass 2.
-     */
     private suspend fun dispatchStreamingDownload(
         action: SyncAction.DownloadContent,
         downloaded: AtomicInteger,
@@ -1820,7 +1768,6 @@ open class SyncEngine(
         }
     }
 
-    /** Companion to [dispatchStreamingDownload]; same shape, no placeholder restore. */
     private suspend fun dispatchStreamingUpload(
         action: SyncAction.Upload,
         uploaded: AtomicInteger,
@@ -2254,30 +2201,6 @@ open class SyncEngine(
         changes to (safeAccumulator + deferred)
     }
 
-    /**
-     * Promote `pending_cursor` to `delta_cursor` unconditionally — even when
-     * the gather pass returned `complete=false`. Providers compute
-     * `pending_cursor` as `max(updatedAt) seen across completed pages`, so
-     * advancing here is always safe relative to what the next sync needs to
-     * re-query: items in the skipped subtree are still found on their next
-     * mutation (Internxt's `updatedAt` filter is tombstone-aware) or via the
-     * user-facing `--reset` escape hatch. The alternative — pinning the
-     * cursor at its prior value — forced a full re-scan from the prior
-     * cursor on every launch whenever any subtree 503'd, which on a hot
-     * account is intolerable.
-     *
-     * Correctness trade: items modified in the skipped subtree between the
-     * advanced cursor and the moment the skip happened, that didn't change
-     * again afterward, will be missed until they next mutate. No worse than
-     * today's behavior, which already misses the same items AND re-fetches
-     * everything else. The `pending_cursor_complete=false` flag is still
-     * recorded so the doctor surface can warn the user to `--reset` if the
-     * skipped subtree matters.
-     *
-     * `last_full_scan` is only stamped when the sweep was complete — it's
-     * the bookkeeping signal for "we successfully enumerated the entire
-     * tree", which a partial sweep does not satisfy.
-     */
     private fun promotePendingCursor() {
         val pendingCursor = db.getSyncState("pending_cursor") ?: return
         db.setSyncState("delta_cursor", pendingCursor)
@@ -2287,11 +2210,6 @@ open class SyncEngine(
         }
     }
 
-    /**
-     * Deleted items from OneDrive personal have no name/parentReference.path,
-     * so toCloudItem() produces path="/". Recover the real path from the DB by remoteId.
-     * Returns null for items that should be skipped (drive root, unknown deleted items).
-     */
     private fun resolveItemPath(item: CloudItem): CloudItem? {
         if (item.path != "/" && item.path.isNotEmpty()) return item
         if (!item.deleted) return null // non-deleted root item, skip
@@ -2300,22 +2218,6 @@ open class SyncEngine(
         return item.copy(path = entry.path, name = entry.path.substringAfterLast("/"))
     }
 
-    /**
-     * After a full delta (cursor was null), the response contains ALL items in the drive.
-     * Any DB entry whose remoteId is NOT in the full set must have been deleted.
-     * This is a pure set comparison — zero extra API calls.
-     *
-     * One exception: a path the engine itself uploaded within
-     * [RECENT_UPLOAD_REAP_GRACE] is NOT marked deleted on its absence. Cloud delta
-     * feeds are eventually consistent, so a just-uploaded item can legitimately be
-     * missing from the very next full enumeration. Reaping it there queued a deletion
-     * the next cycle re-detected and re-uploaded — steady-state churn. The guard keys
-     * off [recentlyUploaded] (stamped at upload time), so it protects ONLY paths the
-     * engine itself pushed; a remote-observed or freshly-downloaded path is never
-     * protected, so a genuinely-deleted remote item still reaps. The grace window only
-     * defers the verdict: once it lapses the path's mark is dropped and a later
-     * enumeration reaps it if it is still absent.
-     */
     private fun detectMissingAfterFullSync(remoteChanges: MutableMap<String, CloudItem>) {
         val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
         pruneRecentlyUploaded()
@@ -2427,32 +2329,6 @@ open class SyncEngine(
         db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
     }
 
-    /**
-     * UD-225b: prefer id-based download dispatch when the action's CloudItem
-     * carries a remoteId. Path-based `provider.download(remotePath, dest)`
-     * forces providers like Internxt to walk the folder tree segment-by-
-     * segment via `getFolderContents` (`InternxtProvider.resolveFolder`),
-     * which is wasteful (one round-trip per path component) and fragile
-     * (any segment that fails sanitization or hits a transient 503 fails
-     * the whole download with `Folder not found: <segment>`). Live impact
-     * 2026-05-03 on the UD-225a recovery sync: ~44 % of 1,426 files failed
-     * with that error before this fix.
-     *
-     * The `CloudProvider.downloadById` default delegates to path-based
-     * `download` for providers that don't override, so the change is safe
-     * across the SPI: providers with a real id-based path (Internxt's
-     * Bridge fileUuid lookup, OneDrive Graph item-id GET) take it; others
-     * keep existing semantics.
-     *
-     * Empty `item.id` falls through to path-based download — defensive for
-     * synthesized CloudItems where `entry.remoteId` was null.
-     */
-    /**
-     * Visibility relaxed to `internal` so [ensureHydrated] (the app:hydration
-     * integration point) can download directly to the hydration cache path
-     * rather than the syncRoot placeholder path. No other cross-module callers
-     * are intended.
-     */
     internal suspend fun downloadByIdOrPath(
         item: CloudItem,
         remotePath: String,
@@ -2774,13 +2650,6 @@ open class SyncEngine(
         )
     }
 
-    /**
-     * Two flavours, distinguished by the alive row's `remoteId`:
-     *  - pending-upload row that vanished before reaching the cloud
-     *    (`remoteId == null`) → hard delete (nothing to tombstone).
-     *  - real cloud row that's already gone on the remote side
-     *    (`remoteId != null`, "both deleted" cascade) → flip to TRASHED.
-     */
     private fun applyRemoveEntry(action: SyncAction.RemoveEntry) {
         val entry = db.getEntry(action.path)
         val remoteId = entry?.remoteId
@@ -2985,13 +2854,6 @@ open class SyncEngine(
         lastSynced = Instant.now(),
     )
 
-    /**
-     * #115: canonical-top → real-local-top map (e.g. "Pictures" → "Bilder"),
-     * restricted to alias folders that ACTUALLY exist on disk under the sync
-     * root. Mirrors Reconciler.buildAliasContext's reverse-map so
-     * [updateRemoteEntries] keys newly-arrived aliased rows at the same
-     * real-local path the reconciler/executor use. Empty when no alias applies.
-     */
     private fun buildCanonicalToLocalTopMap(remoteChanges: Map<String, CloudItem>): Map<String, String> {
         val topLevelNames = remoteChanges.keys
             .filter { it.count { c -> c == '/' } == 1 && !remoteChanges[it]!!.deleted }
@@ -3010,7 +2872,6 @@ open class SyncEngine(
         return rev
     }
 
-    /** #115: substitute the canonical top-level component with its real-local alias. */
     private fun applyReverseTop(path: String, canonicalToLocalTop: Map<String, String>): String {
         if (canonicalToLocalTop.isEmpty()) return path
         val noSlash = path.removePrefix("/")
@@ -3234,16 +3095,6 @@ open class SyncEngine(
         return kept
     }
 
-    /**
-     * Permanent-download-failure handler. The provider has signalled that
-     * the remote object is gone (stable 404), so we mark the row's
-     * `download_quarantined` flag and stop retrying — without this, the
-     * UD-225 recovery loop re-emits a DownloadContent on every pass and
-     * the engine burns cycles forever (live evidence: 1,248 retries of a
-     * single zero-byte file over 8 hours). The flag clears automatically
-     * when a fresh delta event re-reports the same remote_id via
-     * [updateRemoteEntries] → [StateDatabase.clearDownloadQuarantine].
-     */
     private fun handlePermanentDownloadFailure(
         action: SyncAction.DownloadContent,
         e: PermanentDownloadFailureException,
@@ -3263,16 +3114,6 @@ open class SyncEngine(
         }
     }
 
-    /**
-     * Audit-log surface for `DeleteRemote` actions that the reconciler
-     * dropped because the target was an unhydrated folder row. The
-     * Reconciler strips those actions for safety (see
-     * `Reconciler.dropUnhydratedFolderDeletes`); the engine reads the
-     * dropped paths from `reconciler.lastUnhydratedFolderDeletes` and
-     * writes them to `skipped-ops.jsonl` so operators can see what was
-     * suppressed, matching the audit shape UD-264 uses for the
-     * top-level-never-hydrated guard.
-     */
     private fun logUnhydratedFolderSkips() {
         val skipped = reconciler.lastUnhydratedFolderDeletes
         if (skipped.isEmpty()) return
@@ -3364,13 +3205,6 @@ open class SyncEngine(
     }
 
     companion object {
-        /**
-         * UD-248: catastrophic-failure threshold for the sequential-action
-         * pass. Below this count, failing actions are skipped and the pass
-         * continues (no more 3-in-a-row-equals-tear-down-and-rescan
-         * behaviour). Above this count, we treat the run as an upstream
-         * outage and stop the pass so the watch loop can back off.
-         */
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
 
         // Bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2):
@@ -3379,64 +3213,15 @@ open class SyncEngine(
         const val BULK_REAP_ABSOLUTE: Int = 50
         const val BULK_REAP_FRACTION: Double = 0.20
 
-        /**
-         * Grace window protecting a just-uploaded path from the absence-implies-deletion
-         * sweep. Cloud delta feeds are eventually consistent: a path the engine itself
-         * uploaded a moment ago is not yet guaranteed to appear in the next full
-         * enumeration. Reaping it on that absence queues a deletion that the next cycle
-         * re-detects and re-uploads — steady-state churn. A path whose recorded upload
-         * instant falls inside this window is skipped by the sweep; once the window
-         * lapses the mark is pruned and the path reaps normally if still absent (the
-         * guard narrows the sweep, it does not disable genuine deletes). Sized to cover
-         * observed Graph delta propagation lag with margin while staying far below a
-         * normal poll cadence, so a real delete is never masked beyond one short window.
-         */
         @JvmField
         val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)
 
-        /**
-         * Age at which a resumable-scan checkpoint is considered stale and
-         * discarded. Internxt's `updatedAt` cursor filter is a low-resolution
-         * "what changed since X" query, so a six-hour gap is the rough
-         * upstream change-detection window — past that, items that mutated
-         * after the prior scan's cursor were captured then would silently
-         * vanish from a resume. Default matches the BACKLOG entry; not
-         * currently user-configurable.
-         */
         const val SCAN_CHECKPOINT_STALE_HOURS: Long = 6L
 
-        /**
-         * Quiet-window for the remote-change wake debounce. A burst of 50
-         * notification frames from a single folder-tree mutation should
-         * trigger ONE delta walk, not 50. The window has to be long enough
-         * to swallow a burst but short enough that the latency-vs-batch
-         * trade-off still favours latency (the whole point of the WS feed
-         * vs the multi-minute poll cadence). 5 s is the spec's lower
-         * bound; pick it.
-         */
         const val REMOTE_WAKE_DEBOUNCE_MS: Long = 5_000L
 
-        /**
-         * Streaming reconciliation: bounded-channel capacity between the
-         * page-fetch producer and the per-page reconciler consumer
-         * (spec §4 decision 2). Picked to match the per-provider transfer
-         * concurrency floor — when the consumer can't keep up, the
-         * producer's `send()` suspends, suspending `nextPage()` and
-         * back-pressuring the provider's internal speculative fetch
-         * through coroutineScope semantics. Peak memory in the streaming
-         * gather is bounded by this × page-size irrespective of total
-         * drive size.
-         */
         const val STREAMING_RECONCILE_CHANNEL_CAPACITY: Int = 4
 
-        /**
-         * UD-264 / PR #46 Codex P2: format a `skipped-ops.jsonl` row using
-         * kotlinx.serialization.json so the output is always valid JSONL
-         * regardless of what the path / reason / action label contains.
-         * Public for unit-testing with paths that the OS would reject at the
-         * filesystem layer (`"`, `\`, newline — all banned on Windows but
-         * legal on Linux/cloud).
-         */
         internal fun formatSkippedOpJson(
             action: String,
             path: String,

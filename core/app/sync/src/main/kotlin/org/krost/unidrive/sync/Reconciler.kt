@@ -44,15 +44,6 @@ class Reconciler(
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
-    /**
-     * DeleteRemote actions that the last [reconcile] / [finalizeStreaming]
-     * call dropped because the target row is an unhydrated folder
-     * placeholder. The engine reads this after each reconcile pass and
-     * writes the entries to `skipped-ops.jsonl` for operator audit (same
-     * channel the UD-264 top-level-never-hydrated guard uses). Reset at
-     * the start of each reconcile call. Mirrors [LocalScanner.lastScanSkipped]
-     * in shape.
-     */
     var lastUnhydratedFolderDeletes: List<String> = emptyList()
         private set
 
@@ -209,12 +200,10 @@ class Reconciler(
         }
         reporter.onReconcileProgress(totalPaths, totalPaths)
 
-        // Detect case collisions for new local files
         for ((path, state) in localChanges) {
             if (state != ChangeState.NEW) continue
             val existing = entryByLcPath[path.lowercase(Locale.ROOT)]
             if (existing != null && existing.path != path) {
-                // Remove any previously generated Upload action for this path
                 actions.removeAll { it.path == path && it is SyncAction.Upload }
                 actions.add(
                     SyncAction.Conflict(
@@ -228,7 +217,6 @@ class Reconciler(
             }
         }
 
-        // Detect case collisions between new local files in the same cycle
         val newLocalPaths = localChanges.filterValues { it == ChangeState.NEW }.keys.toList()
         val caseGroups = newLocalPaths.groupBy { it.lowercase() }
         for ((_, paths) in caseGroups) {
@@ -876,26 +864,6 @@ class Reconciler(
         return defaultPolicy
     }
 
-    /**
-     * Drops surviving `DeleteRemote` actions whose DB row is an unhydrated
-     * folder. An unhydrated folder row is a planned-but-unfulfilled
-     * placeholder — the remote folder was enumerated into `state.db` but
-     * the user never visited it, so it never materialised on disk. A
-     * missing-from-disk signal for such a row is the EXPECTED state, not
-     * a user delete; propagating it as `DeleteRemote` would plan deletion
-     * of every cloud folder the user never visited on a sparse-hydration
-     * profile.
-     *
-     * Runs AFTER [detectMoves] so that legitimate folder moves — where
-     * `DeleteRemote(source)` + `CreateRemoteFolder(destination)` pair into
-     * `MoveRemote` — are still detected even when the source row is
-     * unhydrated. Only DeleteRemote actions that survive move-detection
-     * (no matching CreateRemoteFolder destination) are dropped here.
-     *
-     * Returns the paths that were dropped so the engine can write them to
-     * `skipped-ops.jsonl` for operator audit (same channel UD-264's guard
-     * uses for top-level-never-hydrated drops).
-     */
     private fun dropUnhydratedFolderDeletes(
         actions: MutableList<SyncAction>,
         entryByPath: Map<String, SyncEntry>,

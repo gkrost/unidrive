@@ -734,18 +734,6 @@ open class SyncCommand : Runnable {
         }
     }
 
-    /**
-     * Ensures a valid webhook subscription exists for the given profile.
-     * - If a stored subscription is still valid (>1h from expiry), reuses it.
-     * - If it expires within 24h, attempts renewal.
-     * - If expired, missing, or renewal fails, creates a new subscription.
-     *
-     * UD-303: when [scheduler] is non-null and it already has a live job for
-     * this profile AND the persisted subscription still has >24h remaining,
-     * short-circuit — no Graph call, no store read beyond what the scheduler
-     * already did. The scheduler will fire its own `renew` callback (which
-     * calls back into this method with `scheduler = null`) at (expiry − 24h).
-     */
     private suspend fun ensureSubscription(
         rawProvider: CloudProvider,
         store: SubscriptionStore,
@@ -912,62 +900,17 @@ open class SyncCommand : Runnable {
     }
 
     companion object {
-        /**
-         * Threshold for "the server-pushed change feed is alive."
-         *
-         * The poll loop stamps `lastRemoteWakeMs` on every debounced wake
-         * hint (Internxt notifications WS fires one on EVENT_CONNECT plus
-         * one per remote-origin frame). When the most recent stamp is
-         * within this window, we treat the WS as healthy and collapse the
-         * poll cadence to `max_poll_interval`. Anything older flips us back
-         * to the aggressive adaptive ladder.
-         *
-         * Comfortably longer than socket.io's reconnect backoff cap (60s in
-         * `NotificationsClient.RECONNECT_MAX_DELAY_MS`) so a transient
-         * disconnect doesn't flap us into the aggressive interval and back.
-         */
         internal const val WS_SILENCE_THRESHOLD_MS: Long = 90_000L
 
-        /**
-         * UD-405: normalise a `--sync-path` value (or its `sync_path` config
-         * equivalent) to the forward-slash, leading-slash, no-trailing-slash
-         * form the SyncEngine scope filter expects.
-         *
-         * Returns null if the input is null, empty, or normalises to "/"
-         * (which is the same as "no scope" — every path startsWith "/").
-         *
-         * Examples:
-         *   `\Project Notes` → `/Project Notes`
-         *   `\internal\sub\`           → `/internal/sub`
-         *   `internal`                 → `/internal`
-         *   `/`                        → `null` (= no scope)
-         *   `""`                       → `null`
-         */
         internal fun normalizeSyncPath(raw: String?): String? {
             if (raw.isNullOrEmpty()) return null
-            // Replace any backslashes with forward slashes (PowerShell-friendly).
             var s = raw.replace('\\', '/')
-            // Collapse runs of '/' to a single '/' (handles "//", "\\\\", mixed).
             s = s.replace(Regex("/+"), "/")
-            // Ensure leading '/'.
             if (!s.startsWith("/")) s = "/$s"
-            // Strip trailing '/' (engine matches startsWith("$syncPath/")).
             if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
-            // A bare "/" is the whole tree — same as no scope.
             return if (s == "/") null else s
         }
 
-        /**
-         * Schedule a `Runtime.halt()` after [delayMs]. Daemon thread, so it
-         * can't keep the JVM alive on its own; it only fires if some OTHER
-         * non-daemon thread is preventing normal shutdown.
-         *
-         * The motivating offender is NotificationsClient's socket.io v2.1.2
-         * worker — `disconnect()` is supposed to release it but doesn't
-         * reliably on Windows. Without this watchdog the user's terminal
-         * sits without a prompt for minutes after a clean sync, which reads
-         * as "the app crashed" even though the sync work itself succeeded.
-         */
         internal fun scheduleForceHalt(
             exitCode: Int,
             delayMs: Long,
