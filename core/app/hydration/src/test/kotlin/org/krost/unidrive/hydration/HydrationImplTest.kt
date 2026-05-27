@@ -1,5 +1,6 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -16,6 +17,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import kotlin.test.Test
+import kotlin.test.assertNull
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -37,6 +39,10 @@ internal class MinimalFakeProvider(
 
     // Throw-injection for testing error paths
     private var nextThrowable: Throwable? = null
+
+    // Optional gate: when set, upload() suspends until this deferred completes.
+    // Used by the promptness test to prove openForWrite returns before the upload finishes.
+    var uploadGate: CompletableDeferred<Unit>? = null
 
     var downloadCount: Int = 0
         private set
@@ -72,6 +78,7 @@ internal class MinimalFakeProvider(
         existingRemoteId: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        uploadGate?.await()
         val bytes = Files.readAllBytes(localPath)
         uploadedFiles[remotePath] = bytes
         return CloudItem(
@@ -277,6 +284,16 @@ internal class HydrationTestEnv(
 
         /** Number of times downloadById has been called on the fake provider. */
         fun downloadCount(): Int = fakeProvider.downloadCount
+
+        /**
+         * Install a gate on the fake provider's upload method: the next (and every
+         * subsequent) upload call suspends until [gate] is completed.  Used by the
+         * promptness test to hold the upload in flight while asserting that
+         * openForWrite already returned Ok.
+         */
+        fun setUploadGate(gate: CompletableDeferred<Unit>) {
+            fakeProvider.uploadGate = gate
+        }
     }
 }
 
@@ -327,13 +344,17 @@ class HydrationImplTest {
 
     @Test
     fun `open_for_write triggers upload-from-cache and registers the handle`() = runTest {
-        val env = HydrationTestEnv()
+        // Pass the test scope so background uploads are dispatched on the test dispatcher
+        // and drained deterministically by yield().
+        val env = HydrationTestEnv(recoveryUploadScope = this)
         env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
         val cacheFile = env.tempDir.resolve("foo.txt").also { java.nio.file.Files.writeString(it, "world") }
 
         val r = env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile)
 
         assertTrue(r is OpenResult.Ok)
+        // Drain the background upload coroutine before asserting its side-effect.
+        yield()
         assertEquals("world", env.syncEngine.remoteContentSeen("/foo.txt"))
 
         // Verify the handle is tracked: close it and re-open with the same id; must succeed.
@@ -350,7 +371,9 @@ class HydrationImplTest {
 
     @Test
     fun `openForWrite_marks_row_on_upload_failure`() = runTest {
-        val env = HydrationTestEnv()
+        // Pass the test scope so the background upload failure is dispatched on the test
+        // dispatcher and drained deterministically by yield().
+        val env = HydrationTestEnv(recoveryUploadScope = this)
         // A file created through the mount, never uploaded (remoteId = null).
         env.stateDb.insertCreatedRow("/draft.txt")
         // Force the upload to fail: uploadFromCache require()s the cache file
@@ -360,7 +383,11 @@ class HydrationImplTest {
 
         val r = env.hydration.openForWrite("conn1", "h1", "/draft.txt", missingCache)
 
-        assertTrue(r is OpenResult.Failed, "a failed upload must surface OpenResult.Failed")
+        // Upload is now backgrounded: openForWrite returns Ok immediately; the failure
+        // happens asynchronously on recoveryUploadScope.
+        assertTrue(r is OpenResult.Ok, "normal dirty-close open_write must return Ok immediately (upload is backgrounded)")
+        // Drain the background upload attempt so the failure side-effects land.
+        yield()
         assertTrue(
             env.stateDb.lastErrorAt("/draft.txt") != null,
             "upload failure must stamp last_error_at so doctor can surface the unsynced row",
@@ -412,6 +439,46 @@ class HydrationImplTest {
         assertTrue(
             env.stateDb.lastErrorAt("/big.bin") != null,
             "recovery upload failure must stamp last_error_at so doctor can surface the unsynced row",
+        )
+    }
+
+    @Test
+    fun `normal_handle_dirty_close_returns_promptly_without_awaiting_upload`() = runTest {
+        // Invariant (#188): a normal dirty close (FUSE release) must return Ok immediately,
+        // without blocking on the cloud upload.  A slow/hung upload must not freeze the file
+        // manager (Dolphin) for the duration of the upload.
+        //
+        // Mechanism: install a gate on the fake provider's upload method.  The upload
+        // coroutine is launched on the test scope (via recoveryUploadScope = this) and
+        // immediately suspends at the gate.  openForWrite must return Ok BEFORE the gate
+        // is released — proving the call doesn't await the upload.
+        //
+        // After releasing the gate, the upload completes and its side-effect
+        // (remoteContentSeen) is visible, proving the background upload still runs.
+        val uploadGate = CompletableDeferred<Unit>()
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.syncEngine.setUploadGate(uploadGate)
+        env.stateDb.insertHydratedEntry("/large.bin", localSize = 5)
+        val cacheFile = env.tempDir.resolve("large.bin").also { java.nio.file.Files.writeString(it, "data") }
+
+        // openForWrite must return Ok without waiting for the upload
+        val r = env.hydration.openForWrite("conn1", "h-normal", "/large.bin", cacheFile)
+
+        assertTrue(r is OpenResult.Ok, "normal dirty-close open_write must return Ok immediately (#188)")
+        // Upload is in flight but gated — not yet complete
+        assertNull(
+            env.syncEngine.remoteContentSeen("/large.bin"),
+            "upload must not have completed before the gate is released (would mean openForWrite blocked)",
+        )
+
+        // Release the gate: background upload can now finish
+        uploadGate.complete(Unit)
+        yield()
+
+        assertEquals(
+            "data",
+            env.syncEngine.remoteContentSeen("/large.bin"),
+            "background upload must complete after the gate is released",
         )
     }
 

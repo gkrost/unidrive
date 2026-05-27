@@ -109,25 +109,28 @@ class HydrationImpl(
             return OpenResult.Ok(cachePath)
         }
 
-        return try {
-            _events.emit(HydrationEvent.Hydrating(path))
-            syncEngine.uploadFromCache(path, cachePath)
-            val bytes = java.nio.file.Files.size(cachePath)
-            _events.emit(HydrationEvent.Hydrated(path, bytes))
-            openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            OpenResult.Ok(cachePath)
-        } catch (e: Exception) {
-            // The co-daemon fires open_write at FUSE release; the user's
-            // close() already returned 0. Make the durability gap
-            // operator-visible by stamping the row before we surface the
-            // failure, so `unidrive doctor` can report "written locally but
-            // not uploaded." Best-effort — a stamp failure must not mask the
-            // original upload error.
-            runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-            val err = HydrationError.Generic(e.message ?: "upload failed")
-            _events.emit(HydrationEvent.Failed(path, err))
-            OpenResult.Failed(err)
+        // Normal dirty close (FUSE release): the co-daemon fires open_write after the
+        // user's close() already returned 0. Uploading synchronously here blocks the
+        // FUSE release for the entire cloud upload — freezing the file manager (Dolphin,
+        // Nautilus) for minutes on large files. Background the upload the same way the
+        // recovery- path does: register the handle immediately, return Ok, and let the
+        // upload run on recoveryUploadScope. Durability across crashes is provided by the
+        // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
+        // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
+        openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
+        recoveryUploadScope.launch {
+            try {
+                _events.emit(HydrationEvent.Hydrating(path))
+                syncEngine.uploadFromCache(path, cachePath)
+                val bytes = java.nio.file.Files.size(cachePath)
+                _events.emit(HydrationEvent.Hydrated(path, bytes))
+            } catch (e: Exception) {
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                val err = HydrationError.Generic(e.message ?: "upload failed")
+                _events.emit(HydrationEvent.Failed(path, err))
+            }
         }
+        return OpenResult.Ok(cachePath)
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {
