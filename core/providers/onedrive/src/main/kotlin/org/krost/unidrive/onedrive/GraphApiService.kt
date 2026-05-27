@@ -657,7 +657,19 @@ class GraphApiService(
             )
             sessionStore.delete(remotePath)
         }
-        val stored = storedSession?.takeIf { it.localSize == fileSize && it.localMtimeMillis == localMtimeMillis }?.uploadUrl
+        // If-Match guard: a stored session not bound to the current eTag must not be reused.
+        // Resuming such a session would skip the createUploadSession If-Match check entirely,
+        // silently overwriting a concurrent remote edit that the caller is trying to detect.
+        if (storedSession != null && ifMatchETag != storedSession.ifMatchETag) {
+            log.info(
+                "OneDrive upload session for {} was created under a different If-Match guard (stored={}, now={}); discarding and creating a fresh session",
+                remotePath,
+                storedSession.ifMatchETag,
+                ifMatchETag,
+            )
+            sessionStore.delete(remotePath)
+        }
+        val stored = storedSession?.takeIf { it.localSize == fileSize && it.localMtimeMillis == localMtimeMillis && it.ifMatchETag == ifMatchETag }?.uploadUrl
         if (stored != null) {
             // Probe the stored URL — Graph extends session lifetime on activity, so our
             // locally stored expiresAt is an upper-bound hint, not authoritative. A network
@@ -673,7 +685,7 @@ class GraphApiService(
                 // shrinks toward its original expiry, an active one stretches up to 14 d.
                 parsedSession.expirationDateTime
                     ?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
-                    ?.let { sessionStore.put(remotePath, stored, it, fileSize, localMtimeMillis) }
+                    ?.let { sessionStore.put(remotePath, stored, it, fileSize, localMtimeMillis, ifMatchETag) }
                 val committedOffset =
                     parsedSession.nextExpectedRanges
                         ?.firstOrNull()
@@ -743,7 +755,7 @@ class GraphApiService(
                     .now()
                     .plusSeconds(86_400) // fallback: 24 h
 
-        sessionStore.put(remotePath, url, expiresAt, fileSize, localMtimeMillis)
+        sessionStore.put(remotePath, url, expiresAt, fileSize, localMtimeMillis, ifMatchETag)
         return url to 0L
     }
 

@@ -789,4 +789,147 @@ class ListChildrenPaginationTest {
             assertEquals(1, callCount)
             service.close()
         }
+
+    @Test
+    fun `stored session bound to a different If-Match guard is discarded and a fresh createUploadSession is issued`() =
+        runTest {
+            val storeDir = java.nio.file.Files.createTempDirectory("unidrive-ifmatch-resume-discard-")
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-ifmatch-resume-", ".bin")
+            java.nio.file.Files.write(tempFile, ByteArray(5 * 1024 * 1024) { 1 })
+            val staleSessionUrl = "https://upload.example.com/session/stale-etag"
+            val freshSessionUrl = "https://upload.example.com/session/fresh-etag"
+            // Stored session was created WITHOUT an If-Match guard (null); caller now requires one.
+            UploadSessionStore(storeDir).put(
+                "/guarded.bin",
+                staleSessionUrl,
+                java.time.Instant.now().plusSeconds(3600),
+                localSize = java.nio.file.Files.size(tempFile),
+                localMtimeMillis = java.nio.file.Files.getLastModifiedTime(tempFile).toMillis(),
+                ifMatchETag = null,
+            )
+
+            var createSessionCount = 0
+            var ifMatchOnCreate: String? = null
+            var staleSessionAccessed = false
+            val driveItemBody = """{"id":"guarded-id","name":"guarded.bin","size":${5 * 1024 * 1024}}"""
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") -> {
+                            createSessionCount++
+                            ifMatchOnCreate = request.headers[HttpHeaders.IfMatch]
+                            respond(
+                                """{"uploadUrl":"$freshSessionUrl","expirationDateTime":"2030-01-01T00:00:00Z"}""",
+                                HttpStatusCode.OK,
+                                headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url == staleSessionUrl -> {
+                            staleSessionAccessed = true
+                            // Probe or PUT against the stale session should not happen.
+                            respond(
+                                """{"nextExpectedRanges":["0-"],"expirationDateTime":"2030-01-01T00:00:00Z"}""",
+                                HttpStatusCode.OK,
+                                headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url == freshSessionUrl ->
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        else -> respond("{}", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                    }
+                }
+            val service = newServiceWithStore(storeDir)
+            installMockClient(service, engine)
+
+            service.uploadLargeFile(
+                localPath = tempFile,
+                remotePath = "/guarded.bin",
+                onProgress = null,
+                fileSystemInfo = null,
+                ifMatchETag = """"new-etag,1"""",
+            )
+
+            assertEquals(
+                1,
+                createSessionCount,
+                "If-Match guard mismatch: stored session (no guard) must be discarded and a fresh createUploadSession issued",
+            )
+            assertEquals(
+                """"new-etag,1"""",
+                ifMatchOnCreate,
+                "Fresh createUploadSession must carry the caller-supplied If-Match header",
+            )
+            assertTrue(
+                !staleSessionAccessed,
+                "Stale session URL must not be probed or PUT when the If-Match guard changed",
+            )
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+            runCatching { java.nio.file.Files.walk(storeDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+        }
+
+    @Test
+    fun `stored session is reused when If-Match guard matches the stored session`() =
+        runTest {
+            val storeDir = java.nio.file.Files.createTempDirectory("unidrive-ifmatch-resume-reuse-")
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-ifmatch-reuse-", ".bin")
+            java.nio.file.Files.write(tempFile, ByteArray(5 * 1024 * 1024) { 2 })
+            val sessionUrl = "https://upload.example.com/session/same-etag"
+            val eTag = """"same-etag,3""""
+            // Stored session was created under the same eTag that the caller now supplies.
+            UploadSessionStore(storeDir).put(
+                "/guarded-reuse.bin",
+                sessionUrl,
+                java.time.Instant.now().plusSeconds(3600),
+                localSize = java.nio.file.Files.size(tempFile),
+                localMtimeMillis = java.nio.file.Files.getLastModifiedTime(tempFile).toMillis(),
+                ifMatchETag = eTag,
+            )
+
+            var createSessionCount = 0
+            val driveItemBody = """{"id":"reuse-id","name":"guarded-reuse.bin","size":${5 * 1024 * 1024}}"""
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") -> {
+                            createSessionCount++
+                            respond(
+                                """{"uploadUrl":"https://upload.example.com/session/new","expirationDateTime":"2030-01-01T00:00:00Z"}""",
+                                HttpStatusCode.OK,
+                                headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url == sessionUrl && request.method == io.ktor.http.HttpMethod.Get ->
+                            respond(
+                                """{"nextExpectedRanges":["0-"],"expirationDateTime":"2030-01-01T00:00:00Z"}""",
+                                HttpStatusCode.OK,
+                                headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        url == sessionUrl && request.method == io.ktor.http.HttpMethod.Put ->
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        else -> respond("{}", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                    }
+                }
+            val service = newServiceWithStore(storeDir)
+            installMockClient(service, engine)
+
+            service.uploadLargeFile(
+                localPath = tempFile,
+                remotePath = "/guarded-reuse.bin",
+                onProgress = null,
+                fileSystemInfo = null,
+                ifMatchETag = eTag,
+            )
+
+            assertEquals(
+                0,
+                createSessionCount,
+                "Matching If-Match guard: stored session must be reused, not recreated",
+            )
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+            runCatching { java.nio.file.Files.walk(storeDir).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) } }
+        }
 }
