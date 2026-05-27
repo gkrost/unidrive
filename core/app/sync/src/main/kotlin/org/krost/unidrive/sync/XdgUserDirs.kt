@@ -53,33 +53,23 @@ internal val XDG_ALIAS_GROUPS: List<Set<String>> = listOf(
           "Scaricati", "Transferências", "Pobrane", "Загрузки"),
     // XDG_DOCUMENTS_DIR
     setOf("Documents", "Dokumente", "Documentos", "Mes documents",
-          "Documenti", "Documentos", "Documenten", "Dokumenty", "Документы"),
+          "Documenti", "Documenten", "Dokumenty", "Документы"),
     // XDG_MUSIC_DIR
     setOf("Music", "Musik", "Música", "Musique", "Musica",
-          "Música", "Muziek", "Muzyka", "Музыка"),
+          "Muziek", "Muzyka", "Музыка"),
     // XDG_PICTURES_DIR
     setOf("Pictures", "Bilder", "Imágenes", "Images", "Foto", "Immagini",
           "Imagens", "Afbeeldingen", "Obrazy", "Изображения"),
     // XDG_VIDEOS_DIR
-    setOf("Videos", "Video", "Vidéos", "Vídeos", "Video",
-          "Vídeos", "Video's", "Wideo", "Видео"),
+    setOf("Videos", "Video", "Vidéos", "Vídeos",
+          "Video's", "Wideo", "Видео"),
     // XDG_TEMPLATES_DIR
     setOf("Templates", "Vorlagen", "Plantillas", "Modèles", "Modelli",
           "Modelos", "Sjablonen", "Szablony", "Шаблоны"),
     // XDG_PUBLICSHARE_DIR
-    setOf("Public", "Öffentlich", "Público", "Public", "Pubblica",
-          "Público", "Openbaar", "Publiczny", "Общедоступные"),
+    setOf("Public", "Öffentlich", "Público", "Pubblica",
+          "Openbaar", "Publiczny", "Общедоступные"),
 )
-
-// Flat reverse-lookup: name (lower-case) → the alias group it belongs to.
-// Built once from XDG_ALIAS_GROUPS.
-internal val XDG_NAME_TO_GROUP: Map<String, Set<String>> by lazy {
-    val m = HashMap<String, Set<String>>()
-    for (group in XDG_ALIAS_GROUPS) {
-        for (name in group) m[name.lowercase()] = group
-    }
-    m
-}
 
 // ---------------------------------------------------------------------------
 // user-dirs.dirs parser
@@ -113,12 +103,14 @@ fun parseUserDirsFile(path: Path): Map<String, String> {
                 // Value is quoted, may contain $HOME prefix.
                 val raw = line.substring(eq + 1).trim().removeSurrounding("\"").removeSurrounding("'")
                 // Extract basename — the folder name relative to HOME.
+                // Skip bare $HOME (no subdir) to avoid yielding the literal "$HOME".
                 val basename = raw
                     .removePrefix("\$HOME/")
                     .removePrefix("~/")
                     .trimEnd('/')
                     .substringAfterLast('/')
                     .ifEmpty { null } ?: return@mapNotNull null
+                if (basename.startsWith('$')) return@mapNotNull null
                 key to basename
             }.toMap()
     } catch (e: Exception) {
@@ -223,13 +215,25 @@ class XdgLocaleDirAliases private constructor(
                 }
             }
 
-            // user-dirs.dirs overrides: if the OS says "XDG_PICTURES_DIR=Bilder" and
-            // "Bilder" is not already mapped (e.g. the static table covers it), add it
-            // explicitly.  This handles locale names the static table doesn't yet cover.
-            for ((_, localName) in userDirsOverrides) {
+            // user-dirs.dirs overrides: if the OS says "XDG_PICTURES_DIR=Kuvat" and
+            // "Kuvat" is not already mapped, add it explicitly.  This covers locale
+            // names absent from the static table: use the XDG key itself (e.g.
+            // XDG_PICTURES_DIR → "pictures") to locate the group that contains a
+            // remote canonical, then map the override name to it.
+            for ((xdgKey, localName) in userDirsOverrides) {
                 if (localName in mapping) continue          // already covered
                 if (localName in remoteTopLevelNames) continue // IS the canonical
-                val group = nameToGroup[localName.lowercase()] ?: continue
+                // Fast path: the static table already covers this locale name.
+                // Fallback: derive a hint from the XDG key itself when the name
+                // is absent from the static table (e.g. "Kuvat" for Finnish).
+                // XDG_PICTURES_DIR → "pictures"; XDG_MUSIC_DIR → "music"; etc.
+                val group: Set<String> = nameToGroup[localName.lowercase()]
+                    ?: run {
+                        if (!xdgKey.startsWith("XDG_") || !xdgKey.endsWith("_DIR")) return@run null
+                        val keyHint = xdgKey.removePrefix("XDG_").removeSuffix("_DIR").lowercase()
+                        aliasGroups.firstOrNull { g -> g.any { it.lowercase() == keyHint } }
+                    }
+                    ?: continue
                 // Find which remote name from the same group is the canonical.
                 val canonical = remoteTopLevelNames.firstOrNull { r ->
                     group.any { it.equals(r, ignoreCase = true) }

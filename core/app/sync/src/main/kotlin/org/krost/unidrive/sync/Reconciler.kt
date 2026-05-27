@@ -146,47 +146,8 @@ class Reconciler(
         // when the cloud already holds "/Pictures" and "Bilder" is a known locale
         // alias.  Built from remoteChanges keys so the canonical name is the actual
         // current cloud state, not a stale snapshot.
-        val xdgAliases = XdgLocaleDirAliases.build(
-            remoteTopLevelNames = remoteChanges.keys
-                .filter { it.count { c -> c == '/' } == 1 && !remoteChanges[it]!!.deleted }
-                .map { it.removePrefix("/") }
-                .toSet(),
-            userDirsOverrides = xdgUserDirsOverrides,
-        )
-        val effectiveLocalChanges =
-            if (xdgAliases.isEmpty) localChanges
-            else localChanges.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
-
-        // #115: resolver that maps a canonical sync-path back to the real local
-        // filesystem path.  When "Bilder" was translated to "Pictures", the real
-        // local path for "/Pictures/..." is syncRoot/Bilder/..., not syncRoot/Pictures/...
-        // The closure undoes the top-level translation for filesystem checks only.
-        // reverseAliasTopLevel: canonical top-level name → original local top-level name
-        val reverseAliasTopLevel: Map<String, String> =
-            if (xdgAliases.isEmpty) emptyMap()
-            else {
-                val rev = HashMap<String, String>()
-                for (origPath in localChanges.keys) {
-                    val origTop = origPath.removePrefix("/").substringBefore('/')
-                    val canonical = xdgAliases.canonicalFor(origTop)
-                    if (canonical != null) rev[canonical] = origTop
-                }
-                rev
-            }
-        val localPathFnForReconcile: (String) -> java.nio.file.Path =
-            if (xdgAliases.isEmpty) ::resolveLocal
-            else { canonicalPath ->
-                val noSlash = canonicalPath.removePrefix("/")
-                val slash = noSlash.indexOf('/')
-                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
-                val originalTop = reverseAliasTopLevel[top]
-                if (originalTop != null) {
-                    val rest = if (slash < 0) "" else noSlash.substring(slash)
-                    safeResolveLocal(syncRoot, "/$originalTop$rest")
-                } else {
-                    resolveLocal(canonicalPath)
-                }
-            }
+        val (effectiveLocalChanges, localPathFnForReconcile) =
+            buildAliasContext(remoteChanges, localChanges)
 
         val allPaths =
             (remoteChanges.keys + effectiveLocalChanges.keys)
@@ -427,42 +388,8 @@ class Reconciler(
         val pinRules = db.getPinRules()
 
         // #115: same locale-alias translation as in reconcile().
-        val xdgAliases = XdgLocaleDirAliases.build(
-            remoteTopLevelNames = pageRemote.keys
-                .filter { it.count { c -> c == '/' } == 1 && !pageRemote[it]!!.deleted }
-                .map { it.removePrefix("/") }
-                .toSet(),
-            userDirsOverrides = xdgUserDirsOverrides,
-        )
-        val effectiveLocalChanges =
-            if (xdgAliases.isEmpty) localChanges
-            else localChanges.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
-
-        val reverseAliasTopLevel: Map<String, String> =
-            if (xdgAliases.isEmpty) emptyMap()
-            else {
-                val rev = HashMap<String, String>()
-                for (origPath in localChanges.keys) {
-                    val origTop = origPath.removePrefix("/").substringBefore('/')
-                    val canonical = xdgAliases.canonicalFor(origTop)
-                    if (canonical != null) rev[canonical] = origTop
-                }
-                rev
-            }
-        val localPathFnForSlice: (String) -> java.nio.file.Path =
-            if (xdgAliases.isEmpty) ::resolveLocal
-            else { canonicalPath ->
-                val noSlash = canonicalPath.removePrefix("/")
-                val slash = noSlash.indexOf('/')
-                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
-                val originalTop = reverseAliasTopLevel[top]
-                if (originalTop != null) {
-                    val rest = if (slash < 0) "" else noSlash.substring(slash)
-                    safeResolveLocal(syncRoot, "/$originalTop$rest")
-                } else {
-                    resolveLocal(canonicalPath)
-                }
-            }
+        val (effectiveLocalChanges, localPathFnForSlice) =
+            buildAliasContext(pageRemote, localChanges)
 
         val actions = mutableListOf<SyncAction>()
         val allPaths =
@@ -523,42 +450,8 @@ class Reconciler(
         val coveredPaths = actions.mapTo(mutableSetOf()) { it.path }
 
         // #115: same locale-alias translation as in reconcile() / resolveSlice().
-        val xdgAliases = XdgLocaleDirAliases.build(
-            remoteTopLevelNames = fullRemote.keys
-                .filter { it.count { c -> c == '/' } == 1 && !fullRemote[it]!!.deleted }
-                .map { it.removePrefix("/") }
-                .toSet(),
-            userDirsOverrides = xdgUserDirsOverrides,
-        )
-        val effectiveFullLocal =
-            if (xdgAliases.isEmpty) fullLocal
-            else fullLocal.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
-
-        val reverseAliasTopLevelForStreaming: Map<String, String> =
-            if (xdgAliases.isEmpty) emptyMap()
-            else {
-                val rev = HashMap<String, String>()
-                for (origPath in fullLocal.keys) {
-                    val origTop = origPath.removePrefix("/").substringBefore('/')
-                    val canonical = xdgAliases.canonicalFor(origTop)
-                    if (canonical != null) rev[canonical] = origTop
-                }
-                rev
-            }
-        val localPathFnForStreaming: (String) -> java.nio.file.Path =
-            if (xdgAliases.isEmpty) ::resolveLocal
-            else { canonicalPath ->
-                val noSlash = canonicalPath.removePrefix("/")
-                val slash = noSlash.indexOf('/')
-                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
-                val originalTop = reverseAliasTopLevelForStreaming[top]
-                if (originalTop != null) {
-                    val rest = if (slash < 0) "" else noSlash.substring(slash)
-                    safeResolveLocal(syncRoot, "/$originalTop$rest")
-                } else {
-                    resolveLocal(canonicalPath)
-                }
-            }
+        val (effectiveFullLocal, localPathFnForStreaming) =
+            buildAliasContext(fullRemote, fullLocal)
 
         // Case-collision detection on new local files — see [reconcile] for rationale.
         for ((path, state) in effectiveFullLocal) {
@@ -664,6 +557,57 @@ class Reconciler(
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
 
         return sortActions(actions)
+    }
+
+    // #115: shared alias-context builder — called from reconcile(), resolveSlice(),
+    // and finalizeStreaming(). Extracted to eliminate 3 structurally-identical
+    // ~35-line blocks (I1 code-review finding).
+    private data class AliasContext(
+        val effectiveLocal: Map<String, ChangeState>,
+        val localPathFn: (String) -> java.nio.file.Path,
+    )
+
+    private fun buildAliasContext(
+        remoteTopLevelMap: Map<String, CloudItem>,
+        rawLocal: Map<String, ChangeState>,
+    ): AliasContext {
+        val xdgAliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = remoteTopLevelMap.keys
+                .filter { it.count { c -> c == '/' } == 1 && !remoteTopLevelMap[it]!!.deleted }
+                .map { it.removePrefix("/") }
+                .toSet(),
+            userDirsOverrides = xdgUserDirsOverrides,
+        )
+        val effectiveLocal =
+            if (xdgAliases.isEmpty) rawLocal
+            else rawLocal.entries.associate { (k, v) -> xdgAliases.translatePath(k) to v }
+
+        val reverseAliasTopLevel: Map<String, String> =
+            if (xdgAliases.isEmpty) emptyMap()
+            else {
+                val rev = HashMap<String, String>()
+                for (origPath in rawLocal.keys) {
+                    val origTop = origPath.removePrefix("/").substringBefore('/')
+                    val canonical = xdgAliases.canonicalFor(origTop)
+                    if (canonical != null) rev[canonical] = origTop
+                }
+                rev
+            }
+        val localPathFn: (String) -> java.nio.file.Path =
+            if (xdgAliases.isEmpty) ::resolveLocal
+            else { canonicalPath ->
+                val noSlash = canonicalPath.removePrefix("/")
+                val slash = noSlash.indexOf('/')
+                val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
+                val originalTop = reverseAliasTopLevel[top]
+                if (originalTop != null) {
+                    val rest = if (slash < 0) "" else noSlash.substring(slash)
+                    safeResolveLocal(syncRoot, "/$originalTop$rest")
+                } else {
+                    resolveLocal(canonicalPath)
+                }
+            }
+        return AliasContext(effectiveLocal, localPathFn)
     }
 
     private fun resolveAction(

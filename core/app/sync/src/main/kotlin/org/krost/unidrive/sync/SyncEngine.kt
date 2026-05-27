@@ -123,6 +123,7 @@ open class SyncEngine(
         db, syncRoot, conflictPolicy, conflictOverrides, effectiveExcludePatterns,
         // #115: wire real user-dirs.dirs content so the reconciler can map locale-
         // aliased local folder names to their cloud-canonical equivalents.
+        // Mapping is read once at construction — a locale change requires a daemon restart.
         xdgUserDirsOverrides = parseUserDirsFile(
             Paths.get(
                 System.getenv("HOME") ?: System.getProperty("user.home"),

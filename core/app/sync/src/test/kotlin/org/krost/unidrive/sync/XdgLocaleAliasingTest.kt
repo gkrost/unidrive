@@ -473,14 +473,34 @@ class XdgLocaleDirAliasesTest {
     }
 
     @Test
-    fun `userDirsOverrides adds locale name not in static table`() {
-        // A hypothetical locale name "Kuvat" (Finnish) not in the static table.
+    fun `static_alias_table_covers_name_in_injected_groups`() {
+        // A hypothetical locale name "Kuvat" (Finnish) injected via aliasGroups —
+        // exercises the static-table lookup path, not the userDirsOverrides loop.
         val customGroups = listOf(setOf("Pictures", "Bilder", "Kuvat"))
         val aliases = XdgLocaleDirAliases.build(
             remoteTopLevelNames = setOf("Pictures"),
             aliasGroups = customGroups,
         )
         assertEquals("Pictures", aliases.canonicalFor("Kuvat"))
+    }
+
+    @Test
+    fun `user_dirs_override_resolves_locale_name_absent_from_static_table`() {
+        // "Kuvat" (Finnish) is NOT in the production static table.  The second
+        // for-loop in XdgLocaleDirAliases.build() handles locale names found in
+        // user-dirs.dirs but absent from the static groups — this test exercises
+        // that path exclusively (aliasGroups defaults to XDG_ALIAS_GROUPS which
+        // does NOT contain "Kuvat").
+        val aliases = XdgLocaleDirAliases.build(
+            remoteTopLevelNames = setOf("Pictures"),
+            userDirsOverrides = mapOf("XDG_PICTURES_DIR" to "Kuvat"),
+        )
+        assertEquals(
+            "Pictures",
+            aliases.canonicalFor("Kuvat"),
+            "userDirsOverrides loop must resolve 'Kuvat' → 'Pictures' even though " +
+                "'Kuvat' is absent from the static alias table",
+        )
     }
 
     @Test
