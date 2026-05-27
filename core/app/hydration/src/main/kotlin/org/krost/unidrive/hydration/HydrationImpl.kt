@@ -17,6 +17,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class HydrationImpl(
     private val syncEngine: SyncEngine,
@@ -47,6 +48,27 @@ class HydrationImpl(
     // map for the daemon's lifetime — bounded by the number of
     // distinct paths ever created, which is small per-session.
     private val createMutexes = ConcurrentHashMap<String, Mutex>()
+
+    // Per-path serialization for background uploads.
+    //
+    // When the same file is saved multiple times in quick succession,
+    // each dirty close launches a background upload against the same
+    // cachePath. Without serialization an older upload can finish after
+    // a newer one, overwriting the remote with stale bytes and marking
+    // the row synced with the wrong mtime.
+    //
+    // A single ConcurrentHashMap<String, UploadSlot> replaces the former
+    // two-map design (uploadMutexes + uploadPendingCounts). Using
+    // ConcurrentHashMap.compute() for both the increment-or-create and the
+    // decrement-and-remove operations makes each of those steps atomic under
+    // the map's bin lock. This closes the race in the old design where
+    // coroutine A's decrementAndGet()→0 and its subsequent remove() were NOT
+    // atomic: a concurrent submitter B could bump the count and computeIfAbsent
+    // the same mutex between A's decrement and A's remove, leaving B holding a
+    // mutex that A then deleted, causing a later submitter C to create a fresh
+    // mutex — so B and C would run concurrently for the same path.
+    private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
+    private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
@@ -94,39 +116,65 @@ class HydrationImpl(
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
             openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            recoveryUploadScope.launch {
-                try {
-                    _events.emit(HydrationEvent.Hydrating(path))
-                    syncEngine.uploadFromCache(path, cachePath)
-                    val bytes = java.nio.file.Files.size(cachePath)
-                    _events.emit(HydrationEvent.Hydrated(path, bytes))
-                } catch (e: Exception) {
-                    runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                    val err = HydrationError.Generic(e.message ?: "upload failed")
-                    _events.emit(HydrationEvent.Failed(path, err))
-                }
-            }
+            launchSerializedUpload(path, cachePath)
             return OpenResult.Ok(cachePath)
         }
 
-        return try {
-            _events.emit(HydrationEvent.Hydrating(path))
-            syncEngine.uploadFromCache(path, cachePath)
-            val bytes = java.nio.file.Files.size(cachePath)
-            _events.emit(HydrationEvent.Hydrated(path, bytes))
-            openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            OpenResult.Ok(cachePath)
-        } catch (e: Exception) {
-            // The co-daemon fires open_write at FUSE release; the user's
-            // close() already returned 0. Make the durability gap
-            // operator-visible by stamping the row before we surface the
-            // failure, so `unidrive doctor` can report "written locally but
-            // not uploaded." Best-effort — a stamp failure must not mask the
-            // original upload error.
-            runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-            val err = HydrationError.Generic(e.message ?: "upload failed")
-            _events.emit(HydrationEvent.Failed(path, err))
-            OpenResult.Failed(err)
+        // Normal dirty close (FUSE release): the co-daemon fires open_write after the
+        // user's close() already returned 0. Uploading synchronously here blocks the
+        // FUSE release for the entire cloud upload — freezing the file manager (Dolphin,
+        // Nautilus) for minutes on large files. Background the upload the same way the
+        // recovery- path does: register the handle immediately, return Ok, and let the
+        // upload run on recoveryUploadScope. Durability across crashes is provided by the
+        // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
+        // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
+        openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
+        launchSerializedUpload(path, cachePath)
+        return OpenResult.Ok(cachePath)
+    }
+
+    // Launches a background upload for [path] from [cachePath], serialized per-path
+    // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
+    // uploads run concurrently. The cache file is read after acquiring the lock so
+    // the last submitted upload always reads the latest content.
+    //
+    // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
+    // increment-or-create (on launch) and the decrement-and-remove (in the finally
+    // block). Because compute() holds the map's bin lock for the duration of the
+    // lambda, a concurrent launch's compute() cannot interleave between the
+    // decrement and the removal. This guarantees a slot is never removed while
+    // another submitter is in the process of bumping its pending count.
+    private fun launchSerializedUpload(path: String, cachePath: Path) {
+        // Atomically create-or-get the slot and bump its pending count. The bin lock
+        // held by compute() ensures that no concurrent finally-block can remove the
+        // slot between the moment we decide to reuse it and the moment we increment.
+        val slot = uploadSlots.compute(path) { _, s ->
+            (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
+        }!!
+        recoveryUploadScope.launch {
+            try {
+                slot.mutex.withLock {
+                    try {
+                        _events.emit(HydrationEvent.Hydrating(path))
+                        syncEngine.uploadFromCache(path, cachePath)
+                        val bytes = java.nio.file.Files.size(cachePath)
+                        _events.emit(HydrationEvent.Hydrated(path, bytes))
+                    } catch (e: Exception) {
+                        runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                        val err = HydrationError.Generic(e.message ?: "upload failed")
+                        _events.emit(HydrationEvent.Failed(path, err))
+                    }
+                }
+            } finally {
+                // Atomically decrement and remove-when-zero. The bin lock held by
+                // compute() ensures no concurrent launch's compute() can observe the
+                // slot between the decrement and the null-return (removal). If
+                // pending reaches zero the lambda returns null → ConcurrentHashMap
+                // removes the entry; otherwise the existing slot is kept.
+                uploadSlots.compute(path) { _, s ->
+                    if (s == null || s.pending.decrementAndGet() == 0) null else s
+                }
+            }
         }
     }
 
