@@ -375,6 +375,112 @@ class ListChildrenPaginationTest {
         }
 
     @Test
+    fun `createUploadSession threads If-Match header when an eTag is supplied`() =
+        runTest {
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-ifmatch-etag-", ".bin")
+            java.nio.file.Files.write(tempFile, "chunky".toByteArray())
+            val driveItemBody = """{"id":"item-us","name":"up.bin","size":6}"""
+            val sessionBody = """{"uploadUrl":"https://upload.example.com/session/ifmatch","expirationDateTime":"2030-01-01T00:00:00Z"}"""
+            var ifMatchSeen: String? = null
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") -> {
+                            ifMatchSeen = request.headers[HttpHeaders.IfMatch]
+                            respond(sessionBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        url.startsWith("https://upload.example.com/") ->
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        else -> error("Unexpected URL: $url")
+                    }
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            service.uploadLargeFile(
+                localPath = tempFile,
+                remotePath = "/up.bin",
+                onProgress = null,
+                fileSystemInfo = null,
+                ifMatchETag = """"opaque-etag,9"""",
+            )
+
+            assertEquals(""""opaque-etag,9"""", ifMatchSeen, "createUploadSession must send the caller-supplied eTag in If-Match")
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+        }
+
+    @Test
+    fun `createUploadSession omits If-Match when no eTag is supplied`() =
+        runTest {
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-ifmatch-null-", ".bin")
+            java.nio.file.Files.write(tempFile, "chunky".toByteArray())
+            val driveItemBody = """{"id":"item-us2","name":"up2.bin","size":6}"""
+            val sessionBody = """{"uploadUrl":"https://upload.example.com/session/noifmatch","expirationDateTime":"2030-01-01T00:00:00Z"}"""
+            var ifMatchSeen: String? = "<not-set>"
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") -> {
+                            ifMatchSeen = request.headers[HttpHeaders.IfMatch]
+                            respond(sessionBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+                        }
+                        url.startsWith("https://upload.example.com/") ->
+                            respond(driveItemBody, HttpStatusCode.Created, headersOf(HttpHeaders.ContentType, "application/json"))
+                        else -> error("Unexpected URL: $url")
+                    }
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            service.uploadLargeFile(
+                localPath = tempFile,
+                remotePath = "/up2.bin",
+                onProgress = null,
+                fileSystemInfo = null,
+                ifMatchETag = null,
+            )
+
+            assertEquals(null, ifMatchSeen, "createUploadSession must not send If-Match when caller passes null")
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+        }
+
+    @Test
+    fun `createUploadSession surfaces 412 Precondition Failed as a GraphApiException`() =
+        runTest {
+            val tempFile = java.nio.file.Files.createTempFile("unidrive-ifmatch-412-", ".bin")
+            java.nio.file.Files.write(tempFile, "chunky".toByteArray())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("createUploadSession") ->
+                            respond("eTag mismatch", HttpStatusCode.PreconditionFailed)
+                        else -> error("Unexpected URL: $url")
+                    }
+                }
+            val service = newService()
+            installMockClient(service, engine)
+
+            val ex =
+                kotlin.test.assertFailsWith<GraphApiException> {
+                    service.uploadLargeFile(
+                        localPath = tempFile,
+                        remotePath = "/up3.bin",
+                        onProgress = null,
+                        fileSystemInfo = null,
+                        ifMatchETag = """"stale,2"""",
+                    )
+                }
+            assertEquals(412, ex.statusCode, "412 from createUploadSession must propagate as GraphApiException(412)")
+            service.close()
+            java.nio.file.Files.deleteIfExists(tempFile)
+        }
+
+    @Test
     fun `uploadSimple URL pins conflictBehavior=replace to match session-upload policy`() =
         runTest {
             val driveItemBody = """{"id":"item-cb","name":"hello.txt","size":3}"""
