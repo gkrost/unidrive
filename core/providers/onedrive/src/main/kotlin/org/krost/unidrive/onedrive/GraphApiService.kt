@@ -207,12 +207,16 @@ class GraphApiService(
         destPath: Path,
     ) {
         val item = getItemById(itemId)
-        val url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
-        val authNeeded = item.downloadUrl == null
+        var url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+        var authNeeded = item.downloadUrl == null
         var flakeAttempts = 0
         var throttleAttempts = 0
         var totalThrottleWaitMs = 0L
         var authRefreshed = false
+        // A CDN edge that serves an HTML throttle page (HTTP 200,
+        // Content-Type: text/html) instead of bytes can't be recovered by
+        // re-GETting the same stale URL. Re-resolve the download URL once.
+        var htmlReresolved = false
         while (true) {
             try {
                 throttleBudget.awaitSlot()
@@ -289,6 +293,25 @@ class GraphApiService(
             } catch (e: kotlinx.coroutines.CancellationException) {
                  throw e
             } catch (e: Exception) {
+                // assertNotHtml throws IOException when the CDN returned an HTML
+                // throttle/captive-portal page instead of file bytes. Re-GETting
+                // the same stale URL can never recover; re-resolve the download URL
+                // ONCE for a fresh CDN URL, then retry. A second HTML hit falls
+                // through to the generic flake-retry below (no loop), so a CDN stuck
+                // on HTML still terminates instead of spinning.
+                if (isHtmlBodyFailure(e) && !htmlReresolved) {
+                    htmlReresolved = true
+                    log.warn(
+                        "Download itemId={} returned an HTML page instead of bytes — re-resolving the " +
+                            "download URL and retrying once: {}",
+                        itemId,
+                        e.message,
+                    )
+                    val fresh = getItemById(itemId)
+                    url = fresh.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+                    authNeeded = fresh.downloadUrl == null
+                    continue
+                }
                 flakeAttempts++
                 if (flakeAttempts >= MAX_FLAKE_ATTEMPTS) {
                     log.warn("Graph download failed after {} attempts for itemId={}: {}", flakeAttempts, itemId, e.message)
@@ -941,6 +964,16 @@ class GraphApiService(
     private fun extractRequestId(response: HttpResponse): String? =
         response.headers["request-id"]
             ?: response.headers["client-request-id"]
+
+    /**
+     * Recognise the IOException that [assertNotHtml] raises when a CDN edge
+     * serves an HTML throttle/captive-portal page (HTTP 200, text/html) in
+     * place of the file bytes. Matched on the stable message substring so the
+     * download path can re-resolve the download URL rather than re-GETting the
+     * same dead URL through the generic flake-retry.
+     */
+    private fun isHtmlBodyFailure(e: Throwable): Boolean =
+        e is java.io.IOException && e.message?.contains("HTML instead of file bytes") == true
 
     private fun shouldBackoff(
         response: HttpResponse,
