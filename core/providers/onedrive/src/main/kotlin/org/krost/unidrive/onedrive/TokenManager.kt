@@ -1,10 +1,13 @@
 package org.krost.unidrive.onedrive
 
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.TransientNetworkException
 import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.auth.awaitOAuthCallback
+import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.io.openBrowser
 import org.krost.unidrive.onedrive.model.Token
+import java.nio.channels.UnresolvedAddressException
 import java.nio.file.Files
 import kotlin.time.Duration.Companion.minutes
 
@@ -121,6 +124,23 @@ class TokenManager(
                                 message = e.message,
                             )
                         lastRefreshFailure = failure
+                        // A transient network blip (DNS unresolved, connection
+                        // reset, read/connect timeout) during refresh is NOT proof
+                        // the token expired — a later live call can still succeed.
+                        // Surface it as retryable so the session is not latched as
+                        // "expired → re-authenticate."
+                        if (isTransientNetworkFailure(e)) {
+                            log.warn(
+                                "OAuth refresh hit a transient network failure: {}: {}. Treating as retryable, not expired.",
+                                failure.errorClass,
+                                failure.message,
+                                e,
+                            )
+                            throw TransientNetworkException(
+                                "Transient network failure during token refresh: ${e.message}",
+                                cause = e,
+                            )
+                        }
                         log.warn(
                             "OAuth refresh failed: {}: {}. User will be prompted to re-authenticate.",
                             failure.errorClass,
@@ -138,5 +158,25 @@ class TokenManager(
         token = null
         val tokenFile = config.tokenPath.resolve("token.json")
         Files.deleteIfExists(tokenFile)
+    }
+
+    // Classify a refresh-time throwable as a transient network failure (retryable)
+    // versus a real auth failure (expired refresh token / invalid_grant). The auth
+    // failure surfaces from refreshToken as an AuthenticationException on a non-2xx
+    // body; anything network-flavoured (DNS unresolved, connection reset, timeout)
+    // must be treated as retryable so a blip can't latch the session as expired.
+    private fun isTransientNetworkFailure(e: Throwable): Boolean {
+        // A non-2xx refresh response (e.g. 400 invalid_grant) is a real auth
+        // failure, not transient — refreshToken raises AuthenticationException.
+        if (e is AuthenticationException) return false
+        if (e is UnresolvedAddressException) return true // DNS blip — transient.
+        if (e is io.ktor.client.plugins.HttpRequestTimeoutException) return true
+        if (e is java.io.IOException && HttpRetryBudget.isRetriableIoException(e)) return true
+        // Ktor wraps the underlying socket failure; walk one cause level for the
+        // common DNS-unresolved and retryable-IO shapes.
+        val cause = e.cause ?: return false
+        if (cause is UnresolvedAddressException) return true
+        if (cause is io.ktor.client.plugins.HttpRequestTimeoutException) return true
+        return cause is java.io.IOException && HttpRetryBudget.isRetriableIoException(cause)
     }
 }
