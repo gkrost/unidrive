@@ -2548,6 +2548,22 @@ open class SyncEngine(
         try {
             provider.delete(action.path)
         } catch (e: ProviderException) {
+            // Only a typed already-gone signal (Folder/Item not found) is a
+            // safe no-op delete that may fall through and tombstone the row.
+            // Every other ProviderException (transient 5xx/429, connection
+            // reset, auth, throttle) must re-throw so the row is left untouched
+            // and DeleteRemote re-emits on the next sync — otherwise a tombstoned
+            // row never re-emits and the remote file is orphaned forever.
+            if (!isAlreadyGone(e)) {
+                auditLog?.emit(
+                    action = "Delete",
+                    path = action.path,
+                    size = priorEntry?.remoteSize,
+                    oldHash = priorEntry?.remoteHash,
+                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                )
+                throw e
+            }
             log.debug("DeleteRemote skipped for ${action.path}: ${e.message}")
             auditResult = "skipped:${e.message}"
         } catch (e: Exception) {
