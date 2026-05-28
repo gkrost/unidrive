@@ -49,6 +49,28 @@ object StaleMountDetector {
             .mapNotNull { parseUnidriveFuseMountpoint(it) }
             .filterNot { probe.isServing(it) }
 
+    /**
+     * Probe whether a live Rust `unidrive-mount` co-daemon is currently bound to
+     * a given IPC [socketPath] (the daemon's per-profile AF_UNIX socket). A mount
+     * whose co-daemon connects to this socket is being served by *this* daemon,
+     * so stopping the daemon would orphan it.
+     *
+     * Injected so the `daemon stop` live-mount guard can be tested without a real
+     * `/proc` tree or a real co-daemon process.
+     */
+    fun interface CoDaemonSocketProbe {
+        fun servesSocket(socketPath: String): Boolean
+    }
+
+    /**
+     * Production entry point: returns true when a live
+     * `unidrive-mount` co-daemon is bound to [socketPath]. `daemon stop` calls
+     * this with the profile's socket path to decide whether stopping would orphan
+     * a live mount.
+     */
+    fun hasLiveMountForSocket(socketPath: String): Boolean =
+        procCoDaemonSocketProbe.servesSocket(socketPath)
+
     internal fun parseUnidriveFuseMountpoint(line: String): String? {
         val parts = line.split(Regex("\\s+"))
         if (parts.size < 3) return null
@@ -97,5 +119,43 @@ object StaleMountDetector {
         if (!isUnidriveMount) return false
         val mountIdx = args.indexOf("--mount")
         return mountIdx >= 0 && mountIdx + 1 < args.size && args[mountIdx + 1] == mountpoint
+    }
+
+    /**
+     * Production socket probe: scans `/proc/<pid>/cmdline` for a live
+     * `unidrive-mount` co-daemon whose `--ipc <socket>` argument matches the
+     * supplied socket path. MountCommand spawns the co-daemon as
+     * `unidrive-mount --mount <mountPath> --ipc <socket> --cache <root>`, so the
+     * `--ipc <socket>` pair identifies which daemon a mount is bound to.
+     */
+    private val procCoDaemonSocketProbe = CoDaemonSocketProbe { socketPath ->
+        if (!Files.isReadable(procRoot)) return@CoDaemonSocketProbe false
+        Files.newDirectoryStream(procRoot).use { stream ->
+            stream.any { entry ->
+                val name = entry.fileName.toString()
+                if (name.isEmpty() || !name.all { it.isDigit() }) return@any false
+                val cmdline = entry.resolve("cmdline")
+                if (!Files.isReadable(cmdline)) return@any false
+                val args =
+                    runCatching {
+                        String(Files.readAllBytes(cmdline))
+                            .split(CMDLINE_SEP)
+                            .filter { it.isNotEmpty() }
+                    }.getOrDefault(emptyList())
+                cmdlineServesSocket(args, socketPath)
+            }
+        }
+    }
+
+    /**
+     * True when [args] is a `unidrive-mount` co-daemon invocation bound to
+     * [socketPath] (i.e. `--ipc <socketPath>` appears in the argv).
+     */
+    internal fun cmdlineServesSocket(args: List<String>, socketPath: String): Boolean {
+        if (args.isEmpty()) return false
+        val isUnidriveMount = args[0].substringAfterLast('/') == "unidrive-mount"
+        if (!isUnidriveMount) return false
+        val ipcIdx = args.indexOf("--ipc")
+        return ipcIdx >= 0 && ipcIdx + 1 < args.size && args[ipcIdx + 1] == socketPath
     }
 }

@@ -727,8 +727,15 @@ open class SyncCommand : Runnable {
                         failure = e
                     }
                     if (failure != null) {
-                        System.err.println("Sync error: ${failure.javaClass.simpleName}: ${failure.message ?: "(no message)"}")
-                        failure.printStackTrace(System.err)
+                        System.err.println(renderSyncFailure(failure))
+                        // Only dump the JVM stack trace for unexpected
+                        // failures, and only under -v. An operator-facing guard
+                        // (mis-pointed sync_root, tripped safeguard) carries a
+                        // complete actionable message — a stack trace there is the
+                        // very noise the "never stack traces" rule forbids.
+                        if (parent.verbose && !isOperatorFacing(failure)) {
+                            failure.printStackTrace(System.err)
+                        }
                     }
                     System.out.flush()
                     System.err.flush()
@@ -923,6 +930,39 @@ open class SyncCommand : Runnable {
 
     companion object {
         internal const val WS_SILENCE_THRESHOLD_MS: Long = 90_000L
+
+        /**
+         * Render a sync failure as a clean, operator-facing message instead
+         * of a raw stack trace (project rule: CLI errors show formatted help,
+         * never stack traces).
+         *
+         * Operator-facing guards — the empty-sync_root / wrong-directory check,
+         * deletion safeguards, reconciler invariants — throw [IllegalStateException]
+         * / [IllegalArgumentException] carrying an actionable, fully formed message.
+         * For those, the message IS the error; the class name and the JVM stack
+         * trace are noise. Render the bare message.
+         *
+         * Genuinely unexpected throwables (NPE, IOException, …) keep a class-name
+         * prefix so they're identifiable in a bug report. Their stack trace is
+         * surfaced only when [verbose] is set, matching the rest of the CLI's
+         * `-v`-gated diagnostics.
+         */
+        internal fun renderSyncFailure(failure: Throwable): String {
+            val message = failure.message?.takeIf { it.isNotBlank() }
+            return if (isOperatorFacing(failure) && message != null) {
+                "Sync error: $message"
+            } else {
+                "Sync error: ${failure.javaClass.simpleName}: ${message ?: "(no message)"}"
+            }
+        }
+
+        /**
+         * True for exception types the engine uses to signal an operator-correctable
+         * condition (mis-pointed sync_root, tripped safeguard, broken invariant)
+         * rather than an internal defect. These carry a complete, actionable message.
+         */
+        internal fun isOperatorFacing(failure: Throwable): Boolean =
+            failure is IllegalStateException || failure is IllegalArgumentException
 
         internal fun normalizeSyncPath(raw: String?): String? {
             if (raw.isNullOrEmpty()) return null
