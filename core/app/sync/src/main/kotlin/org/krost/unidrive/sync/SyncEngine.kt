@@ -2220,6 +2220,13 @@ open class SyncEngine(
                         safeAccumulator.addAll(safeNow)
                         for (action in safeNow) {
                             if (action is SyncAction.DownloadContent || action is SyncAction.Upload) {
+                                // #200(b): a NEW-local upload must NOT dispatch mid-gather —
+                                // enumeration completeness isn't known until scan-end. It stays in
+                                // safeAccumulator, so finalizeStreaming's gate either keeps it
+                                // (complete → uploaded in Pass 2) or defers it (incomplete),
+                                // never duplicating an un-enumerated remote file. Downloads and
+                                // MODIFIED/replace uploads still stream concurrently.
+                                if (action is SyncAction.Upload && localChanges[action.path] == ChangeState.NEW) continue
                                 executorChannel.send(action)
                             }
                         }
