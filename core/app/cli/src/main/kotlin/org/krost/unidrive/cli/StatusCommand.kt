@@ -16,6 +16,7 @@ import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -63,6 +64,69 @@ internal data class LocalSizeBuckets(
     val hydratedBytes: Long,
     val pendingBytes: Long,
 )
+
+/**
+ * Summary counts read directly from a `tracking.db` (tracking-set engine) using
+ * plain JDBC — no compile-time dependency on `:app:sync-tracking` required.
+ *
+ *  - [total]   total entries in the tracking set (any state)
+ *  - [synced]  entries in state `TrackedSynced` (both sides agree with snapshot)
+ *  - [pending] entries in any `Pending*` state (in-flight transfers/deletes)
+ *  - [cloudBytes]  sum of `remote_size` for non-null remote_file_id rows
+ *  - [localBytes]  sum of `local_size` for rows with non-null local_size
+ */
+internal data class TrackingDbCounts(
+    val total: Int,
+    val synced: Int,
+    val pending: Int,
+    val cloudBytes: Long,
+    val localBytes: Long,
+)
+
+/**
+ * Read [TrackingDbCounts] from a `tracking.db` at [dbPath] via plain JDBC.
+ * Returns null when the file does not exist, is not a valid SQLite database,
+ * or does not have the expected `tracking_entries` table.
+ *
+ * Using plain JDBC (sqlite-jdbc is on the runtime classpath via `:app:sync`)
+ * avoids a compile-time dependency on `:app:sync-tracking`, which itself
+ * depends on `:app:cli` — that cycle is broken by keeping this call raw.
+ */
+internal fun readTrackingDbCounts(dbPath: Path): TrackingDbCounts? {
+    if (!Files.exists(dbPath)) return null
+    return try {
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            var total = 0
+            var synced = 0
+            var pending = 0
+            var cloudBytes = 0L
+            var localBytes = 0L
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery(
+                    "SELECT state, COUNT(*), " +
+                        "SUM(CASE WHEN remote_file_id IS NOT NULL THEN COALESCE(remote_size,0) ELSE 0 END), " +
+                        "SUM(COALESCE(local_size,0)) " +
+                        "FROM tracking_entries GROUP BY state",
+                ).use { rs ->
+                    while (rs.next()) {
+                        val state = rs.getString(1) ?: continue
+                        val count = rs.getInt(2)
+                        val cloud = rs.getLong(3)
+                        val local = rs.getLong(4)
+                        total += count
+                        cloudBytes += cloud
+                        localBytes += local
+                        if (state == "TrackedSynced") synced += count
+                        if (state.startsWith("Pending")) pending += count
+                    }
+                }
+            }
+            TrackingDbCounts(total, synced, pending, cloudBytes, localBytes)
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
 
 internal fun computeLocalSizeBuckets(entries: List<org.krost.unidrive.sync.model.SyncEntry>): LocalSizeBuckets {
     var hydrated = 0L
@@ -399,6 +463,24 @@ class StatusCommand : Runnable {
             return buildOrphanAccountRow(label, stateDbPath, hasDb)
         }
 
+        // Tracking-set engine detection: if tracking.db is present the profile
+        // is managed by the TS engine. We read real counts from tracking.db via
+        // plain JDBC (no compile-time dep on :app:sync-tracking needed) and
+        // surface them with a [TS] status label.  When both tracking.db AND
+        // state.db exist, tracking.db takes precedence — the TS engine is
+        // explicitly designed to co-exist with state.db, and showing TS figures
+        // is more accurate for a profile that has switched engines.
+        //
+        // PR #198 P2: do NOT bypass the auth/stale health check — pass the
+        // offline credential health through so a TS profile with missing or
+        // stale credentials renders the auth problem instead of a blanket [TS].
+        val trackingDbPath = configDir.resolve("tracking.db")
+        val tsCounts = readTrackingDbCounts(trackingDbPath)
+        if (tsCounts != null) {
+            val tsHealth = parent.checkCredentialHealth(profile, configDir)
+            return buildTrackingSetAccountRow(label, tsCounts, tsHealth)
+        }
+
         val health = parent.checkCredentialHealth(profile, configDir)
         val effectiveCanAuth =
             health is org.krost.unidrive.CredentialHealth.Ok ||
@@ -555,6 +637,38 @@ class StatusCommand : Runnable {
         }
     }
 
+    /**
+     * Build an [AccountRow] for a tracking-set-managed profile.
+     *
+     * The STATUS column shows `[TS]` when credentials are healthy, signalling
+     * that the figures come from `tracking.db` (the tracking-set engine), not
+     * `state.db`. When [health] is not [CredentialHealth.Ok], the STATUS column
+     * instead reflects the auth problem (stale/missing/warn) using the same
+     * label logic as the legacy path — so a TS profile whose credentials are
+     * broken does not falsely render as healthy. The TS counts (CLOUD, HYDRATED,
+     * PENDING, LAST-SYNC) are always preserved from `tracking.db` regardless of
+     * auth health.
+     *
+     * Operators wanting state-machine breakdowns should run `unidrive ts status`.
+     */
+    private fun buildTrackingSetAccountRow(
+        label: String,
+        counts: TrackingDbCounts,
+        health: CredentialHealth,
+    ): AccountRow {
+        val (status, statusLabel) = trackingSetRowStatus(health)
+        return AccountRow(
+            profileName = label,
+            status = status,
+            statusLabel = statusLabel,
+            sparse = 0,
+            cloudSize = CliProgressReporter.formatSize(counts.cloudBytes),
+            hydratedSize = CliProgressReporter.formatSize(counts.localBytes),
+            pendingSize = if (counts.pending > 0) counts.pending.toString() else "0 B",
+            lastSync = "ts:${counts.synced}/${counts.total}",
+        )
+    }
+
     private fun renderTable(
         groups: List<ProviderGroup>,
         ansi: Boolean,
@@ -656,9 +770,11 @@ class StatusCommand : Runnable {
 
         // Render groups
         for ((gi, group) in groups.withIndex()) {
-            val anyOk = group.accounts.any { it.status == "ok" }
+            // "ts" is treated as healthy (renders green) for group-level indicators:
+            // the profile is actively managed by the tracking-set engine.
+            val anyOk = group.accounts.any { it.status == "ok" || it.status == "ts" }
             val icon = if (anyOk) GlyphRenderer.cloud() else GlyphRenderer.warn()
-            val allError = group.accounts.all { it.status != "ok" }
+            val allError = group.accounts.all { it.status != "ok" && it.status != "ts" }
 
             // Single-account provider with error: inline status on provider row
             if (group.accounts.size == 1 && allError) {
@@ -688,7 +804,7 @@ class StatusCommand : Runnable {
                     val connector = if (isLast) " ${GlyphRenderer.treeLast()} " else " ${GlyphRenderer.treeBranch()} "
                     val acctColor =
                         when (acct.status) {
-                            "ok" -> "green"
+                            "ok", "ts" -> "green"
                             "dim" -> "dim"
                             else -> "yellow"
                         }
@@ -777,6 +893,27 @@ class StatusCommand : Runnable {
  * as `[⚠ STALE]`, not silently fixed-up via an interactive auth prompt.
  */
 internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
+
+/**
+ * Pure helper: derive the (status-code, statusLabel) pair for a tracking-set
+ * profile row given the offline [CredentialHealth] of the profile.
+ *
+ * A TS profile with healthy credentials → ("ts", "[TS]").
+ * A TS profile with a stale / expired token → ("warn", "[⚠ STALE]").
+ * A TS profile with missing or otherwise broken credentials → ("auth", "[✘ AUTH]").
+ *
+ * The TS counts from `tracking.db` are always preserved by the caller regardless
+ * of which status is returned — only the STATUS column changes.
+ *
+ * Extracted as a top-level function so tests can drive it directly without a
+ * live [StatusCommand] + [Main] wiring.
+ */
+internal fun trackingSetRowStatus(health: CredentialHealth): Pair<String, String> =
+    when {
+        health is CredentialHealth.Ok -> "ts" to GlyphRenderer.trackingSetLabel()
+        health is CredentialHealth.ExpiresIn -> "warn" to GlyphRenderer.warnLabel("STALE")
+        else -> "auth" to GlyphRenderer.authFailLabel()
+    }
 
 /**
  * Pure helper extracted from [StatusCommand.discoverProfiles] so unit tests

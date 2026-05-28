@@ -227,6 +227,14 @@ object GlyphRenderer {
      */
     fun orphanLabel(): String = "[? ORPHAN]"
 
+    /**
+     * `[TS]` status label for a profile managed by the tracking-set engine.
+     * The label signals that the real figures come from `tracking.db`, not the
+     * legacy `state.db`, and that `unidrive ts status` is the authoritative
+     * view for detailed state-machine breakdowns.
+     */
+    fun trackingSetLabel(): String = "[TS]"
+
     // ── Compatibility shim ───────────────────────────────────────────────────
 
     /**
