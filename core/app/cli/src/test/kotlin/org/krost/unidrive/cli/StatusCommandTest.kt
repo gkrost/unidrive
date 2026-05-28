@@ -5,6 +5,7 @@ import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.model.SyncEntry
 import picocli.CommandLine
 import java.nio.file.Files
+import java.sql.DriverManager
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -445,5 +446,185 @@ class StatusCommandTest {
         assertTrue("hydratedSize" in declaredFields)
         assertTrue("pendingSize" in declaredFields)
         assertTrue("lastSync" in declaredFields)
+    }
+
+    // ── Tracking-set engine detection ──────────────────────────────────────────
+
+    /**
+     * Helper: create a minimal tracking.db at [path] and seed it with
+     * [rows] entries using the same schema as SqliteTrackingSet.
+     *
+     * Each row tuple: (path, state, remoteFileId?, remoteSize, localSize)
+     */
+    private fun createTrackingDb(
+        path: java.nio.file.Path,
+        rows: List<Triple<String, String, Long>>,
+    ) {
+        Files.createDirectories(path.parent)
+        DriverManager.getConnection("jdbc:sqlite:$path").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE IF NOT EXISTS tracking_entries (
+                        path             TEXT PRIMARY KEY,
+                        provider_id      TEXT NOT NULL,
+                        remote_file_id   TEXT,
+                        state            TEXT NOT NULL,
+                        local_hash       TEXT,
+                        local_size       INTEGER,
+                        remote_etag      TEXT,
+                        remote_size      INTEGER,
+                        last_synced      TEXT NOT NULL
+                    )
+                    """,
+                )
+            }
+            rows.forEach { (entryPath, state, size) ->
+                conn.prepareStatement(
+                    "INSERT INTO tracking_entries (path, provider_id, remote_file_id, state, local_size, remote_size, last_synced) " +
+                        "VALUES (?, 'internxt', ?, ?, ?, ?, ?)",
+                ).use { ps ->
+                    ps.setString(1, entryPath)
+                    ps.setString(2, if (state != "Untracked") "remote-$entryPath" else null)
+                    ps.setString(3, state)
+                    ps.setLong(4, size)
+                    ps.setLong(5, size)
+                    ps.setString(6, Instant.now().toString())
+                    ps.executeUpdate()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `tracking-set profile with tracking-db returns TS status label not empty OK`() {
+        // Core invariant: a profile whose configDir contains tracking.db must NOT
+        // be reported as "[✔ OK]" with zeros — that was the misleading display this
+        // fix addresses.  The status label must be the [TS] marker.
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val trackingDb = dir.resolve("tracking.db")
+            createTrackingDb(
+                trackingDb,
+                listOf(
+                    Triple("/Documents/report.pdf", "TrackedSynced", 50_000L),
+                    Triple("/Documents/photo.jpg", "TrackedSynced", 200_000L),
+                ),
+            )
+            val counts = readTrackingDbCounts(trackingDb)
+            assertNotNull(counts, "readTrackingDbCounts must read a valid tracking.db")
+            assertEquals(2, counts.total)
+            assertEquals(2, counts.synced)
+            assertEquals(0, counts.pending)
+            assertTrue(counts.cloudBytes > 0, "cloud bytes must reflect remote_size")
+            assertTrue(counts.localBytes > 0, "local bytes must reflect local_size")
+
+            // The status label must be [TS], not [✔ OK]
+            val tsLabel = GlyphRenderer.trackingSetLabel()
+            assertTrue("TS" in tsLabel, "tracking-set label must contain TS, got: $tsLabel")
+            assertTrue(tsLabel.startsWith("[") && tsLabel.endsWith("]"), "must be bracketed")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `readTrackingDbCounts returns null when tracking-db absent`() {
+        // Legacy profiles with no tracking.db must not be affected — the reader
+        // returns null so the caller stays on the state.db path.
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val missing = dir.resolve("tracking.db")
+            val counts = readTrackingDbCounts(missing)
+            assertEquals(null, counts, "must return null when tracking.db does not exist")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `readTrackingDbCounts reflects pending entries separately from synced`() {
+        // Pending entries signal in-flight transfers. The counts must distinguish
+        // them from synced entries so the operator can see that a transfer is
+        // underway (not just a clean state count of zero pending).
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val trackingDb = dir.resolve("tracking.db")
+            createTrackingDb(
+                trackingDb,
+                listOf(
+                    Triple("/a.txt", "TrackedSynced", 1_000L),
+                    Triple("/b.txt", "PendingUpload", 2_000L),
+                    Triple("/c.txt", "PendingDownload", 3_000L),
+                ),
+            )
+            val counts = readTrackingDbCounts(trackingDb)
+            assertNotNull(counts)
+            assertEquals(3, counts.total)
+            assertEquals(1, counts.synced)
+            assertEquals(2, counts.pending)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `tracking-set profile with both tracking-db and state-db uses tracking-db counts`() {
+        // When both tracking.db (TS engine) and state.db (legacy engine) are
+        // present, tracking.db takes precedence.  The profile was migrated to the
+        // TS engine; showing legacy state.db figures would be misleading.
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val trackingDb = dir.resolve("tracking.db")
+            createTrackingDb(
+                trackingDb,
+                listOf(Triple("/ts-file.txt", "TrackedSynced", 99_000L)),
+            )
+            // Also create a state.db (simulating a profile that has both)
+            val stateDb = dir.resolve("state.db")
+            DriverManager.getConnection("jdbc:sqlite:$stateDb").use { conn ->
+                conn.createStatement().use { it.executeUpdate("CREATE TABLE IF NOT EXISTS sync_state (key TEXT, value TEXT)") }
+            }
+
+            val counts = readTrackingDbCounts(trackingDb)
+            assertNotNull(counts, "tracking.db must be read when both dbs present")
+            assertEquals(1, counts.total, "counts must come from tracking.db (1 entry), not state.db (0 entries)")
+            assertEquals(1, counts.synced)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `readTrackingDbCounts returns null for a corrupt or non-sqlite file`() {
+        // A malformed tracking.db must not crash the status command — readTrackingDbCounts
+        // must return null and let buildAccountRow fall through to the legacy path.
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val badDb = dir.resolve("tracking.db")
+            Files.writeString(badDb, "this is not a sqlite database")
+            val counts = readTrackingDbCounts(badDb)
+            assertEquals(null, counts, "corrupt file must return null, not throw")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy state-db-only profile is not affected by tracking-set detection`() {
+        // A profile with only state.db (no tracking.db) must return null from
+        // readTrackingDbCounts so buildAccountRow follows the unchanged legacy path.
+        val dir = Files.createTempDirectory("ts-status-test-")
+        try {
+            val stateDb = dir.resolve("state.db")
+            DriverManager.getConnection("jdbc:sqlite:$stateDb").use { conn ->
+                conn.createStatement().use { it.executeUpdate("CREATE TABLE IF NOT EXISTS sync_state (key TEXT, value TEXT)") }
+            }
+            val noTracking = dir.resolve("tracking.db")
+            val counts = readTrackingDbCounts(noTracking)
+            assertEquals(null, counts, "no tracking.db -> null -> legacy path unchanged")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
     }
 }
