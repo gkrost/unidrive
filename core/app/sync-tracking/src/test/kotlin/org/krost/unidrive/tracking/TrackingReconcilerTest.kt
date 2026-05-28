@@ -125,6 +125,80 @@ class TrackingReconcilerTest {
         assertTrue(action is ReconcileAction.ReportCollision, "size-mismatch with null hashes must produce ReportCollision, got $action")
     }
 
+    // ── auto-match unit tests ──
+
+    /**
+     * auto-match=size: null-hash, same-size, same-path → adopt (NoOp + shouldAdopt=true).
+     * This test would FAIL before the auto-match change (default collides).
+     */
+    @Test
+    fun `auto_match_size_null_hash_equal_size_adopts`() {
+        val size = 42L
+        val l = LocalObservation(exists = true, hash = null, size = size, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = size, hash = null, serverMtime = null)
+        val recSize = TrackingReconciler(AutoMatchMode.SIZE)
+        val action = recSize.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.NoOp,
+            "auto-match=size, null hashes, equal size must produce NoOp (adopt-signal), got $action",
+        )
+        assertTrue(
+            recSize.shouldAdopt(l, r, track = null),
+            "auto-match=size, null hashes, equal size: shouldAdopt must be true",
+        )
+    }
+
+    /**
+     * auto-match=size: null-hash, SIZE MISMATCH → still collision (size-match required).
+     */
+    @Test
+    fun `auto_match_size_null_hash_size_mismatch_still_collides`() {
+        val l = LocalObservation(exists = true, hash = null, size = 10L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 20L, hash = null, serverMtime = null)
+        val recSize = TrackingReconciler(AutoMatchMode.SIZE)
+        val action = recSize.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.ReportCollision,
+            "auto-match=size with size mismatch must still produce ReportCollision, got $action",
+        )
+    }
+
+    /**
+     * auto-match=name: null-hash, same-path → adopt regardless of size.
+     */
+    @Test
+    fun `auto_match_name_null_hash_same_path_adopts`() {
+        val l = LocalObservation(exists = true, hash = null, size = 10L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 99L, hash = null, serverMtime = null)
+        val recName = TrackingReconciler(AutoMatchMode.NAME)
+        val action = recName.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.NoOp,
+            "auto-match=name, null hashes, same-path must produce NoOp (adopt-signal), got $action",
+        )
+        assertTrue(
+            recName.shouldAdopt(l, r, track = null),
+            "auto-match=name, null hashes: shouldAdopt must be true",
+        )
+    }
+
+    /**
+     * DEFAULT (no auto-match): null-hash same-size → ReportCollision — #104 preserved.
+     * Belt-and-braces assertion on the reconciler directly (complements the integration test).
+     */
+    @Test
+    fun `default_off_null_hash_same_size_still_collides_preserving_104`() {
+        val size = 42L
+        val l = LocalObservation(exists = true, hash = null, size = size, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = size, hash = null, serverMtime = null)
+        val recOff = TrackingReconciler(AutoMatchMode.OFF)
+        val action = recOff.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.ReportCollision,
+            "default (off) auto-match must still produce ReportCollision for null-hash same-size, got $action",
+        )
+    }
+
     @Test
     fun `tracked + no change → no-op`() {
         assertTrue(rec.reconcile("/p", local(true, "lh"), remote(true, "re", "rh"), track()) is ReconcileAction.NoOp)
@@ -180,6 +254,85 @@ class TrackingReconcilerTest {
             ReconcileAction.DownloadRemote("/p")::class,
             a::class,
             "post-crash pending-download must re-derive to DownloadRemote, got $a",
+        )
+    }
+
+    // ── hashless-provider change-token tests ──
+
+    /** Hashless track: null etags on both snapshot and live observation — a remote SIZE change must trigger download. */
+    @Test
+    fun `hashless tracked remote size change triggers download not no-op`() {
+        val hashlessTrack = TrackingRecord(
+            path = "/p", providerId = "internxt", remoteFileId = "rid",
+            state = TrackState.TrackedSynced,
+            localHash = null, localSize = 10L,
+            remoteEtag = null, remoteSize = 10L,
+            lastSynced = Instant.EPOCH,
+        )
+        // Remote file grew from 10 → 20 bytes; etag stays null (Internxt never returns one).
+        val localObs = LocalObservation(exists = true, hash = null, size = 10L, mtime = Instant.EPOCH, inode = null)
+        val remoteObs = RemoteObservation(exists = true, remoteFileId = "rid", etag = null, size = 20L, hash = null, serverMtime = Instant.EPOCH)
+        val action = rec.reconcile("/p", localObs, remoteObs, hashlessTrack)
+        assertTrue(
+            action is ReconcileAction.DownloadRemote,
+            "hashless provider: remote size change must produce DownloadRemote, got $action",
+        )
+    }
+
+    /** Hashless track: null etags AND same size — no spurious download. */
+    @Test
+    fun `hashless tracked remote same size no-op`() {
+        val hashlessTrack = TrackingRecord(
+            path = "/p", providerId = "internxt", remoteFileId = "rid",
+            state = TrackState.TrackedSynced,
+            localHash = null, localSize = 10L,
+            remoteEtag = null, remoteSize = 10L,
+            lastSynced = Instant.EPOCH,
+        )
+        val localObs = LocalObservation(exists = true, hash = null, size = 10L, mtime = Instant.EPOCH, inode = null)
+        val remoteObs = RemoteObservation(exists = true, remoteFileId = "rid", etag = null, size = 10L, hash = null, serverMtime = Instant.EPOCH)
+        val action = rec.reconcile("/p", localObs, remoteObs, hashlessTrack)
+        assertTrue(
+            action is ReconcileAction.NoOp,
+            "hashless provider: same size must produce NoOp (no false download), got $action",
+        )
+    }
+
+    /** OneDrive path (etag present): remote etag change still triggers download — no regression. */
+    @Test
+    fun `onedrive etag change on tracked row still triggers download`() {
+        val etagTrack = track(localHash = "lh", remoteEtag = "etag-v1")
+        val localObs = LocalObservation(exists = true, hash = "lh", size = 10L, mtime = Instant.EPOCH, inode = null)
+        val remoteObs = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag-v2", size = 10L, hash = null, serverMtime = Instant.EPOCH)
+        val action = rec.reconcile("/p", localObs, remoteObs, etagTrack)
+        assertTrue(
+            action is ReconcileAction.DownloadRemote,
+            "OneDrive etag path: changed etag must still produce DownloadRemote, got $action",
+        )
+    }
+
+    /**
+     * Auto-match=size adoption followed by a remote size change must produce DownloadRemote.
+     * Confirms that an auto-matched row (remoteSize recorded at adoption) detects a later edit.
+     */
+    @Test
+    fun `auto-match adopted row detects subsequent remote size change`() {
+        val recSize = TrackingReconciler(AutoMatchMode.SIZE)
+        // Simulate a row adopted via --auto-match=size: both hashes null, remoteSize=10 recorded.
+        val adoptedTrack = TrackingRecord(
+            path = "/p", providerId = "internxt", remoteFileId = "rid",
+            state = TrackState.TrackedSynced,
+            localHash = null, localSize = 10L,
+            remoteEtag = null, remoteSize = 10L,
+            lastSynced = Instant.EPOCH,
+        )
+        val localObs = LocalObservation(exists = true, hash = null, size = 10L, mtime = Instant.EPOCH, inode = null)
+        // Remote file edited after adoption: size changed from 10 → 30.
+        val remoteObs = RemoteObservation(exists = true, remoteFileId = "rid", etag = null, size = 30L, hash = null, serverMtime = Instant.EPOCH)
+        val action = recSize.reconcile("/p", localObs, remoteObs, adoptedTrack)
+        assertTrue(
+            action is ReconcileAction.DownloadRemote,
+            "auto-match adopted row: remote size change after adoption must produce DownloadRemote, got $action",
         )
     }
 }

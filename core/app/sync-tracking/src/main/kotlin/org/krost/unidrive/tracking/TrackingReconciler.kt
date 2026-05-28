@@ -25,7 +25,9 @@ package org.krost.unidrive.tracking
  * The reconciler is intentionally side-effect free. The engine owns IO
  * and persistence; this function only decides.
  */
-class TrackingReconciler {
+class TrackingReconciler(
+    val autoMatch: AutoMatchMode = AutoMatchMode.OFF,
+) {
     /**
      * Return the action to take for [path] given the live observations
      * and the current tracking record (null = untracked).
@@ -86,8 +88,25 @@ class TrackingReconciler {
         // engine. We gate Gone on `snapshot side was non-null` so a
         // crashed-mid-pending row recovers to its original intent (down/
         // upload), not to a delete.
-        val localChanged = local.exists && local.hash != track.localHash
-        val remoteChanged = remote.exists && (remote.etag != track.remoteEtag)
+        //
+        // Hashless-provider change-token: when both etags/hashes are null
+        // (Internxt never returns a content hash or a discriminating etag)
+        // the primary identity token can't distinguish "unchanged" from
+        // "changed to the same null". Fall back to size: if the size changed
+        // the file definitely changed; if size is the same we can't tell
+        // (a same-size content edit is undetectable without a hash — inherent
+        // to the provider). This is the best available token given the API.
+        val remoteEtagDiffers = remote.etag != track.remoteEtag
+        val remoteEtagComparable = remote.etag != null || track.remoteEtag != null
+        val remoteChanged = remote.exists &&
+            (remoteEtagDiffers || (!remoteEtagComparable && remote.size != track.remoteSize))
+
+        // Symmetric: local hash is null on some configurations (e.g. a provider
+        // that only hashes after upload). Fall back to local size as well.
+        val localHashDiffers = local.hash != track.localHash
+        val localHashComparable = local.hash != null || track.localHash != null
+        val localChanged = local.exists &&
+            (localHashDiffers || (!localHashComparable && local.size != track.localSize))
         val localGone = !local.exists && track.localHash != null
         val remoteGone = !remote.exists && track.remoteEtag != null
 
@@ -162,7 +181,18 @@ class TrackingReconciler {
         // (loud, user-recoverable) rather than silent adopt (data-corruption risk).
         val lh = local.hash
         val rh = remote.hash
-        if (lh == null || rh == null) return false
-        return lh == rh
+        if (lh != null && rh != null) return lh == rh
+
+        // Both hashes are null: content identity is unprovable.
+        // Opt-in escape hatches via autoMatch — the operator asserts it is safe.
+        return when (autoMatch) {
+            AutoMatchMode.OFF -> false
+            AutoMatchMode.SIZE -> local.size != null && local.size == remote.size
+            // NAME: both sides exist at the same path (already guaranteed by the
+            // caller) and we treat that as sufficient evidence. Any size mismatch
+            // is still a potential divergence — we flag it, but the operator opted
+            // in to name-only matching so we adopt regardless.
+            AutoMatchMode.NAME -> true
+        }
     }
 }

@@ -44,11 +44,13 @@ class TrackingEngine(
     private val provider: CloudProvider,
     private val trackingSet: TrackingSet,
     private val syncRoot: Path,
-    private val reconciler: TrackingReconciler = TrackingReconciler(),
+    reconciler: TrackingReconciler? = null,
     private val batchGuard: BatchGuard = BatchGuard(),
     private val dryRun: Boolean = false,
     private val excludePatterns: List<String> = emptyList(),
+    autoMatch: AutoMatchMode = AutoMatchMode.OFF,
 ) {
+    private val reconciler: TrackingReconciler = reconciler ?: TrackingReconciler(autoMatch)
     private val log = LoggerFactory.getLogger(TrackingEngine::class.java)
 
     /**

@@ -221,3 +221,110 @@ class FakeTrackingProvider : CloudProvider {
         return d.digest(bytes).joinToString("") { "%02x".format(it) }
     }
 }
+
+/**
+ * Variant of [FakeTrackingProvider] that models a hashless remote (e.g. Internxt):
+ * every [CloudItem] emitted has `hash = null`, which is what the tracking engine
+ * sees when the provider's API does not return a content hash.
+ *
+ * Used to pin the auto-match behaviour: with no [AutoMatchMode] set, a null-hash
+ * both-sides entry must surface a [ReconcileAction.ReportCollision]; with
+ * [AutoMatchMode.SIZE] or [AutoMatchMode.NAME] it must adopt.
+ */
+class HashlessFakeProvider : CloudProvider {
+    val files: MutableMap<String, ByteArray> = mutableMapOf()
+    override val id = "hashless-fake"
+    override val displayName = "Hashless Fake"
+    override var isAuthenticated: Boolean = true
+
+    override fun capabilities(): Set<org.krost.unidrive.Capability> =
+        setOf(org.krost.unidrive.Capability.Delta, org.krost.unidrive.Capability.VerifyItem)
+
+    override suspend fun authenticate() {}
+
+    override suspend fun listChildren(path: String): List<org.krost.unidrive.CloudItem> = emptyList()
+
+    override suspend fun getMetadata(path: String): org.krost.unidrive.CloudItem {
+        val bytes = files[path] ?: throw NoSuchElementException("no remote at $path")
+        return itemFor(path, bytes)
+    }
+
+    override suspend fun download(
+        remotePath: String,
+        destination: Path,
+    ): Long {
+        val bytes = files[remotePath] ?: throw NoSuchElementException("no remote at $remotePath")
+        Files.createDirectories(destination.parent)
+        Files.write(destination, bytes)
+        return bytes.size.toLong()
+    }
+
+    override suspend fun upload(
+        localPath: Path,
+        remotePath: String,
+        existingRemoteId: String?,
+        onProgress: ((Long, Long) -> Unit)?,
+    ): org.krost.unidrive.CloudItem {
+        val bytes = Files.readAllBytes(localPath)
+        files[remotePath] = bytes
+        return itemFor(remotePath, bytes)
+    }
+
+    override suspend fun delete(remotePath: String) {
+        files.remove(remotePath)
+    }
+
+    override suspend fun createFolder(path: String): org.krost.unidrive.CloudItem =
+        org.krost.unidrive.CloudItem(
+            id = "folder-$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 0,
+            isFolder = true,
+            modified = java.time.Instant.now(),
+            created = java.time.Instant.now(),
+            hash = null,
+            mimeType = null,
+        )
+
+    override suspend fun move(
+        fromPath: String,
+        toPath: String,
+    ): org.krost.unidrive.CloudItem {
+        val bytes = files.remove(fromPath) ?: throw NoSuchElementException("no remote at $fromPath")
+        files[toPath] = bytes
+        return itemFor(toPath, bytes)
+    }
+
+    override suspend fun delta(
+        cursor: String?,
+        onPageProgress: ((Int) -> Unit)?,
+        scanContext: org.krost.unidrive.ScanContext?,
+    ): org.krost.unidrive.DeltaPage {
+        val items =
+            files.entries.map { (path, bytes) -> itemFor(path, bytes) }
+        return org.krost.unidrive.DeltaPage(items = items, cursor = "hashless-cursor", hasMore = false)
+    }
+
+    override suspend fun quota(): org.krost.unidrive.QuotaInfo =
+        org.krost.unidrive.QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)
+
+    override suspend fun verifyItemExists(remoteId: String): org.krost.unidrive.CapabilityResult<Boolean> =
+        org.krost.unidrive.CapabilityResult.Success(files.containsKey(remoteId))
+
+    private fun itemFor(
+        path: String,
+        bytes: ByteArray,
+    ): org.krost.unidrive.CloudItem =
+        org.krost.unidrive.CloudItem(
+            id = "id-${path.hashCode()}",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = bytes.size.toLong(),
+            isFolder = false,
+            modified = java.time.Instant.parse("2026-05-21T00:00:00Z"),
+            created = java.time.Instant.parse("2026-05-21T00:00:00Z"),
+            hash = null, // <-- the distinguishing property: no content hash
+            mimeType = "application/octet-stream",
+        )
+}
