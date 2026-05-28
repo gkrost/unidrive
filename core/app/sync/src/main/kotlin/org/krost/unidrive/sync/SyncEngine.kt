@@ -2245,12 +2245,26 @@ open class SyncEngine(
                                 // never duplicating an un-enumerated remote file. Downloads and
                                 // MODIFIED/replace uploads still stream concurrently.
                                 if (action is SyncAction.Upload && localChanges[action.path] == ChangeState.NEW) continue
-                                // Claim the path atomically before forwarding so a transfer
-                                // re-emitted on a later page (MODIFIED upload / recurring
-                                // download) is sent to the executor exactly once. add()
-                                // returns false when already claimed; concurrent set so two
-                                // page-slices can't both win the claim.
-                                if (!sentToExecutor.add(action.path)) continue
+                                // Claim before forwarding so a transfer re-emitted on a later
+                                // page is sent to the executor exactly once. add() returns
+                                // false when already claimed; concurrent set so two page-slices
+                                // can't both win the claim.
+                                //
+                                // An Upload's local content is fixed for the gather
+                                // (localChanges is computed once), so a MODIFIED upload that
+                                // recurs across pages is a true duplicate — claim by path.
+                                // A DownloadContent, however, carries this page's remote
+                                // metadata: if the remote was edited again on a later page the
+                                // later DownloadContent is a genuinely-newer transfer, so key
+                                // it on (path, hash, modified) — only an identical re-emission
+                                // is dropped, never a fresher remote version.
+                                val claimKey =
+                                    when (action) {
+                                        is SyncAction.DownloadContent ->
+                                            "${action.path}|${action.remoteItem.hash}|${action.remoteItem.modified}"
+                                        else -> action.path
+                                    }
+                                if (!sentToExecutor.add(claimKey)) continue
                                 executorChannel.send(action)
                             }
                         }
@@ -2273,32 +2287,48 @@ open class SyncEngine(
             // + producer too, matching Pass 2's behaviour.
             val executorJob =
                 launch {
+                    // Serialize transfers that target the SAME path, in channel (page)
+                    // order. A path can surface a second transfer on a later page — a
+                    // remote edited again mid-enumeration yields a newer DownloadContent
+                    // with different metadata, which the content-aware claim deliberately
+                    // lets through. If both ran concurrently to the same destination + DB
+                    // row, a slower earlier-page transfer could finish last and overwrite
+                    // the fresher bytes/metadata. Chaining each path's job onto the prior
+                    // one (join, which waits without rethrowing) makes the later page win.
+                    // Distinct paths get a null prior, so they still run concurrently. The
+                    // loop is single-threaded, so this map needs no synchronisation.
+                    val lastJobPerPath = HashMap<String, kotlinx.coroutines.Job>()
                     for (action in executorChannel) {
+                        val prior = lastJobPerPath[action.path]
                         when (action) {
                             is SyncAction.DownloadContent ->
-                                gatherScope.launch {
-                                    dispatchStreamingDownload(
-                                        action = action,
-                                        downloaded = downloaded,
-                                        transferFailures = transferFailures,
-                                        authFailure = authFailure,
-                                        executedPaths = executedPaths,
-                                        gatherScope = gatherScope,
-                                        transferSemaphore = transferSemaphore,
-                                    )
-                                }
+                                lastJobPerPath[action.path] =
+                                    gatherScope.launch {
+                                        prior?.join()
+                                        dispatchStreamingDownload(
+                                            action = action,
+                                            downloaded = downloaded,
+                                            transferFailures = transferFailures,
+                                            authFailure = authFailure,
+                                            executedPaths = executedPaths,
+                                            gatherScope = gatherScope,
+                                            transferSemaphore = transferSemaphore,
+                                        )
+                                    }
                             is SyncAction.Upload ->
-                                gatherScope.launch {
-                                    dispatchStreamingUpload(
-                                        action = action,
-                                        uploaded = uploaded,
-                                        transferFailures = transferFailures,
-                                        authFailure = authFailure,
-                                        executedPaths = executedPaths,
-                                        gatherScope = gatherScope,
-                                        transferSemaphore = transferSemaphore,
-                                    )
-                                }
+                                lastJobPerPath[action.path] =
+                                    gatherScope.launch {
+                                        prior?.join()
+                                        dispatchStreamingUpload(
+                                            action = action,
+                                            uploaded = uploaded,
+                                            transferFailures = transferFailures,
+                                            authFailure = authFailure,
+                                            executedPaths = executedPaths,
+                                            gatherScope = gatherScope,
+                                            transferSemaphore = transferSemaphore,
+                                        )
+                                    }
                             else -> {
                                 // Defensive: classify() only surfaces
                                 // Download/Upload to us. Ignore the rest so
