@@ -127,6 +127,41 @@ class ReconcilerTest {
         assertIs<SyncAction.Upload>(actions[0])
     }
 
+    // #200(b): an INCOMPLETE enumeration must not let local-present/remote-absent
+    // paths drive remote creates — they may be un-enumerated subtrees, not new files.
+    @Test
+    fun `incomplete enumeration defers new-local creates`() {
+        Files.createDirectory(syncRoot.resolve("newdir")) // NEW-local dir → CreateRemoteFolder
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf(
+            "/local-new.txt" to ChangeState.NEW, // → Upload
+            "/newdir" to ChangeState.NEW, // → CreateRemoteFolder
+        )
+        val actions = reconciler.reconcile(remoteChanges, localChanges, enumerationComplete = false)
+        assertTrue(actions.none { it is SyncAction.Upload }, "new-local Upload must be deferred on an incomplete enumeration")
+        assertTrue(actions.none { it is SyncAction.CreateRemoteFolder }, "new-local CreateRemoteFolder must be deferred")
+    }
+
+    // Inverse: a COMPLETE enumeration must NOT over-defer — new-local creates emit.
+    @Test
+    fun `complete enumeration emits new-local creates`() {
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/local-new.txt" to ChangeState.NEW)
+        val actions = reconciler.reconcile(remoteChanges, localChanges, enumerationComplete = true)
+        assertTrue(actions.any { it is SyncAction.Upload }, "complete enumeration must still upload genuinely-new files")
+    }
+
+    // The defer targets only NEW-local creates: a MODIFIED upload (replace an
+    // existing remote) is not deferred even when the enumeration is incomplete.
+    @Test
+    fun `incomplete enumeration does not defer modified upload`() {
+        db.upsertEntry(dbEntry("/mod.txt", isHydrated = true))
+        val remoteChanges = emptyMap<String, CloudItem>()
+        val localChanges = mapOf("/mod.txt" to ChangeState.MODIFIED)
+        val actions = reconciler.reconcile(remoteChanges, localChanges, enumerationComplete = false)
+        assertTrue(actions.any { it is SyncAction.Upload }, "MODIFIED upload must NOT be deferred")
+    }
+
     @Test
     fun `UD-373 matchesGlob compiles each distinct pattern exactly once (cached across calls)`() {
         // Reset the spy counter so this test sees only its own invocations even if other

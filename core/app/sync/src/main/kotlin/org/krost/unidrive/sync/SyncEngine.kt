@@ -1095,13 +1095,22 @@ open class SyncEngine(
         // the union of streamed safe-now + deferred-drained actions here
         // so the recovery loops, case-collision detection, move detection,
         // and final sort run exactly once against the full action set.
+        // Upload-direction completeness gate: when the just-completed gather is
+        // INCOMPLETE, a local-present/remote-absent path may be an un-enumerated
+        // subtree rather than a genuinely-new file, so the reconciler must defer
+        // new-local creates (mirror of the delete-side "reap only on complete").
+        // apply mode (skipRemoteGather) has no fresh listing, so it is never gated.
+        val enumerationComplete =
+            skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
         val reconciledActions =
             if (streamingActions != null) {
                 reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath,
-                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD)
+                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
+                    enumerationComplete = enumerationComplete)
             } else {
                 reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath,
-                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD)
+                    downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
+                    enumerationComplete = enumerationComplete)
             }
         logUnhydratedFolderSkips()
 
