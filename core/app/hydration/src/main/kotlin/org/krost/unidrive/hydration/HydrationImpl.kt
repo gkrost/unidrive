@@ -82,10 +82,11 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrating(path))
             val p = syncEngine.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
-            // Re-read the row after hydration: a concurrent enumeration may have
-            // refreshed remoteSize while the download ran, and comparing the cache
-            // against the pre-hydration snapshot would spuriously trip (or skip) the
-            // size guard below. Fall back to the snapshot if the row vanished.
+            // Re-read the row after hydration: ensureHydrated persists the freshly
+            // downloaded size as remoteSize (and a concurrent enumeration may also have
+            // refreshed it), so comparing the cache against the pre-hydration snapshot
+            // would spuriously trip the size guard when the remote changed size since the
+            // last enumeration. Fall back to the snapshot if the row vanished.
             val current = stateDb.getEntry(path) ?: entry
             // Never hand the co-daemon a short/incomplete cache for a known-sized
             // file: a partial hydration would surface to the mount as a silent

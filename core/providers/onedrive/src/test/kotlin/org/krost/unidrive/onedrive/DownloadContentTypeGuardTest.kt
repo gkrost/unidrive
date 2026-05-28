@@ -165,4 +165,46 @@ class DownloadContentTypeGuardTest {
             runCatching { Files.deleteIfExists(destPath) }
             runCatching { Files.deleteIfExists(tempDir) }
         }
+
+    // C7: a body shorter than its Content-Length is a truncated transfer. downloadFile
+    // must throw (not return a short file), so hydration never persists a partial cache
+    // as the authoritative remote size.
+    @Test
+    fun `download throws when the body is shorter than Content-Length`() =
+        runTest {
+            val cdnUrl = "https://fake-cdn.sharepoint.com/truncated"
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    if (url.contains("/drive/items/test-id") && !url.endsWith("/content")) {
+                        respond(
+                            content = driveItemWithCdnUrl(cdnUrl),
+                            status = HttpStatusCode.OK,
+                            headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        // 5 body bytes but Content-Length claims 100 → truncated transfer.
+                        respond(
+                            content = ByteArray(5),
+                            status = HttpStatusCode.OK,
+                            headers =
+                                headersOf(
+                                    HttpHeaders.ContentType to listOf("application/octet-stream"),
+                                    HttpHeaders.ContentLength to listOf("100"),
+                                ),
+                        )
+                    }
+                }
+
+            val service = newService()
+            installMockClient(service, engine)
+            val tempDir = Files.createTempDirectory("od-trunc-")
+            val destPath = tempDir.resolve("f.bin")
+
+            assertFailsWith<Exception> { service.downloadFile("test-id", destPath) }
+
+            service.close()
+            runCatching { Files.deleteIfExists(destPath) }
+            runCatching { Files.deleteIfExists(tempDir) }
+        }
 }
