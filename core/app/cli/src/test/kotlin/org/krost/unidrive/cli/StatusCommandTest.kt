@@ -610,6 +610,43 @@ class StatusCommandTest {
         }
     }
 
+    // ── PR #198 P2: TS profile credential health is not bypassed ──────────────
+
+    @Test
+    fun `tracking-set profile with missing credentials renders auth status not healthy TS`() {
+        // The bug: buildAccountRow early-returned buildTrackingSetAccountRow with
+        // status="ts" (healthy) before running checkCredentialHealth.  A TS profile
+        // whose credentials are MISSING must render the auth problem, not [TS].
+        // This test drives trackingSetRowStatus directly with Missing health.
+        val missingHealth = CredentialHealth.Missing("No credentials file — run 'unidrive auth'")
+        val (status, statusLabel) = trackingSetRowStatus(missingHealth)
+        assertEquals("auth", status, "missing credentials must produce status=auth, not ts")
+        assertTrue("AUTH" in statusLabel, "status label for missing creds must contain AUTH, got: $statusLabel")
+        assertTrue(statusLabel.startsWith("[") && statusLabel.endsWith("]"), "expected bracketed label")
+    }
+
+    @Test
+    fun `tracking-set profile with stale token renders warn status not healthy TS`() {
+        // A TS profile with an expired / stale token must render [⚠ STALE], not [TS].
+        // The TS counts must still be preserved (count fields are unaffected by health).
+        val staleHealth = CredentialHealth.ExpiresIn(0, "JWT expired — run 'unidrive auth'")
+        val (status, statusLabel) = trackingSetRowStatus(staleHealth)
+        assertEquals("warn", status, "stale token must produce status=warn, not ts")
+        assertTrue("STALE" in statusLabel, "status label for stale token must contain STALE, got: $statusLabel")
+        assertTrue(statusLabel.startsWith("[") && statusLabel.endsWith("]"), "expected bracketed label")
+    }
+
+    @Test
+    fun `tracking-set profile with healthy credentials renders TS status`() {
+        // Regression guard for the happy path introduced by #118: a TS profile
+        // with valid credentials must still render [TS] + status="ts".
+        val okHealth = CredentialHealth.Ok
+        val (status, statusLabel) = trackingSetRowStatus(okHealth)
+        assertEquals("ts", status, "healthy TS profile must produce status=ts")
+        assertTrue("TS" in statusLabel, "status label for healthy TS profile must contain TS, got: $statusLabel")
+        assertTrue(statusLabel.startsWith("[") && statusLabel.endsWith("]"), "expected bracketed label")
+    }
+
     @Test
     fun `legacy state-db-only profile is not affected by tracking-set detection`() {
         // A profile with only state.db (no tracking.db) must return null from
