@@ -360,11 +360,16 @@ class StateDatabase(
     fun upsertEntry(rawEntry: SyncEntry) {
         // #171: store paths in NFC so the reconciler's NFC keys and direct lookups
         // (incl. the co-daemon's possibly-NFD getEntry) match the stored rows.
+        // remote_path is normalized on write too, so getEntryByRemotePath — which
+        // canonicalizes its query — still matches an aliased row whose cloud path
+        // arrived in NFD instead of treating the next delta as a new remote item.
+        val nfcPath = PathNormalizer.nfc(rawEntry.path)
+        val nfcRemotePath = rawEntry.remotePath?.let { PathNormalizer.nfc(it) }
         val entry =
-            if (PathNormalizer.nfc(rawEntry.path) == rawEntry.path) {
+            if (nfcPath == rawEntry.path && nfcRemotePath == rawEntry.remotePath) {
                 rawEntry
             } else {
-                rawEntry.copy(path = PathNormalizer.nfc(rawEntry.path))
+                rawEntry.copy(path = nfcPath, remotePath = nfcRemotePath)
             }
         // Path-collision resolution: if a different alive row already holds
         // this path, the partial unique index `WHERE status='EXISTS'` would
@@ -416,7 +421,8 @@ class StateDatabase(
      * count stays at one and the PK doesn't churn. Otherwise mint a fresh
      * `local:<uuid4>` synthetic.
      */
-    private fun pickSyntheticIdForPath(path: String): String {
+    private fun pickSyntheticIdForPath(pathRaw: String): String {
+        val path = PathNormalizer.nfc(pathRaw)
         conn
             .prepareStatement(
                 "SELECT remote_id FROM sync_entries WHERE path=? AND status='EXISTS' " +
@@ -462,7 +468,8 @@ class StateDatabase(
      * collapses to a plain `path` match — identical to [getEntry].
      */
     @Synchronized
-    fun getEntryByRemotePath(remotePath: String): SyncEntry? {
+    fun getEntryByRemotePath(remotePathRaw: String): SyncEntry? {
+        val remotePath = PathNormalizer.nfc(remotePathRaw)
         conn.prepareStatement(
             "SELECT * FROM alive_entries WHERE COALESCE(remote_path, path) = ?",
         ).use { stmt ->
@@ -473,7 +480,8 @@ class StateDatabase(
     }
 
     @Synchronized
-    fun getEntryCaseInsensitive(path: String): SyncEntry? {
+    fun getEntryCaseInsensitive(pathRaw: String): SyncEntry? {
+        val path = PathNormalizer.nfc(pathRaw)
         conn.prepareStatement("SELECT * FROM alive_entries WHERE path = ? COLLATE NOCASE").use { stmt ->
             stmt.setString(1, path)
             val rs = stmt.executeQuery()
@@ -510,7 +518,8 @@ class StateDatabase(
 
     /** Mark a path as no longer locally cached (is_hydrated = 0). */
     @Synchronized
-    fun markUnhydrated(path: String) {
+    fun markUnhydrated(pathRaw: String) {
+        val path = PathNormalizer.nfc(pathRaw)
         conn.prepareStatement(
             "UPDATE sync_entries SET is_hydrated = 0 WHERE path = ? AND status = 'EXISTS'",
         ).use { stmt ->
@@ -537,7 +546,8 @@ class StateDatabase(
      * intent is "is this subtree known to the user", not a count.
      */
     @Synchronized
-    fun hasHydratedDescendant(topLevel: String): Boolean {
+    fun hasHydratedDescendant(topLevelRaw: String): Boolean {
+        val topLevel = PathNormalizer.nfc(topLevelRaw)
         val pattern = "${escapeLike(topLevel)}/%"
         conn
             .prepareStatement(
@@ -559,7 +569,8 @@ class StateDatabase(
      * the deletion plan operates on.
      */
     @Synchronized
-    fun countEntriesUnderTopLevel(topLevel: String): Int {
+    fun countEntriesUnderTopLevel(topLevelRaw: String): Int {
+        val topLevel = PathNormalizer.nfc(topLevelRaw)
         val pattern = "${escapeLike(topLevel)}/%"
         conn
             .prepareStatement(
@@ -582,7 +593,8 @@ class StateDatabase(
      * and folder rows aren't always populated when leaf rows are.
      */
     @Synchronized
-    fun listDirectChildren(parentPath: String): List<SyncEntry> {
+    fun listDirectChildren(parentPathRaw: String): List<SyncEntry> {
+        val parentPath = PathNormalizer.nfc(parentPathRaw)
         val likeBase = if (parentPath.isEmpty()) "/" else "${escapeLike(parentPath)}/"
         val sliceFrom = if (parentPath.isEmpty()) 2 else parentPath.length + 2
         conn.prepareStatement(
@@ -599,7 +611,8 @@ class StateDatabase(
     }
 
     @Synchronized
-    fun getEntriesByPrefix(prefix: String): List<SyncEntry> {
+    fun getEntriesByPrefix(prefixRaw: String): List<SyncEntry> {
+        val prefix = PathNormalizer.nfc(prefixRaw)
         conn.prepareStatement("SELECT * FROM alive_entries WHERE path LIKE ? ESCAPE '\\'").use { stmt ->
             stmt.setString(1, "${escapeLike(prefix)}%")
             val rs = stmt.executeQuery()
@@ -664,7 +677,8 @@ class StateDatabase(
      * For cloud deletes, call [setStatusTrashed] instead.
      */
     @Synchronized
-    fun deleteEntry(path: String) {
+    fun deleteEntry(pathRaw: String) {
+        val path = PathNormalizer.nfc(pathRaw)
         conn.prepareStatement("DELETE FROM sync_entries WHERE path = ? AND status='EXISTS'").use { stmt ->
             stmt.setString(1, path)
             stmt.executeUpdate()
@@ -729,9 +743,10 @@ class StateDatabase(
      */
     @Synchronized
     fun markUploadFailed(
-        path: String,
+        pathRaw: String,
         at: Instant,
     ): Boolean {
+        val path = PathNormalizer.nfc(pathRaw)
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET last_error_at=? WHERE path=? AND status='EXISTS'",
@@ -819,9 +834,11 @@ class StateDatabase(
 
     @Synchronized
     fun renamePrefix(
-        oldPrefix: String,
-        newPrefix: String,
+        oldPrefixRaw: String,
+        newPrefixRaw: String,
     ) {
+        val oldPrefix = PathNormalizer.nfc(oldPrefixRaw)
+        val newPrefix = PathNormalizer.nfc(newPrefixRaw)
         val old = if (oldPrefix.endsWith('/')) oldPrefix else "$oldPrefix/"
         val new = if (newPrefix.endsWith('/')) newPrefix else "$newPrefix/"
         // UD-901c: clear any pre-existing destination rows BEFORE the UPDATE.

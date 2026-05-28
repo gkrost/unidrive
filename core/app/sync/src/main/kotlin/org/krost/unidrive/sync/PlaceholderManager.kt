@@ -41,7 +41,11 @@ fun safeResolveLocal(
     if (!Files.exists(resolved)) {
         val parent = resolved.parent
         val leaf = resolved.fileName?.toString()
-        if (parent != null && leaf != null && Files.isDirectory(parent)) {
+        // Only a leaf with non-ASCII chars can have a differing Unicode form (NFC vs
+        // NFD); a pure-ASCII name has no decomposed variant, so skip the O(n) parent
+        // scan for it — that keeps a bulk download of ASCII-named files from going
+        // O(n²) (every not-yet-created target would otherwise scan the growing dir).
+        if (parent != null && leaf != null && leaf.any { it.code > 0x7F } && Files.isDirectory(parent)) {
             val leafNfc = PathNormalizer.nfc(leaf)
             val match =
                 runCatching {
