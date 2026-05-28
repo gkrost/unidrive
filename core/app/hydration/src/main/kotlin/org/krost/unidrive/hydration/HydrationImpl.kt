@@ -87,7 +87,7 @@ class HydrationImpl(
             // 0-byte/short read, which a file-manager copy turns into a corrupt
             // 0-byte destination. Fail loudly (→ EIO, retryable) instead of serving
             // truncated content as success.
-            if (!entry.isFolder && entry.remoteSize > 0 && bytes != entry.remoteSize) {
+            if (entry.remoteId != null && !entry.isFolder && entry.remoteSize > 0 && bytes != entry.remoteSize) {
                 throw IllegalStateException(
                     "incomplete hydration for $path: cached $bytes of ${entry.remoteSize} bytes",
                 )

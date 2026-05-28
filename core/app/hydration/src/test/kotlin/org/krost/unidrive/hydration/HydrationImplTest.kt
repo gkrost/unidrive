@@ -232,6 +232,27 @@ internal class HydrationTestEnv(
             )
         }
 
+        // A file created/edited through the mount but not yet uploaded: remoteId
+        // null (local: synthetic), remoteSize 0, isHydrated true; the cache holds the
+        // just-written bytes and is the only copy. The warm path must trust it.
+        fun insertLocalOnlyHydratedEntry(path: String) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(),
+                    localSize = null,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+
         fun insertFolderEntry(path: String) {
             db.upsertEntry(
                 SyncEntry(
@@ -391,6 +412,26 @@ class HydrationImplTest {
         val error = (result as OpenResult.Failed).error
         assertTrue(error is HydrationError.Generic)
         assertTrue(error.message.contains("incomplete hydration"), "message: ${error.message}")
+    }
+
+    // #207 regression: a local-only hydrated file (created via the mount, not yet
+    // uploaded — remoteId null, remoteSize 0) must be served from its cache on the
+    // warm path, NEVER re-downloaded (there is no remote object yet, and the cache
+    // is the only copy of the user's just-written bytes).
+    @Test
+    fun `open_read serves a local-only hydrated cache without re-downloading`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertLocalOnlyHydratedEntry("/draft.txt")
+        env.syncEngine.seedCacheContent("/draft.txt", "just typed this") // 15 bytes, only copy
+
+        val result = env.hydration.openForRead("conn1", "h1", "/draft.txt")
+
+        assertTrue(result is OpenResult.Ok, "local-only hydrated row must be served from cache")
+        assertEquals(
+            "just typed this",
+            java.nio.file.Files.readString((result as OpenResult.Ok).cachePath),
+        )
+        assertEquals(0, env.syncEngine.downloadCount(), "must NOT re-download a local-only file")
     }
 
     @Test
