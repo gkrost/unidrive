@@ -64,7 +64,9 @@ class LocalScanner(
                     file: Path,
                     attrs: BasicFileAttributes,
                 ): FileVisitResult {
-                    val relativePath = "/" + syncRoot.relativize(file).toString().replace('\\', '/')
+                    // #171: canonicalize to NFC so an NFD on-disk name matches the
+                    // NFC remote/state.db key in the reconciler.
+                    val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(file).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.CONTINUE
                     seenPaths.add(relativePath)
                     visited++
@@ -136,7 +138,8 @@ class LocalScanner(
                     attrs: BasicFileAttributes,
                 ): FileVisitResult {
                     if (dir == syncRoot) return FileVisitResult.CONTINUE
-                    val relativePath = "/" + syncRoot.relativize(dir).toString().replace('\\', '/')
+                    // #171: canonicalize to NFC (see visitFile).
+                    val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(dir).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.SKIP_SUBTREE
                     seenPaths.add(relativePath)
 

@@ -2402,7 +2402,12 @@ open class SyncEngine(
     }
 
     private fun resolveItemPath(item: CloudItem): CloudItem? {
-        if (item.path != "/" && item.path.isNotEmpty()) return item
+        // #171: canonicalize the remote path to NFC so it matches the NFC local key
+        // in the reconciler (copy only when the form actually changes).
+        if (item.path != "/" && item.path.isNotEmpty()) {
+            val n = PathNormalizer.nfc(item.path)
+            return if (n == item.path) item else item.copy(path = n)
+        }
         // #183: access-revoked tombstone — Graph `@microsoft.graph.removed` state="removed",
         // no parentReference, so path resolved to "/". The item still physically exists on the
         // remote; the local file MUST be kept. Retire the DB row via TRASHED (removed from the
