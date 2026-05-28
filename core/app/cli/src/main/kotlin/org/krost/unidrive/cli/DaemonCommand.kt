@@ -225,7 +225,20 @@ class DaemonStopCommand : Runnable {
             return
         }
 
-        // Refuse (without --force) when a FUSE mount served by this daemon
+        // Resolve the daemon process first. A dead daemon (kill -9'd or crashed)
+        // leaves a stale .lock.pid; stopping is then a no-op cleanup that must
+        // succeed so the profile isn't stuck. This precedes the live-mount guard
+        // below because that guard is only meaningful for a LIVE daemon — a dead
+        // daemon's IPC server is already gone, so its mount is already orphaned
+        // and refusing to clean up the stale lock helps nobody.
+        val handle = ProcessHandle.of(pid).orElse(null)
+        if (handle == null || !handle.isAlive) {
+            println("daemon for profile '${profile.name}' (PID $pid) is not running (stale .lock.pid); cleaning up")
+            runCatching { Files.deleteIfExists(pidFile) }
+            return
+        }
+
+        // Refuse (without --force) when a FUSE mount served by this (live) daemon
         // is still live. Stopping the daemon tears down its IPC server; the
         // co-daemon then loses its backend and the mount serves broken state
         // (reads return EIO/ENOENT) with no other warning. The link between a
@@ -245,12 +258,6 @@ class DaemonStopCommand : Runnable {
         }
 
         // Send SIGTERM via ProcessHandle.
-        val handle = ProcessHandle.of(pid).orElse(null)
-        if (handle == null || !handle.isAlive) {
-            println("daemon for profile '${profile.name}' (PID $pid) is not running (stale .lock.pid); cleaning up")
-            runCatching { Files.deleteIfExists(pidFile) }
-            return
-        }
         handle.destroy()  // SIGTERM
         handle.onExit().orTimeout(STOP_DEADLINE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             .handle { _, _ -> true }.get()
