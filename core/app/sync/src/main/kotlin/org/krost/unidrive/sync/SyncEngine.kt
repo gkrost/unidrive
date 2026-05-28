@@ -2245,12 +2245,26 @@ open class SyncEngine(
                                 // never duplicating an un-enumerated remote file. Downloads and
                                 // MODIFIED/replace uploads still stream concurrently.
                                 if (action is SyncAction.Upload && localChanges[action.path] == ChangeState.NEW) continue
-                                // Claim the path atomically before forwarding so a transfer
-                                // re-emitted on a later page (MODIFIED upload / recurring
-                                // download) is sent to the executor exactly once. add()
-                                // returns false when already claimed; concurrent set so two
-                                // page-slices can't both win the claim.
-                                if (!sentToExecutor.add(action.path)) continue
+                                // Claim before forwarding so a transfer re-emitted on a later
+                                // page is sent to the executor exactly once. add() returns
+                                // false when already claimed; concurrent set so two page-slices
+                                // can't both win the claim.
+                                //
+                                // An Upload's local content is fixed for the gather
+                                // (localChanges is computed once), so a MODIFIED upload that
+                                // recurs across pages is a true duplicate — claim by path.
+                                // A DownloadContent, however, carries this page's remote
+                                // metadata: if the remote was edited again on a later page the
+                                // later DownloadContent is a genuinely-newer transfer, so key
+                                // it on (path, hash, modified) — only an identical re-emission
+                                // is dropped, never a fresher remote version.
+                                val claimKey =
+                                    when (action) {
+                                        is SyncAction.DownloadContent ->
+                                            "${action.path}|${action.remoteItem.hash}|${action.remoteItem.modified}"
+                                        else -> action.path
+                                    }
+                                if (!sentToExecutor.add(claimKey)) continue
                                 executorChannel.send(action)
                             }
                         }

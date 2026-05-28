@@ -1945,6 +1945,106 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `newer remote download on a later page is not dropped by the executor dedup`() =
+        runTest {
+            // Orthogonal to the upload-dedup invariant: the executor dedup must
+            // NOT silently drop a genuinely-newer DownloadContent. If the remote
+            // is edited again between page 1 and a later page, the file surfaces
+            // twice with DIFFERENT metadata. A path-only claim would keep the
+            // stale page-1 version and drop the fresher one (the page-1 download
+            // adds the path to executedPaths, so Pass 2 skips the later action),
+            // while the cursor advances past the later page — a lost remote
+            // update. The claim is therefore content-aware for downloads, so the
+            // fresher version still reaches the executor.
+            val baseline = Instant.parse("2026-01-01T00:00:00Z")
+            val v1Modified = Instant.parse("2026-02-01T00:00:00Z")
+            val v2Modified = Instant.parse("2026-03-01T00:00:00Z")
+
+            // Established baseline: a hydrated row whose local file matches the
+            // tracked size/mtime, so the local side scans as UNCHANGED and each
+            // page's remote metadata change yields a clean DownloadContent (not a
+            // delete-vs-modify conflict).
+            val localFile = syncRoot.resolve("edited.txt")
+            Files.write(localFile, ByteArray(5))
+            val localMtime = Files.getLastModifiedTime(localFile).toMillis()
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/edited.txt",
+                    remoteId = "remote-id-edited",
+                    remoteHash = "hash-v0",
+                    remoteSize = 5,
+                    remoteModified = baseline,
+                    localMtime = localMtime,
+                    localSize = 5,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = baseline,
+                ),
+            )
+            db.setSyncState("delta_cursor", "baseline-cursor")
+            provider.files["/edited.txt"] = ByteArray(5)
+
+            val v1 =
+                CloudItem(
+                    id = "remote-id-edited",
+                    name = "edited.txt",
+                    path = "/edited.txt",
+                    size = 5,
+                    isFolder = false,
+                    modified = v1Modified,
+                    created = baseline,
+                    hash = "hash-v1",
+                    mimeType = "application/octet-stream",
+                )
+            val v2 = v1.copy(hash = "hash-v2", modified = v2Modified)
+
+            // Same path on NON-adjacent pages with different remote metadata (a
+            // second remote edit landed on a later page). The middle page holds
+            // an unrelated item so the 1-page rename-coalescing lookahead flushes
+            // v1 for reconciliation BEFORE v2 arrives — otherwise the lookahead
+            // would merge the two same-id entries into one before resolveSlice
+            // ever runs, and the dedup would never see two actions. With them a
+            // page apart, both v1 and v2 reach resolveSlice as separate slices;
+            // a path-only dedup would drop v2, the content-aware claim lets it
+            // through.
+            provider.deltaPages =
+                listOf(
+                    listOf(v1) to "page1-cursor",
+                    listOf(cloudItem("/unrelated.txt", size = 3)) to "page2-cursor",
+                    listOf(v2) to "page3-cursor",
+                )
+            provider.files["/unrelated.txt"] = ByteArray(3)
+
+            val streamingEngine =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    streamingReconciliation = true,
+                )
+            streamingEngine.syncOnce()
+
+            assertTrue(
+                provider.deltaCalls >= 2,
+                "expected a multi-page gather (got deltaCalls=${provider.deltaCalls})",
+            )
+            // Both versions reach the provider — the fresher v2 is not dropped.
+            // (Pre-fix path-only dedup would yield exactly 1 download here.)
+            val edits = provider.downloadByIdCalls.count { it.second == "/edited.txt" } +
+                provider.downloadByPathCalls.count { it == "/edited.txt" }
+            assertEquals(
+                2,
+                edits,
+                "a newer remote version of /edited.txt on a later page must still be " +
+                    "downloaded; got $edits download(s) — the content-aware dedup must not " +
+                    "collapse two distinct remote versions of the same path",
+            )
+        }
+
+    @Test
     fun `UD-223 fast-bootstrap falls back to enumeration when provider lacks capability`() =
         runTest {
             provider.supportsFastBootstrap = false // default; capability absent
