@@ -508,6 +508,35 @@ open class SyncEngine(
         db.renamePrefix(oldPath, newPath)
     }
 
+    // The remote item at [path], or null only when the provider proves it ABSENT.
+    // The mount's rename/unlink use this to tell a genuinely-never-uploaded local:
+    // row from a "ghost" — a local: row whose content actually landed on the cloud
+    // (an upload whose response was lost) and must therefore be moved/deleted
+    // remotely, not handled locally. A genuine not-found maps to null; transient
+    // failures (auth expiry, throttling, 5xx, network) are PROPAGATED, never read
+    // as absence — otherwise a ghost probed during a blip would fall to the
+    // local-only path and silently skip the cloud move/delete (orphan/duplicate).
+    // isAlreadyGone covers the typed Internxt "not found"; statusCode 404 covers
+    // OneDrive's GraphApiException.
+    open suspend fun remoteItemOrNull(path: String): CloudItem? =
+        try {
+            provider.getMetadata(path)
+        } catch (e: Exception) {
+            if (isAlreadyGone(e) || statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)) {
+                null
+            } else {
+                throw e
+            }
+        }
+
+    // Reflectively read a `getStatusCode(): Int` off a provider exception without a
+    // provider-module classpath dependency (mirrors the hydration SPI helper).
+    private fun statusCodeOf(e: Throwable): Int? =
+        runCatching {
+            val getter = e.javaClass.methods.firstOrNull { it.name == "getStatusCode" && it.parameterCount == 0 }
+            getter?.invoke(e) as? Int
+        }.getOrNull()
+
     /**
      * One-way remote→state.db refresh for view consumers (the FUSE mount). Reuses the remote
      * gather + state.db upsert, but NEVER scans sync_root, NEVER plans/executes a local→remote

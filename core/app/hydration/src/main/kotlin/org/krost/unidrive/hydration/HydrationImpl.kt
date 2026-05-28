@@ -293,6 +293,25 @@ class HydrationImpl(
         // would grow sync_entries unboundedly with dead tombstones. deleteEntry
         // removes the row outright, matching the pending-upload cleanup path.
         if (entry.remoteId == null) {
+            // Ghost check (see rename): a local: row whose content actually landed
+            // on the cloud must be deleted remotely, not just dropped locally —
+            // otherwise the cloud copy is orphaned. Probe the remote; on a hit,
+            // delete it cloud-side, else hard-delete the genuinely-local row.
+            val ghost = try {
+                syncEngine.remoteItemOrNull(normalised)
+            } catch (e: Exception) {
+                // Transient remote-probe failure: fail the unlink rather than
+                // hard-delete the row and orphan a ghost's cloud copy.
+                return UnlinkResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+            }
+            if (ghost != null && !ghost.isFolder) {
+                return runCatching {
+                    syncEngine.deleteRemote(normalised)
+                    UnlinkResult.Ok
+                }.getOrElse { e ->
+                    UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
+                }
+            }
             return runCatching {
                 runCatching {
                     java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
@@ -330,6 +349,20 @@ class HydrationImpl(
             } else {
                 RmdirResult.Failed(HydrationError.Generic(msg.ifBlank { "rmdir failed" }))
             }
+        }
+    }
+
+    // Follow a renamed file's hydration cache from old to new path. A missing
+    // cache file is tolerated (a zero-byte temp that was never written, or an
+    // unhydrated placeholder). Shared by the genuinely-local and ghost rename paths.
+    private fun moveCacheFile(oldNorm: String, newNorm: String) {
+        val oldCache = syncEngine.resolveCachePath(oldNorm)
+        val newCache = syncEngine.resolveCachePath(newNorm)
+        try {
+            Files.createDirectories(newCache.parent)
+            Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
+        } catch (_: NoSuchFileException) {
+            // Cache file absent — nothing to move; the state.db repath suffices.
         }
     }
 
@@ -462,16 +495,41 @@ class HydrationImpl(
         // subtree in practice only occurs during an in-progress upload burst,
         // which is an unlikely race with a folder rename.
         if (sourceEntry.remoteId == null) {
-            return runCatching {
-                val oldCache = syncEngine.resolveCachePath(oldNorm)
-                val newCache = syncEngine.resolveCachePath(newNorm)
-                try {
-                    Files.createDirectories(newCache.parent)
-                    Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
-                } catch (_: NoSuchFileException) {
-                    // Cache file absent — zero-byte temp that was never written.
-                    // Nothing to move; the state.db repath below is sufficient.
+            // A local: row is normally a genuinely-never-uploaded file. But a
+            // "ghost" — an upload that committed cloud-side but lost its response —
+            // also presents as local:, and a local-only rename would silently skip
+            // the remote move (leaving the cloud copy under its old name and risking
+            // a duplicate re-upload). Probe the remote: if the file is actually
+            // there, treat it as a ghost — move it on the cloud and adopt its real
+            // id — otherwise fall through to the genuinely-local rename.
+            val ghost = try {
+                syncEngine.remoteItemOrNull(oldNorm)
+            } catch (e: Exception) {
+                // Transient remote-probe failure: fail the rename rather than risk a
+                // local-only rename that would silently skip a ghost's cloud move.
+                return RenameResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+            }
+            if (ghost != null && !ghost.isFolder) {
+                return runCatching {
+                    syncEngine.renameRemote(oldNorm, newNorm)
+                    moveCacheFile(oldNorm, newNorm)
+                    stateDb.getEntry(newNorm)?.let { moved ->
+                        stateDb.upsertEntry(
+                            moved.copy(
+                                remoteId = ghost.id,
+                                remoteHash = ghost.hash,
+                                remoteSize = ghost.size,
+                                remoteModified = ghost.modified,
+                            ),
+                        )
+                    }
+                    RenameResult.Ok
+                }.getOrElse { e ->
+                    RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
                 }
+            }
+            return runCatching {
+                moveCacheFile(oldNorm, newNorm)
                 stateDb.renamePrefix(oldNorm, newNorm)
                 RenameResult.Ok
             }.getOrElse { e ->
