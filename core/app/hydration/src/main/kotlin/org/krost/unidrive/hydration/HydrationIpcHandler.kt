@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import org.krost.unidrive.sync.PathNormalizer
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -223,7 +224,7 @@ class HydrationIpcHandler(
         return when (verb) {
             "hydration.open_read" -> {
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.openForRead(connectionId, handleId, path)) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
@@ -231,7 +232,7 @@ class HydrationIpcHandler(
             }
             "hydration.open_write" -> {
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
@@ -240,7 +241,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.open_write_begin" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 // handle_id is OPTIONAL: present → O_TRUNC live open (registers open-set entry);
                 // absent → one-shot setattr/bare-truncate (no registration).
                 val handleId = pluck(jsonRequest, "handle_id")
@@ -255,14 +256,14 @@ class HydrationIpcHandler(
                 reply(ok = true)
             }
             "hydration.hydrate" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.hydrate(path)) {
                     HydrateResult.Ok -> reply(ok = true)
                     is HydrateResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
             "hydration.dehydrate" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.dehydrate(path)) {
                     DehydrateResult.Ok -> reply(ok = true)
                     DehydrateResult.Busy -> reply(ok = false, error = "busy")
@@ -270,7 +271,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.last_synced" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.lastSynced(path)) {
                     is LastSyncedResult.Ok -> """{"ok":true,"mtime_ms":${r.mtimeEpochMillis}}"""
                     is LastSyncedResult.Unknown -> reply(ok = false, error = r.reason)
@@ -284,7 +285,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.mkdir" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.mkdir(path)) {
                     is MkdirResult.Ok -> reply(ok = true)
                     MkdirResult.ParentNotFound -> reply(ok = false, error = "parent_not_found")
@@ -292,7 +293,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.unlink" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.unlink(path)) {
                     is UnlinkResult.Ok -> reply(ok = true)
                     UnlinkResult.PathIsFolder -> reply(ok = false, error = "path_is_folder")
@@ -300,7 +301,7 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.rmdir" -> {
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.rmdir(path)) {
                     is RmdirResult.Ok -> reply(ok = true)
                     RmdirResult.PathIsFile -> reply(ok = false, error = "path_is_file")
@@ -310,7 +311,7 @@ class HydrationIpcHandler(
             }
             "hydration.create" -> {
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
-                val path = pluck(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.create(connectionId, handleId, path)) {
                     is CreateResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"handle_id":${jsonEsc(r.handleId)}}"""
                     CreateResult.ParentNotFound -> reply(ok = false, error = "parent_not_found")
@@ -319,8 +320,8 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.rename" -> {
-                val oldPath = pluck(jsonRequest, "old_path") ?: return reply(ok = false, error = "missing_old_path")
-                val newPath = pluck(jsonRequest, "new_path") ?: return reply(ok = false, error = "missing_new_path")
+                val oldPath = pluckPath(jsonRequest, "old_path") ?: return reply(ok = false, error = "missing_old_path")
+                val newPath = pluckPath(jsonRequest, "new_path") ?: return reply(ok = false, error = "missing_new_path")
                 when (val r = hydration.rename(oldPath, newPath)) {
                     is RenameResult.Ok -> reply(ok = true)
                     RenameResult.OldPathNotFound -> reply(ok = false, error = "old_path_not_found")
@@ -339,6 +340,19 @@ class HydrationIpcHandler(
 
     private fun reply(ok: Boolean, error: String? = null): String =
         if (ok) """{"ok":true}""" else """{"ok":false,"error":${jsonEsc(error ?: "unknown")}}"""
+
+    // Plucks a LOGICAL co-daemon path field and canonicalises it to NFC. This is the
+    // single point where co-daemon paths enter the JVM; normalizing once here makes
+    // every downstream op (cache resolution + provider delete/createFolder/move + the
+    // StateDatabase NFC lookups) see the same NFC form as the NFC-stored data. The
+    // co-daemon may send a decomposed (NFD) name (macOS-origin accents) for a row
+    // stored composed (NFC) — without this an NFD deleteRemote 404s on the NFC cloud
+    // object and an NFD cache lookup misses the NFC-named file. Mirrors the existing
+    // ingestion-chokepoint approach. NOT applied to `cache_path` (a literal local
+    // filesystem path the co-daemon already created, used verbatim) or `prefix`
+    // (StateDatabase.listDirectChildren already normalizes it).
+    private fun pluckPath(line: String, key: String): String? =
+        pluck(line, key)?.let { PathNormalizer.nfc(it) }
 
     // Minimal JSON pluck — works for flat top-level string fields. Sufficient
     // for our verb messages; we don't accept arbitrary client JSON shapes.
