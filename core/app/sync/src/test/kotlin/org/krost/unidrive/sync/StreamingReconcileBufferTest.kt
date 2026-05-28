@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.CloudItem
 import org.krost.unidrive.sync.model.ChangeState
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.krost.unidrive.sync.model.SyncAction
@@ -8,6 +9,19 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class StreamingReconcileBufferTest {
+    private fun item(path: String) =
+        CloudItem(
+            id = "id$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 1,
+            isFolder = false,
+            modified = null,
+            created = null,
+            hash = null,
+            mimeType = null,
+        )
+
     @Test
     fun `classify splits additive safe-now from deletion-bearing deferred`() {
         val buf = StreamingReconcileBuffer()
@@ -28,22 +42,39 @@ class StreamingReconcileBufferTest {
         assertEquals(listOf(deleteConflict), buf.drainDeferred())
     }
 
-    // C6 invariant: a path that fired a safe-now (additive) action this gather must
-    // NOT then be destroyed by a deferred delete buffered on another page. The live
-    // case is delete-then-recreate split across delta pages: page 1 tombstones the old
-    // id (DeleteLocal, deferred), a later page re-creates the file (DownloadContent,
-    // safe-now). Here Upload stands in for any additive verdict — the buffer's safePaths
-    // mechanism is agnostic to which one fired.
+    // C6 invariant: a delete/recreate split across delta pages must keep the recreated
+    // file. Page 1 tombstones the old id (DeleteLocal, deferred); a later page re-creates
+    // the file at the same path (DownloadContent, safe-now, already written). The drain
+    // must drop the stale DeleteLocal.
     // If this test is removed or loosened, the streaming delete-then-recreate data-loss
     // path silently re-opens.
     @Test
-    fun `deferred delete is suppressed when the same path fired safe-now`() {
+    fun `deferred delete is suppressed when remote content lands at the same path`() {
         val buf = StreamingReconcileBuffer()
-        buf.classify(listOf(SyncAction.DeleteLocal("/p"))) // earlier page: tombstone -> deferred
-        buf.classify(listOf(SyncAction.Upload("/p"))) // later page: recreate -> safe-now
+        buf.classify(listOf(SyncAction.DeleteLocal("/p"))) // earlier page: tombstone(old id) -> deferred
+        buf.classify(listOf(SyncAction.DownloadContent("/p", item("/p")))) // later page: recreate -> safe-now
         assertTrue(
             buf.drainDeferred().none { it.path == "/p" },
-            "a deferred delete for a path that also fired safe-now must be dropped at drain",
+            "a deferred delete must be dropped once remote content lands at that path",
+        )
+    }
+
+    // Bot P1 (the complement): a LOCAL Upload must NOT suppress a deferred delete. The
+    // localChanges map is replayed every page, so a MODIFIED-local path produces a
+    // per-page safe-now Upload; the page carrying the remote tombstone emits a
+    // DELETED-bearing Conflict. That conflict is a genuine modify-vs-remote-delete and
+    // must survive the drain — only remote-content landing supersedes a delete.
+    @Test
+    fun `local Upload does not suppress a deferred delete-modify conflict`() {
+        val buf = StreamingReconcileBuffer()
+        buf.classify(listOf(SyncAction.Upload("/p"))) // no-remote page: MODIFIED-local replayed
+        val conflict =
+            SyncAction.Conflict("/p", ChangeState.MODIFIED, ChangeState.DELETED, null, ConflictPolicy.KEEP_BOTH)
+        buf.classify(listOf(conflict)) // tombstone page: real delete-vs-modify conflict
+        assertEquals(
+            listOf(conflict),
+            buf.drainDeferred(),
+            "a local Upload must not drop a genuine remote-delete conflict",
         )
     }
 
@@ -54,7 +85,7 @@ class StreamingReconcileBufferTest {
         assertEquals(
             listOf(SyncAction.DeleteLocal("/gone")),
             buf.drainDeferred(),
-            "a genuine remote deletion with no competing safe-now action must still drain",
+            "a genuine remote deletion with no competing remote-content action must still drain",
         )
     }
 }
