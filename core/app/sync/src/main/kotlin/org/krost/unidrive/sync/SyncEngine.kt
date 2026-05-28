@@ -508,6 +508,14 @@ open class SyncEngine(
         db.renamePrefix(oldPath, newPath)
     }
 
+    // The remote item at [path], or null when the provider has none. Any provider
+    // error (not-found or transient) maps to null. The mount's rename/unlink use
+    // this to tell a genuinely-never-uploaded local: row from a "ghost" — a local:
+    // row whose content actually landed on the cloud (an upload whose response was
+    // lost) and must therefore be moved/deleted remotely, not handled locally.
+    open suspend fun remoteItemOrNull(path: String): CloudItem? =
+        runCatching { provider.getMetadata(path) }.getOrNull()
+
     /**
      * One-way remote→state.db refresh for view consumers (the FUSE mount). Reuses the remote
      * gather + state.db upsert, but NEVER scans sync_root, NEVER plans/executes a local→remote
