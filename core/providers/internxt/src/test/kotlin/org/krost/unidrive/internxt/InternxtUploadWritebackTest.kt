@@ -11,23 +11,20 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-/**
- * Upload write-back recovery: a createFile whose response is LOST (the
- * `server prematurely closed the connection` truncation) AFTER the server
- * committed the drive entry must not leave a `local:` ghost row. The file is on
- * the drive but the client never got its UUID; the provider re-resolves by path
- * and adopts the real UUID when the landed file is provably ours.
- *
- * If these tests are removed or loosened, a truncated upload response silently
- * produces a never-recorded file → lost renames/deletes through the mount and a
- * duplicate-upload hazard on the next sync.
- *
- * `retryOnTransient` only retries InternxtApiException transient statuses, so the
- * raw IOException reaches the provider-level catch (verified). Three invariants:
- *  1. landed-and-ours      → adopt the real UUID, no throw, no re-upload.
- *  2. not-found            → re-throw the original failure (engine retries later).
- *  3. found-but-different  → re-throw (never adopt a file that isn't our content).
- */
+// Upload write-back recovery: a createFile whose response is LOST (the
+// "server prematurely closed the connection" truncation) AFTER the server
+// committed the drive entry must not leave a local: ghost row. The file is on
+// the drive but the client never got its UUID; the provider re-resolves by path
+// and adopts the real UUID when the landed file is provably ours.
+//
+// If these tests are removed or loosened, a truncated upload response silently
+// produces a never-recorded file -> lost renames/deletes through the mount and a
+// duplicate-upload hazard on the next sync. retryOnTransient only retries
+// InternxtApiException transient statuses, so the raw IOException reaches the
+// provider-level catch (verified). Three invariants, one test each:
+//  1. landed-and-ours     -> adopt the real UUID, no throw, no re-upload.
+//  2. not-found           -> re-throw the original failure (engine retries later).
+//  3. found-but-different -> re-throw (never adopt a file that isn't our content).
 class InternxtUploadWritebackTest {
     private val shardUrl = "https://shard-host.invalid/writeback-put"
     private val localFileId = "local-bucket-entry-id" // fileId of what we just uploaded
@@ -75,11 +72,9 @@ class InternxtUploadWritebackTest {
         field.set(api, io.ktor.client.HttpClient(engine))
     }
 
-    /**
-     * Builds a MockEngine whose upload pre-amble succeeds, whose createFile POST
-     * fails with a connection-truncation IOException, and whose folder-content
-     * GET returns [folderFilesJson]. [createPosts] / [folderGets] count the calls.
-     */
+    // Builds a MockEngine whose upload pre-amble succeeds, whose createFile POST
+    // fails with a connection-truncation IOException, and whose folder-content GET
+    // returns folderFilesJson. createPosts / folderGets count the calls.
     private fun engineWithLostCreate(
         createPosts: AtomicInteger,
         folderGets: AtomicInteger,
