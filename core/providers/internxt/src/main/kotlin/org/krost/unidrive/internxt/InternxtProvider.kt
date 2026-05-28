@@ -2134,6 +2134,30 @@ internal const val RECONCILE_WINDOW_MS: Long = 5L * 60 * 1000
 
 internal const val RECONCILE_RELIST_DELAY_MS: Long = 2_000L
 
+// List [folderUuid] and match a just-committed bucket entry by
+// (plainName, type, size, recency-window). Shared by both finishUpload recovery
+// paths — a 409 MissingUploadsError and a lost/truncated response surface the
+// same question ("did the commit land server-side?") and answer it identically.
+// A NotFoundWithNameMatch (a stale same-name entry that fails size/window) gets
+// one bounded re-list to absorb the bridge's eventual-consistency window.
+// Listing failures propagate to the caller, which maps them to its own error.
+internal suspend fun reconcileLandedEntry(
+    api: InternxtApiService,
+    folderUuid: String,
+    plainName: String,
+    ext: String?,
+    fileSize: Long,
+    startedAt: java.time.Instant,
+): ReconcileResult {
+    val window = startedAt.minusMillis(RECONCILE_WINDOW_MS)
+    val listing = api.getFolderContents(folderUuid)
+    val reconciled = pickReconcileCandidate(listing, plainName, ext, fileSize, window)
+    if (reconciled !is ReconcileResult.NotFoundWithNameMatch) return reconciled
+    kotlinx.coroutines.delay(RECONCILE_RELIST_DELAY_MS)
+    val relisted = api.getFolderContents(folderUuid)
+    return pickReconcileCandidate(relisted, plainName, ext, fileSize, window)
+}
+
 internal suspend fun commitWithRetry(
     api: InternxtApiService,
     bucket: String,
@@ -2152,6 +2176,68 @@ internal suspend fun commitWithRetry(
     val first =
         try {
             api.finishUpload(bucket, indexHex, hashHex, shardUuid)
+        } catch (ioe: java.io.IOException) {
+            // The finishUpload response was lost (truncated / "server prematurely
+            // closed the connection") AFTER the bridge may have committed the
+            // bucket entry: the shard is on the drive but we never received its
+            // fileId. retryShardCommit would re-throw this after its attempt
+            // ladder, and the engine would record a synthetic local: ghost row
+            // (remote_size=0) — the same data-loss class the 409 reconcile below
+            // guards against. Re-resolve the parent by (name, type, size, window);
+            // adopt the landed bucket entry iff it provably matches what we just
+            // uploaded, else surface the original failure (the pipeline retries).
+            finishUploadLog.warn(
+                "finishUpload response lost for {} under folder={} ({}); " +
+                    "re-resolving parent to check for a landed commit",
+                plainName,
+                folderUuid,
+                ioe.message,
+            )
+            val reconciled =
+                try {
+                    reconcileLandedEntry(api, folderUuid, plainName, ext, fileSize, startedAt)
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    throw ce
+                } catch (listingErr: Exception) {
+                    finishUploadLog.warn(
+                        "finishUpload-lost-response reconcile listing failed for {}: {}; propagating original failure",
+                        folderUuid,
+                        listingErr.message,
+                    )
+                    throw ioe
+                }
+            when (reconciled) {
+                is ReconcileResult.Found -> {
+                    finishUploadLog.warn(
+                        "finishUpload landed server-side despite the lost response for {} (fileId={}); adopting",
+                        plainName,
+                        reconciled.bucketEntry.id,
+                    )
+                    return reconciled.bucketEntry
+                }
+                is ReconcileResult.FoundDisambiguated -> {
+                    finishUploadLog.warn(
+                        "finishUpload-lost-response reconcile matched multiple candidates for {} under {}; " +
+                            "selecting youngest fileId={}, others={}",
+                        plainName,
+                        folderUuid,
+                        reconciled.bucketEntry.id,
+                        reconciled.siblingFileIds,
+                    )
+                    return reconciled.bucketEntry
+                }
+                ReconcileResult.NotFoundNoNameMatch,
+                ReconcileResult.NotFoundWithNameMatch,
+                -> {
+                    finishUploadLog.warn(
+                        "no landed commit found after finishUpload lost its response for {} under {}; " +
+                            "propagating original failure (pipeline retries with pinned indexBytes)",
+                        plainName,
+                        folderUuid,
+                    )
+                    throw ioe
+                }
+            }
         } catch (e: InternxtApiException) {
             if (!isMissingUploadsError(e)) throw e
 
@@ -2163,10 +2249,12 @@ internal suspend fun commitWithRetry(
                 e.requestId?.let { " requestId=$it" } ?: "",
             )
 
-            val listing =
+            val reconciled =
                 try {
-                    api.getFolderContents(folderUuid)
-                } catch (listingErr: InternxtApiException) {
+                    reconcileLandedEntry(api, folderUuid, plainName, ext, fileSize, startedAt)
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    throw ce
+                } catch (listingErr: Exception) {
                     finishUploadLog.warn(
                         "finishUpload-409 reconcile listing failed for {}: {}; propagating original 409{}",
                         folderUuid,
@@ -2180,27 +2268,6 @@ internal suspend fun commitWithRetry(
                         cause = listingErr,
                     )
                 }
-
-            val window = startedAt.minusMillis(RECONCILE_WINDOW_MS)
-            var reconciled = pickReconcileCandidate(listing, plainName, ext, fileSize, window)
-
-            // Case (b): a stale entry exists with the same name but doesn't match
-            // size/window — eventual-consistency window. Wait briefly and re-list once.
-            if (reconciled is ReconcileResult.NotFoundWithNameMatch) {
-                kotlinx.coroutines.delay(RECONCILE_RELIST_DELAY_MS)
-                val relisted =
-                    try {
-                        api.getFolderContents(folderUuid)
-                    } catch (listingErr: InternxtApiException) {
-                        throw InternxtApiException(
-                            "finishUpload 409 MissingUploadsError, reconcile re-list failed: ${listingErr.message}",
-                            statusCode = 409,
-                            requestId = e.requestId,
-                            cause = listingErr,
-                        )
-                    }
-                reconciled = pickReconcileCandidate(relisted, plainName, ext, fileSize, window)
-            }
 
             when (reconciled) {
                 is ReconcileResult.Found -> {
