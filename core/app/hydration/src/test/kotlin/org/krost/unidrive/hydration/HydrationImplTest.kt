@@ -359,6 +359,40 @@ class HydrationImplTest {
         assertTrue(error.message.contains("does-not-exist.txt"))
     }
 
+    // #207: a hydrated row over a truncated/0-byte cache (crash mid-download,
+    // external clear, reset/poll window) must NOT be served as-is — ensureHydrated
+    // re-downloads when the cached size doesn't match the remote size.
+    @Test
+    fun `open_read re-downloads when a hydrated cache is truncated below the remote size`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 11) // remoteSize = 11
+        env.syncEngine.seedRemoteContent("/foo.txt", "hello world") // the real 11 bytes
+        env.syncEngine.seedCacheContent("/foo.txt", "")             // stale 0-byte cache
+
+        val result = env.hydration.openForRead("conn1", "h1", "/foo.txt")
+
+        assertTrue(result is OpenResult.Ok, "must re-download, not serve the truncated cache")
+        val cachePath = (result as OpenResult.Ok).cachePath
+        assertEquals("hello world", java.nio.file.Files.readString(cachePath))
+        assertEquals(1, env.syncEngine.downloadCount(), "the size-mismatched cache must trigger a re-download")
+    }
+
+    // #207: a download that comes up short of the known remote size must fail
+    // loudly (→ EIO, retryable), never serve truncated content as success.
+    @Test
+    fun `open_read fails when the hydration comes up short of the remote size`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/bar.txt", remoteSize = 100)
+        env.syncEngine.seedRemoteContent("/bar.txt", "short") // only 5 of 100 bytes
+
+        val result = env.hydration.openForRead("conn1", "h1", "/bar.txt")
+
+        assertTrue(result is OpenResult.Failed, "a short hydration must fail, not serve truncated content")
+        val error = (result as OpenResult.Failed).error
+        assertTrue(error is HydrationError.Generic)
+        assertTrue(error.message.contains("incomplete hydration"), "message: ${error.message}")
+    }
+
     @Test
     fun `close_handle on unknown id is a noop`() = runTest {
         val env = HydrationTestEnv()

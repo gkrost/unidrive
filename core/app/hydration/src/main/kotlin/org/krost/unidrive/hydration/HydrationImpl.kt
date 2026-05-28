@@ -82,6 +82,16 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrating(path))
             val p = syncEngine.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
+            // Never hand the co-daemon a short/incomplete cache for a known-sized
+            // file: a partial hydration would surface to the mount as a silent
+            // 0-byte/short read, which a file-manager copy turns into a corrupt
+            // 0-byte destination. Fail loudly (→ EIO, retryable) instead of serving
+            // truncated content as success.
+            if (!entry.isFolder && entry.remoteSize > 0 && bytes != entry.remoteSize) {
+                throw IllegalStateException(
+                    "incomplete hydration for $path: cached $bytes of ${entry.remoteSize} bytes",
+                )
+            }
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             p
         } catch (e: Exception) {
