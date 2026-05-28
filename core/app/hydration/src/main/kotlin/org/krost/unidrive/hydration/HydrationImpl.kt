@@ -82,14 +82,19 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrating(path))
             val p = syncEngine.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
+            // Re-read the row after hydration: a concurrent enumeration may have
+            // refreshed remoteSize while the download ran, and comparing the cache
+            // against the pre-hydration snapshot would spuriously trip (or skip) the
+            // size guard below. Fall back to the snapshot if the row vanished.
+            val current = stateDb.getEntry(path) ?: entry
             // Never hand the co-daemon a short/incomplete cache for a known-sized
             // file: a partial hydration would surface to the mount as a silent
             // 0-byte/short read, which a file-manager copy turns into a corrupt
             // 0-byte destination. Fail loudly (→ EIO, retryable) instead of serving
             // truncated content as success.
-            if (entry.remoteId != null && !entry.isFolder && entry.remoteSize > 0 && bytes != entry.remoteSize) {
+            if (current.remoteId != null && !current.isFolder && current.remoteSize > 0 && bytes != current.remoteSize) {
                 throw IllegalStateException(
-                    "incomplete hydration for $path: cached $bytes of ${entry.remoteSize} bytes",
+                    "incomplete hydration for $path: cached $bytes of ${current.remoteSize} bytes",
                 )
             }
             _events.emit(HydrationEvent.Hydrated(path, bytes))
