@@ -60,6 +60,41 @@ class StateDatabaseTest {
         assertNotNull(db.getEntry("/sch\u00F6n.txt"), "NFD-written row retrievable by NFC")
     }
 
+    // #171 follow-up: EVERY path-keyed method normalizes its argument to NFC, not
+    // just getEntry/upsertEntry \u2014 otherwise a co-daemon op arriving in NFD would
+    // silently no-op against the NFC-stored row instead of resolving it.
+    @Test
+    fun `markUnhydrated resolves an NFD path to the NFC row`() {
+        db.upsertEntry(entry("/sch\u00F6n.txt").copy(isHydrated = true))
+        db.markUnhydrated("/scho\u0308n.txt")
+        assertEquals(false, db.getEntry("/sch\u00F6n.txt")?.isHydrated)
+    }
+
+    @Test
+    fun `deleteEntry resolves an NFD path to the NFC row`() {
+        db.upsertEntry(entry("/sch\u00F6n.txt"))
+        db.deleteEntry("/scho\u0308n.txt")
+        assertNull(db.getEntry("/sch\u00F6n.txt"))
+    }
+
+    @Test
+    fun `markUploadFailed resolves an NFD path to the NFC row`() {
+        db.upsertEntry(entry("/sch\u00F6n.txt"))
+        assertTrue(db.markUploadFailed("/scho\u0308n.txt", Instant.now()))
+    }
+
+    @Test
+    fun `listDirectChildren resolves an NFD parent path`() {
+        db.upsertEntry(entry("/f\u00F6lder/a.txt"))
+        assertEquals(listOf("/f\u00F6lder/a.txt"), db.listDirectChildren("/fo\u0308lder").map { it.path })
+    }
+
+    @Test
+    fun `getEntriesByPrefix resolves an NFD prefix`() {
+        db.upsertEntry(entry("/f\u00F6lder/a.txt"))
+        assertTrue(db.getEntriesByPrefix("/fo\u0308lder").any { it.path == "/f\u00F6lder/a.txt" })
+    }
+
     @Test
     fun `upsert and get entry`() {
         val e = entry("/test.txt")
