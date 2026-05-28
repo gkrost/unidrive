@@ -357,7 +357,15 @@ class StateDatabase(
      * swap the synthetic out cleanly.
      */
     @Synchronized
-    fun upsertEntry(entry: SyncEntry) {
+    fun upsertEntry(rawEntry: SyncEntry) {
+        // #171: store paths in NFC so the reconciler's NFC keys and direct lookups
+        // (incl. the co-daemon's possibly-NFD getEntry) match the stored rows.
+        val entry =
+            if (PathNormalizer.nfc(rawEntry.path) == rawEntry.path) {
+                rawEntry
+            } else {
+                rawEntry.copy(path = PathNormalizer.nfc(rawEntry.path))
+            }
         // Path-collision resolution: if a different alive row already holds
         // this path, the partial unique index `WHERE status='EXISTS'` would
         // block our INSERT. SQLite's INSERT OR REPLACE deletes the
@@ -427,8 +435,10 @@ class StateDatabase(
 
     @Synchronized
     fun getEntry(path: String): SyncEntry? {
+        // #171: rows are stored NFC; normalize the query so an NFD-origin path
+        // (e.g. from a co-daemon FUSE op) still matches.
         conn.prepareStatement("SELECT * FROM alive_entries WHERE path = ?").use { stmt ->
-            stmt.setString(1, path)
+            stmt.setString(1, PathNormalizer.nfc(path))
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.toSyncEntry() else null
         }

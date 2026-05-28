@@ -31,6 +31,27 @@ fun safeResolveLocal(
                 "which escapes syncRoot='$normalizedRoot'",
         )
     }
+    // #171: the logical path is NFC, but a pre-existing on-disk file may be a
+    // different Unicode form (NFD, e.g. a macOS-origin name) on a byte-preserving
+    // filesystem. If the exact NFC path is absent, find the parent's child whose NFC
+    // form matches so FS ops (upload read, isDirectory checks) reach the real bytes
+    // instead of failing on the NFC spelling. The common case (NFC on disk) hits the
+    // exact path and never scans. Returns the NFC path unchanged when no match exists
+    // (a genuinely-new file: a later create/download writes the canonical NFC name).
+    if (!Files.exists(resolved)) {
+        val parent = resolved.parent
+        val leaf = resolved.fileName?.toString()
+        if (parent != null && leaf != null && Files.isDirectory(parent)) {
+            val leafNfc = PathNormalizer.nfc(leaf)
+            val match =
+                runCatching {
+                    Files.newDirectoryStream(parent).use { ds ->
+                        ds.firstOrNull { PathNormalizer.nfc(it.fileName.toString()) == leafNfc }
+                    }
+                }.getOrNull()
+            if (match != null) return match
+        }
+    }
     return resolved
 }
 

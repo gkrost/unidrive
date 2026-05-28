@@ -42,6 +42,24 @@ class StateDatabaseTest {
         lastSynced = Instant.now(),
     )
 
+    // #171: rows are stored NFC and looked up NFC, so the same logical name
+    // matches regardless of the Unicode form it arrives in (composed vs decomposed).
+    @Test
+    fun `getEntry matches across NFC and NFD path forms`() {
+        val nfc = "/sch\u00F6n.txt" // composed o-with-diaeresis (U+00F6)
+        val nfd = "/scho\u0308n.txt" // decomposed o + combining diaeresis (U+0308)
+        assertNotEquals(nfc, nfd, "precondition: the two forms are byte-different")
+        db.upsertEntry(entry(nfc))
+        assertNotNull(db.getEntry(nfd), "NFD lookup must resolve the NFC-stored row")
+        assertNotNull(db.getEntry(nfc))
+    }
+
+    @Test
+    fun `upsertEntry stores path in NFC`() {
+        db.upsertEntry(entry("/scho\u0308n.txt")) // written NFD -> stored NFC
+        assertNotNull(db.getEntry("/sch\u00F6n.txt"), "NFD-written row retrievable by NFC")
+    }
+
     @Test
     fun `upsert and get entry`() {
         val e = entry("/test.txt")
