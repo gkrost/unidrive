@@ -883,11 +883,17 @@ open class SyncEngine(
             complete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true,
         )
         // Remote-shrink guard inputs (sync path only): snapshot the pre-gather
-        // tracked-row baseline and whether this pass is a full enumeration
-        // (delta_cursor unset, matching gatherRemoteChanges). Used after the gather
-        // to refuse reconciling against a silently-partial listing.
+        // tracked-row baseline and whether this pass is expected to be a full
+        // enumeration (delta_cursor unset, matching gatherRemoteChanges). The
+        // actual verdict — which a 410 cursor-expiry recovery can upgrade inside
+        // the gather — is read back after the gather below.
         val preGatherTrackedRows = db.getEntryCount()
-        val wasFullEnumeration = db.getSyncState("delta_cursor").isNullOrEmpty()
+        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty()
+        // A full enumeration against an established baseline must run NON-streaming
+        // so the remote-shrink guard can abort before any transfer is dispatched —
+        // the streaming gather dispatches safe-now uploads/downloads mid-scan, which
+        // would otherwise execute before a partial listing is detected.
+        val shrinkGateMayApply = fullEnumerationExpected && preGatherTrackedRows >= ENUM_TRUST_MIN_BASELINE
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
         // Streaming reconciliation reorders the phases: local scan first,
@@ -899,7 +905,7 @@ open class SyncEngine(
         val localChangesForStreaming: Map<String, ChangeState>?
         val streamingActions: List<SyncAction>?
         val allRemoteChanges: Map<String, CloudItem>
-        if (streamingReconciliation && !skipRemoteGather) {
+        if (streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply) {
             db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
                 reporter.onScanHistoricalHint("local", it)
             }
@@ -971,9 +977,14 @@ open class SyncEngine(
         // fewer live remote items than the pre-gather baseline — a partial listing
         // (flaky provider, swallowed transient errors) that would otherwise plan
         // spurious mass uploads/deletes (and --force-delete would apply them).
-        // allRemoteChanges is the unscoped gather result; remoteChanges may be
-        // syncPath-filtered. skipRemoteGather (apply mode) has no fresh listing.
-        if (wasFullEnumeration && syncPath == null && !skipRemoteGather) {
+        // Uses the gather's ACTUAL full-enumeration verdict (a 410 cursor-expiry
+        // recovery upgrades an incremental pass to a full re-enumeration inside the
+        // gather), falling back to the pre-gather expectation. allRemoteChanges is
+        // the unscoped gather result; remoteChanges may be syncPath-filtered.
+        // skipRemoteGather (apply mode) has no fresh listing to judge.
+        val actualFullEnumeration =
+            db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
+        if (actualFullEnumeration && syncPath == null && !skipRemoteGather) {
             val observedAlive = allRemoteChanges.values.count { !it.deleted }
             remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
                 if (dryRun) {
@@ -1822,6 +1833,10 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        // Record the gather's ACTUAL full-enumeration verdict (a 410 recovery above
+        // can upgrade an incremental pass to full) so the sync-path remote-shrink
+        // guard judges the real mode, not just the pre-gather cursor state.
+        db.setSyncState("last_gather_full", isFullSync.toString())
         changes
     }
 
@@ -2310,6 +2325,8 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        // Record the gather's full-enumeration verdict (see gatherRemoteChanges).
+        db.setSyncState("last_gather_full", isFullSync.toString())
 
         val deferred = buffer.drainDeferred()
         changes to (safeAccumulator + deferred)

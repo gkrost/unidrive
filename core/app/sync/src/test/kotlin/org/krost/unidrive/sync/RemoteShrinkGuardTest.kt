@@ -3,6 +3,7 @@ package org.krost.unidrive.sync
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
 import java.nio.file.Files
@@ -107,6 +108,32 @@ class RemoteShrinkGuardTest {
             assertNotNull(db.getEntry("/f0.txt"))
         }
 
+    // --- Invariant E: a 410 cursor-expiry recovery upgrades an incremental pass to
+    //     a full re-enumeration *inside* the gather; the guard must judge that actual
+    //     full mode, not the pre-gather cursor state (else the guard is bypassed). ---
+    @Test
+    fun `recovery full enumeration after cursor expiry still trips the shrink guard`() =
+        runTest {
+            repeat(100) { provider.putRemote("/f$it.txt", "v$it") }
+            val seed = engine.enumerateRemoteIntoState(reset = false)
+            assertTrue(seed.complete)
+            assertEquals(100, db.getEntryCount())
+
+            // A cursor now exists → the next syncOnce starts INCREMENTAL. The provider
+            // expires that cursor (410); the gather recovers with a full re-enumeration
+            // that lists only 17 items.
+            for (i in 17 until 100) provider.removeRemote("/f$i.txt")
+            provider.expireNextIncrementalCursor = true
+
+            val ex = assertFailsWith<IllegalStateException> { engine.syncOnce(dryRun = false) }
+            assertTrue(
+                ex.message!!.contains("partial"),
+                "recovery full enumeration must be gated: ${ex.message}",
+            )
+            assertEquals(100, db.getEntryCount(), "recovery shrink must not reap tracked rows")
+            assertNotNull(db.getEntry("/f0.txt"))
+        }
+
     class ShrinkFakeProvider : CloudProvider {
         override val id = "shrink-fake"
         override val displayName = "Shrink Fake"
@@ -117,6 +144,10 @@ class RemoteShrinkGuardTest {
 
         private val remote = linkedMapOf<String, CloudItem>()
         private var nextCursorSeq = 0
+
+        // When set, the next INCREMENTAL delta (cursor != null) throws a cursor-expiry
+        // (410) so the gather's recovery path performs a full re-enumeration.
+        var expireNextIncrementalCursor = false
 
         fun putRemote(path: String, content: String = "") {
             remote[path] =
@@ -150,6 +181,10 @@ class RemoteShrinkGuardTest {
             onPageProgress: ((itemsSoFar: Int) -> Unit)?,
             scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage {
+            if (cursor != null && expireNextIncrementalCursor) {
+                expireNextIncrementalCursor = false
+                throw DeltaCursorExpiredException("cursor expired (test)")
+            }
             nextCursorSeq++
             return DeltaPage(
                 items = remote.values.toList(),
