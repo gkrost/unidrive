@@ -1,0 +1,245 @@
+package org.krost.unidrive.internxt
+
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import kotlinx.coroutines.test.runTest
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+/**
+ * Upload write-back recovery: a createFile whose response is LOST (the
+ * `server prematurely closed the connection` truncation) AFTER the server
+ * committed the drive entry must not leave a `local:` ghost row. The file is on
+ * the drive but the client never got its UUID; the provider re-resolves by path
+ * and adopts the real UUID when the landed file is provably ours.
+ *
+ * If these tests are removed or loosened, a truncated upload response silently
+ * produces a never-recorded file → lost renames/deletes through the mount and a
+ * duplicate-upload hazard on the next sync.
+ *
+ * `retryOnTransient` only retries InternxtApiException transient statuses, so the
+ * raw IOException reaches the provider-level catch (verified). Three invariants:
+ *  1. landed-and-ours      → adopt the real UUID, no throw, no re-upload.
+ *  2. not-found            → re-throw the original failure (engine retries later).
+ *  3. found-but-different  → re-throw (never adopt a file that isn't our content).
+ */
+class InternxtUploadWritebackTest {
+    private val shardUrl = "https://shard-host.invalid/writeback-put"
+    private val localFileId = "local-bucket-entry-id" // fileId of what we just uploaded
+
+    private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
+        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val authField = InternxtProvider::class.java.getDeclaredField("authService")
+        authField.isAccessible = true
+        val authService = authField.get(provider)
+        val credsField = authService.javaClass.getDeclaredField("credentials")
+        credsField.isAccessible = true
+        val payload = """{"exp":9999999999}"""
+        val payloadB64 =
+            java.util.Base64
+                .getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(payload.toByteArray())
+        credsField.set(
+            authService,
+            org.krost.unidrive.internxt.model.InternxtCredentials(
+                jwt = "header.$payloadB64.signature",
+                mnemonic =
+                    "abandon abandon abandon abandon abandon abandon " +
+                        "abandon abandon abandon abandon abandon about",
+                rootFolderId = "root-folder-uuid",
+                email = "test@example.invalid",
+                bridgeUser = "bridge-user",
+                bridgeUserId = "bridge-secret",
+                bucket = "6928426c1a2316b856c9ab81",
+            ),
+        )
+        return provider
+    }
+
+    private fun installMockClientOnProvider(
+        provider: InternxtProvider,
+        engine: io.ktor.client.engine.mock.MockEngine,
+    ) {
+        val apiField = InternxtProvider::class.java.getDeclaredField("api")
+        apiField.isAccessible = true
+        val api = apiField.get(provider) as InternxtApiService
+        val field = InternxtApiService::class.java.getDeclaredField("httpClient")
+        field.isAccessible = true
+        (field.get(api) as? io.ktor.client.HttpClient)?.close()
+        field.set(api, io.ktor.client.HttpClient(engine))
+    }
+
+    /**
+     * Builds a MockEngine whose upload pre-amble succeeds, whose createFile POST
+     * fails with a connection-truncation IOException, and whose folder-content
+     * GET returns [folderFilesJson]. [createPosts] / [folderGets] count the calls.
+     */
+    private fun engineWithLostCreate(
+        createPosts: AtomicInteger,
+        folderGets: AtomicInteger,
+        replacePuts: AtomicInteger,
+        folderFilesJson: String,
+    ) = io.ktor.client.engine.mock.MockEngine { request ->
+        val url = request.url.toString()
+        when {
+            url.contains("/v2/buckets/") && url.contains("/files/start") ->
+                respond(
+                    content = """{"uploads":[{"index":0,"uuid":"shard-u","url":"$shardUrl"}]}""",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf("Content-Type", "application/json"),
+                )
+            url == shardUrl -> respond("", HttpStatusCode.OK)
+            url.contains("/v2/buckets/") && url.contains("/files/finish") ->
+                respond(
+                    content = """{"id":"$localFileId","index":"${"ab".repeat(32)}","bucket":"6928426c1a2316b856c9ab81","name":"enc"}""",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf("Content-Type", "application/json"),
+                )
+            // createFile POST → simulate the lost/truncated response.
+            url.startsWith("https://gateway.internxt.com/drive/files") &&
+                request.method == HttpMethod.Post -> {
+                createPosts.incrementAndGet()
+                throw java.io.IOException("Failed to parse HTTP response: the server prematurely closed the connection")
+            }
+            // replaceFile PUT — must NOT be hit by the recovery path.
+            url.startsWith("https://gateway.internxt.com/drive/files/") &&
+                request.method == HttpMethod.Put -> {
+                replacePuts.incrementAndGet()
+                respond("", HttpStatusCode.OK)
+            }
+            // re-resolve listing
+            url.contains("/drive/folders/content/") -> {
+                folderGets.incrementAndGet()
+                respond(
+                    content = folderFilesJson,
+                    status = HttpStatusCode.OK,
+                    headers = headersOf("Content-Type", "application/json"),
+                )
+            }
+            else -> error("unexpected URL in writeback test: $url (method=${request.method})")
+        }
+    }
+
+    // --- Invariant 1: landed + ours → adopt the real UUID, no throw, no re-upload.
+    @Test
+    fun `lost create response but file landed with our content adopts the real uuid`() =
+        runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-wb-adopt-")
+            val local =
+                java.nio.file.Files
+                    .createTempFile(tmp, "deb-", ".deb")
+                    .also { java.nio.file.Files.write(it, ByteArray(200) { i -> i.toByte() }) }
+            try {
+                val createPosts = AtomicInteger(0)
+                val folderGets = AtomicInteger(0)
+                val replacePuts = AtomicInteger(0)
+                // Landed file: same fileId we uploaded AND same size (200) → provably ours.
+                val landed =
+                    """{"children":[],"files":[{
+                        "uuid":"landed-real-uuid",
+                        "fileId":"$localFileId",
+                        "plainName":"deb-x","type":"deb","size":"200",
+                        "bucket":"6928426c1a2316b856c9ab81",
+                        "folderUuid":"root-folder-uuid","status":"EXISTS"
+                    }]}"""
+                val provider = newProviderRooted(tmp)
+                try {
+                    installMockClientOnProvider(
+                        provider,
+                        engineWithLostCreate(createPosts, folderGets, replacePuts, landed),
+                    )
+                    // Upload to the exact name the landed listing reports (deb-x.deb).
+                    val result = provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+
+                    assertEquals("landed-real-uuid", result.id, "must adopt the UUID of the file that landed server-side")
+                    assertEquals(1, createPosts.get(), "createFile attempted exactly once (no blind re-POST)")
+                    assertTrue(folderGets.get() >= 1, "must re-resolve the parent to confirm the server-side commit")
+                    assertEquals(0, replacePuts.get(), "adoption must not overwrite via replaceFile")
+                } finally {
+                    provider.close()
+                }
+            } finally {
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    // --- Invariant 2: file not found on re-resolve → re-throw the original failure.
+    @Test
+    fun `lost create response and file not landed re-throws`() =
+        runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-wb-absent-")
+            val local =
+                java.nio.file.Files
+                    .createTempFile(tmp, "deb-", ".deb")
+                    .also { java.nio.file.Files.write(it, ByteArray(200) { i -> i.toByte() }) }
+            try {
+                val createPosts = AtomicInteger(0)
+                val folderGets = AtomicInteger(0)
+                val replacePuts = AtomicInteger(0)
+                val empty = """{"children":[],"files":[]}"""
+                val provider = newProviderRooted(tmp)
+                try {
+                    installMockClientOnProvider(
+                        provider,
+                        engineWithLostCreate(createPosts, folderGets, replacePuts, empty),
+                    )
+                    assertFailsWith<java.io.IOException> {
+                        provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+                    }
+                    assertTrue(folderGets.get() >= 1, "re-resolve must run before deciding to re-throw")
+                    assertEquals(0, replacePuts.get(), "no overwrite when nothing landed")
+                } finally {
+                    provider.close()
+                }
+            } finally {
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    // --- Invariant 3: found by name but different content → re-throw (never adopt
+    //     a file that isn't ours).
+    @Test
+    fun `lost create response but landed content differs re-throws`() =
+        runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-wb-diff-")
+            val local =
+                java.nio.file.Files
+                    .createTempFile(tmp, "deb-", ".deb")
+                    .also { java.nio.file.Files.write(it, ByteArray(200) { i -> i.toByte() }) }
+            try {
+                val createPosts = AtomicInteger(0)
+                val folderGets = AtomicInteger(0)
+                val replacePuts = AtomicInteger(0)
+                // Same name, but DIFFERENT fileId and size → not provably ours.
+                val different =
+                    """{"children":[],"files":[{
+                        "uuid":"someone-elses-uuid",
+                        "fileId":"a-different-bucket-entry",
+                        "plainName":"deb-x","type":"deb","size":"999999",
+                        "bucket":"6928426c1a2316b856c9ab81",
+                        "folderUuid":"root-folder-uuid","status":"EXISTS"
+                    }]}"""
+                val provider = newProviderRooted(tmp)
+                try {
+                    installMockClientOnProvider(
+                        provider,
+                        engineWithLostCreate(createPosts, folderGets, replacePuts, different),
+                    )
+                    assertFailsWith<java.io.IOException> {
+                        provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+                    }
+                    assertEquals(0, replacePuts.get(), "must never overwrite a file whose content isn't provably ours")
+                } finally {
+                    provider.close()
+                }
+            } finally {
+                tmp.toFile().deleteRecursively()
+            }
+        }
+}
