@@ -67,6 +67,12 @@ class Reconciler(
         // mode — in bidirectional mode a locally-deleted hydrated file is a
         // legitimate user delete that must propagate to remote.
         downloadOnly: Boolean = false,
+        // #200(b): when false, the remote enumeration that produced [remoteChanges]
+        // was incomplete, so a local-present/remote-absent path may be an
+        // un-enumerated subtree rather than a genuinely-new file. Defer new-local
+        // creates (Upload/CreateRemoteFolder) until a complete enumeration confirms
+        // remote-absence — mirror of the delete-side "reap only on complete".
+        enumerationComplete: Boolean = true,
     ): List<SyncAction> {
         // UD-240g: bookend the reconcile pass with log breadcrumbs. Before this,
         // the phase between `Delta: N items, hasMore=false` (gatherRemoteChanges)
@@ -353,6 +359,7 @@ class Reconciler(
         detectMoves(actions, entryByPath, alias)
         detectRemoteRenames(actions, remoteChanges, entryByRemoteId, alias)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
+        deferIncompleteRemoteCreates(actions, localChanges, enumerationComplete)
 
         val sorted = sortActions(actions)
         log.info(
@@ -468,6 +475,9 @@ class Reconciler(
         // from resolveSlice already used this flag; finalizeStreaming receives
         // it only for completeness (the recovery loops don't call resolveAction).
         @Suppress("UNUSED_PARAMETER") downloadOnly: Boolean = false,
+        // #200(b): mirror of the same flag on reconcile() — defer new-local creates
+        // when the (cross-page) enumeration that produced fullRemote was incomplete.
+        enumerationComplete: Boolean = true,
     ): List<SyncAction> {
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
@@ -588,8 +598,39 @@ class Reconciler(
         detectMoves(actions, entryByPath, alias)
         detectRemoteRenames(actions, fullRemote, entryByRemoteId, alias)
         lastUnhydratedFolderDeletes = dropUnhydratedFolderDeletes(actions, entryByPath)
+        deferIncompleteRemoteCreates(actions, fullLocal, enumerationComplete)
 
         return sortActions(actions)
+    }
+
+    // #200(b): when the remote enumeration was INCOMPLETE, a local-present/
+    // remote-absent path may be a subtree we simply failed to enumerate, not a
+    // genuinely-new local file — so emitting Upload/CreateRemoteFolder risks
+    // duplicating a file that exists remotely but went unseen. Drop those new-local
+    // creates; they retry on the next COMPLETE enumeration, which either confirms
+    // remote-absence (→ upload) or sees the file (→ adopt). MODIFIED uploads
+    // (replace an existing remote) and recovery-synthesised actions are not keyed
+    // ChangeState.NEW in localChanges, so they are left intact. Mirror of the
+    // delete-side "reap only on a complete enumeration".
+    private fun deferIncompleteRemoteCreates(
+        actions: MutableList<SyncAction>,
+        localChanges: Map<String, ChangeState>,
+        enumerationComplete: Boolean,
+    ) {
+        if (enumerationComplete) return
+        val before = actions.size
+        actions.removeAll { a ->
+            (a is SyncAction.Upload || a is SyncAction.CreateRemoteFolder) &&
+                localChanges[a.path] == ChangeState.NEW
+        }
+        val deferred = before - actions.size
+        if (deferred > 0) {
+            log.warn(
+                "Enumeration incomplete: deferred {} new-local create(s) (Upload/CreateRemoteFolder) " +
+                    "until a complete enumeration — avoids duplicating un-enumerated remote files",
+                deferred,
+            )
+        }
     }
 
     // #115: alias-context for transparent locale-alias adoption.
