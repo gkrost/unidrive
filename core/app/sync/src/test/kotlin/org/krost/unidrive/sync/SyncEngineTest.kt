@@ -1869,6 +1869,82 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `modified local upload dispatched once across a multi page gather`() =
+        runTest {
+            // C8: resolveSlice processes the FULL localChanges map on every
+            // delta page. A MODIFIED-local file absent from a page's remote
+            // delta re-emits Upload(path) on EVERY page. The streaming
+            // executor launches a dispatch per channel item with no
+            // pre-send dedup, so before the fix the SAME path was applyUpload'd
+            // once per page (K pages → K replace-PUTs racing on one remote id).
+            // Invariant: the MODIFIED-local path is dispatched/uploaded EXACTLY
+            // ONCE across a multi-page gather, regardless of how many pages it
+            // is absent from.
+            val baseline = Instant.parse("2026-01-01T00:00:00Z")
+
+            // Established baseline: a hydrated, fully-synced row for the file.
+            // localSize=10 so a 20-byte local file scans as MODIFIED (size
+            // mismatch bypasses the touch-only hash gate). A non-null cursor
+            // makes fullEnumerationExpected=false so the streaming path runs
+            // (the full-enum-against-baseline shrink gate forces non-streaming).
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/modified.txt",
+                    remoteId = "remote-id-modified",
+                    remoteHash = "hash-modified",
+                    remoteSize = 10,
+                    remoteModified = baseline,
+                    localMtime = baseline.toEpochMilli(),
+                    localSize = 10,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = baseline,
+                ),
+            )
+            db.setSyncState("delta_cursor", "baseline-cursor")
+
+            // Local edit: 20 bytes (≠ tracked 10) → ChangeState.MODIFIED.
+            Files.write(syncRoot.resolve("modified.txt"), ByteArray(20) { 0x41 })
+
+            // Two remote delta pages, NEITHER carrying /modified.txt. Each page
+            // has one unrelated item so the slice is non-empty (the consumer
+            // skips empty slices) and resolveSlice runs — re-deriving the
+            // MODIFIED upload from the full localChanges map each time.
+            provider.deltaPages =
+                listOf(
+                    listOf(cloudItem("/other-page1.txt", size = 5)) to "page1-cursor",
+                    listOf(cloudItem("/other-page2.txt", size = 5)) to "page2-cursor",
+                )
+
+            val streamingEngine =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    streamingReconciliation = true,
+                )
+            streamingEngine.syncOnce()
+
+            // Sanity: the gather genuinely spanned ≥2 pages.
+            assertTrue(
+                provider.deltaCalls >= 2,
+                "expected a multi-page gather (got deltaCalls=${provider.deltaCalls})",
+            )
+            // The invariant: exactly one upload of the MODIFIED path. Before the
+            // dedup, this was deltaPages.size (one per page the path is absent from).
+            val modifiedUploads = provider.uploadedPaths.count { it == "/modified.txt" }
+            assertEquals(
+                1,
+                modifiedUploads,
+                "MODIFIED-local /modified.txt must be uploaded exactly once across the " +
+                    "multi-page gather; got $modifiedUploads (all uploads: ${provider.uploadedPaths})",
+            )
+        }
+
+    @Test
     fun `UD-223 fast-bootstrap falls back to enumeration when provider lacks capability`() =
         runTest {
             provider.supportsFastBootstrap = false // default; capability absent
@@ -2413,6 +2489,13 @@ class SyncEngineTest {
 
         var deltaItems = listOf<CloudItem>()
         var deltaCursor = "cursor-1"
+
+        // Multi-page delta driver: when non-empty, successive delta() calls
+        // return successive entries (last page has hasMore=false). Lets a test
+        // drive the streaming gather across ≥2 pages (the single-page deltaItems
+        // path always returns hasMore=false). Each entry is (items, cursor).
+        var deltaPages: List<Pair<List<CloudItem>, String>> = emptyList()
+        private var deltaPageIndex = 0
         val uploadedPaths = mutableListOf<String>()
         val deletedPaths = mutableListOf<String>()
         val files = mutableMapOf<String, ByteArray>()
@@ -2601,6 +2684,17 @@ class SyncEngineTest {
             }
             if (persistThenFail) {
                 throw ProviderException("Simulated mid-scan crash after partial persistence")
+            }
+            if (deltaPages.isNotEmpty()) {
+                val idx = deltaPageIndex.coerceAtMost(deltaPages.size - 1)
+                deltaPageIndex = (deltaPageIndex + 1).coerceAtMost(deltaPages.size)
+                val (items, pageCursor) = deltaPages[idx]
+                return DeltaPage(
+                    items = items,
+                    cursor = pageCursor,
+                    hasMore = idx < deltaPages.size - 1,
+                    complete = deltaComplete,
+                )
             }
             return DeltaPage(
                 items = deltaItems,

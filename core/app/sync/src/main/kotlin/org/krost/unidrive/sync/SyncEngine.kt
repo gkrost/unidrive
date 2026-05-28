@@ -2019,6 +2019,18 @@ open class SyncEngine(
         val changes = mutableMapOf<String, CloudItem>()
         val buffer = StreamingReconcileBuffer()
         val safeAccumulator = mutableListOf<SyncAction>()
+        // resolveSlice processes the full localChanges map on every delta page,
+        // so a MODIFIED-local file absent from a given page's remote delta
+        // re-emits its Upload (and likewise a DownloadContent can recur across
+        // pages). Without a precheck the executor would launch one dispatch per
+        // recurrence — K concurrent applyUpload/applyDownload of the same path
+        // across K pages. executedPaths only fills in post-completion, so it
+        // can't dedup the in-flight sends. Claim the path here, before the send,
+        // so two pages can never both forward the same transfer. Lives for the
+        // gather only; Pass 2 dedups separately via executedPaths.
+        val sentToExecutor =
+            java.util.concurrent.ConcurrentHashMap
+                .newKeySet<String>()
 
         // UD-223 fast-bootstrap mirror: bootstrap adopts the cursor with
         // zero enumeration, so there's nothing to stream — fall through
@@ -2233,6 +2245,12 @@ open class SyncEngine(
                                 // never duplicating an un-enumerated remote file. Downloads and
                                 // MODIFIED/replace uploads still stream concurrently.
                                 if (action is SyncAction.Upload && localChanges[action.path] == ChangeState.NEW) continue
+                                // Claim the path atomically before forwarding so a transfer
+                                // re-emitted on a later page (MODIFIED upload / recurring
+                                // download) is sent to the executor exactly once. add()
+                                // returns false when already claimed; concurrent set so two
+                                // page-slices can't both win the claim.
+                                if (!sentToExecutor.add(action.path)) continue
                                 executorChannel.send(action)
                             }
                         }
