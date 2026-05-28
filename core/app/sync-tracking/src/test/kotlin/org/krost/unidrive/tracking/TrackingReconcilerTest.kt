@@ -73,6 +73,58 @@ class TrackingReconcilerTest {
         assertTrue(a is ReconcileAction.ReportCollision)
     }
 
+    /**
+     * Safety invariant (#104): when BOTH hashes are null (Internxt first-scan),
+     * equal size must NOT produce a silent adopt. Content identity is unprovable
+     * → surface ReportCollision (loud) rather than silently treating divergent
+     * files as identical.
+     *
+     * This test FAILS before the fix (pre-fix: size fallback returns NoOp).
+     */
+    @Test
+    fun `null_hash_same_size_different_content_emits_collision_not_silent_adopt`() {
+        val sameSize = 42L
+        val l = LocalObservation(exists = true, hash = null, size = sameSize, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = sameSize, hash = null, serverMtime = null)
+        val action = rec.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.ReportCollision,
+            "expected ReportCollision when both hashes are null (Internxt), got $action",
+        )
+        val shouldAdopt = rec.shouldAdopt(l, r, track = null)
+        assertTrue(
+            !shouldAdopt,
+            "shouldAdopt must be false when hashes are null — size-only match is unprovable",
+        )
+    }
+
+    /**
+     * Regression guard (#104): a genuine hash match (OneDrive — both hashes
+     * present and equal) must still adopt cleanly; no collision introduced.
+     */
+    @Test
+    fun `hash_match_both_present_still_adopts`() {
+        val l = LocalObservation(exists = true, hash = "abc123", size = 10L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 10L, hash = "abc123", serverMtime = null)
+        val action = rec.reconcile("/p", l, r, track = null)
+        assertTrue(action is ReconcileAction.NoOp, "hash-equal both-sides must produce NoOp (adopt-signal), got $action")
+        assertTrue(rec.shouldAdopt(l, r, track = null), "shouldAdopt must be true for a proven hash match")
+    }
+
+    /**
+     * Regression guard (#104): a clear size mismatch (both hashes null) must
+     * also emit a collision — not silently adopt. Behaviour unchanged from
+     * before the fix for this sub-case (size fallback also rejected mismatched
+     * sizes), but explicitly asserted so a future refactor can't regress it.
+     */
+    @Test
+    fun `null_hash_size_mismatch_emits_collision`() {
+        val l = LocalObservation(exists = true, hash = null, size = 100L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 200L, hash = null, serverMtime = null)
+        val action = rec.reconcile("/p", l, r, track = null)
+        assertTrue(action is ReconcileAction.ReportCollision, "size-mismatch with null hashes must produce ReportCollision, got $action")
+    }
+
     @Test
     fun `tracked + no change → no-op`() {
         assertTrue(rec.reconcile("/p", local(true, "lh"), remote(true, "re", "rh"), track()) is ReconcileAction.NoOp)

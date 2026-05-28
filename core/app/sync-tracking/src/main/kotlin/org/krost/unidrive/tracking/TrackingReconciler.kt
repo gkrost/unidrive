@@ -154,15 +154,15 @@ class TrackingReconciler {
         local: LocalObservation,
         remote: RemoteObservation,
     ): Boolean {
-        // Prefer hash-equality when both sides have a hash. If either side's
-        // hash is missing (provider with no hashAlgorithm, local not yet
-        // hashed), fall back to size-equality which is the loosest "looks
-        // the same" we can offer without reading bytes. Loose-match here is
-        // safe because the alternative is ReportCollision, which is the
-        // correct safe fallback.
+        // Content identity is PROVEN only when BOTH sides supply a comparable
+        // hash. A missing hash (e.g. Internxt's hashAlgorithm()==null → every
+        // CloudItem.hash==null) means we cannot verify byte-level equality —
+        // silently adopting on size-equality would hide a data-divergence bug
+        // behind a size coincidence. The safe fallback is false → ReportCollision
+        // (loud, user-recoverable) rather than silent adopt (data-corruption risk).
         val lh = local.hash
         val rh = remote.hash
-        if (lh != null && rh != null) return lh == rh
-        return local.size != null && remote.size != null && local.size == remote.size
+        if (lh == null || rh == null) return false
+        return lh == rh
     }
 }
