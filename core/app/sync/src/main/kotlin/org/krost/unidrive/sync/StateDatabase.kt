@@ -360,11 +360,16 @@ class StateDatabase(
     fun upsertEntry(rawEntry: SyncEntry) {
         // #171: store paths in NFC so the reconciler's NFC keys and direct lookups
         // (incl. the co-daemon's possibly-NFD getEntry) match the stored rows.
+        // remote_path is normalized on write too, so getEntryByRemotePath — which
+        // canonicalizes its query — still matches an aliased row whose cloud path
+        // arrived in NFD instead of treating the next delta as a new remote item.
+        val nfcPath = PathNormalizer.nfc(rawEntry.path)
+        val nfcRemotePath = rawEntry.remotePath?.let { PathNormalizer.nfc(it) }
         val entry =
-            if (PathNormalizer.nfc(rawEntry.path) == rawEntry.path) {
+            if (nfcPath == rawEntry.path && nfcRemotePath == rawEntry.remotePath) {
                 rawEntry
             } else {
-                rawEntry.copy(path = PathNormalizer.nfc(rawEntry.path))
+                rawEntry.copy(path = nfcPath, remotePath = nfcRemotePath)
             }
         // Path-collision resolution: if a different alive row already holds
         // this path, the partial unique index `WHERE status='EXISTS'` would

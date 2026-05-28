@@ -96,6 +96,14 @@ class StateDatabaseTest {
     }
 
     @Test
+    fun `getEntryByRemotePath matches across NFC and NFD remote_path forms`() {
+        // remote_path stored NFD must be reachable by both NFC and NFD queries
+        db.upsertEntry(entry("/x.txt").copy(remotePath = "/scho\u0308n.txt"))
+        assertNotNull(db.getEntryByRemotePath("/scho\u0308n.txt"), "NFD remote lookup resolves the row")
+        assertNotNull(db.getEntryByRemotePath("/sch\u00F6n.txt"), "NFC remote lookup resolves the same row")
+    }
+
+    @Test
     fun `upsert and get entry`() {
         val e = entry("/test.txt")
         db.upsertEntry(e)
