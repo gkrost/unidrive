@@ -862,6 +862,32 @@ class InternxtProvider(
                                 statusCode = 409,
                             )
                     }
+                } catch (e: java.io.IOException) {
+                    // The createFile response was lost (truncated / "server
+                    // prematurely closed the connection") AFTER the server may have
+                    // committed the drive entry: the file is on the drive but we
+                    // never received its UUID. Leaving the row as a `local:` ghost
+                    // loses the next rename/delete and risks a duplicate re-upload.
+                    // Re-resolve by path; if the file landed with exactly the
+                    // content we just uploaded (same bucket fileId + size), adopt
+                    // its real UUID. Otherwise surface the original failure.
+                    log.warn(
+                        "createFile response lost for {} ({}); re-resolving parent to check server-side commit",
+                        remotePath,
+                        e.message,
+                    )
+                    val landed = findFileByName(parentUuid, segments.last()) ?: throw e
+                    val landedSize = landed.size.toLongOrNull() ?: -1L
+                    if (landed.fileId == bucketEntry.id && landedSize == fileSize) {
+                        log.info(
+                            "createFile landed server-side despite the lost response for {} (uuid={}); adopting",
+                            remotePath,
+                            landed.uuid,
+                        )
+                        landed
+                    } else {
+                        throw e
+                    }
                 }
             finalItem = created.toCloudItem(parentPath)
         }
@@ -874,6 +900,30 @@ class InternxtProvider(
         // is covered by the UD-366 logic without needing a tombstone.
         withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
         return finalItem
+    }
+
+    // Re-resolve a file by name within its parent folder. Used to recover from a
+    // createFile whose response was lost (truncated / connection closed) after the
+    // server committed the drive entry — the file is on the drive but the client
+    // never received its UUID. Matches the same name-with-type logic as the 409
+    // adopt path and getMetadata. Returns the raw InternxtFile (carrying uuid +
+    // fileId) if a name match exists, else null.
+    private suspend fun findFileByName(
+        parentUuid: String,
+        fileName: String,
+    ): org.krost.unidrive.internxt.model.InternxtFile? {
+        val folderContent = api.getFolderContents(parentUuid)
+        return folderContent.files.find { f ->
+            val baseName = sanitizeName(f.plainName ?: f.name ?: "")
+            val cleanType = f.type?.let { sanitizeName(it) }
+            val fullName =
+                if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) {
+                    "$baseName.$cleanType"
+                } else {
+                    baseName
+                }
+            fullName == fileName || baseName == fileName
+        }
     }
 
     override suspend fun delete(remotePath: String) {
