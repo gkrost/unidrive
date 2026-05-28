@@ -882,6 +882,18 @@ open class SyncEngine(
             cursor = db.getSyncState("delta_cursor")?.ifBlank { null },
             complete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true,
         )
+        // Remote-shrink guard inputs (sync path only): snapshot the pre-gather
+        // tracked-row baseline and whether this pass is expected to be a full
+        // enumeration (delta_cursor unset, matching gatherRemoteChanges). The
+        // actual verdict — which a 410 cursor-expiry recovery can upgrade inside
+        // the gather — is read back after the gather below.
+        val preGatherTrackedRows = db.getEntryCount()
+        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty()
+        // A full enumeration against an established baseline must run NON-streaming
+        // so the remote-shrink guard can abort before any transfer is dispatched —
+        // the streaming gather dispatches safe-now uploads/downloads mid-scan, which
+        // would otherwise execute before a partial listing is detected.
+        val shrinkGateMayApply = fullEnumerationExpected && preGatherTrackedRows >= ENUM_TRUST_MIN_BASELINE
         val remotePhaseStart = System.currentTimeMillis()
         reporter.onScanProgress("remote", 0)
         // Streaming reconciliation reorders the phases: local scan first,
@@ -893,7 +905,7 @@ open class SyncEngine(
         val localChangesForStreaming: Map<String, ChangeState>?
         val streamingActions: List<SyncAction>?
         val allRemoteChanges: Map<String, CloudItem>
-        if (streamingReconciliation && !skipRemoteGather) {
+        if (streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply) {
             db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
                 reporter.onScanHistoricalHint("local", it)
             }
@@ -960,6 +972,28 @@ open class SyncEngine(
         val remoteScanSecs = (System.currentTimeMillis() - remotePhaseStart) / 1000
         db.setSyncState("last_scan_secs_remote", remoteScanSecs.toString())
         db.setSyncState("last_scan_count_remote", remoteChanges.size.toString())
+
+        // Remote-shrink guard: abort a full, unscoped enumeration that observed far
+        // fewer live remote items than the pre-gather baseline — a partial listing
+        // (flaky provider, swallowed transient errors) that would otherwise plan
+        // spurious mass uploads/deletes (and --force-delete would apply them).
+        // Uses the gather's ACTUAL full-enumeration verdict (a 410 cursor-expiry
+        // recovery upgrades an incremental pass to a full re-enumeration inside the
+        // gather), falling back to the pre-gather expectation. allRemoteChanges is
+        // the unscoped gather result; remoteChanges may be syncPath-filtered.
+        // skipRemoteGather (apply mode) has no fresh listing to judge.
+        val actualFullEnumeration =
+            db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
+        if (actualFullEnumeration && syncPath == null && !skipRemoteGather) {
+            val observedAlive = allRemoteChanges.values.count { !it.deleted }
+            remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
+                if (dryRun) {
+                    reporter.onWarning(msg)
+                } else {
+                    throw IllegalStateException(msg)
+                }
+            }
+        }
 
         // Streaming-reconciliation auto-flip: after the first successful
         // streaming scan, persist the sentinel so subsequent runs default to
@@ -1799,6 +1833,10 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        // Record the gather's ACTUAL full-enumeration verdict (a 410 recovery above
+        // can upgrade an incremental pass to full) so the sync-path remote-shrink
+        // guard judges the real mode, not just the pre-gather cursor state.
+        db.setSyncState("last_gather_full", isFullSync.toString())
         changes
     }
 
@@ -2287,6 +2325,8 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        // Record the gather's full-enumeration verdict (see gatherRemoteChanges).
+        db.setSyncState("last_gather_full", isFullSync.toString())
 
         val deferred = buffer.drainDeferred()
         changes to (safeAccumulator + deferred)
@@ -3323,6 +3363,37 @@ open class SyncEngine(
         // rows) to deleted defers reaping until a second complete enumeration corroborates.
         const val BULK_REAP_ABSOLUTE: Int = 50
         const val BULK_REAP_FRACTION: Double = 0.20
+
+        // Remote-shrink trust gate. A *full* enumeration is trusted as complete
+        // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked
+        // baseline; a silently-partial provider walk (transient errors swallowed
+        // upstream, short pages) can report complete=true while having dropped
+        // whole subtrees, and trusting it would let detectMissingAfterFullSync
+        // synthesize a mass-delete cascade for every unobserved row. Accounts
+        // below ENUM_TRUST_MIN_BASELINE rows are exempt so a legitimately small or
+        // near-empty drive is never pinned incomplete by the gate.
+        const val ENUM_TRUST_MIN_FRACTION: Double = 0.5
+        const val ENUM_TRUST_MIN_BASELINE: Int = 50
+
+        /**
+         * Remote-shrink trust gate. Returns an operator-facing warning when a FULL
+         * enumeration observed implausibly few live remote items ([observedAlive])
+         * versus the tracked [baseline] — the signature of a silently-partial walk
+         * masquerading as complete — otherwise null. Accounts below
+         * [ENUM_TRUST_MIN_BASELINE] rows are exempt so a legitimately small or
+         * near-empty drive is never blocked. Pure function of the two counts so the
+         * threshold is unit-testable without a live gather.
+         */
+        internal fun remoteShrinkWarningOrNull(observedAlive: Int, baseline: Int): String? {
+            if (baseline < ENUM_TRUST_MIN_BASELINE) return null
+            if (observedAlive >= baseline * ENUM_TRUST_MIN_FRACTION) return null
+            return "Remote enumeration looks partial: a full scan observed only $observedAlive " +
+                "live remote item(s) vs $baseline previously-tracked " +
+                "(< ${(ENUM_TRUST_MIN_FRACTION * 100).toInt()}%). Refusing to reconcile to avoid " +
+                "spurious mass uploads/deletes from an incomplete listing. Do NOT use " +
+                "--force-delete (it would apply the bad plan). Re-run when the connection is " +
+                "healthy; if you really removed most remote files, rebuild with --reset."
+        }
 
         @JvmField
         val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)
