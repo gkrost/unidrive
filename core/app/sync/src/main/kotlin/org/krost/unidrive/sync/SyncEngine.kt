@@ -255,7 +255,22 @@ open class SyncEngine(
         val entry = db.getEntry(path)
             ?: throw IllegalArgumentException("Unknown remote path: $path")
         val cachePath = resolveCachePath(path)
-        if (entry.isHydrated && Files.exists(cachePath)) {
+        // Trust the warm cache only if it is actually COMPLETE. The isHydrated flag
+        // plus mere file-existence is not enough for a REMOTE-backed file: a stale
+        // isHydrated over a 0-byte/truncated cache (crash mid-download, an
+        // externally-cleared cache, a reset/enumeration window) would otherwise be
+        // served as-is, silently yielding empty/short reads — which a file-manager
+        // copy turns into a corrupt 0-byte destination. Re-download whenever the
+        // cached size doesn't match the known remote size.
+        //
+        // Local-only rows (remoteId == null: created/edited through the mount, not
+        // yet uploaded — remoteSize is 0 while the cache holds the just-written
+        // bytes) have NO remote to compare against or re-download from; the cache is
+        // the only copy, so always trust them on the warm path.
+        if (entry.isHydrated && Files.exists(cachePath) &&
+            (entry.remoteId == null ||
+                runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)
+        ) {
             return cachePath
         }
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
