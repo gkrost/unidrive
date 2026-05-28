@@ -125,6 +125,80 @@ class TrackingReconcilerTest {
         assertTrue(action is ReconcileAction.ReportCollision, "size-mismatch with null hashes must produce ReportCollision, got $action")
     }
 
+    // ── auto-match unit tests ──
+
+    /**
+     * auto-match=size: null-hash, same-size, same-path → adopt (NoOp + shouldAdopt=true).
+     * This test would FAIL before the auto-match change (default collides).
+     */
+    @Test
+    fun `auto_match_size_null_hash_equal_size_adopts`() {
+        val size = 42L
+        val l = LocalObservation(exists = true, hash = null, size = size, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = size, hash = null, serverMtime = null)
+        val recSize = TrackingReconciler(AutoMatchMode.SIZE)
+        val action = recSize.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.NoOp,
+            "auto-match=size, null hashes, equal size must produce NoOp (adopt-signal), got $action",
+        )
+        assertTrue(
+            recSize.shouldAdopt(l, r, track = null),
+            "auto-match=size, null hashes, equal size: shouldAdopt must be true",
+        )
+    }
+
+    /**
+     * auto-match=size: null-hash, SIZE MISMATCH → still collision (size-match required).
+     */
+    @Test
+    fun `auto_match_size_null_hash_size_mismatch_still_collides`() {
+        val l = LocalObservation(exists = true, hash = null, size = 10L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 20L, hash = null, serverMtime = null)
+        val recSize = TrackingReconciler(AutoMatchMode.SIZE)
+        val action = recSize.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.ReportCollision,
+            "auto-match=size with size mismatch must still produce ReportCollision, got $action",
+        )
+    }
+
+    /**
+     * auto-match=name: null-hash, same-path → adopt regardless of size.
+     */
+    @Test
+    fun `auto_match_name_null_hash_same_path_adopts`() {
+        val l = LocalObservation(exists = true, hash = null, size = 10L, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = 99L, hash = null, serverMtime = null)
+        val recName = TrackingReconciler(AutoMatchMode.NAME)
+        val action = recName.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.NoOp,
+            "auto-match=name, null hashes, same-path must produce NoOp (adopt-signal), got $action",
+        )
+        assertTrue(
+            recName.shouldAdopt(l, r, track = null),
+            "auto-match=name, null hashes: shouldAdopt must be true",
+        )
+    }
+
+    /**
+     * DEFAULT (no auto-match): null-hash same-size → ReportCollision — #104 preserved.
+     * Belt-and-braces assertion on the reconciler directly (complements the integration test).
+     */
+    @Test
+    fun `default_off_null_hash_same_size_still_collides_preserving_104`() {
+        val size = 42L
+        val l = LocalObservation(exists = true, hash = null, size = size, mtime = null, inode = null)
+        val r = RemoteObservation(exists = true, remoteFileId = "rid", etag = "etag", size = size, hash = null, serverMtime = null)
+        val recOff = TrackingReconciler(AutoMatchMode.OFF)
+        val action = recOff.reconcile("/p", l, r, track = null)
+        assertTrue(
+            action is ReconcileAction.ReportCollision,
+            "default (off) auto-match must still produce ReportCollision for null-hash same-size, got $action",
+        )
+    }
+
     @Test
     fun `tracked + no change → no-op`() {
         assertTrue(rec.reconcile("/p", local(true, "lh"), remote(true, "re", "rh"), track()) is ReconcileAction.NoOp)

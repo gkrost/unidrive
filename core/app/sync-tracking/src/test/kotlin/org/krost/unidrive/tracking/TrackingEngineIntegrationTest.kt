@@ -8,6 +8,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -734,6 +735,229 @@ class TrackingEngineIntegrationTest {
                     it is ReconcileAction.PropagateLocalDelete || it is ReconcileAction.PropagateRemoteDelete
                 },
                 "untracked mismatch must NEVER produce a delete",
+            )
+        } finally {
+            tracking.close()
+        }
+    }
+
+    // ── Part 1: coexistence — legacy state.db is not read by the tracking engine ──
+
+    /**
+     * A profile directory that already contains a populated legacy `state.db`
+     * must not affect the tracking-set engine in any way. The first `ts sync`
+     * must produce adoption from LIVE observations only (local scan + remote
+     * enumerate) — it must NOT import or read legacy rows.
+     *
+     * Concretely: we place a `state.db` next to `tracking.db` and pre-populate
+     * it with a row for a path that does NOT exist on either the local scan
+     * or the remote. If the engine read from `state.db` it would see a tracked
+     * row and might emit a spurious delete. The correct behaviour is that the
+     * engine never opens `state.db` and the spurious-path row remains invisible.
+     */
+    @Test
+    fun `legacy state_db present does not affect tracking engine — first sync adopts via live observations only`() {
+        // Seed the legacy state.db with a row for a path that does not exist
+        // locally or remotely. If the tracking engine read it, it would see a
+        // tracked entry with no live observations — a candidate for spurious cleanup
+        // or delete propagation. It must not.
+        val legacyDbPath = workDir.resolve("state.db")
+        val legacyConn =
+            java.sql.DriverManager.getConnection("jdbc:sqlite:$legacyDbPath").also { c ->
+                c.createStatement().use { s ->
+                    s.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS sync_entries (
+                            path TEXT PRIMARY KEY,
+                            local_hash TEXT,
+                            remote_etag TEXT
+                        )
+                        """,
+                    )
+                    s.executeUpdate("INSERT INTO sync_entries VALUES ('/legacy-only.txt', 'lh', 're')")
+                }
+            }
+        legacyConn.close()
+
+        // Seed the real remote with a single file whose content matches locally.
+        val content = "shared content".toByteArray()
+        Files.write(syncRoot.resolve("shared.txt"), content)
+        provider.files["/shared.txt"] = content
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report = engine(tracking = tracking, dryRun = true).syncOnce()
+
+            // INVARIANT 1: the engine must have adopted /shared.txt via live
+            // content-hash match, NOT from any legacy import.
+            assertTrue(
+                report.adopted.contains("/shared.txt"),
+                "first sync must adopt the live-matched path; adopted=${report.adopted}",
+            )
+
+            // INVARIANT 2: the legacy-only row must be invisible — no action,
+            // no collision, no entry in tracking.db.
+            val legacyInPlan = report.plan.any { it.path == "/legacy-only.txt" }
+            assertFalse(
+                legacyInPlan,
+                "legacy-only path must be invisible to the tracking engine; plan=${report.plan}",
+            )
+            val legacyTracked = tracking.lookup("/legacy-only.txt")
+            assertNull(
+                legacyTracked,
+                "legacy-only path must not appear in tracking.db after first sync",
+            )
+
+            // INVARIANT 3: zero deletes — neither side triggered a delete action.
+            val deletes =
+                report.plan.count {
+                    it is ReconcileAction.PropagateLocalDelete || it is ReconcileAction.PropagateRemoteDelete
+                }
+            assertEquals(0, deletes, "first sync with legacy state.db present must emit zero deletes")
+        } finally {
+            tracking.close()
+        }
+    }
+
+    // ── Part 2: --auto-match engine-level tests ──
+
+    /**
+     * DEFAULT behaviour preserved: when both hashes are null (Internxt first-scan)
+     * and NO auto-match is configured, the engine must surface a ReportCollision.
+     * This is the #104 invariant — verifying the default is unbroken by this change.
+     */
+    @Test
+    fun `default_no_auto_match_null_hash_same_size_still_surfaces_collision`() {
+        // Use a hashless fake provider (override to return null hash).
+        val hashlessProvider = HashlessFakeProvider()
+        val content = "some file".toByteArray()
+        Files.write(syncRoot.resolve("file.txt"), content)
+        hashlessProvider.files["/file.txt"] = content
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            // No autoMatch specified → defaults to OFF
+            val report =
+                TrackingEngine(
+                    provider = hashlessProvider,
+                    trackingSet = tracking,
+                    syncRoot = syncRoot,
+                    dryRun = true,
+                ).syncOnce()
+
+            val collisions = report.collisions.map { it.path }
+            assertTrue(
+                collisions.contains("/file.txt"),
+                "null-hash same-size with no --auto-match must still produce a collision; collisions=$collisions",
+            )
+            assertFalse(
+                report.adopted.contains("/file.txt"),
+                "null-hash must NOT be adopted without --auto-match",
+            )
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
+     * --auto-match=size: when both hashes are null and sizes are EQUAL,
+     * the engine must adopt the path (no collision).
+     */
+    @Test
+    fun `auto_match_size_null_hash_same_size_adopts`() {
+        val hashlessProvider = HashlessFakeProvider()
+        val content = "some file".toByteArray()
+        Files.write(syncRoot.resolve("file.txt"), content)
+        hashlessProvider.files["/file.txt"] = content
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report =
+                TrackingEngine(
+                    provider = hashlessProvider,
+                    trackingSet = tracking,
+                    syncRoot = syncRoot,
+                    dryRun = true,
+                    autoMatch = AutoMatchMode.SIZE,
+                ).syncOnce()
+
+            assertTrue(
+                report.adopted.contains("/file.txt"),
+                "null-hash same-size with auto-match=size must adopt; adopted=${report.adopted}",
+            )
+            assertEquals(
+                0,
+                report.collisions.size,
+                "no collision expected when auto-match=size adopts; collisions=${report.collisions}",
+            )
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
+     * --auto-match=size with a SIZE MISMATCH must still surface a collision.
+     * Size-match is required for the opt-in to fire.
+     */
+    @Test
+    fun `auto_match_size_null_hash_size_mismatch_still_collides`() {
+        val hashlessProvider = HashlessFakeProvider()
+        // Local: 5 bytes; remote: 10 bytes — sizes differ.
+        Files.write(syncRoot.resolve("file.txt"), "hello".toByteArray())
+        hashlessProvider.files["/file.txt"] = "hello world".toByteArray()
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report =
+                TrackingEngine(
+                    provider = hashlessProvider,
+                    trackingSet = tracking,
+                    syncRoot = syncRoot,
+                    dryRun = true,
+                    autoMatch = AutoMatchMode.SIZE,
+                ).syncOnce()
+
+            val collisions = report.collisions.map { it.path }
+            assertTrue(
+                collisions.contains("/file.txt"),
+                "null-hash size-mismatch with auto-match=size must still collide; collisions=$collisions",
+            )
+            assertFalse(report.adopted.contains("/file.txt"), "size-mismatch must NOT adopt")
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
+     * --auto-match=name: when both hashes are null and the path is the same,
+     * the engine must adopt regardless of size.
+     */
+    @Test
+    fun `auto_match_name_null_hash_same_path_adopts`() {
+        val hashlessProvider = HashlessFakeProvider()
+        // Local and remote have the same path but different sizes — name-only match.
+        Files.write(syncRoot.resolve("file.txt"), "local content".toByteArray())
+        hashlessProvider.files["/file.txt"] = "different remote content".toByteArray()
+
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val report =
+                TrackingEngine(
+                    provider = hashlessProvider,
+                    trackingSet = tracking,
+                    syncRoot = syncRoot,
+                    dryRun = true,
+                    autoMatch = AutoMatchMode.NAME,
+                ).syncOnce()
+
+            assertTrue(
+                report.adopted.contains("/file.txt"),
+                "null-hash with auto-match=name must adopt regardless of size; adopted=${report.adopted}",
+            )
+            assertEquals(
+                0,
+                report.collisions.size,
+                "no collision expected when auto-match=name adopts; collisions=${report.collisions}",
             )
         } finally {
             tracking.close()

@@ -132,11 +132,38 @@ class TsSyncCommand : Runnable {
     )
     var maxDeleteAbsolute: Int = 50
 
+    @Option(
+        names = ["--auto-match"],
+        description = [
+            "Opt-in adoption strategy for hashless providers (e.g. Internxt).",
+            "When the remote returns no content hash, adoption is normally",
+            "suppressed and a collision is surfaced instead — the safe default.",
+            "Use this flag only when you are confident the local and remote",
+            "copies are identical and the noise from collisions is not useful.",
+            "  off  (default) — always surface a collision when hashes are absent.",
+            "  size — adopt when both hashes are null and file sizes are equal.",
+            "  name — adopt when both hashes are null and the path matches",
+            "          (the weakest match; use only on a clean first-scan).",
+        ],
+    )
+    var autoMatchCli: String = "off"
+
     override fun run() {
         System.err.println(
             "EXPERIMENTAL: tracking-set engine not yet verified against real Internxt/OneDrive. " +
                 "Use --dry-run first.",
         )
+        val autoMatch =
+            when (autoMatchCli.lowercase()) {
+                "off", "" -> AutoMatchMode.OFF
+                "size" -> AutoMatchMode.SIZE
+                "name" -> AutoMatchMode.NAME
+                else ->
+                    throw picocli.CommandLine.ParameterException(
+                        picocli.CommandLine(TsSyncCommand()),
+                        "--auto-match must be one of off|size|name; got '$autoMatchCli'",
+                    )
+            }
         val ctx = TsContext.build(parent.servicesRef, profile)
         Files.createDirectories(ctx.configDir)
         val tracking = SqliteTrackingSet(ctx.trackingDb)
@@ -152,6 +179,7 @@ class TsSyncCommand : Runnable {
                     batchGuard = BatchGuard(maxDeleteRatio, maxDeleteAbsolute),
                     dryRun = dryRun,
                     excludePatterns = ctx.excludePatterns,
+                    autoMatch = autoMatch,
                 )
             val report = engine.syncOnce()
             renderReport(report, dryRun)

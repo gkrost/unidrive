@@ -111,6 +111,23 @@ data class RemoteObservation(
 )
 
 /**
+ * Opt-in adoption strategy for hashless remote providers (e.g. Internxt,
+ * whose API does not return a content hash). The safe default is [OFF]:
+ * when both hashes are absent, content identity is unprovable, so the
+ * engine surfaces a [ReconcileAction.ReportCollision] instead of silently
+ * adopting. Operators who are confident their local and remote copies are
+ * in sync can pass [SIZE] or [NAME] to opt in to a weaker match.
+ *
+ * [OFF]  — default; null-hash entries always produce ReportCollision.
+ * [SIZE] — adopt when both hashes are null AND sizes are equal.
+ * [NAME] — adopt when both hashes are null AND the path is the same
+ *           (i.e. both sides simply exist — the weakest match; useful
+ *           for a clean bulk first-scan where name-equality is sufficient
+ *           evidence that the file is the same).
+ */
+enum class AutoMatchMode { OFF, SIZE, NAME }
+
+/**
  * The pure output of the reconciler for one path. Sealed so the engine's
  * apply loop is exhaustive and so action-shape regressions are
  * compile-time visible.

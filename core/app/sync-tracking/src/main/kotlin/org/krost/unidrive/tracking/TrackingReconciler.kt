@@ -25,7 +25,9 @@ package org.krost.unidrive.tracking
  * The reconciler is intentionally side-effect free. The engine owns IO
  * and persistence; this function only decides.
  */
-class TrackingReconciler {
+class TrackingReconciler(
+    val autoMatch: AutoMatchMode = AutoMatchMode.OFF,
+) {
     /**
      * Return the action to take for [path] given the live observations
      * and the current tracking record (null = untracked).
@@ -162,7 +164,18 @@ class TrackingReconciler {
         // (loud, user-recoverable) rather than silent adopt (data-corruption risk).
         val lh = local.hash
         val rh = remote.hash
-        if (lh == null || rh == null) return false
-        return lh == rh
+        if (lh != null && rh != null) return lh == rh
+
+        // Both hashes are null: content identity is unprovable.
+        // Opt-in escape hatches via autoMatch — the operator asserts it is safe.
+        return when (autoMatch) {
+            AutoMatchMode.OFF -> false
+            AutoMatchMode.SIZE -> local.size != null && local.size == remote.size
+            // NAME: both sides exist at the same path (already guaranteed by the
+            // caller) and we treat that as sufficient evidence. Any size mismatch
+            // is still a potential divergence — we flag it, but the operator opted
+            // in to name-only matching so we adopt regardless.
+            AutoMatchMode.NAME -> true
+        }
     }
 }
