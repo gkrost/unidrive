@@ -2134,6 +2134,24 @@ internal const val RECONCILE_WINDOW_MS: Long = 5L * 60 * 1000
 
 internal const val RECONCILE_RELIST_DELAY_MS: Long = 2_000L
 
+// True only for the IOException class that proves the request reached the server
+// and a response began before the connection dropped — i.e. the body was lost in
+// transit, not the request. Reconciling-by-name is sound here because the server
+// may have committed our entry. A pre-commit failure (connect refused/reset,
+// connect timeout) carries no such proof and must NOT adopt a same-name listing
+// entry — a coincidental recent same-name/size remote file would be wrongly
+// claimed as ours. Keyed on the truncation marker the bridge emits + the parse
+// failure Ktor raises when a response is cut mid-body (verified against the live
+// "server prematurely closed the connection" class this fix targets).
+internal fun isLostResponse(e: java.io.IOException): Boolean {
+    val msg = (e.message ?: "").lowercase()
+    return msg.contains("prematurely closed") ||
+        msg.contains("failed to parse http response") ||
+        msg.contains("premature end") ||
+        msg.contains("connection closed prematurely") ||
+        msg.contains("unexpected end of stream")
+}
+
 // List [folderUuid] and match a just-committed bucket entry by
 // (plainName, type, size, recency-window). Shared by both finishUpload recovery
 // paths — a 409 MissingUploadsError and a lost/truncated response surface the
@@ -2177,15 +2195,21 @@ internal suspend fun commitWithRetry(
         try {
             api.finishUpload(bucket, indexHex, hashHex, shardUuid)
         } catch (ioe: java.io.IOException) {
-            // The finishUpload response was lost (truncated / "server prematurely
-            // closed the connection") AFTER the bridge may have committed the
-            // bucket entry: the shard is on the drive but we never received its
-            // fileId. retryShardCommit would re-throw this after its attempt
-            // ladder, and the engine would record a synthetic local: ghost row
-            // (remote_size=0) — the same data-loss class the 409 reconcile below
-            // guards against. Re-resolve the parent by (name, type, size, window);
-            // adopt the landed bucket entry iff it provably matches what we just
-            // uploaded, else surface the original failure (the pipeline retries).
+            // Only a LOST-RESPONSE IOException (truncated / "server prematurely
+            // closed the connection") proves the request reached the server and a
+            // response began: the bridge may have committed the bucket entry, but
+            // we never received its fileId. retryShardCommit would re-throw this
+            // after its attempt ladder, and the engine would record a synthetic
+            // local: ghost row (remote_size=0) — the same data-loss class the 409
+            // reconcile below guards against. A pre-commit failure (connect
+            // refused/reset/timeout) carries no such proof, so it must NOT adopt a
+            // listing entry by name+size — a coincidental recent same-name/size
+            // remote file would be wrongly claimed as ours. Surface those verbatim
+            // so the pipeline retries with pinned indexBytes.
+            if (!isLostResponse(ioe)) throw ioe
+            // Re-resolve the parent by (name, type, size, window); adopt the landed
+            // bucket entry iff it provably matches what we just uploaded, else
+            // surface the original failure (the pipeline retries).
             finishUploadLog.warn(
                 "finishUpload response lost for {} under folder={} ({}); " +
                     "re-resolving parent to check for a landed commit",

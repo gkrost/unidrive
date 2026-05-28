@@ -250,22 +250,28 @@ class InternxtUploadWritebackTest {
     //
     // If these tests are removed or loosened, a truncated finishUpload response
     // silently produces a never-recorded file -> lost renames/deletes through the
-    // mount and a duplicate-upload hazard on the next sync. Two invariants:
-    //  1. landed-and-ours -> reconcile recovers the fileId; upload() returns a real
-    //     UUID (not local:), finishUpload fired exactly once (no blind re-finish).
-    //  2. nothing-landed  -> upload() re-throws (no createFile, no ghost row).
+    // mount and a duplicate-upload hazard on the next sync. Three invariants:
+    //  1. landed-and-ours      -> reconcile recovers the fileId; upload() returns a
+    //     real UUID (not local:), finishUpload fired exactly once (no re-finish).
+    //  2. nothing-landed       -> upload() re-throws (no createFile, no ghost row).
+    //  3. pre-commit IO failure -> upload() re-throws WITHOUT adopting, even when a
+    //     coincidental recent same-name/size file exists. A connect reset/timeout is
+    //     no proof the request committed; adopting by name+size would claim a file
+    //     that isn't ours. Only a lost-RESPONSE IOException may reconcile-by-name.
+    private val lostResponseMsg = "Failed to parse HTTP response: the server prematurely closed the connection"
+    private val preCommitConnectMsg = "Connection reset by peer"
 
     // Builds a MockEngine whose upload pre-amble succeeds, whose finishUpload POST
-    // fails with a connection-truncation IOException, whose folder-content GET
-    // returns folderFilesJson (the finish-reconcile listing), and whose createFile
-    // POST succeeds returning the real drive UUID. finishPosts / folderGets /
-    // createPosts count the calls.
+    // fails with [finishIoMessage], whose folder-content GET returns folderFilesJson
+    // (the finish-reconcile listing), and whose createFile POST succeeds returning
+    // the real drive UUID. finishPosts / folderGets / createPosts count the calls.
     private fun engineWithLostFinish(
         finishPosts: AtomicInteger,
         folderGets: AtomicInteger,
         createPosts: AtomicInteger,
         folderFilesJson: String,
         createdUuid: String,
+        finishIoMessage: String = lostResponseMsg,
     ) = io.ktor.client.engine.mock.MockEngine { request ->
         val url = request.url.toString()
         when {
@@ -276,10 +282,10 @@ class InternxtUploadWritebackTest {
                     headers = headersOf("Content-Type", "application/json"),
                 )
             url == shardUrl -> respond("", HttpStatusCode.OK)
-            // finishUpload POST → simulate the lost/truncated response.
+            // finishUpload POST → simulate the configured IO failure.
             url.contains("/v2/buckets/") && url.contains("/files/finish") -> {
                 finishPosts.incrementAndGet()
-                throw java.io.IOException("Failed to parse HTTP response: the server prematurely closed the connection")
+                throw java.io.IOException(finishIoMessage)
             }
             // finish-reconcile listing.
             url.contains("/drive/folders/content/") -> {
@@ -380,6 +386,61 @@ class InternxtUploadWritebackTest {
                     }
                     assertTrue(folderGets.get() >= 1, "re-resolve must run before deciding to re-throw")
                     assertEquals(0, createPosts.get(), "no createFile when the shard never committed — never fabricate a drive entry")
+                } finally {
+                    provider.close()
+                }
+            } finally {
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    // --- Invariant 3: a PRE-COMMIT IO failure (connect reset/timeout) must NOT
+    //     adopt by name+size, even when a coincidental recent same-name/size file
+    //     already exists in the parent. A connect failure is no proof the request
+    //     committed; adopting would claim a file that isn't ours. upload() re-throws
+    //     and never reaches createFile.
+    @Test
+    fun `pre-commit connect failure never adopts a coincidental same-name file`() =
+        runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-fin-precommit-")
+            val local =
+                java.nio.file.Files
+                    .createTempFile(tmp, "deb-", ".deb")
+                    .also { java.nio.file.Files.write(it, ByteArray(200) { i -> i.toByte() }) }
+            try {
+                val finishPosts = AtomicInteger(0)
+                val folderGets = AtomicInteger(0)
+                val createPosts = AtomicInteger(0)
+                // A recent, same-name/type/size file that would MATCH the reconcile
+                // listing — but the failure proves nothing committed, so it must be
+                // ignored, not adopted.
+                val coincidental =
+                    """{"children":[],"files":[{
+                        "uuid":"not-ours-uuid",
+                        "fileId":"some-other-bucket-entry",
+                        "plainName":"deb-x","type":"deb","size":"200",
+                        "bucket":"6928426c1a2316b856c9ab81",
+                        "folderUuid":"root-folder-uuid","status":"EXISTS",
+                        "creationTime":"${java.time.Instant.now()}"
+                    }]}"""
+                val provider = newProviderRooted(tmp)
+                try {
+                    installMockClientOnProvider(
+                        provider,
+                        engineWithLostFinish(
+                            finishPosts,
+                            folderGets,
+                            createPosts,
+                            coincidental,
+                            "real-drive-uuid",
+                            finishIoMessage = preCommitConnectMsg,
+                        ),
+                    )
+                    assertFailsWith<java.io.IOException> {
+                        provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+                    }
+                    assertEquals(0, folderGets.get(), "a pre-commit failure must NOT even list the parent to adopt")
+                    assertEquals(0, createPosts.get(), "never createFile off a coincidental match after a pre-commit failure")
                 } finally {
                     provider.close()
                 }
