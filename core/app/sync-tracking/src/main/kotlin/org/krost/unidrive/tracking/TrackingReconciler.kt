@@ -88,8 +88,25 @@ class TrackingReconciler(
         // engine. We gate Gone on `snapshot side was non-null` so a
         // crashed-mid-pending row recovers to its original intent (down/
         // upload), not to a delete.
-        val localChanged = local.exists && local.hash != track.localHash
-        val remoteChanged = remote.exists && (remote.etag != track.remoteEtag)
+        //
+        // Hashless-provider change-token: when both etags/hashes are null
+        // (Internxt never returns a content hash or a discriminating etag)
+        // the primary identity token can't distinguish "unchanged" from
+        // "changed to the same null". Fall back to size: if the size changed
+        // the file definitely changed; if size is the same we can't tell
+        // (a same-size content edit is undetectable without a hash — inherent
+        // to the provider). This is the best available token given the API.
+        val remoteEtagDiffers = remote.etag != track.remoteEtag
+        val remoteEtagComparable = remote.etag != null || track.remoteEtag != null
+        val remoteChanged = remote.exists &&
+            (remoteEtagDiffers || (!remoteEtagComparable && remote.size != track.remoteSize))
+
+        // Symmetric: local hash is null on some configurations (e.g. a provider
+        // that only hashes after upload). Fall back to local size as well.
+        val localHashDiffers = local.hash != track.localHash
+        val localHashComparable = local.hash != null || track.localHash != null
+        val localChanged = local.exists &&
+            (localHashDiffers || (!localHashComparable && local.size != track.localSize))
         val localGone = !local.exists && track.localHash != null
         val remoteGone = !remote.exists && track.remoteEtag != null
 
