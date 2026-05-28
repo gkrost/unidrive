@@ -130,7 +130,12 @@ class DaemonStatusCommand : Runnable {
             }
             is LockPidReadResult.Present -> {
                 val pid = result.contents.pid
-                val modeToken = result.contents.modeToken ?: "(no-mode)"
+                val modeToken = result.contents.modeToken
+                if (modeToken != "daemon") {
+                    System.err.println(daemonModeMismatchMessage(profile.name, modeToken, pid))
+                    System.exit(1)
+                    return
+                }
                 println("pid $pid, mode $modeToken")
 
                 // RPC enrichment per spec §4.3 — file-derived data above,
@@ -180,6 +185,15 @@ class DaemonStopCommand : Runnable {
     )
     var profilePositional: String? = null
 
+    @Option(
+        names = ["--force"],
+        description = [
+            "Stop the daemon even when a FUSE mount it serves is still live. " +
+                "Without this flag, daemon stop refuses so the mount is not orphaned.",
+        ],
+    )
+    var force: Boolean = false
+
     companion object {
         const val STOP_DEADLINE_MS: Long = 12_000  // 10s graceful + 2s buffer
     }
@@ -206,12 +220,28 @@ class DaemonStopCommand : Runnable {
         val pid = contents.pid
         val modeToken = contents.modeToken
         if (modeToken != "daemon") {
-            System.err.println(
-                "lock for profile '${profile.name}' is held by mode '$modeToken', not 'daemon'. " +
-                    "Use the appropriate stop mechanism (e.g. `kill $pid` for sync).",
-            )
+            System.err.println(daemonModeMismatchMessage(profile.name, modeToken, pid))
             System.exit(1)
             return
+        }
+
+        // Refuse (without --force) when a FUSE mount served by this daemon
+        // is still live. Stopping the daemon tears down its IPC server; the
+        // co-daemon then loses its backend and the mount serves broken state
+        // (reads return EIO/ENOENT) with no other warning. The link between a
+        // mount and this daemon is the IPC socket the co-daemon connected to.
+        if (!force) {
+            val socketPath = IpcServer.defaultSocketPath(profile.name)
+            if (StaleMountDetector.hasLiveMountForSocket(socketPath.toString())) {
+                System.err.println(
+                    "refusing to stop daemon for profile '${profile.name}': a FUSE mount it " +
+                        "serves is still live. Stopping now would orphan the mount " +
+                        "(reads then fail with EIO/ENOENT). Unmount it first " +
+                        "(`fusermount -u <mountpoint>`), or re-run with --force to stop anyway.",
+                )
+                System.exit(1)
+                return
+            }
         }
 
         // Send SIGTERM via ProcessHandle.
@@ -278,6 +308,20 @@ internal fun readLockPid(pidFile: java.nio.file.Path): LockPidReadResult {
     val pid = parts.getOrNull(0)?.toLongOrNull() ?: return LockPidReadResult.Malformed(raw)
     val modeToken = parts.getOrNull(1)
     return LockPidReadResult.Present(LockPidContents(pid, modeToken))
+}
+
+/**
+ * Operator-facing message for the case where a `.lock.pid` holder's mode is
+ * not `daemon`. Shared by `daemon status` and `daemon stop` so both commands
+ * refuse a non-daemon lock holder with identical, symmetric wording. The
+ * legacy pid-only sidecar (no mode field) renders as `(no-mode)` — it predates
+ * the mode-mutex and is treated as a non-daemon holder (typically a legacy
+ * `unidrive sync` watcher).
+ */
+internal fun daemonModeMismatchMessage(profileName: String, modeToken: String?, pid: Long): String {
+    val rendered = modeToken ?: "(no-mode)"
+    return "lock for profile '$profileName' is held by mode '$rendered', not 'daemon'. " +
+        "Use the appropriate stop mechanism (e.g. `kill $pid` for sync)."
 }
 
 /**

@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import picocli.CommandLine
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -100,6 +101,47 @@ class SyncCommandTest {
         assertNull(SyncCommand.normalizeSyncPath("/"))
         assertNull(SyncCommand.normalizeSyncPath("\\"))
         assertNull(SyncCommand.normalizeSyncPath("//"))
+    }
+
+    // ── sync failures render a formatted error, never a stack trace ──────────
+
+    // Invariant: an operator-correctable failure — the mis-pointed
+    // sync_root guard throws IllegalStateException with a complete, actionable
+    // message — renders as a single clean `Sync error: <message>` line. No
+    // class-name prefix, and (the actual bug) no JVM stack trace. The repro
+    // message from the issue is reproduced verbatim to lock the contract.
+    @Test
+    fun `sync_root-missing-yields-formatted-error-not-exception`() {
+        val guardMessage =
+            "Local sync_root '/home/gernot/InternxtTest' is empty, but state DB knows " +
+                "149 previously-hydrated entries (of 205 total). sync_root probably points " +
+                "at the wrong directory. To rehydrate from cloud, re-run with --download-only. " +
+                "To proceed with a bidirectional sync after an intentional local wipe, " +
+                "re-run with --force-delete."
+        val rendered = SyncCommand.renderSyncFailure(IllegalStateException(guardMessage))
+
+        assertEquals("Sync error: $guardMessage", rendered)
+        assertFalse(
+            rendered.contains("IllegalStateException"),
+            "operator-facing failure must not leak the exception class name; got: $rendered",
+        )
+        assertTrue(
+            SyncCommand.isOperatorFacing(IllegalStateException("x")),
+            "IllegalStateException is an operator-facing guard and must suppress the stack trace",
+        )
+    }
+
+    // Invariant: a genuinely unexpected failure keeps a class-name
+    // prefix so it stays identifiable in a bug report, and is NOT classified as
+    // operator-facing (so its stack trace is still available under -v).
+    @Test
+    fun `unexpected-sync-failure-keeps-class-prefix-for-diagnosis`() {
+        val rendered = SyncCommand.renderSyncFailure(java.io.IOException("disk gone"))
+        assertEquals("Sync error: IOException: disk gone", rendered)
+        assertFalse(
+            SyncCommand.isOperatorFacing(java.io.IOException("x")),
+            "an IOException is an internal/unexpected failure, not an operator-facing guard",
+        )
     }
 
     @Test
