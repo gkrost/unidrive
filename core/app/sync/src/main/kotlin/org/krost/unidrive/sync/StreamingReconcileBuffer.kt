@@ -78,7 +78,13 @@ internal class StreamingReconcileBuffer {
      * clears the buffer for the next gather pass.
      */
     fun drainDeferred(): List<SyncAction> {
-        val out = deferred.values.toList()
+        // A path that fired a safe-now (additive) action this gather — e.g. a
+        // DownloadContent for a file re-created at a path whose old id was
+        // tombstoned on an earlier page — must NOT then be destroyed by a deferred
+        // delete still sitting in the buffer. Drop those: the safe-now verdict wins.
+        // Without this, a delete-then-recreate split across delta pages deletes the
+        // just-downloaded file at scan-end.
+        val out = deferred.values.filterNot { it.path in safePaths }
         deferred.clear()
         return out
     }
