@@ -261,7 +261,7 @@ class InternxtProvider(
         // indexHex, so a fresh attempt produces a byte-identical cipher state.
         // TRUNCATE_EXISTING on the destination open mode (inside
         // downloadFileStreaming) discards any partial prior attempt's bytes.
-        return retryShardCommit {
+        val written = retryShardCommit {
             val bridgeInfo =
                 try {
                     api.getBridgeFileInfo(bucket, fileId)
@@ -293,6 +293,18 @@ class InternxtProvider(
             val cipher = crypto.createContentDecryptCipher(fileKey, iv)
             api.downloadFileStreaming(downloadUrl, cipher, destination)
         }
+        // Completeness guard: downloadFileStreaming returns the actual decrypted bytes
+        // written and does not validate length itself, so a short/truncated decrypt
+        // would otherwise be stored as a complete cache. Compare against the declared
+        // plaintext size and fail loudly so the caller (hydration) never trusts a
+        // partial file. Skipped when the declared size is unknown (0).
+        val expected = fileMeta.size.toLongOrNull()
+        if (expected != null && expected > 0L && written != expected) {
+            throw ProviderException(
+                "Incomplete download of $remotePath: got $written of $expected bytes",
+            )
+        }
+        return written
     }
 
     // Stages 5-7 of the upload pipeline (startUpload → PUT shard → finishUpload)

@@ -287,7 +287,7 @@ open class SyncEngine(
             mimeType = null,
         )
         Files.createDirectories(cachePath.parent)
-        downloadByIdOrPath(remoteItem, path, cachePath)
+        val downloadedSize = downloadByIdOrPath(remoteItem, path, cachePath)
         if (verifyIntegrity) {
             val verified = HashVerifier.verify(cachePath, entry.remoteHash, algorithm = provider.hashAlgorithm())
             if (!verified) {
@@ -295,9 +295,15 @@ open class SyncEngine(
                 throw IllegalStateException("Integrity check failed for hydration cache: $path")
             }
         }
+        // Persist the freshly-downloaded size as remoteSize. The provider validated the
+        // download against the authoritative remote length (throwing on a short read), so
+        // this is the current truth. Without it a remote that changed size since the last
+        // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
+        // perfectly valid re-download.
         db.upsertEntry(
             (db.getEntry(path) ?: entry).copy(
                 isHydrated = true,
+                remoteSize = downloadedSize,
                 localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
                 localSize = Files.size(cachePath),
                 lastSynced = Instant.now(),

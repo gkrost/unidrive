@@ -205,8 +205,9 @@ class GraphApiService(
     suspend fun downloadFile(
         itemId: String,
         destPath: Path,
-    ) {
+    ): Long {
         val item = getItemById(itemId)
+        var downloadedBytes = 0L
         var url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
         var authNeeded = item.downloadUrl == null
         var flakeAttempts = 0
@@ -248,22 +249,37 @@ class GraphApiService(
                         assertNotHtml(response, contextMsg = "Download itemId=$itemId")
                         throttleBudget.recordSuccess()
                         val channel: ByteReadChannel = response.bodyAsChannel()
-                        withContext(Dispatchers.IO) {
-                            Files.createDirectories(destPath.parent)
-                            Files.newOutputStream(destPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                                val buf = ByteArray(8192)
-                                while (true) {
-                                    val n = channel.readAvailable(buf)
-                                    if (n <= 0) break
-                                    out.write(buf, 0, n)
+                        val written =
+                            withContext(Dispatchers.IO) {
+                                Files.createDirectories(destPath.parent)
+                                Files.newOutputStream(destPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                                    val buf = ByteArray(8192)
+                                    var w = 0L
+                                    while (true) {
+                                        val n = channel.readAvailable(buf)
+                                        if (n <= 0) break
+                                        out.write(buf, 0, n)
+                                        w += n
+                                    }
+                                    w
                                 }
                             }
+                        // Truncation guard: a connection that closes mid-body can yield a
+                        // short file without throwing. Compare bytes written against the
+                        // response Content-Length and treat a short read as a retryable
+                        // flake, so a partial cache is never returned as a complete download.
+                        val expected = response.contentLength()
+                        if (expected != null && expected >= 0L && written != expected) {
+                            throw java.io.IOException(
+                                "Truncated download itemId=$itemId: got $written of $expected bytes",
+                            )
                         }
+                        downloadedBytes = written
                         DownloadOutcome.Done
                     }
 
                 when (outcome) {
-                    DownloadOutcome.Done -> return
+                    DownloadOutcome.Done -> return downloadedBytes
                     DownloadOutcome.RetryAuth -> {
                         log.info("Got 401 on download itemId={} — forcing token refresh and retrying once", itemId)
                         authRefreshed = true

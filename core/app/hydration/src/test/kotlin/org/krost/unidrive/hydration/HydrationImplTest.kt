@@ -232,6 +232,8 @@ internal class HydrationTestEnv(
             )
         }
 
+        fun remoteSizeOf(path: String): Long? = db.getEntry(path)?.remoteSize
+
         // A file created/edited through the mount but not yet uploaded: remoteId
         // null (local: synthetic), remoteSize 0, isHydrated true; the cache holds the
         // just-written bytes and is the only copy. The warm path must trust it.
@@ -398,20 +400,39 @@ class HydrationImplTest {
         assertEquals(1, env.syncEngine.downloadCount(), "the size-mismatched cache must trigger a re-download")
     }
 
-    // #207: a download that comes up short of the known remote size must fail
-    // loudly (→ EIO, retryable), never serve truncated content as success.
+    // #207 + C7: completeness is enforced at the provider — a download that comes up
+    // short of the declared remote size throws there (see the per-provider tests). The
+    // hydration layer must surface that as a typed failure (→ EIO, retryable), never
+    // serve truncated content as success.
     @Test
-    fun `open_read fails when the hydration comes up short of the remote size`() = runTest {
+    fun `open_read fails when the provider rejects an incomplete download`() = runTest {
         val env = HydrationTestEnv()
         env.stateDb.insertUnhydratedEntry("/bar.txt", remoteSize = 100)
-        env.syncEngine.seedRemoteContent("/bar.txt", "short") // only 5 of 100 bytes
+        env.syncEngine.makeNextDownloadThrow(
+            IllegalStateException("Incomplete download of /bar.txt: got 5 of 100 bytes"),
+        )
 
         val result = env.hydration.openForRead("conn1", "h1", "/bar.txt")
 
         assertTrue(result is OpenResult.Failed, "a short hydration must fail, not serve truncated content")
-        val error = (result as OpenResult.Failed).error
-        assertTrue(error is HydrationError.Generic)
-        assertTrue(error.message.contains("incomplete hydration"), "message: ${error.message}")
+        assertTrue((result as OpenResult.Failed).error is HydrationError.Generic)
+    }
+
+    // C1/C7: when the remote changed size since the last enumeration, ensureHydrated
+    // re-downloads and persists the FRESH size as remoteSize. Before the fix the
+    // pre-download snapshot (stale remoteSize) made openForRead EIO a perfectly valid
+    // file. The cache must be served and the row's remoteSize refreshed to match.
+    @Test
+    fun `open_read succeeds and refreshes remoteSize when the remote grew since enumeration`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/big.txt", remoteSize = 5) // stale: last enum saw 5
+        env.syncEngine.seedRemoteContent("/big.txt", "hello world") // remote is now 11 bytes
+
+        val result = env.hydration.openForRead("conn1", "h1", "/big.txt")
+
+        assertTrue(result is OpenResult.Ok, "a grown remote must hydrate, not EIO on the stale size")
+        assertEquals("hello world", java.nio.file.Files.readString((result as OpenResult.Ok).cachePath))
+        assertEquals(11L, env.stateDb.remoteSizeOf("/big.txt"), "remoteSize must be refreshed to the downloaded size")
     }
 
     // #207 regression: a local-only hydrated file (created via the mount, not yet

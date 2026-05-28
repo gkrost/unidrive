@@ -85,7 +85,6 @@ class OneDriveProvider(
         val item = graphApi.getItemByPath(remotePath)
         return try {
             graphApi.downloadFile(item.id, destination)
-            item.size
         } catch (e: GraphApiException) {
             // A 404 on the content GET means the pre-resolved download URL went
             // stale (the CDN URL expired) and/or the cached remoteId drifted off
@@ -101,7 +100,6 @@ class OneDriveProvider(
             )
             val fresh = graphApi.getItemByPath(remotePath)
             graphApi.downloadFile(fresh.id, destination)
-            fresh.size
         }
     }
 
