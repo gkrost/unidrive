@@ -297,7 +297,13 @@ class HydrationImpl(
             // on the cloud must be deleted remotely, not just dropped locally —
             // otherwise the cloud copy is orphaned. Probe the remote; on a hit,
             // delete it cloud-side, else hard-delete the genuinely-local row.
-            val ghost = syncEngine.remoteItemOrNull(normalised)
+            val ghost = try {
+                syncEngine.remoteItemOrNull(normalised)
+            } catch (e: Exception) {
+                // Transient remote-probe failure: fail the unlink rather than
+                // hard-delete the row and orphan a ghost's cloud copy.
+                return UnlinkResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+            }
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
                     syncEngine.deleteRemote(normalised)
@@ -496,7 +502,13 @@ class HydrationImpl(
             // a duplicate re-upload). Probe the remote: if the file is actually
             // there, treat it as a ghost — move it on the cloud and adopt its real
             // id — otherwise fall through to the genuinely-local rename.
-            val ghost = syncEngine.remoteItemOrNull(oldNorm)
+            val ghost = try {
+                syncEngine.remoteItemOrNull(oldNorm)
+            } catch (e: Exception) {
+                // Transient remote-probe failure: fail the rename rather than risk a
+                // local-only rename that would silently skip a ghost's cloud move.
+                return RenameResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+            }
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
                     syncEngine.renameRemote(oldNorm, newNorm)

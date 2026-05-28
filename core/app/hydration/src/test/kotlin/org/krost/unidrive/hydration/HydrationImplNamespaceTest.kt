@@ -32,7 +32,9 @@ class HydrationImplNamespaceTest {
         override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
         override suspend fun authenticate() {}
         override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
-        override suspend fun getMetadata(path: String): CloudItem = error("not used")
+        // A never-uploaded local file is genuinely absent on the cloud — the
+        // rename/unlink ghost-probe expects a typed not-found, not a generic error.
+        override suspend fun getMetadata(path: String): CloudItem = throw ProviderException("Item not found: $path")
         override suspend fun download(remotePath: String, destination: Path): Long = 0L
         override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long = 0L
         override suspend fun upload(localPath: Path, remotePath: String, existingRemoteId: String?, onProgress: ((Long, Long) -> Unit)?): CloudItem = error("not used")

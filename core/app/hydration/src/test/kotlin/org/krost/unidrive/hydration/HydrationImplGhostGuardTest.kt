@@ -17,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 // Ghost-guard for the mount's rename/unlink (#203 layer-2). A state.db row with a
 // local: synthetic id is normally a genuinely-never-uploaded file. But a "ghost" —
@@ -43,12 +44,17 @@ class HydrationImplGhostGuardTest {
         var lastMoveTo: String? = null
         var lastDeletePath: String? = null
 
+        // When set, getMetadata throws this (a transient, NOT a not-found) so the
+        // probe must propagate rather than be read as absence.
+        var transientError: Throwable? = null
+
         override fun capabilities(): Set<Capability> = setOf(Capability.Delta)
         override suspend fun authenticate() {}
         override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
 
-        override suspend fun getMetadata(path: String): CloudItem =
-            if (path == ghostAt) {
+        override suspend fun getMetadata(path: String): CloudItem {
+            transientError?.let { throw it }
+            return if (path == ghostAt) {
                 CloudItem(
                     id = ghostId,
                     name = path.substringAfterLast('/'),
@@ -63,6 +69,7 @@ class HydrationImplGhostGuardTest {
             } else {
                 throw ProviderException("Item not found: $path")
             }
+        }
 
         override suspend fun download(remotePath: String, destination: Path): Long = 0L
         override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long = 0L
@@ -172,5 +179,36 @@ class HydrationImplGhostGuardTest {
             val moved = db.getEntry("/pending-renamed.deb")
             assertNotNull(moved, "row repathed locally")
             assertNull(moved.remoteId, "row stays local: (no remote to adopt)")
+        }
+
+    // Invariant 4: a TRANSIENT probe failure must fail the op, never fall to
+    // local-only (which would skip a ghost's cloud move/delete and orphan it).
+    @Test
+    fun `transient probe failure fails the rename and leaves the row untouched`() =
+        runTest {
+            val (hydration, provider, db) = freshEnv()
+            seedLocalGhostRow(db, "/maybe-ghost.deb")
+            provider.transientError = ProviderException("Internxt 503 Service Unavailable") // not a not-found
+
+            val result = hydration.rename("/maybe-ghost.deb", "/renamed.deb")
+
+            assertTrue(result is RenameResult.Failed, "a transient probe failure must fail the rename, not go local-only")
+            assertNull(provider.lastMoveFrom, "no cloud move attempted on a transient probe failure")
+            assertNotNull(db.getEntry("/maybe-ghost.deb"), "row must stay put (not repathed) so the op can be retried")
+            assertNull(db.getEntry("/renamed.deb"), "no row created at the new path")
+        }
+
+    @Test
+    fun `transient probe failure fails the unlink and leaves the row untouched`() =
+        runTest {
+            val (hydration, provider, db) = freshEnv()
+            seedLocalGhostRow(db, "/maybe-ghost.deb")
+            provider.transientError = ProviderException("Internxt 503 Service Unavailable")
+
+            val result = hydration.unlink("/maybe-ghost.deb")
+
+            assertTrue(result is UnlinkResult.Failed, "a transient probe failure must fail the unlink, not hard-delete the row")
+            assertNull(provider.lastDeletePath, "no cloud delete attempted on a transient probe failure")
+            assertNotNull(db.getEntry("/maybe-ghost.deb"), "row must remain so the op can be retried")
         }
 }
