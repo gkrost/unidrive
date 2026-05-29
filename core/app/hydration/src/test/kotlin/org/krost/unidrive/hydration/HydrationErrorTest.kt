@@ -12,11 +12,18 @@ class HydrationErrorTest {
     }
 
     @Test
+    fun `unknown path carries the stable unknown_path wire token`() {
+        assertEquals("unknown_path", HydrationError.UnknownPath.message)
+        assertEquals("unknown_path", HydrationError.UNKNOWN_PATH_TOKEN)
+    }
+
+    @Test
     fun `sealed interface allows future variants without breaking exhaustiveness`() {
         val e: HydrationError = HydrationError.Generic("x")
         val rendered = when (e) {
             is HydrationError.Generic -> "generic:${e.message}"
             HydrationError.NotFound -> "not_found"
+            HydrationError.UnknownPath -> "unknown_path"
         }
         assertTrue(rendered.startsWith("generic:"))
     }

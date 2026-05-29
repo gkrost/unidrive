@@ -356,6 +356,16 @@ internal class HydrationTestEnv(
 }
 
 class HydrationImplTest {
+    // Extracts the wire error token from any Failed result of a state-db-precondition
+    // verb. Fails the test loudly if the verb did not fail (an unknown path must fail).
+    private fun tokenOf(result: Any?): String = when (result) {
+        is OpenResult.Failed -> result.error.message
+        is DehydrateResult.Failed -> result.error.message
+        is UnlinkResult.Failed -> result.error.message
+        is RmdirResult.Failed -> result.error.message
+        else -> error("expected a Failed result for an unknown path; got $result")
+    }
+
     @Test
     fun `open_read on unhydrated path triggers download and returns cache path`() = runTest {
         val env = HydrationTestEnv()
@@ -371,15 +381,15 @@ class HydrationImplTest {
     }
 
     @Test
-    fun `open_read on unknown path returns Failed with Generic error`() = runTest {
+    fun `open_read on unknown path returns the typed unknown_path token`() = runTest {
         val env = HydrationTestEnv()
 
         val result = env.hydration.openForRead("conn1", "h2", "/does-not-exist.txt")
 
         assertTrue(result is OpenResult.Failed)
         val error = (result as OpenResult.Failed).error
-        assertTrue(error is HydrationError.Generic)
-        assertTrue(error.message.contains("does-not-exist.txt"))
+        assertTrue(error is HydrationError.UnknownPath)
+        assertEquals("unknown_path", error.message)
     }
 
     // #207: a hydrated row over a truncated/0-byte cache (crash mid-download,
@@ -453,6 +463,39 @@ class HydrationImplTest {
             java.nio.file.Files.readString((result as OpenResult.Ok).cachePath),
         )
         assertEquals(0, env.syncEngine.downloadCount(), "must NOT re-download a local-only file")
+    }
+
+    // #122: a path that is not in state.db is a genuinely-unknown path. Every verb
+    // whose precondition is a state.db row lookup must surface the SAME stable wire
+    // token (`unknown_path`) so the mount maps the identical condition to the
+    // identical errno (ENOENT) regardless of which verb the kernel happened to call.
+    // Before the fix, open_read/open_write/dehydrate/unlink/rmdir returned the
+    // free-text "Unknown path: <p>" (→ catch-all EIO) while open_write_begin already
+    // returned the bare `unknown_path` token (→ ENOENT) — the same condition, two
+    // errnos. If this test is removed or loosened, that divergence silently regresses.
+    @Test
+    fun `unknown path yields the same unknown_path token across every state-db-precondition verb`() = runTest {
+        val env = HydrationTestEnv()
+        val missing = "/never-existed.txt"
+
+        val tokens: List<Pair<String, String>> = listOf(
+            "open_read" to tokenOf(env.hydration.openForRead("conn1", "h1", missing)),
+            "open_write" to tokenOf(
+                env.hydration.openForWrite("conn1", "h2", missing, env.tempDir.resolve("c.txt")),
+            ),
+            "open_write_begin" to tokenOf(env.hydration.openWriteBegin("conn1", missing)),
+            "dehydrate" to tokenOf(env.hydration.dehydrate(missing)),
+            "unlink" to tokenOf(env.hydration.unlink(missing)),
+            "rmdir" to tokenOf(env.hydration.rmdir(missing)),
+        )
+
+        for ((verb, token) in tokens) {
+            assertEquals(
+                "unknown_path",
+                token,
+                "verb $verb must surface the stable unknown_path token for an unknown path; got $token",
+            )
+        }
     }
 
     @Test
@@ -673,7 +716,8 @@ class HydrationImplTest {
         val env = HydrationTestEnv()
         val r = env.hydration.dehydrate("/never-existed.txt")
         assertTrue(r is DehydrateResult.Failed)
-        assertTrue(r.error.message.startsWith("Unknown path:"))
+        assertTrue(r.error is HydrationError.UnknownPath)
+        assertEquals("unknown_path", r.error.message)
     }
 
     @Test

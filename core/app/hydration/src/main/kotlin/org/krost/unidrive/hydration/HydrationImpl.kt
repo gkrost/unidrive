@@ -73,7 +73,7 @@ class HydrationImpl(
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
-            ?: return OpenResult.Failed(HydrationError.Generic("Unknown path: $path"))
+            ?: return OpenResult.Failed(HydrationError.UnknownPath)
 
         val cachePath = try {
             // Always emit Hydrating + Hydrated, even when SyncEngine returns a warm cache
@@ -118,7 +118,7 @@ class HydrationImpl(
 
     override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
         stateDb.getEntry(path)
-            ?: return OpenResult.Failed(HydrationError.Generic("Unknown path: $path"))
+            ?: return OpenResult.Failed(HydrationError.UnknownPath)
 
         // Crash-recovery replay: the co-daemon's cache_scanner fires open_write with
         // handle_id = "recovery-<n>" for each cache file whose mtime exceeds the
@@ -213,7 +213,7 @@ class HydrationImpl(
     }
     override suspend fun dehydrate(path: String): DehydrateResult {
         stateDb.getEntry(path)
-            ?: return DehydrateResult.Failed(HydrationError.Generic("Unknown path: $path"))
+            ?: return DehydrateResult.Failed(HydrationError.UnknownPath)
 
         // Check the open-set across ALL connections
         val anyOpen = openSets.values.any { perConn -> perConn.containsValue(path) }
@@ -293,7 +293,7 @@ class HydrationImpl(
     override suspend fun unlink(path: String): UnlinkResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val entry = stateDb.getEntry(normalised)
-            ?: return UnlinkResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
+            ?: return UnlinkResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return UnlinkResult.PathIsFolder
 
         // Never-uploaded file (remote_id is null): the file only ever existed
@@ -353,7 +353,7 @@ class HydrationImpl(
     override suspend fun rmdir(path: String): RmdirResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val entry = stateDb.getEntry(normalised)
-            ?: return RmdirResult.Failed(HydrationError.Generic("Unknown path: $normalised"))
+            ?: return RmdirResult.Failed(HydrationError.UnknownPath)
         if (!entry.isFolder) return RmdirResult.PathIsFile
 
         return runCatching {
@@ -437,7 +437,7 @@ class HydrationImpl(
     override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val entry = stateDb.getEntry(normalised)
-            ?: return OpenResult.Failed(HydrationError.Generic("unknown_path"))
+            ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
         return try {
             val cachePath = prepareEmptyCache(normalised)
