@@ -343,6 +343,14 @@ data class SyncConfig(
             // unidrive-internal
             "/.unidrive-trash/**",
             "/.unidrive-versions/**",
+            // version-control metadata directories (whole subtree, at any depth).
+            // The `**/.git/**` form matches both the directory itself (preVisit
+            // SKIP_SUBTREE) and every nested object, so a checked-out repo under
+            // the sync root never enters a plan (issue: .git uploaded in full).
+            "**/.git/**",  // Git
+            "**/.svn/**",  // Subversion
+            "**/.hg/**",   // Mercurial
+            "**/.bzr/**",  // Bazaar
             // desktop / OS / editor junk
             "**/.directory.lock", // KDE Dolphin
             "**/.DS_Store",       // macOS
