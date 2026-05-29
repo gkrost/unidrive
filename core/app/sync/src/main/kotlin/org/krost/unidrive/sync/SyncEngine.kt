@@ -1332,7 +1332,57 @@ open class SyncEngine(
         db.beginBatch()
         try {
             withContext(Priority.Foreground) {
-                for (action in sequentialActions) {
+                // #123: process a maximal contiguous run of CreateRemoteFolder
+                // actions with bounded concurrency instead of one blocking
+                // round-trip each. topologicalApplyOrder has already placed any
+                // MoveRemote a create depends on before the run, so a run's
+                // external deps are satisfied; parent→child WITHIN the run is
+                // preserved by createFolderBatch's depth-barrier semantics.
+                var idx = 0
+                while (idx < sequentialActions.size) {
+                    val head = sequentialActions[idx]
+                    if (head is SyncAction.CreateRemoteFolder) {
+                        var end = idx
+                        while (end < sequentialActions.size &&
+                            sequentialActions[end] is SyncAction.CreateRemoteFolder
+                        ) {
+                            end++
+                        }
+                        @Suppress("UNCHECKED_CAST")
+                        val run = sequentialActions.subList(idx, end) as List<SyncAction.CreateRemoteFolder>
+                        val failures =
+                            applyCreateRemoteFolderRun(
+                                run = run,
+                                concurrency = perProviderConcurrency,
+                                passOneFailures = passOneFailures,
+                                completedActions = completedActions,
+                                totalActions = actions.size,
+                            )
+                        // Fold the run outcome into consecutiveFailures: a wholly
+                        // failed run signals an outage (trips the hard cap below),
+                        // any success resets the streak. Mirrors the single-action
+                        // path's reset-on-success / increment-on-failure semantic.
+                        if (failures >= run.size) {
+                            consecutiveFailures += failures
+                            if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
+                                log.error(
+                                    "Stopping sync pass: {} consecutive action failures " +
+                                        "(last run: {} create-folder failures) — treating as upstream outage",
+                                    consecutiveFailures,
+                                    failures,
+                                )
+                                throw ProviderException(
+                                    "Stopping sync after $consecutiveFailures consecutive failures",
+                                )
+                            }
+                            if (failures > 0) delay(minOf(2_000L * consecutiveFailures, 10_000L))
+                        } else {
+                            consecutiveFailures = 0
+                        }
+                        idx = end
+                        continue
+                    }
+                    val action = head
                     try {
                         when (action) {
                             is SyncAction.CreatePlaceholder -> {
@@ -1347,7 +1397,6 @@ open class SyncEngine(
                             is SyncAction.MoveLocal -> applyMoveLocal(action)
                             is SyncAction.DeleteLocal -> applyDeleteLocal(action)
                             is SyncAction.DeleteRemote -> applyDeleteRemote(action)
-                            is SyncAction.CreateRemoteFolder -> applyCreateRemoteFolder(action)
                             is SyncAction.Conflict -> {
                                 applyConflict(action)
                                 conflicts.incrementAndGet()
@@ -1417,6 +1466,7 @@ open class SyncEngine(
                         delay(minOf(2_000L * consecutiveFailures, 10_000L))
                     }
                     reporter.onActionProgress(completedActions.incrementAndGet(), actions.size, actionLabel(action), displayPath(action))
+                    idx++
                 }
             }
             db.commitBatch()
@@ -2967,6 +3017,117 @@ open class SyncEngine(
             path = action.path,
             result = "success",
         )
+    }
+
+    /**
+     * #123: applies a contiguous run of CreateRemoteFolder actions with bounded concurrency.
+     *
+     * The run is split into depth-ordered batches (see [createFolderBatches]); each batch runs
+     * concurrently under a [concurrency]-permit semaphore, and the next batch starts only after
+     * the current one fully drains — that barrier preserves the parent-before-child invariant
+     * (a child folder is always one level deeper than its parent, so its parent's create is in an
+     * earlier batch and has completed).
+     *
+     * Partial-failure tolerance (mirrors the per-action sequential path): a single createFolder
+     * failure is logged + recorded and the rest of the plan continues. A folder whose parent's
+     * create failed in an earlier batch is skipped (its create cannot succeed without the parent)
+     * and counted as a failure too, so the count surfaced to the caller reflects the real damage.
+     *
+     * @return the number of folders in this run that failed (or were skipped due to a failed parent).
+     */
+    private suspend fun applyCreateRemoteFolderRun(
+        run: List<SyncAction.CreateRemoteFolder>,
+        concurrency: Int,
+        passOneFailures: AtomicInteger,
+        completedActions: AtomicInteger,
+        totalActions: Int,
+    ): Int {
+        val failedPaths = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val failures = AtomicInteger(0)
+        val semaphore = kotlinx.coroutines.sync.Semaphore(concurrency.coerceAtLeast(1))
+        for (batch in createFolderBatches(run)) {
+            coroutineScope {
+                for (action in batch) {
+                    launch {
+                        // Skip when a parent create failed earlier in this run: the
+                        // provider would reject the child with "parent not found".
+                        val parent = parentOfTracked(action.path, failedPaths)
+                        if (parent != null) {
+                            log.warn(
+                                "Skipping create-folder {} — parent create failed ({})",
+                                action.path,
+                                parent,
+                            )
+                            failedPaths.add(normalizeTrackedPath(action.path))
+                            failures.incrementAndGet()
+                            passOneFailures.incrementAndGet()
+                            reporter.onActionProgress(
+                                completedActions.incrementAndGet(),
+                                totalActions,
+                                actionLabel(action),
+                                displayPath(action),
+                            )
+                            return@launch
+                        }
+                        try {
+                            semaphore.withPermit { applyCreateRemoteFolder(action) }
+                        } catch (e: AuthenticationException) {
+                            log.error(
+                                "Authentication failed, stopping sync: {}: {}{}",
+                                e.javaClass.simpleName,
+                                e.message,
+                                org.krost.unidrive.requestIdSuffix(e),
+                                e,
+                            )
+                            throw e
+                        } catch (e: Exception) {
+                            failedPaths.add(normalizeTrackedPath(action.path))
+                            failures.incrementAndGet()
+                            passOneFailures.incrementAndGet()
+                            log.warn(
+                                "Action failed for {}: {}: {}{}",
+                                action.path,
+                                e.javaClass.simpleName,
+                                e.message,
+                                org.krost.unidrive.requestIdSuffix(e),
+                                e,
+                            )
+                            reporter.onWarning("Failed: ${action.path} - ${e.message}")
+                            logFailure(action, e)
+                        } finally {
+                            reporter.onActionProgress(
+                                completedActions.incrementAndGet(),
+                                totalActions,
+                                actionLabel(action),
+                                displayPath(action),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return failures.get()
+    }
+
+    private fun normalizeTrackedPath(p: String): String {
+        val s = if (p.startsWith("/")) p else "/$p"
+        return if (s.length > 1) s.trimEnd('/') else s
+    }
+
+    // Returns the nearest ancestor path that already failed its create in this run, or null.
+    private fun parentOfTracked(
+        path: String,
+        failedPaths: Set<String>,
+    ): String? {
+        var anc = normalizeTrackedPath(path)
+        val cut = anc.lastIndexOf('/')
+        anc = if (cut <= 0) "" else anc.substring(0, cut)
+        while (anc.isNotEmpty()) {
+            if (anc in failedPaths) return anc
+            val i = anc.lastIndexOf('/')
+            anc = if (i <= 0) "" else anc.substring(0, i)
+        }
+        return null
     }
 
     private suspend fun applyConflict(action: SyncAction.Conflict) {

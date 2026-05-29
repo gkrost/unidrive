@@ -90,6 +90,33 @@ fun topologicalApplyOrder(actions: List<SyncAction>): List<SyncAction> {
     return result
 }
 
+/**
+ * Splits a list of `CreateRemoteFolder` actions into depth-ordered batches so the apply phase can
+ * create independent folders concurrently without violating the parent-before-child invariant.
+ *
+ * A folder's parent always has a strictly shorter path (one fewer segment) than the folder itself,
+ * so two folders at the same depth can never be parent/child of each other and are always safe to
+ * create concurrently. Batches are emitted in ascending depth: every folder in batch N has its
+ * in-batch parent (if any) created by an earlier batch. Callers MUST fully drain batch N (await all
+ * creates) before starting batch N+1; that barrier is what preserves parent→child.
+ *
+ * Order within a batch follows the input order so behaviour stays deterministic.
+ */
+fun createFolderBatches(creates: List<SyncAction.CreateRemoteFolder>): List<List<SyncAction.CreateRemoteFolder>> {
+    if (creates.isEmpty()) return emptyList()
+    val byDepth = sortedMapOf<Int, MutableList<SyncAction.CreateRemoteFolder>>()
+    for (c in creates) {
+        byDepth.getOrPut(pathDepth(c.path)) { mutableListOf() }.add(c)
+    }
+    return byDepth.values.map { it.toList() }
+}
+
+private fun pathDepth(p: String): Int {
+    val n = normalizePath(p)
+    if (n.length <= 1) return 0
+    return n.count { it == '/' }
+}
+
 private fun SyncAction.isStructural(): Boolean =
     this is SyncAction.CreateRemoteFolder || this is SyncAction.MoveRemote
 
