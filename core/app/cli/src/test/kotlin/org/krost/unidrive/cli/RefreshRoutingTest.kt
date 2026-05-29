@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.krost.unidrive.CloudItem
@@ -241,7 +242,6 @@ class RefreshRoutingTest {
                 emit = { emitted.add(it) },
             )
 
-        val launchedJob = scope.coroutineContext[kotlinx.coroutines.Job]
         handler.handle("conn-1", """{"verb":"refresh.run"}""")
 
         // Wait until the refresh has actually suspended inside the engine (gated open).
@@ -251,9 +251,10 @@ class RefreshRoutingTest {
         }
         assertTrue(engine.enumerateCalled, "refresh must be in flight before the close")
 
-        // Simulate daemon close: cancel the in-flight refresh's children, then let
-        // its cancellation propagate. The gate is never completed.
-        launchedJob?.cancelChildren()
+        // Simulate daemon close: cancel the daemon scope (same shape EnumeratePollerTest
+        // uses) while the refresh is suspended. The gate is never completed; the
+        // in-flight refresh resumes with CancellationException.
+        scope.cancel()
         repeat(200) {
             if (emitted.isNotEmpty()) return@repeat
             yield()
