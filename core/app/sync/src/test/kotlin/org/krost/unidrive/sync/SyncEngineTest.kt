@@ -1812,6 +1812,72 @@ class SyncEngineTest {
             assertEquals(1, provider.deltaCalls)
         }
 
+    // #116 — fast-bootstrap adopt-on-name-match for top-level folders.
+    //
+    // Invariant: under fast-bootstrap the pre-existing cloud tree is invisible to
+    // the planner, so the LOCAL scanner emits a CreateRemoteFolder for every
+    // top-level folder — including ones whose name already exists on the cloud,
+    // each of which would 409. The apply pass must adopt the existing remote folder
+    // (capturing its remoteId) and SKIP the mkdir. If this test is removed or
+    // loosened, fast-bootstrap silently regresses to N spurious 409s per reset.
+    @Test
+    fun `fast_bootstrap_adopts_matching_top_level_folders_instead_of_mkdir`() =
+        runTest {
+            provider.supportsFastBootstrap = true
+            provider.deltaCursor = "latest-cursor"
+
+            // Three top-level folders already exist on the cloud (invisible to the
+            // bootstrap planner) — mirror the live evidence (/.safe, /Pictures, /dev).
+            val remoteSafe = remoteFolder("/.safe", "remote-uuid-safe")
+            val remotePictures = remoteFolder("/Pictures", "remote-uuid-pictures")
+            val remoteDev = remoteFolder("/dev", "remote-uuid-dev")
+            provider.childrenByParent["/"] = listOf(remoteSafe, remotePictures, remoteDev)
+
+            // The same three folders exist locally and would each plan a mkdir-remote.
+            Files.createDirectory(syncRoot.resolve(".safe"))
+            Files.createDirectory(syncRoot.resolve("Pictures"))
+            Files.createDirectory(syncRoot.resolve("dev"))
+
+            bootstrapEngine().syncOnce()
+
+            // (a) ZERO mkdir calls for the matching folders — no 409s.
+            assertTrue(
+                provider.createdFolders.isEmpty(),
+                "fast-bootstrap must NOT issue CreateRemoteFolder for folders that already " +
+                    "exist on the remote; got mkdir calls: ${provider.createdFolders}",
+            )
+
+            // (b) all three rows quietly adopted with the EXISTING remoteId.
+            assertEquals("remote-uuid-safe", db.getEntry("/.safe")?.remoteId)
+            assertEquals("remote-uuid-pictures", db.getEntry("/Pictures")?.remoteId)
+            assertEquals("remote-uuid-dev", db.getEntry("/dev")?.remoteId)
+        }
+
+    // #116 — orthogonal invariant: adopt-on-match must NOT swallow genuinely-new
+    // top-level folders. A local folder with no name match on the cloud still gets
+    // its CreateRemoteFolder, so first-time uploads under fast-bootstrap still work.
+    @Test
+    fun `fast_bootstrap_still_creates_non_matching_top_level_folders`() =
+        runTest {
+            provider.supportsFastBootstrap = true
+            provider.deltaCursor = "latest-cursor"
+
+            // One folder matches an existing remote; one is brand new.
+            provider.childrenByParent["/"] = listOf(remoteFolder("/Pictures", "remote-uuid-pictures"))
+            Files.createDirectory(syncRoot.resolve("Pictures"))
+            Files.createDirectory(syncRoot.resolve("BrandNew"))
+
+            bootstrapEngine().syncOnce()
+
+            assertEquals(
+                listOf("/BrandNew"),
+                provider.createdFolders.toList(),
+                "the brand-new folder must still be created; the matching one adopted",
+            )
+            assertEquals("remote-uuid-pictures", db.getEntry("/Pictures")?.remoteId)
+            assertNotNull(db.getEntry("/BrandNew")?.remoteId, "the created folder must get a remoteId")
+        }
+
     @Test
     fun `streaming gather dispatches downloads inside the gather scope without double-dispatching in Pass 2`() =
         runTest {
@@ -2716,6 +2782,23 @@ class SyncEngineTest {
 
     // -- Fake provider for testing --
 
+    // #116: a pre-existing remote folder with an explicit remoteId, so an adopt
+    // test can assert the captured id is the cloud's, not a freshly-minted one.
+    private fun remoteFolder(
+        path: String,
+        remoteId: String,
+    ) = CloudItem(
+        id = remoteId,
+        name = path.substringAfterLast("/"),
+        path = path,
+        size = 0,
+        isFolder = true,
+        modified = Instant.parse("2026-03-28T12:00:00Z"),
+        created = Instant.parse("2026-03-28T10:00:00Z"),
+        hash = null,
+        mimeType = null,
+    )
+
     private fun cloudItem(
         path: String,
         size: Long = 100,
@@ -2808,7 +2891,12 @@ class SyncEngineTest {
 
         override suspend fun logout() {}
 
-        override suspend fun listChildren(path: String) = emptyList<CloudItem>()
+        // #116: pre-existing remote tree the fast-bootstrap planner can't see.
+        // Keyed by parent path; listChildren returns the configured children so a
+        // test can stage top-level folders that already exist on the cloud.
+        val childrenByParent = mutableMapOf<String, List<CloudItem>>()
+
+        override suspend fun listChildren(path: String) = childrenByParent[path] ?: emptyList<CloudItem>()
 
         override suspend fun getMetadata(path: String) = deltaItems.first { it.path == path }
 

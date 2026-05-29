@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.Capability
@@ -154,6 +155,25 @@ open class SyncEngine(
     // quiet window elapses.
     @Volatile
     private var remoteWakeDebounceJob: kotlinx.coroutines.Job? = null
+
+    // #116: set true for the duration of a sync run that actually took the
+    // fast-bootstrap branch (cursor adopted with zero enumeration). When true,
+    // applyCreateRemoteFolder adopts-on-name-match for a top-level folder whose
+    // name already exists on the remote instead of issuing a CreateRemoteFolder
+    // that would 409 — the pre-existing cloud tree is invisible to the planner
+    // under fast-bootstrap, so the local scanner emits a spurious mkdir for every
+    // top-level folder that matches one. Reset at the start of every doSyncOnce.
+    @Volatile
+    private var fastBootstrapActive = false
+
+    // #116: per-run cache of the remote root's direct children indexed by name,
+    // populated lazily on the first top-level CreateRemoteFolder while
+    // fastBootstrapActive. Null = not yet fetched this run; an empty map = fetched
+    // and the root has no folders (or the listing failed — see populateRemoteTopLevel).
+    // The mutex serialises the lazy fetch so the concurrent create-folder run
+    // (which launches the depth-0 batch in parallel) issues the root listing once.
+    private var remoteTopLevelByName: Map<String, CloudItem>? = null
+    private val remoteTopLevelMutex = kotlinx.coroutines.sync.Mutex()
 
     // Paths a prior COMPLETE enumeration flagged missing-but-deferred under the
     // bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2).
@@ -717,6 +737,11 @@ open class SyncEngine(
         skipTransfers: Boolean = false,
         skipRemoteGather: Boolean = false,
     ) {
+        // #116: reset the per-run fast-bootstrap adopt state. gatherRemoteChanges
+        // flips fastBootstrapActive on only when the bootstrap branch is actually
+        // taken; the apply loop reads it to adopt-on-name-match top-level folders.
+        fastBootstrapActive = false
+        remoteTopLevelByName = null
         val downloaded = AtomicInteger(0)
         val uploaded = AtomicInteger(0)
         val conflicts = AtomicInteger(0)
@@ -1705,6 +1730,8 @@ open class SyncEngine(
                                 "Upload-direction sync is unaffected."
                         log.warn(msg)
                         reporter.onWarning(msg)
+                        // #116: arm adopt-on-name-match for this run's apply pass.
+                        fastBootstrapActive = true
                         return@withContext changes
                     }
                     is CapabilityResult.Unsupported -> {
@@ -2113,6 +2140,8 @@ open class SyncEngine(
                             "Upload-direction sync is unaffected."
                     log.warn(msg)
                     reporter.onWarning(msg)
+                    // #116: arm adopt-on-name-match for this run's apply pass.
+                    fastBootstrapActive = true
                     return@withContext changes to emptyList()
                 }
                 is CapabilityResult.Unsupported -> {
@@ -2980,10 +3009,106 @@ open class SyncEngine(
         }
     }
 
+    /**
+     * #116: fast-bootstrap adopt-on-name-match for a TOP-LEVEL folder. Returns true
+     * when the folder's name already exists at the remote root and the state.db row
+     * was adopted (capturing the existing remoteId) — the caller then SKIPS the
+     * CreateRemoteFolder, avoiding the 409 the mkdir would otherwise hit.
+     *
+     * Scope is deliberately narrow: only single-segment paths (drive-root children),
+     * which is exactly the spurious-mkdir set the issue's evidence shows. Nested
+     * folders fall through to the normal create — their parent was either adopted
+     * (so the create lands under it) or created this run.
+     */
+    private suspend fun adoptExistingTopLevelFolder(
+        action: SyncAction.CreateRemoteFolder,
+        remotePath: String,
+    ): Boolean {
+        val name = topLevelFolderName(remotePath) ?: return false
+        val existing = populateRemoteTopLevel()[name] ?: return false
+        db.upsertEntry(
+            SyncEntry(
+                path = action.path,
+                remotePath = action.remoteTarget,
+                remoteId = existing.id,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = existing.modified,
+                localMtime = Files.getLastModifiedTime(placeholder.resolveLocal(action.path)).toMillis(),
+                localSize = 0,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+                parentUuid = existing.parentId,
+            ),
+        )
+        log.info(
+            "#116 fast-bootstrap: adopted existing remote folder {} (remoteId={}) instead of mkdir",
+            action.path,
+            existing.id,
+        )
+        auditLog?.emit(
+            action = "CreateRemoteFolder",
+            path = action.path,
+            result = "adopted",
+        )
+        return true
+    }
+
+    // #116: the single path segment of a drive-root child, or null when the path
+    // is the root itself or nested deeper than one level (adopt-on-match is
+    // top-level-only — see adoptExistingTopLevelFolder).
+    private fun topLevelFolderName(remotePath: String): String? {
+        val trimmed = remotePath.trim('/')
+        if (trimmed.isEmpty() || trimmed.contains('/')) return null
+        return trimmed
+    }
+
+    // #116: lazily list the remote root's direct child folders once per run and
+    // index them by name. A failed listing caches an empty map so we don't retry
+    // per folder — falling back to the pre-fix mkdir (which 409s, but is no worse
+    // than before the fix).
+    private suspend fun populateRemoteTopLevel(): Map<String, CloudItem> {
+        remoteTopLevelByName?.let { return it }
+        return remoteTopLevelMutex.withLock {
+            remoteTopLevelByName?.let { return@withLock it }
+            val byName =
+                try {
+                    provider
+                        .listChildren("/")
+                        .filter { it.isFolder && !it.deleted }
+                        .associateBy { it.name }
+                } catch (e: CancellationException) {
+                    // Never swallow cancellation as a listing failure: doing so would
+                    // cache an empty map and let a shutdown/cancel pass fall through to
+                    // issuing mkdirs (remote writes during teardown, the 409s this avoids).
+                    throw e
+                } catch (e: Exception) {
+                    log.warn(
+                        "#116 fast-bootstrap: root-children listing failed ({}); " +
+                            "matching top-level folders will fall back to mkdir (may 409).",
+                        e.message,
+                    )
+                    emptyMap()
+                }
+            remoteTopLevelByName = byName
+            byName
+        }
+    }
+
     private suspend fun applyCreateRemoteFolder(action: SyncAction.CreateRemoteFolder) {
         // #115: REMOTE create target = remoteTarget ?: path; LOCAL mtime read
         // uses action.path. Non-aliased: remoteTarget null → identical to today.
         val remotePath = action.remoteTarget ?: action.path
+        // #116: under fast-bootstrap the pre-existing cloud tree is invisible to
+        // the planner, so the local scanner emits a CreateRemoteFolder for every
+        // top-level local folder — including ones whose name already exists on the
+        // remote, each of which then 409s. Adopt-on-name-match: if the matching
+        // remote folder already exists, register its remoteId and skip the mkdir.
+        if (fastBootstrapActive && adoptExistingTopLevelFolder(action, remotePath)) {
+            return
+        }
         val result =
             try {
                 provider.createFolder(remotePath)

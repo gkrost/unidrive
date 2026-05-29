@@ -17,6 +17,7 @@ Things that were done before this branch started. Append new entries when items 
 
 ## Drained from BACKLOG
 
+- `--fast-bootstrap` adopts a matching top-level remote folder (registers the state.db row with the existing `remoteId`) instead of issuing a `mkdir` that 409s; gated to the bootstrap apply path so normal sync semantics are unchanged (BACKLOG: High)
 - `RefreshRpcHandler` reserves the in-flight slot via `compareAndSet`-before-launch (placeholder swap), with launch-failure cleanup so the invariant-I6 guard can't stick; added named tests for the busy, provider_error, and shutdown reply paths (docs/dev/specs/unidrive-daemon-design.md, `RefreshRpcHandler` / invariant I6)
 - Apply-phase action ordering respects parent-folder dependencies via Kahn's algorithm in `ApplyOrder.kt` (BACKLOG: High)
 - Tracking-set cursor-resume no longer forces `exists=true` for `PendingDeleteLocal` rows, fixing stale-local crash-recovery (BACKLOG: Critical)
