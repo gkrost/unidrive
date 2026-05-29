@@ -34,7 +34,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - [#113] OneDrive `If-Match` precondition on `createUploadSession`
 - [#114] OneDrive refresh `downloadUrl` on `assertNotHtml`
 - [#115] XDG-user-dir locale aliasing across `Pictures`/`Bilder`/`Imágenes`/`Images`/…
-- [#116] `--fast-bootstrap` doesn't adopt-on-match for local folders that already exist on cloud
 - [#117] `status` and `status --all` enumerate different profile sources (orphan-profile-dir divergence)
 - [#118] `status` / `status --all` don't reflect the tracking-set engine
 - [#119] OneDrive delta loses sight of a path the engine itself just wrote ("not in delta, marking deleted" loop)
