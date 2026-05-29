@@ -3079,6 +3079,11 @@ open class SyncEngine(
                         .listChildren("/")
                         .filter { it.isFolder && !it.deleted }
                         .associateBy { it.name }
+                } catch (e: CancellationException) {
+                    // Never swallow cancellation as a listing failure: doing so would
+                    // cache an empty map and let a shutdown/cancel pass fall through to
+                    // issuing mkdirs (remote writes during teardown, the 409s this avoids).
+                    throw e
                 } catch (e: Exception) {
                     log.warn(
                         "#116 fast-bootstrap: root-children listing failed ({}); " +
