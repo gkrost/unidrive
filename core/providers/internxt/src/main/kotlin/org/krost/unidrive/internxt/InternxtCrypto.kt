@@ -170,23 +170,37 @@ open class InternxtCrypto {
     // --- CryptoJS-compatible AES (OpenSSL EVP_BytesToKey, AES-256-CBC) ---
 
     private val SALTED_PREFIX = "Salted__".toByteArray(Charsets.US_ASCII)
+    private val GCM_PREFIX = "GCMv1__".toByteArray(Charsets.US_ASCII)
 
     /**
-     * Decrypt data encrypted by CryptoJS.AES.encrypt(plaintext, passphrase).
-     * Format: "Salted__" + 8-byte salt + ciphertext (base64-encoded).
-     * Key derivation: OpenSSL EVP_BytesToKey with MD5.
+     * Decrypt data encrypted by this class.
+     * Supported formats:
+     * - New: base64("GCMv1__" + 8-byte salt + 12-byte nonce + ciphertext+tag) using AES-GCM.
+     * - Legacy: base64("Salted__" + 8-byte salt + ciphertext) using AES-CBC (CryptoJS/OpenSSL compatible).
      */
     fun cryptoJsDecrypt(
         base64Ciphertext: String,
         passphrase: String,
     ): String {
         val data = Base64.getDecoder().decode(base64Ciphertext)
-        // Check "Salted__" prefix
+        require(data.size >= 8) { "Invalid ciphertext payload" }
         val prefix = data.copyOfRange(0, 8)
-        require(prefix.contentEquals(SALTED_PREFIX)) { "Missing Salted__ prefix" }
+
+        if (prefix.contentEquals(GCM_PREFIX)) {
+            require(data.size >= 28) { "Invalid GCM payload" } // 8 prefix + 8 salt + 12 nonce
+            val salt = data.copyOfRange(8, 16)
+            val nonce = data.copyOfRange(16, 28)
+            val ciphertext = data.copyOfRange(28, data.size)
+            val (key, _) = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+        }
+
+        // Legacy format fallback: "Salted__" + salt + ciphertext
+        require(prefix.contentEquals(SALTED_PREFIX)) { "Missing supported prefix" }
         val salt = data.copyOfRange(8, 16)
         val ciphertext = data.copyOfRange(16, data.size)
-
         val (key, iv) = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt)
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
@@ -194,19 +208,20 @@ open class InternxtCrypto {
     }
 
     /**
-     * Encrypt data in CryptoJS.AES.encrypt(plaintext, passphrase) compatible format.
-     * Output: base64("Salted__" + salt + ciphertext)
+     * Encrypt data using authenticated encryption.
+     * Output: base64("GCMv1__" + 8-byte salt + 12-byte nonce + ciphertext+tag)
      */
     fun cryptoJsEncrypt(
         plaintext: String,
         passphrase: String,
     ): String {
         val salt = ByteArray(8).also { random.nextBytes(it) }
-        val (key, iv) = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt)
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        val nonce = ByteArray(12).also { random.nextBytes(it) }
+        val (key, _) = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
         val encrypted = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        val output = SALTED_PREFIX + salt + encrypted
+        val output = GCM_PREFIX + salt + nonce + encrypted
         return Base64.getEncoder().encodeToString(output)
     }
 
