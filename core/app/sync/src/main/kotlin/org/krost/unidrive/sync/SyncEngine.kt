@@ -1337,7 +1337,7 @@ open class SyncEngine(
                 // round-trip each. topologicalApplyOrder has already placed any
                 // MoveRemote a create depends on before the run, so a run's
                 // external deps are satisfied; parent→child WITHIN the run is
-                // preserved by createFolderBatch's depth-barrier semantics.
+                // preserved by createFolderBatches' depth-barrier semantics.
                 var idx = 0
                 while (idx < sequentialActions.size) {
                     val head = sequentialActions[idx]
