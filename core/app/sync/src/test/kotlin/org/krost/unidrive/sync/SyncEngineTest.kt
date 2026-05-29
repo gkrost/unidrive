@@ -2604,6 +2604,102 @@ class SyncEngineTest {
             )
         }
 
+    // #123 — bulk create-folder: bounded concurrency + partial-failure tolerance.
+
+    /** Captures onSyncComplete.failed and every onWarning message. */
+    private class FailureCapturingReporter : ProgressReporter by ProgressReporter.Silent {
+        var failed: Int = -1
+            private set
+        val warnings = java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        override fun onSyncComplete(
+            downloaded: Int,
+            uploaded: Int,
+            conflicts: Int,
+            durationMs: Long,
+            actionCounts: Map<String, Int>,
+            failed: Int,
+        ) {
+            this.failed = failed
+        }
+
+        override fun onWarning(message: String) {
+            warnings.add(message)
+        }
+    }
+
+    private fun engineWithReporterAndProvider(reporter: ProgressReporter) =
+        SyncEngine(
+            provider = provider,
+            db = db,
+            syncRoot = syncRoot,
+            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+            reporter = reporter,
+        )
+
+    @Test
+    fun `one create-folder failure does not abort the rest of the plan`() =
+        runTest {
+            // Local-only nested tree → a run of CreateRemoteFolder actions.
+            Files.createDirectories(syncRoot.resolve("proj/a/deep"))
+            Files.createDirectories(syncRoot.resolve("proj/b"))
+            Files.createDirectories(syncRoot.resolve("proj/c"))
+            provider.deltaItems = emptyList()
+            // Fail the create of /proj/a: its sibling subtree (/proj/b, /proj/c)
+            // must still be created, and /proj itself must still be created.
+            provider.createFolderFailPaths.add("/proj/a")
+
+            val reporter = FailureCapturingReporter()
+            engineWithReporterAndProvider(reporter).syncOnce(dryRun = false)
+
+            assertTrue(provider.createdFolders.contains("/proj"), "root /proj still created")
+            assertTrue(provider.createdFolders.contains("/proj/b"), "sibling /proj/b still created")
+            assertTrue(provider.createdFolders.contains("/proj/c"), "sibling /proj/c still created")
+            assertFalse(provider.createdFolders.contains("/proj/a"), "/proj/a create was forced to fail")
+            // /proj/a/deep must be skipped: its parent's create failed.
+            assertFalse(
+                provider.createdFolders.contains("/proj/a/deep"),
+                "child of a failed-parent create must be skipped, not attempted",
+            )
+            // The failure count is surfaced: /proj/a (failed) + /proj/a/deep (skipped) = 2.
+            assertEquals(2, reporter.failed, "two folders failed/skipped; got ${reporter.failed}")
+            assertTrue(
+                reporter.warnings.any { it.contains("/proj/a") },
+                "a warning naming the failed folder must be surfaced; got ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `parent folders are created before their children under bounded concurrency`() =
+        runTest {
+            // A multi-level tree with several same-depth siblings exercises the
+            // concurrent batches; the depth-barrier must keep parent→child order.
+            Files.createDirectories(syncRoot.resolve("root/x1/y1"))
+            Files.createDirectories(syncRoot.resolve("root/x1/y2"))
+            Files.createDirectories(syncRoot.resolve("root/x2/y3"))
+            Files.createDirectories(syncRoot.resolve("root/x3"))
+            provider.deltaItems = emptyList()
+
+            engineWithReporterAndProvider(ProgressReporter.Silent).syncOnce(dryRun = false)
+
+            val order = provider.createdFolders.toList()
+            // Every created folder's parent (if also created in this run) must
+            // appear earlier in the completion-ordered list.
+            for (path in order) {
+                val parent = path.substringBeforeLast("/", "")
+                if (parent.isNotEmpty() && order.contains(parent)) {
+                    assertTrue(
+                        order.indexOf(parent) < order.indexOf(path),
+                        "parent $parent must be created before child $path; order=$order",
+                    )
+                }
+            }
+            // Sanity: the whole tree got created.
+            for (p in listOf("/root", "/root/x1", "/root/x2", "/root/x3", "/root/x1/y1", "/root/x1/y2", "/root/x2/y3")) {
+                assertTrue(order.contains(p), "expected $p to be created; order=$order")
+            }
+        }
+
     /** Captures the reconciler's pre-filter action count from onActionCount. */
     private class CapturingActionCountReporter : ProgressReporter by ProgressReporter.Silent {
         var lastPreFilterTotal: Int = -1
@@ -2680,6 +2776,16 @@ class SyncEngineTest {
         val uploadedPaths = mutableListOf<String>()
         val deletedPaths = mutableListOf<String>()
         val files = mutableMapOf<String, ByteArray>()
+
+        // #123: created-folder order, captured under the bounded-concurrency
+        // create-folder run. Thread-safe because createFolder runs from
+        // concurrent coroutines; the synchronized list preserves completion
+        // order for the parent-before-child ordering assertion.
+        val createdFolders: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+
+        // Paths whose createFolder must throw, simulating a single provider
+        // mkdir failure mid-bulk-import (the rest of the plan must still apply).
+        val createFolderFailPaths: MutableSet<String> = mutableSetOf()
 
         var downloadFailCount = 0
         var uploadFailCount = 0
@@ -2815,8 +2921,12 @@ class SyncEngineTest {
             deletedPaths.add(remotePath)
         }
 
-        override suspend fun createFolder(path: String) =
-            CloudItem(
+        override suspend fun createFolder(path: String): CloudItem {
+            if (path in createFolderFailPaths) {
+                throw ProviderException("Simulated createFolder failure for $path")
+            }
+            createdFolders.add(path)
+            return CloudItem(
                 id = "id-$path",
                 name = path.substringAfterLast("/"),
                 path = path,
@@ -2827,6 +2937,7 @@ class SyncEngineTest {
                 hash = null,
                 mimeType = null,
             )
+        }
 
         val movedPaths = mutableListOf<Pair<String, String>>() // (fromPath, toPath)
 
