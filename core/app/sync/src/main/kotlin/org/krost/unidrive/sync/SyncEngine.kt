@@ -2691,6 +2691,16 @@ open class SyncEngine(
 
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
         log.debug("Download: {} ({} bytes)", action.path, action.remoteItem.size)
+        // #230: a name that cannot exist on the local filesystem (Windows
+        // all-dots / trailing-dot / reserved device name, etc.) can never be
+        // downloaded here. Surface it as a permanent failure so the row is
+        // quarantined (handlePermanentDownloadFailure) instead of re-attempted
+        // every poll cycle.
+        localNameIssue(action.path)?.let { issue ->
+            throw PermanentDownloadFailureException(
+                "cannot represent '${action.path}' on the local filesystem: $issue",
+            )
+        }
         val localPath = placeholder.resolveLocal(action.path)
         if (versionManager != null && Files.isRegularFile(localPath) && Files.size(localPath) > 0) {
             versionManager.snapshot(action.path)

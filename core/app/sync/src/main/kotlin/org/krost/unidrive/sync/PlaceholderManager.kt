@@ -59,6 +59,47 @@ fun safeResolveLocal(
     return resolved
 }
 
+// #230: a cloud entry whose name cannot be represented on the local filesystem
+// (Windows forbids all-dots names like `....`, trailing dot/space, reserved
+// device names CON/PRN/AUX/NUL/COM[1-9]/LPT[1-9], and the characters
+// <>:"/\|?*) can never be materialised here. The engine detects this up front
+// and quarantines the row instead of re-attempting the doomed download every
+// poll cycle (see SyncEngine.applyDownload / the reconciler recovery loop).
+private val WINDOWS_RESERVED_NAMES: Set<String> =
+    setOf("CON", "PRN", "AUX", "NUL") + (1..9).map { "COM$it" } + (1..9).map { "LPT$it" }
+
+private const val WINDOWS_RESERVED_CHARS = "<>:\"/\\|?*"
+
+/**
+ * Returns a human-readable reason if any component of [remotePath] cannot be
+ * represented as a file/directory name on the local filesystem, else null.
+ *
+ * [windows] defaults to the host OS but is a parameter so the Win32 rules can be
+ * unit-tested deterministically on any platform. POSIX accepts essentially any
+ * byte in a name except '/' (the separator, already split out) and NUL.
+ */
+internal fun localNameIssue(
+    remotePath: String,
+    windows: Boolean = System.getProperty("os.name", "").lowercase().contains("win"),
+): String? {
+    for (component in remotePath.split('/')) {
+        if (component.isEmpty() || component == "." || component == "..") continue
+        if (component.any { it.code == 0 }) return "name contains a NUL character"
+        if (!windows) continue
+        if (component.last() == '.' || component.last() == ' ') {
+            return "Windows names cannot end with '.' or a space: '$component'"
+        }
+        if (component.all { it == '.' }) return "Windows names cannot be all dots: '$component'"
+        if (component.any { it.code < 0x20 || it in WINDOWS_RESERVED_CHARS }) {
+            return "Windows names cannot contain control or reserved characters: '$component'"
+        }
+        if (component.substringBefore('.').uppercase() in WINDOWS_RESERVED_NAMES) {
+            return "Windows reserved device name: '$component'"
+        }
+    }
+    return null
+}
+
 open class PlaceholderManager(
     protected val syncRoot: Path,
 ) {
