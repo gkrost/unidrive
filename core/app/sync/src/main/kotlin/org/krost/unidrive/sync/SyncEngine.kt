@@ -732,7 +732,7 @@ open class SyncEngine(
         dryRun: Boolean,
         forceDelete: Boolean,
         @Suppress("UNUSED_PARAMETER") scanId: String,
-        @Suppress("UNUSED_PARAMETER") reason: SyncReason,
+        reason: SyncReason,
         startTime: Long,
         skipTransfers: Boolean = false,
         skipRemoteGather: Boolean = false,
@@ -1168,7 +1168,7 @@ open class SyncEngine(
                 applyTopLevelHydrationGuard(reconciledActions)
             }
 
-        val actions =
+        var actions =
             when (syncDirection) {
                 SyncDirection.UPLOAD ->
                     allActions.filter {
@@ -1241,10 +1241,23 @@ open class SyncEngine(
         //
         // Any single axis tripping aborts apply / warns in dry-run.
         // forceDelete bypasses all three. 0 disables the corresponding axis.
+        //
+        // #108: under a long-running daemon (`sync --watch`), a tripped safeguard
+        // must NOT abort the whole cycle. The throw is caught by the watch loop,
+        // which then retries the same failing cycle forever (exponential backoff)
+        // and never makes progress on uploads/downloads either — the daemon
+        // "stays failed". So in daemon mode (BOOT/WATCH_POLL) we DEFER the deletes
+        // (drop them this cycle, below) + warn + continue; one-shot `unidrive sync`
+        // (MANUAL) keeps the hard throw so an operator sees it and can re-run with
+        // --force-delete. A transient cause (e.g. an incomplete Internxt
+        // enumeration) clears on a later cycle; a genuine bulk delete simply waits
+        // for explicit operator confirmation.
+        var deferDeletes = false
         if (!forceDelete) {
             val deleteActions = actions.filter { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
             val deleteCount = deleteActions.size
             val totalEntries = db.getEntryCount()
+            val daemonMode = reason == SyncReason.WATCH_POLL || reason == SyncReason.BOOT
 
             // UD-298 legacy whole-inventory percentage axis.
             if (maxDeletePercentage in 1..99 && totalEntries > 0 && deleteCount > 10) {
@@ -1254,10 +1267,13 @@ open class SyncEngine(
                         "Deletion safeguard: $deleteCount of $totalEntries files ($pct%) would be deleted, " +
                             "exceeding max_delete_percentage=$maxDeletePercentage%. " +
                             "sync_root='$syncRoot'. Use --force-delete to override."
-                    if (dryRun) {
-                        reporter.onWarning(msg)
-                    } else {
-                        throw IllegalStateException(msg)
+                    when {
+                        dryRun -> reporter.onWarning(msg)
+                        daemonMode -> {
+                            deferDeletes = true
+                            reporter.onWarning("$msg Deferring deletes this cycle (daemon mode).")
+                        }
+                        else -> throw IllegalStateException(msg)
                     }
                 }
             }
@@ -1268,10 +1284,13 @@ open class SyncEngine(
                     "UD-265 Deletion safeguard: $deleteCount deletes planned, " +
                         "exceeding max_delete_absolute=$maxDeleteAbsolute. " +
                         "sync_root='$syncRoot'. Use --force-delete to override."
-                if (dryRun) {
-                    reporter.onWarning(msg)
-                } else {
-                    throw IllegalStateException(msg)
+                when {
+                    dryRun -> reporter.onWarning(msg)
+                    daemonMode -> {
+                        deferDeletes = true
+                        reporter.onWarning("$msg Deferring deletes this cycle (daemon mode).")
+                    }
+                    else -> throw IllegalStateException(msg)
                 }
             }
 
@@ -1293,14 +1312,30 @@ open class SyncEngine(
                                 "under top-level '$top' ($pct%) would be deleted, exceeding " +
                                 "max_delete_per_subtree_percent=$maxDeletePerSubtreePercent%. " +
                                 "sync_root='$syncRoot'. Use --force-delete to override."
-                        if (dryRun) {
-                            reporter.onWarning(msg)
-                        } else {
-                            throw IllegalStateException(msg)
+                        when {
+                            dryRun -> reporter.onWarning(msg)
+                            daemonMode -> {
+                                deferDeletes = true
+                                reporter.onWarning("$msg Deferring deletes this cycle (daemon mode).")
+                            }
+                            else -> throw IllegalStateException(msg)
                         }
                     }
                 }
             }
+        }
+
+        // #108: drop the planned deletes for this cycle when a daemon-mode
+        // safeguard tripped. The apply pass derives sequentialActions from
+        // `actions`, so removing them here keeps uploads/downloads/creates
+        // flowing; the deletes are re-evaluated on the next sync.
+        if (deferDeletes) {
+            val before = actions.size
+            actions = actions.filterNot { it is SyncAction.DeleteRemote || it is SyncAction.DeleteLocal }
+            log.warn(
+                "#108: deferred {} delete action(s) this cycle (daemon-mode safeguard); re-evaluated next sync",
+                before - actions.size,
+            )
         }
 
         if (dryRun) {
@@ -1668,7 +1703,20 @@ open class SyncEngine(
         // scratch → same outcome. Live repro 2026-05-20 def535f1: 14.8 h scan,
         // 218 k items, pending_cursor written, delta_cursor never set; the
         // following run did the full enum again.
-        promotePendingCursor()
+        //
+        // #108/P1 (PR #241 review): when a daemon-mode safeguard trip deferred the planned
+        // deletes this cycle, do NOT advance the cursor. A DeleteLocal driven by a remote
+        // tombstone is consumed from the delta exactly once; if the cursor moved past it, an
+        // incremental delta would not resend it and the unchanged local+DB row would not
+        // re-plan it — silently stranding the local copy and making the "wait for operator
+        // --force-delete" path impossible. Holding the cursor lets the tombstones replay
+        // until the divergence clears or drops back under the cap. (DeleteRemote re-derives
+        // from the local scan every cycle regardless, so it is unaffected either way.)
+        if (deferDeletes) {
+            log.warn("#108: holding delta cursor this cycle (deletes deferred); tombstones replay next sync")
+        } else {
+            promotePendingCursor()
+        }
 
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(

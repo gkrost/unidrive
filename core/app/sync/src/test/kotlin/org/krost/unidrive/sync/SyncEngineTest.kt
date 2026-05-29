@@ -1431,6 +1431,64 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#108 daemon-mode safeguard trip defers deletes instead of wedging the cycle`() =
+        runTest {
+            // Same plan as the abort test, but a watch-poll (daemon) must NOT
+            // throw — otherwise the watch loop retries the failing cycle forever
+            // and the daemon "stays failed". It defers the deletes + warns +
+            // continues; one-shot MANUAL still throws (covered by the abort test).
+            seedDbEntries(60)
+            Files.writeString(syncRoot.resolve("seeded-0.txt"), "x")
+            provider.deltaItems = emptyList()
+
+            val reporter = RecordingReporter()
+            engineWithGuards(reporter = reporter, maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                .syncOnce(dryRun = false, reason = SyncReason.WATCH_POLL)
+
+            assertTrue(
+                reporter.warnings.any { it.contains("max_delete_absolute") && it.contains("Deferring deletes") },
+                "expected a daemon-mode deferral warning, got: ${reporter.warnings}",
+            )
+            // Deferred, not applied: the 59-delete plan did not reap the seeded rows.
+            assertTrue(
+                db.getAllEntries().size >= 50,
+                "deferred deletes must not reap the seeded rows, got ${db.getAllEntries().size}",
+            )
+        }
+
+    @Test
+    fun `#108 a deferred daemon-mode delete holds the delta cursor so tombstones replay`() =
+        runTest {
+            // PR #241 review (P1): remote tombstones for locally-present, unchanged rows
+            // reconcile to DeleteLocal. Under WATCH_POLL that plan is deferred when it trips
+            // the cap — but the delta cursor MUST NOT advance, or the consumed tombstones
+            // would never replay and the local copies would be stranded. seedDbEntries pins
+            // delta_cursor='seeded-cursor'; the gather would otherwise promote 'cursor-advanced'.
+            seedDbEntries(60)
+            val seededMtime = Instant.parse("2026-01-01T00:00:00Z")
+            for (i in 0 until 60) {
+                val f = syncRoot.resolve("seeded-$i.txt")
+                Files.writeString(f, "x".repeat(100))
+                Files.setLastModifiedTime(f, java.nio.file.attribute.FileTime.from(seededMtime))
+            }
+            provider.deltaItems = (0 until 60).map { cloudItem("/seeded-$it.txt", size = 100, deleted = true) }
+            provider.deltaCursor = "cursor-advanced"
+
+            engineWithGuards(maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                .syncOnce(dryRun = false, reason = SyncReason.WATCH_POLL)
+
+            assertEquals(
+                "seeded-cursor",
+                db.getSyncState("delta_cursor"),
+                "deferred deletes must hold the cursor, not promote 'cursor-advanced'",
+            )
+            assertTrue(
+                Files.exists(syncRoot.resolve("seeded-0.txt")),
+                "deferred DeleteLocal must not delete the local file",
+            )
+        }
+
+    @Test
     fun `UD-265 per-subtree percentage trips when one top-level is mostly deleted`() =
         runTest {
             // 20 entries under /Documents (all hydrated); only one of them
