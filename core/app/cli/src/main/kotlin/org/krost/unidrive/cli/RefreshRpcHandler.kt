@@ -51,9 +51,15 @@ class RefreshRpcHandler(
      * If accepted (ok:true), launches the refresh body as a child of [scope].
      */
     fun handle(@Suppress("UNUSED_PARAMETER") connectionId: String, jsonRequest: String): String {
-        val existing = inFlight.get()
-        if (existing != null) {
-            return """{"ok":false,"error":"busy","message":"refresh already running (job_id=${existing.id})"}"""
+        val jobId = UUID.randomUUID().toString()
+        // Reserve the in-flight slot BEFORE launching: a placeholder job is swapped
+        // in atomically, so a second concurrent request can never slip through the
+        // gap between launch and registration regardless of dispatcher. If another
+        // refresh already holds the slot, reject as busy without launching.
+        val placeholder = RefreshJob(jobId, Job())
+        if (!inFlight.compareAndSet(null, placeholder)) {
+            val existing = inFlight.get()
+            return """{"ok":false,"error":"busy","message":"refresh already running (job_id=${existing?.id})"}"""
         }
         // Parse optional `"reset": true` from the request. Spec amendment vs.
         // initial §4.2 ("no parameters"): F9 added `reset` to cover the
@@ -64,51 +70,63 @@ class RefreshRpcHandler(
         val reset = RESET_TRUE_REGEX.containsMatchIn(jsonRequest)
         val forceDelete = FORCE_DELETE_TRUE_REGEX.containsMatchIn(jsonRequest)
         val mounted = mountClientConnected()
-        val jobId = UUID.randomUUID().toString()
-        val launched = scope.launch {
-            val terminalEvent = try {
-                if (mounted) {
-                    // Mount-view refresh: one-way remote→state.db. enumerateRemoteIntoState
-                    // handles `reset` internally (clears only the cursor — NOT db.resetAll,
-                    // which would empty the view if the gather then failed). force_delete is
-                    // meaningless here (enumerate cannot delete remote content), so surface
-                    // that it was ignored rather than dropping it silently (review gap 5).
-                    log.info("refresh.run routed to enumerate (mount client connected): job_id=$jobId reset=$reset")
-                    // enumerateRemoteIntoState converts provider failures into EnumerateResult(ok=false)
-                    // rather than throwing, so a false result must be surfaced — not emitted as success.
-                    val result = engine.enumerateRemoteIntoState(reset)
-                    if (result.ok) {
-                        val forceDeleteIgnored = if (forceDelete) ""","force_delete_ignored":true""" else ""
-                        """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
-                    } else {
-                        log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
-                        val msg = result.error?.replace("\"", "\\\"") ?: ""
+        val launched =
+            try {
+                scope.launch {
+                    val terminalEvent = try {
+                        if (mounted) {
+                            // Mount-view refresh: one-way remote→state.db. enumerateRemoteIntoState
+                            // handles `reset` internally (clears only the cursor — NOT db.resetAll,
+                            // which would empty the view if the gather then failed). force_delete is
+                            // meaningless here (enumerate cannot delete remote content), so surface
+                            // that it was ignored rather than dropping it silently (review gap 5).
+                            log.info("refresh.run routed to enumerate (mount client connected): job_id=$jobId reset=$reset")
+                            // enumerateRemoteIntoState converts provider failures into EnumerateResult(ok=false)
+                            // rather than throwing, so a false result must be surfaced — not emitted as success.
+                            val result = engine.enumerateRemoteIntoState(reset)
+                            if (result.ok) {
+                                val forceDeleteIgnored = if (forceDelete) ""","force_delete_ignored":true""" else ""
+                                """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
+                            } else {
+                                log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
+                                val msg = result.error?.replace("\"", "\\\"") ?: ""
+                                """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                            }
+                        } else {
+                            if (reset) {
+                                log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
+                                db.resetAll()
+                            }
+                            engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
+                            """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        log.info("refresh.run cancelled (shutdown): job_id=$jobId")
+                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
+                    } catch (e: Exception) {
+                        log.warn("refresh.run failed: job_id=$jobId", e)
+                        val msg = e.message?.replace("\"", "\\\"") ?: ""
                         """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                    } finally {
+                        inFlight.set(null)
                     }
-                } else {
-                    if (reset) {
-                        log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
-                        db.resetAll()
-                    }
-                    engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
-                    """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
+                    // Fan terminal event to all sync.subscribe subscribers via the
+                    // existing broadcast channel. emit() is non-blocking trySend; the
+                    // broadcastJob loop in IpcServer filters by syncSubscribers set.
+                    runCatching { emit(terminalEvent) }
                 }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                log.info("refresh.run cancelled (shutdown): job_id=$jobId")
-                """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
-            } catch (e: Exception) {
-                log.warn("refresh.run failed: job_id=$jobId", e)
-                val msg = e.message?.replace("\"", "\\\"") ?: ""
-                """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
-            } finally {
-                inFlight.set(null)
+            } catch (t: Throwable) {
+                // launch itself failed (e.g. scope already cancelled): release the
+                // reserved slot so the guard can never be left stuck holding the
+                // placeholder, then surface the failure to the caller.
+                inFlight.compareAndSet(placeholder, null)
+                throw t
             }
-            // Fan terminal event to all sync.subscribe subscribers via the
-            // existing broadcast channel. emit() is non-blocking trySend; the
-            // broadcastJob loop in IpcServer filters by syncSubscribers set.
-            runCatching { emit(terminalEvent) }
-        }
-        inFlight.compareAndSet(null, RefreshJob(jobId, launched))
+        // Swap the placeholder for the real job, but only if the launched coroutine
+        // hasn't already finished and cleared the slot to null — a CAS avoids
+        // resurrecting a stale in-flight entry (which would wrongly reject the next
+        // request as busy and make awaitInFlight join a completed job).
+        inFlight.compareAndSet(placeholder, RefreshJob(jobId, launched))
         return """{"ok":true,"job_id":"$jobId"}"""
     }
 

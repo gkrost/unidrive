@@ -65,7 +65,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - [#143] `unidrive daemon status` should refuse / warn when lock-holder mode is not `daemon`
 - [#144] Daemon doesn't auto-poll for remote changes — mount view stays stale until operator runs `refresh`
 - [#145] `unidrive ls` (live query) and the FUSE mount (state.db) disagree during the stale window
-- [#146] `RefreshRpcHandler` in-flight guard ordering + missing error-path test coverage
 
 ## Low — guards and UX
 
