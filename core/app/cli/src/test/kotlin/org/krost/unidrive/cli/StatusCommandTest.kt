@@ -6,6 +6,7 @@ import org.krost.unidrive.sync.model.SyncEntry
 import picocli.CommandLine
 import java.nio.file.Files
 import java.sql.DriverManager
+import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -663,5 +664,54 @@ class StatusCommandTest {
         } finally {
             dir.toFile().deleteRecursively()
         }
+    }
+
+    // ── #232: a live daemon must not render STALE; a dead one still does ──────
+
+    @Test
+    fun `legacyRowStatus renders OK for an expiring token with a recent scan`() {
+        // A live `sync --watch` daemon refreshes last_full_scan every poll, so an
+        // expiring token whose last scan is recent must NOT show STALE (#232).
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        val recent = now.minusSeconds(60).toString()
+        val (status, label) = legacyRowStatus(isExpiring = true, lastSyncRaw = recent, now = now)
+        assertEquals("ok", status, "expiring token + recent scan must render ok, not warn")
+        assertFalse("STALE" in label, "expected non-stale label, got: $label")
+    }
+
+    @Test
+    fun `legacyRowStatus renders STALE for an expiring token with an old scan`() {
+        // #157 preserved: no recent scan (dead daemon) + expiring token → STALE.
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        val old = now.minus(Duration.ofHours(2)).toString()
+        val (status, label) = legacyRowStatus(isExpiring = true, lastSyncRaw = old, now = now)
+        assertEquals("warn", status, "expiring token + stale scan must render warn")
+        assertTrue("STALE" in label, "expected STALE label, got: $label")
+    }
+
+    @Test
+    fun `legacyRowStatus renders STALE for an expiring token that never synced`() {
+        // #157 preserved: never-synced (null last_full_scan) + expiring → STALE.
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        val (status, label) = legacyRowStatus(isExpiring = true, lastSyncRaw = null, now = now)
+        assertEquals("warn", status, "expiring token + no scan must render warn")
+        assertTrue("STALE" in label, "expected STALE label, got: $label")
+    }
+
+    @Test
+    fun `legacyRowStatus renders OK for a healthy non-expiring token`() {
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        val (status, label) = legacyRowStatus(isExpiring = false, lastSyncRaw = null, now = now)
+        assertEquals("ok", status, "healthy token must render ok")
+        assertFalse("STALE" in label, "expected non-stale label, got: $label")
+    }
+
+    @Test
+    fun `lastScanIsRecent is false for blank, null, and unparseable timestamps`() {
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        assertFalse(lastScanIsRecent(null, now))
+        assertFalse(lastScanIsRecent("", now))
+        assertFalse(lastScanIsRecent("not-a-timestamp", now))
+        assertTrue(lastScanIsRecent(now.minusSeconds(30).toString(), now))
     }
 }

@@ -17,6 +17,7 @@ import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -554,10 +555,15 @@ class StatusCommand : Runnable {
                     lastSync = lastSyncFormatted,
                 )
             } else {
-                val statusLabel = if (isExpiring) GlyphRenderer.warnLabel("STALE") else GlyphRenderer.okLabel()
+                // #232: a live `sync --watch` daemon refreshes last_full_scan
+                // every poll, so an expiring token whose last scan is recent
+                // renders OK (the daemon is refreshing it), not STALE. See
+                // legacyRowStatus / STALE_GRACE; #157 (STALE on genuinely-stale
+                // auth, i.e. no recent scan) is preserved.
+                val (rowStatus, statusLabel) = legacyRowStatus(isExpiring, lastSyncRaw, Instant.now())
                 return AccountRow(
                     profileName = label,
-                    status = if (isExpiring) "warn" else "ok",
+                    status = rowStatus,
                     statusLabel = statusLabel,
                     sparse = sparseCount,
                     cloudSize = CliProgressReporter.formatSize(cloudSizeBytes),
@@ -914,6 +920,46 @@ internal fun trackingSetRowStatus(health: CredentialHealth): Pair<String, String
         health is CredentialHealth.ExpiresIn -> "warn" to GlyphRenderer.warnLabel("STALE")
         else -> "auth" to GlyphRenderer.authFailLabel()
     }
+
+// #232: grace window — a live `sync --watch` daemon rewrites last_full_scan on
+// every poll (SyncEngine promotePendingCursor / gather), so a recent timestamp
+// means it is actively refreshing credentials. Comfortably exceeds the default
+// max_poll_interval (300s) so an idle daemon stays OK; a dead daemon's timestamp
+// ages out and STALE reappears, so #157 is not regressed.
+internal val STALE_GRACE: Duration = Duration.ofMinutes(15)
+
+/**
+ * Pure helper: true when [lastSyncRaw] (an ISO-8601 instant the engine writes on
+ * every scan) is within [STALE_GRACE] of [now]. Absent / blank / unparseable →
+ * false (not recent).
+ */
+internal fun lastScanIsRecent(
+    lastSyncRaw: String?,
+    now: Instant,
+): Boolean {
+    if (lastSyncRaw.isNullOrBlank()) return false
+    val ts = runCatching { Instant.parse(lastSyncRaw) }.getOrNull() ?: return false
+    return Duration.between(ts, now) < STALE_GRACE
+}
+
+/**
+ * Pure helper: derive the (status, statusLabel) pair for a legacy state.db
+ * profile row. #232: a live daemon refreshes last_full_scan every poll, so an
+ * expiring token whose last scan is recent renders OK (the daemon is refreshing
+ * it); an expiring token with no recent scan still renders [⚠ STALE], preserving
+ * #157 (STALE on genuinely-stale auth).
+ *
+ * Extracted as a top-level function so tests can drive it directly without a
+ * live [StatusCommand] + [Main] wiring (mirrors [trackingSetRowStatus]).
+ */
+internal fun legacyRowStatus(
+    isExpiring: Boolean,
+    lastSyncRaw: String?,
+    now: Instant,
+): Pair<String, String> {
+    val showStale = isExpiring && !lastScanIsRecent(lastSyncRaw, now)
+    return if (showStale) "warn" to GlyphRenderer.warnLabel("STALE") else "ok" to GlyphRenderer.okLabel()
+}
 
 /**
  * Pure helper extracted from [StatusCommand.discoverProfiles] so unit tests
