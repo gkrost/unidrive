@@ -53,9 +53,13 @@ class LsCommand : Runnable {
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
-        // Single source of truth: when a daemon serves this profile, read its
-        // state.db view so ls agrees with the mount. --live opts out.
-        if (!live && Files.exists(socketPath)) {
+        // Single source of truth: when a DAEMON serves this profile, read its
+        // state.db view so ls agrees with the mount. --live opts out. A plain
+        // `unidrive sync` watcher binds the same socket + hydration verbs, but its
+        // snapshot is not the mount view — identify the daemon positively via the
+        // lock-pid modeToken (the same signal `daemon status` uses) and otherwise
+        // fall through to the documented live provider query.
+        if (!live && daemonHoldsLock(parent.providerConfigDir()) && Files.exists(socketPath)) {
             val entries = queryDaemonView(socketPath, normalized)
             if (entries != null) {
                 printDaemonEntries(entries)
@@ -201,4 +205,16 @@ class LsCommand : Runnable {
             val isFolder: Boolean,
         )
     }
+}
+
+/**
+ * True only when a DAEMON holds the profile lock — read from the lock-pid `modeToken`,
+ * the same signal `daemon status` uses. A plain `unidrive sync` watcher binds the same
+ * socket and hydration verbs but is NOT the mount view, so `ls` must mirror the daemon's
+ * state.db view only in this case (otherwise it does the documented live provider query).
+ */
+internal fun daemonHoldsLock(configDir: java.nio.file.Path): Boolean {
+    val lockFile = configDir.resolve(".lock")
+    val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
+    return (readLockPid(pidFile) as? LockPidReadResult.Present)?.contents?.modeToken == "daemon"
 }
