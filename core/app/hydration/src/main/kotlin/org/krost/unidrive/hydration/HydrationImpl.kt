@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
@@ -323,6 +324,7 @@ class HydrationImpl(
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
                     syncEngine.deleteRemote(normalised)
+                    evictCacheFile(normalised)
                     UnlinkResult.Ok
                 }.getOrElse { e ->
                     UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
@@ -341,6 +343,7 @@ class HydrationImpl(
 
         return runCatching {
             syncEngine.deleteRemote(normalised)
+            evictCacheFile(normalised)
             UnlinkResult.Ok
         }.getOrElse { e ->
             UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
@@ -355,8 +358,18 @@ class HydrationImpl(
 
         return runCatching {
             syncEngine.deleteRemote(normalised)
+            evictCacheTree(normalised)
             RmdirResult.Ok
         }.getOrElse { e ->
+            // Typed signal first: a provider that raises FolderNotEmptyException
+            // (directly or as the cause of a wrapping exception) maps to ENOTEMPTY
+            // without depending on the provider's message text. The substring
+            // fallback covers providers that have not yet been wired to throw the
+            // typed exception — their current wordings stay pinned by
+            // rmdir_detects_provider_not_empty_substring.
+            if (e is FolderNotEmptyException || e.cause is FolderNotEmptyException) {
+                return@getOrElse RmdirResult.NotEmpty
+            }
             val msg = e.message ?: ""
             if (msg.contains("not empty", ignoreCase = true) ||
                 msg.contains("non-empty", ignoreCase = true)
@@ -379,6 +392,31 @@ class HydrationImpl(
             Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
         } catch (_: NoSuchFileException) {
             // Cache file absent — nothing to move; the state.db repath suffices.
+        }
+    }
+
+    // Evict a single file's hydration-cache copy after a successful unlink.
+    // Idempotent: a missing cache file (never hydrated) is a no-op, and any
+    // IO failure is swallowed — the cloud delete already committed, so a stale
+    // cache byte is a disk-space concern, never a reason to fail the unlink.
+    private fun evictCacheFile(path: String) {
+        runCatching { Files.deleteIfExists(syncEngine.resolveCachePath(path)) }
+    }
+
+    // Recursively evict a folder's hydration-cache subtree after a successful
+    // rmdir. Same idempotency contract as evictCacheFile: a missing subtree is
+    // a no-op and a partial failure must not abort the op (the cloud delete
+    // already succeeded). Deletes children before parents so the directory
+    // empties before it is removed.
+    private fun evictCacheTree(path: String) {
+        val root = syncEngine.resolveCachePath(path)
+        runCatching {
+            if (!Files.exists(root)) return
+            Files.walk(root).use { stream ->
+                stream.sorted(Comparator.reverseOrder()).forEach { p ->
+                    runCatching { Files.deleteIfExists(p) }
+                }
+            }
         }
     }
 

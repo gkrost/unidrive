@@ -79,6 +79,22 @@ open class PermanentDownloadFailureException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * Signals that a folder cannot be removed because it still contains
+ * entries — the provider refused the delete with its non-empty surface
+ * (OneDrive 409 Conflict, Internxt's non-empty rejection). Typed so
+ * `HydrationImpl.rmdir` can map it to the FUSE ENOTEMPTY errno without
+ * substring-matching the provider's (potentially localised) message
+ * text. It is a [ProviderException] so legacy callers that only catch
+ * the base type keep their existing behaviour; rmdir catches this
+ * subtype first to surface NotEmpty.
+ */
+open class FolderNotEmptyException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
+/**
  * Signals that a resumed delta cursor is no longer accepted by the
  * provider — the remote returned a "gone" status (Graph 410 Gone) on the
  * delta endpoint because the stored marker aged out or the drive was
