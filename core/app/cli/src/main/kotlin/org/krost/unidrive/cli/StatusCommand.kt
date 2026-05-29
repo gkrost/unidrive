@@ -560,7 +560,10 @@ class StatusCommand : Runnable {
                 // renders OK (the daemon is refreshing it), not STALE. See
                 // legacyRowStatus / STALE_GRACE; #157 (STALE on genuinely-stale
                 // auth, i.e. no recent scan) is preserved.
-                val (rowStatus, statusLabel) = legacyRowStatus(isExpiring, lastSyncRaw, Instant.now())
+                // #243 review: scale the STALE grace to the profile's configured
+                // max_poll_interval so a slow-polling but healthy daemon isn't flagged.
+                val (rowStatus, statusLabel) =
+                    legacyRowStatus(isExpiring, lastSyncRaw, Instant.now(), staleGraceFor(baseDir))
                 return AccountRow(
                     profileName = label,
                     status = rowStatus,
@@ -921,12 +924,37 @@ internal fun trackingSetRowStatus(health: CredentialHealth): Pair<String, String
         else -> "auth" to GlyphRenderer.authFailLabel()
     }
 
-// #232: grace window — a live `sync --watch` daemon rewrites last_full_scan on
-// every poll (SyncEngine promotePendingCursor / gather), so a recent timestamp
-// means it is actively refreshing credentials. Comfortably exceeds the default
-// max_poll_interval (300s) so an idle daemon stays OK; a dead daemon's timestamp
-// ages out and STALE reappears, so #157 is not regressed.
+// #232: grace window FLOOR — a live `sync --watch` daemon rewrites last_full_scan on
+// every poll (SyncEngine promotePendingCursor / gather), so a recent timestamp means it
+// is actively refreshing credentials. This is the FLOOR; effectiveStaleGrace() scales it
+// up for tuned profiles. A dead daemon's timestamp ages out and STALE reappears, so #157
+// is not regressed.
 internal val STALE_GRACE: Duration = Duration.ofMinutes(15)
+
+// #232 (PR #243 review): the daemon's heartbeat is its poll interval, so the grace must
+// comfortably exceed the configured max_poll_interval — otherwise a healthy idle daemon
+// that polls less often than 15 min is re-labelled STALE before its next poll rewrites
+// last_full_scan. Floor at STALE_GRACE (so the default 300s config keeps the documented
+// 15-min grace: 2×300s = 10 min < 15 min) and otherwise allow two full poll intervals.
+internal fun effectiveStaleGrace(maxPollIntervalSeconds: Int): Duration =
+    maxOf(STALE_GRACE, Duration.ofSeconds(maxPollIntervalSeconds.toLong()).multipliedBy(2))
+
+/**
+ * Resolve the effective STALE grace for [profileName] from the `max_poll_interval` in
+ * `config.toml` under [baseDir]. Falls back to the 300s default (→ 15-min grace) when the
+ * config cannot be read or the profile does not resolve.
+ */
+internal fun staleGraceFor(baseDir: Path): Duration {
+    val maxPoll =
+        runCatching {
+            val cfg = baseDir.resolve("config.toml")
+            val raw =
+                if (Files.exists(cfg)) SyncConfig.parseRaw(Files.readString(cfg)) else SyncConfig.parseRaw("[general]\n")
+            // max_poll_interval is a [general] setting; RawSyncConfig.general is non-null.
+            raw.general.max_poll_interval ?: 300
+        }.getOrDefault(300)
+    return effectiveStaleGrace(maxPoll)
+}
 
 /**
  * Pure helper: true when [lastSyncRaw] (an ISO-8601 instant the engine writes on
@@ -936,10 +964,11 @@ internal val STALE_GRACE: Duration = Duration.ofMinutes(15)
 internal fun lastScanIsRecent(
     lastSyncRaw: String?,
     now: Instant,
+    grace: Duration = STALE_GRACE,
 ): Boolean {
     if (lastSyncRaw.isNullOrBlank()) return false
     val ts = runCatching { Instant.parse(lastSyncRaw) }.getOrNull() ?: return false
-    return Duration.between(ts, now) < STALE_GRACE
+    return Duration.between(ts, now) < grace
 }
 
 /**
@@ -956,8 +985,9 @@ internal fun legacyRowStatus(
     isExpiring: Boolean,
     lastSyncRaw: String?,
     now: Instant,
+    grace: Duration = STALE_GRACE,
 ): Pair<String, String> {
-    val showStale = isExpiring && !lastScanIsRecent(lastSyncRaw, now)
+    val showStale = isExpiring && !lastScanIsRecent(lastSyncRaw, now, grace)
     return if (showStale) "warn" to GlyphRenderer.warnLabel("STALE") else "ok" to GlyphRenderer.okLabel()
 }
 
