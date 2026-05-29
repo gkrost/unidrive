@@ -75,4 +75,46 @@ class ApplyOrderTest {
         val input = listOf(mkdir("/a"), mkdir("/b"), mkdir("/c"))
         assertEquals(input, topologicalApplyOrder(input), "independent mkdirs keep input order")
     }
+
+    // #123: createFolderBatches feeds the bounded-concurrency create-folder run.
+    // Every batch may run concurrently; the apply loop drains batch N before
+    // starting batch N+1. These tests pin the parent-before-child invariant that
+    // barrier relies on.
+
+    @Test
+    fun `create-folder batches place every parent in an earlier batch than its child`() {
+        // Topologically ordered input (parent before child within the flat list).
+        val ordered = topologicalApplyOrder(listOf(mkdir("/A/B/C"), mkdir("/A"), mkdir("/A/B")))
+            .filterIsInstance<SyncAction.CreateRemoteFolder>()
+        val batches = createFolderBatches(ordered)
+        // Map each path to the index of the batch that creates it.
+        val batchOf = HashMap<String, Int>()
+        batches.forEachIndexed { i, b -> b.forEach { batchOf[it.path] = i } }
+        assertTrue(batchOf["/A"]!! < batchOf["/A/B"]!!, "/A batch precedes /A/B batch")
+        assertTrue(batchOf["/A/B"]!! < batchOf["/A/B/C"]!!, "/A/B batch precedes /A/B/C batch")
+    }
+
+    @Test
+    fun `sibling folders at the same depth share one batch so they run concurrently`() {
+        val batches = createFolderBatches(listOf(mkdir("/A/x"), mkdir("/A/y"), mkdir("/A/z")))
+        assertEquals(1, batches.size, "three depth-2 siblings collapse into one concurrent batch")
+        assertEquals(setOf("/A/x", "/A/y", "/A/z"), batches[0].map { it.path }.toSet())
+    }
+
+    @Test
+    fun `no batch contains a folder and one of its own ancestors`() {
+        // The barrier between batches is the only thing serialising parent→child;
+        // if a parent and child ever landed in the same batch they could race.
+        val batches =
+            createFolderBatches(
+                listOf(mkdir("/A"), mkdir("/A/B"), mkdir("/A/B/C"), mkdir("/D"), mkdir("/D/E")),
+            )
+        for (batch in batches) {
+            val paths = batch.map { it.path }
+            for (p in paths) {
+                val ancestorInSameBatch = paths.any { it != p && p.startsWith("$it/") }
+                assertTrue(!ancestorInSameBatch, "batch $paths must not contain an ancestor of $p")
+            }
+        }
+    }
 }
