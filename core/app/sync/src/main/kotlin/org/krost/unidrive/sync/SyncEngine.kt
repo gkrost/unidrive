@@ -1703,7 +1703,20 @@ open class SyncEngine(
         // scratch → same outcome. Live repro 2026-05-20 def535f1: 14.8 h scan,
         // 218 k items, pending_cursor written, delta_cursor never set; the
         // following run did the full enum again.
-        promotePendingCursor()
+        //
+        // #108/P1 (PR #241 review): when a daemon-mode safeguard trip deferred the planned
+        // deletes this cycle, do NOT advance the cursor. A DeleteLocal driven by a remote
+        // tombstone is consumed from the delta exactly once; if the cursor moved past it, an
+        // incremental delta would not resend it and the unchanged local+DB row would not
+        // re-plan it — silently stranding the local copy and making the "wait for operator
+        // --force-delete" path impossible. Holding the cursor lets the tombstones replay
+        // until the divergence clears or drops back under the cap. (DeleteRemote re-derives
+        // from the local scan every cycle regardless, so it is unaffected either way.)
+        if (deferDeletes) {
+            log.warn("#108: holding delta cursor this cycle (deletes deferred); tombstones replay next sync")
+        } else {
+            promotePendingCursor()
+        }
 
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(
