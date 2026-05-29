@@ -3420,6 +3420,35 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#230 an invalid-named remote folder is quarantined, not a mkdir-every-pass failure`() =
+        runTest {
+            // PR #242 review: applyDownload guards file downloads; folders + adopt placeholders
+            // reach createFolder/createPlaceholder via applyCreatePlaceholder. A Windows-invalid
+            // folder name must be quarantined here too, not fail the mkdir every poll cycle.
+            // localNameIssue's cross-platform rules are unit-tested in PlaceholderManagerTest;
+            // this gates on Windows, where such names are actually unrepresentable.
+            org.junit.Assume.assumeTrue(
+                "folder-name representability is a Windows-FS constraint",
+                System.getProperty("os.name", "").lowercase().contains("win"),
+            )
+            provider.deltaItems = listOf(cloudItem("/CON", isFolder = true))
+
+            // Must NOT throw (pre-fix: createFolder('/CON') threw a reserved-name error every pass).
+            engine.syncOnce(dryRun = false)
+
+            val entry = db.getEntry("/CON")
+            assertNotNull(entry, "the invalid-named folder row should be tracked")
+            assertTrue(
+                entry.downloadQuarantined,
+                "invalid folder name must be quarantined (recovery loop skips it thereafter)",
+            )
+            assertFalse(
+                Files.exists(syncRoot.resolve("CON")),
+                "an unrepresentable folder name must not be created locally",
+            )
+        }
+
+    @Test
     fun `fresh delta event clears download quarantine`() =
         runTest {
             // Establish quarantine.
