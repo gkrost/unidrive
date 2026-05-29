@@ -140,9 +140,32 @@ class DaemonRuntime(
                 val hydration = HydrationImpl(engine, db!!)
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 hydrationIpcRef = hydrationIpc
+
+                // sync.enumerate handler (mount-view-refresh-design.md §4.1): one-way
+                // remote→state.db refresh for mount view consumers. Constructed before the
+                // hydration verbs so the subscribe-triggered enumerate (below) can reuse its
+                // shared in-flight guard.
+                val enumerateHandler = EnumerateRpcHandler(engine, serveScope, server::emit)
+
+                // Reactive remote-change detection: when the FUSE co-daemon issues
+                // hydration.subscribe on mount, run ONE guarded enumerate after the reply.
+                // The enumerate pulls remote changes into state.db and, when anything changed,
+                // the engine's viewInvalidationSink pushes view.invalidated back over this same
+                // subscribe stream — so a freshly-mounted view reflects remote renames/deletes
+                // without a manual `refresh`. This stays strictly reactive (triggered by the
+                // subscribe verb, daemon-design G3): no always-on poll loop. Serialised through
+                // the same in-flight guard as sync.enumerate/the poller, so a concurrent
+                // enumeration is skipped rather than overlapped.
                 for (verb in HydrationIpcHandler.VERBS) {
                     server.registerHandler(verb) { connId, json ->
-                        hydrationIpc.handle(connectionId = connId, jsonRequest = json)
+                        val reply = hydrationIpc.handle(connectionId = connId, jsonRequest = json)
+                        if (verb == "hydration.subscribe" && reply.contains("\"ok\":true")) {
+                            server.scheduleAfterReply(connId) {
+                                runCatching { enumerateHandler.runGuarded(reset = false) }
+                                    .onFailure { log.warn("enumerate-on-subscribe failed", it) }
+                            }
+                        }
+                        reply
                     }
                 }
                 server.registerConnectionCloseListener { connId ->
@@ -188,10 +211,10 @@ class DaemonRuntime(
                     refreshHandler.handle(connId, json)
                 }
 
-                // sync.enumerate verb (mount-view-refresh-design.md §4.1): one-way
-                // remote→state.db refresh for mount view consumers. Terminal events
-                // fan out to sync.subscribe listeners via server.emit.
-                val enumerateHandler = EnumerateRpcHandler(engine, serveScope, server::emit)
+                // sync.enumerate verb (mount-view-refresh-design.md §4.1). The handler is
+                // constructed above (shared with the subscribe-triggered enumerate); here we
+                // expose it as an explicit verb whose terminal events fan out to sync.subscribe
+                // listeners via server.emit.
                 server.registerHandler("sync.enumerate") { connId, json ->
                     enumerateHandler.handle(connId, json)
                 }

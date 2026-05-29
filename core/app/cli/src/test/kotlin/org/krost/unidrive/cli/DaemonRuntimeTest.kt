@@ -200,6 +200,54 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    fun view_invalidated_pushed_on_detected_remote_change_after_subscribe() = runBlocking {
+        // Reactive-freshness invariant: when the FUSE co-daemon issues hydration.subscribe
+        // on mount, the daemon runs ONE reactive enumerate; because the provider's delta
+        // reports a remote file, state.db is mutated and the engine pushes a view.invalidated
+        // event back over the SAME subscribe stream — without any manual `refresh` or poll loop.
+        val provider: CloudProvider = OneRemoteFileStubProvider()
+
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { provider },
+        )
+
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+
+        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        try {
+            channel.configureBlocking(false)
+            // Subscribe via hydration.subscribe (the verb the co-daemon issues on mount).
+            channel.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
+            // First line is the subscribe ok-reply; the view.invalidated event follows
+            // post-reply once the auto-enumerate mutates state.db.
+            val collected = readUntil(channel, "view.invalidated", timeoutMs = 10_000)
+            assertTrue(
+                collected.contains("\"event\":\"view.invalidated\""),
+                "expected a view.invalidated push after subscribe-triggered enumerate; got: $collected",
+            )
+            assertTrue(
+                collected.contains("/remote-new.txt"),
+                "view.invalidated must name the newly-enumerated path; got: $collected",
+            )
+        } finally {
+            channel.close()
+        }
+
+        runtime.close()
+        daemonJob.join()
+    }
+
+    @Test
     fun daemon_status_returns_uptime_clients_and_refresh_state() = runBlocking {
         val provider: CloudProvider = StubProvider()
 
@@ -355,6 +403,65 @@ class DaemonRuntimeTest {
             onPageProgress: ((Int) -> Unit)?,
             scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage = DeltaPage(items = emptyList(), cursor = "x", hasMore = false)
+
+        override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
+    }
+
+    /**
+     * Stub whose delta reports a single remote file on a complete (hasMore=false)
+     * enumeration. Used by the reactive-freshness test to make the subscribe-triggered enumerate
+     * mutate state.db so a view.invalidated event fires on the subscribe stream.
+     */
+    private class OneRemoteFileStubProvider : CloudProvider {
+        override val id: String = "stub-one-file"
+        override val displayName: String = "Stub (one remote file)"
+        override var isAuthenticated: Boolean = true
+
+        override fun capabilities(): Set<Capability> = emptySet()
+
+        override suspend fun authenticate() { /* no-op */ }
+
+        override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
+
+        override suspend fun getMetadata(path: String): CloudItem = error("not used")
+
+        override suspend fun download(remotePath: String, destination: Path): Long = error("not used")
+
+        override suspend fun upload(
+            localPath: Path,
+            remotePath: String,
+            existingRemoteId: String?,
+            onProgress: ((Long, Long) -> Unit)?,
+        ): CloudItem = error("not used")
+
+        override suspend fun delete(remotePath: String) = error("not used")
+
+        override suspend fun createFolder(path: String): CloudItem = error("not used")
+
+        override suspend fun move(fromPath: String, toPath: String): CloudItem = error("not used")
+
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
+        ): DeltaPage =
+            DeltaPage(
+                items = listOf(
+                    CloudItem(
+                        id = "remote-1",
+                        name = "remote-new.txt",
+                        path = "/remote-new.txt",
+                        size = 7L,
+                        isFolder = false,
+                        modified = java.time.Instant.now(),
+                        created = java.time.Instant.now(),
+                        hash = "abc123",
+                        mimeType = "text/plain",
+                    ),
+                ),
+                cursor = "cursor-1",
+                hasMore = false,
+            )
 
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
     }
