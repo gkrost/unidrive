@@ -8,7 +8,7 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 - **Doc surface is bounded.** Allowed: this file, `README.md`, `BACKLOG.md`, `CLOSED.md`, `BOOSTERS.md`, ADRs (`docs/adr/`), audits (`docs/audits/`), specs (`docs/dev/specs/`), plans (`docs/dev/plans/`), per-module `README.md`. Closing BACKLOG entry cites spec path.
 - **No IDs, dates, or version numbers** in commits, filenames, or docs.
 - **Abstractions earn their keep.** Need named justification (platform-surface need or structural-safety property) + one consumer. Don't preemptively factor; don't refuse on principle. Tracking-set is the explicit exception.
-- **No CI policing.** `./gradlew check` is the gate.
+- **No CI policing.** `./gradlew check` is the gate. Exception: security scanning (CodeQL) may run on push/PR/schedule, but stays advisory — it MUST NOT be a required merge check; `./gradlew check` remains the sole gate.
 - **Never hot-swap a `.jar` on a running JVM.** Stop daemon first.
 
 ## How to work
