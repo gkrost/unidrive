@@ -351,6 +351,46 @@ class LocalScannerTest {
         assertNull(changes["/draft.tmp"], "temp file must be excluded")
     }
 
+    @Test
+    fun `default excludes skip a git repo subtree under the sync root`() {
+        // Issue #223: a checked-out repo under the sync root must never enter a
+        // plan — the whole `.git` subtree (including nested loose objects) is
+        // excluded by the default set, while tracked working-tree files sync.
+        val excluded = LocalScanner(syncRoot, db, SyncConfig.DEFAULT_EXCLUDE_PATTERNS)
+        Files.createDirectories(syncRoot.resolve("repo/.git/objects/ab"))
+        Files.createDirectories(syncRoot.resolve("repo/.git/refs/heads"))
+        Files.writeString(syncRoot.resolve("repo/.git/HEAD"), "ref: refs/heads/main")
+        Files.writeString(syncRoot.resolve("repo/.git/config"), "[core]")
+        Files.writeString(syncRoot.resolve("repo/.git/objects/ab/cdef0123456789"), "binaryobj")
+        Files.writeString(syncRoot.resolve("repo/.git/refs/heads/main"), "deadbeef")
+        // A repo at the sync-root top level too (not nested under a folder).
+        Files.createDirectories(syncRoot.resolve(".git/objects"))
+        Files.writeString(syncRoot.resolve(".git/HEAD"), "ref: refs/heads/main")
+        Files.writeString(syncRoot.resolve(".git/objects/0011223344"), "rootobj")
+        // Real tracked working-tree files that MUST sync.
+        Files.writeString(syncRoot.resolve("repo/README.md"), "hello")
+        Files.writeString(syncRoot.resolve("repo/.gitignore"), "build/")
+
+        val changes = excluded.scan()
+
+        // Tracked working-tree files sync — including .gitignore (NOT a .git entry).
+        assertEquals(ChangeState.NEW, changes["/repo/README.md"], "tracked file must sync")
+        assertEquals(ChangeState.NEW, changes["/repo/.gitignore"], ".gitignore must sync (it is not .git)")
+        // No part of either .git subtree may produce a change.
+        assertTrue(
+            changes.keys.none { it.contains("/.git/") || it.endsWith("/.git") },
+            "no .git path may enter the change set, got: ${changes.keys.filter { it.contains(".git/") }}",
+        )
+        // Spot-check the exact paths the issue observed being uploaded.
+        assertNull(changes["/.git/HEAD"])
+        assertNull(changes["/.git/objects/0011223344"])
+        assertNull(changes["/repo/.git/HEAD"])
+        assertNull(changes["/repo/.git/objects/ab/cdef0123456789"])
+        // The .git directory rows themselves must not be planned either.
+        assertNull(changes["/.git"])
+        assertNull(changes["/repo/.git"])
+    }
+
     // #112 — hash-compare touch-only local changes
 
     @Test
