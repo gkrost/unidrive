@@ -62,7 +62,14 @@ class HydrationImplNamespaceTest {
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
     }
 
-    private fun freshEnv(): Triple<HydrationImpl, NamespaceFakeProvider, StateDatabase> {
+    private data class Env(
+        val impl: HydrationImpl,
+        val provider: NamespaceFakeProvider,
+        val db: StateDatabase,
+        val engine: SyncEngine,
+    )
+
+    private fun freshEnv(): Env {
         val cacheRoot = Files.createTempDirectory("unidrive-hydration-ns-cache")
         val dbPath = Files.createTempDirectory("unidrive-hydration-ns-db").resolve("state.db")
         val provider = NamespaceFakeProvider()
@@ -76,7 +83,7 @@ class HydrationImplNamespaceTest {
             cacheRoot = cacheRoot,
         )
         val hydration = HydrationImpl(syncEngine = engine, stateDb = db)
-        return Triple(hydration, provider, db)
+        return Env(hydration, provider, db, engine)
     }
 
     @Test
@@ -409,5 +416,99 @@ class HydrationImplNamespaceTest {
         )
         provider2.throwOnDelete = RuntimeException("Internxt API: cannot delete non-empty folder")
         assertEquals(RmdirResult.NotEmpty, impl2.rmdir("/foo"))
+    }
+
+    @Test
+    fun rmdir_maps_typed_FolderNotEmpty_to_NotEmpty() = runTest {
+        // The typed signal must map to ENOTEMPTY regardless of the message text:
+        // a provider raising FolderNotEmptyException (even with a message that
+        // contains none of the substrings the fallback matcher looks for) is
+        // surfaced as NotEmpty, not Failed.
+        val env = freshEnv()
+        env.db.upsertEntry(
+            SyncEntry(
+                path = "/typed-dir",
+                remoteId = "rid-typed",
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        env.provider.throwOnDelete =
+            org.krost.unidrive.FolderNotEmptyException("Verzeichnis nicht leer")
+
+        assertEquals(RmdirResult.NotEmpty, env.impl.rmdir("/typed-dir"))
+    }
+
+    @Test
+    fun unlink_evicts_hydration_cache_file() = runTest {
+        val env = freshEnv()
+        env.db.upsertEntry(
+            SyncEntry(
+                path = "/cached.txt",
+                remoteId = "rid-cached",
+                remoteHash = "hash",
+                remoteSize = 5L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+        val cacheFile = env.engine.resolveCachePath("/cached.txt")
+        Files.createDirectories(cacheFile.parent)
+        Files.writeString(cacheFile, "stale")
+        assertTrue(Files.exists(cacheFile), "precondition: cache file must exist before unlink")
+
+        val result = env.impl.unlink("/cached.txt")
+
+        assertEquals(UnlinkResult.Ok, result)
+        assertTrue(
+            Files.notExists(cacheFile),
+            "unlink must evict the hydration-cache file so stale bytes do not linger",
+        )
+    }
+
+    @Test
+    fun rmdir_evicts_hydration_cache_subtree() = runTest {
+        val env = freshEnv()
+        env.db.upsertEntry(
+            SyncEntry(
+                path = "/cdir",
+                remoteId = "rid-cdir",
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = Instant.parse("2026-05-24T09:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+        // Populate the folder's cache subtree with a nested hydrated file.
+        val nested = env.engine.resolveCachePath("/cdir/sub/file.bin")
+        Files.createDirectories(nested.parent)
+        Files.writeString(nested, "bytes")
+        val cacheDir = env.engine.resolveCachePath("/cdir")
+        assertTrue(Files.exists(cacheDir), "precondition: cache subtree must exist before rmdir")
+
+        val result = env.impl.rmdir("/cdir")
+
+        assertEquals(RmdirResult.Ok, result)
+        assertTrue(
+            Files.notExists(cacheDir),
+            "rmdir must recursively evict the folder's hydration-cache subtree",
+        )
     }
 }
