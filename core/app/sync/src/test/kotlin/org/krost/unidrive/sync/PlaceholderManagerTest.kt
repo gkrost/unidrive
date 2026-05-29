@@ -31,6 +31,36 @@ class PlaceholderManagerTest {
         assertEquals(0, Files.size(file))
     }
 
+    // ── #230: local-name representability ────────────────────────────────────
+
+    @Test
+    fun `localNameIssue allows normal names including spaces and dot segments`() {
+        for (w in listOf(true, false)) {
+            assertNull(localNameIssue("/Documents/my report.txt", windows = w))
+            assertNull(localNameIssue("/a/b/c.pdf", windows = w))
+            assertNull(localNameIssue("/", windows = w))
+            // `.` / `..` are path navigation, not all-dots names.
+            assertNull(localNameIssue("/a/./b", windows = w))
+            assertNull(localNameIssue("/a/../b", windows = w))
+        }
+    }
+
+    @Test
+    fun `localNameIssue rejects Windows-invalid names only on Windows`() {
+        val bad = listOf("/x/....", "/x/foo.", "/x/foo ", "/x/CON", "/x/nul.txt", "/x/a:b", "/x/a?b", "/x/a<b")
+        for (p in bad) {
+            assertNotNull(localNameIssue(p, windows = true), "expected '$p' rejected on Windows")
+            assertNull(localNameIssue(p, windows = false), "expected '$p' allowed on POSIX")
+        }
+    }
+
+    @Test
+    fun `localNameIssue rejects an embedded NUL on every platform`() {
+        val withNul = "/x/a" + Char(0) + "b"
+        assertNotNull(localNameIssue(withNul, windows = true))
+        assertNotNull(localNameIssue(withNul, windows = false))
+    }
+
     @Test
     fun `createPlaceholder creates parent directories`() {
         mgr.createPlaceholder("/deep/nested/dir/file.txt", size = 100, modified = Instant.now())
