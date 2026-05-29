@@ -18,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -47,6 +48,20 @@ class LsCommandTest {
         runCatching { Files.deleteIfExists(lockFile) }
         runCatching { Files.deleteIfExists(lockFile.resolveSibling(".lock.pid")) }
         runCatching { tempDir.toFile().deleteRecursively() }
+    }
+
+    // #145 P2: `ls` mirrors the daemon view only when a DAEMON holds the lock. A plain
+    // `unidrive sync` watcher binds the same socket + hydration verbs but isn't the mount
+    // view, so a sync-mode (or absent) holder must fall through to the live provider query.
+    @Test
+    fun `daemonHoldsLock is true only for a daemon-mode lock holder`() {
+        val pidFile = tempDir.resolve(".lock.pid")
+        Files.writeString(pidFile, "12345 daemon")
+        assertTrue(daemonHoldsLock(tempDir), "daemon-mode holder -> mirror the daemon view")
+        Files.writeString(pidFile, "12345 sync")
+        assertFalse(daemonHoldsLock(tempDir), "a sync watcher must NOT take the daemon view")
+        Files.deleteIfExists(pidFile)
+        assertFalse(daemonHoldsLock(tempDir), "no lock holder -> live query")
     }
 
     @Test
