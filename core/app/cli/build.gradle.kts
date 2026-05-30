@@ -419,6 +419,7 @@ dependencies {
     implementation(project(":app:core"))
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
+    implementation(project(":providers:localfs"))
     implementation(project(":app:sync"))
     // Runtime-only: the tracking-set engine implements the CliExtension SPI
     // that lives in this module, so :app:sync-tracking depends on :app:cli.

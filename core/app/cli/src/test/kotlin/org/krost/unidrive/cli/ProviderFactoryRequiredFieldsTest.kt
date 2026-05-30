@@ -62,6 +62,10 @@ class ProviderFactoryRequiredFieldsTest {
                     "user" to "alice",
                     "password" to "hunter2",
                 ),
+            "localfs" to
+                mapOf(
+                    "root_path" to "/tmp/localfs-remote-stub",
+                ),
         )
 
     @Test
