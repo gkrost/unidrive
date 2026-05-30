@@ -4,7 +4,7 @@
 **Date:** 2026-05-29
 **Related ADRs:** `docs/adr/multi-platform.md` (authoritative — the planned Windows desktop tier), `docs/adr/core-app-contract.md` (engine/client split), `docs/adr/linux-only.md` (ADR-0012, Windows out of MVP), `docs/adr/shipping-surface.md` (ADR-0011, `shell-win` removal).
 **Related specs:** `docs/dev/specs/unidrive-daemon-design.md`, `docs/dev/specs/mount-view-refresh-design.md`, `docs/dev/specs/sparse-hydration-roadmap-design.md`.
-**Related issues:** #237 (teardown — P0), #238 (watch-handle release / teardown verb), #239 (Linux-path test assumptions), #230 (invalid NTFS names — closed), #99 (tracking-set engine = the engine/client module boundary), #142 (auto-spawn daemon).
+**Related issues:** #237 (teardown — P0), #238 (watch-handle release / teardown verb), #239 (Linux-path test assumptions), #230 (invalid NTFS names — closed), #99 (tracking-set engine = the engine/client module boundary), #142 (auto-spawn daemon). *These are **GitHub issues**, not `BACKLOG.md` entries — the repo tracks work in GitHub issues (see the migration note atop `BACKLOG.md`).*
 
 ---
 
@@ -69,9 +69,11 @@ The client translates `cldflt` callbacks into the hydration verbs the daemon alr
 | `view.invalidated` event → `CfUpdatePlaceholder` / re-list dir | (from `hydration.subscribe`) | the Windows analog of FUSE `notify_inval_entry`; emitted after a remote enumeration changes `state.db` |
 | error token → NTSTATUS | — | `unknown_path` / `not_found` → object-not-found; everything else → a *retryable* IO status. (Verify exact `STATUS_CLOUD_FILE_*` codes against MS Learn.) |
 
+**Hydration byte-serving (the `FETCH_DATA` contract):** CfAPI hydration is *push* — on `FETCH_DATA` the kernel hands the provider a `TransferKey`; the client reads bytes from the engine's `cache_path` and writes them into the placeholder via `CfExecute(CF_OPERATION_TYPE_TRANSFER_DATA)` (offset/length-chunked, with `CfReportProviderProgress`). It does **not** map the cache file in directly — it streams cache bytes through the transfer pipe, completing each chunk with a status. The **never-serve-short-cache** invariant binds here: if `open_read` returned but the cache is incomplete (the engine throws → EIO, or `cachedBytes != remoteSize`), the client must complete the transfer with a *failure* `NTSTATUS` so the read fails cleanly — never serve partial bytes (which a copy would silently truncate to a short / 0-byte file).
+
 Plus refresh wiring the client should drive: on mount, issue `hydration.subscribe` (the daemon then schedules one guarded `sync.enumerate` so the view reflects remote renames/deletes); optionally `--poll-interval`. Verbs: `sync.enumerate` / `refresh.run` / `daemon.status` (`EnumerateRpcHandler`, `RefreshRpcHandler`, `DaemonRuntime`).
 
-**Crash-recovery contract:** on (re)mount, the client scans its cache root and replays `hydration.open_write` with `handle_id = "recovery-<n>"` for any cache file newer than the last-synced watermark — the daemon special-cases the `recovery-` prefix to background the upload so the mount can come up. This is how durability survives a crash (the Rust mount does it today; the Windows client must reimplement it over its cache root). Cache layout to match: `<cacheRoot>/unidrive/hydration/<cacheKey>/<path>`, `cacheKey = profile.name`.
+**Crash-recovery contract:** on (re)mount, the client scans its cache root and replays `hydration.open_write` with `handle_id = "recovery-<n>"` for any cache file newer than the last-synced watermark — the daemon special-cases the `recovery-` prefix to background the upload so the mount can come up. This is how durability survives a crash. The JVM-side handler is confirmed (`HydrationImpl.kt` special-cases the `recovery-` prefix and backgrounds the upload); the Linux consumer of it lives in the sibling `unidrive-mount-linux` repo (not in this checkout), so the **Windows client's scanner is net-new, not a port**. Cache layout to match: `<cacheRoot>/unidrive/hydration/<cacheKey>/<path>`, `cacheKey = profile.name`.
 
 ---
 
@@ -90,7 +92,7 @@ The single hardest hazard. The handoff's four orphaned `unidrive-cfapi-test*` di
 
 **Reuse unchanged (the whole backend):** `DaemonRuntime`/`DaemonCommand`, `StateDatabase` (`state.db`), provider auth, `SyncEngine` (hydration download/upload, remote mkdir/delete/rename, delta enumeration, cache management), the `Hydration` SPI (`HydrationImpl`), `IpcServer` + verb handlers, the `view.invalidated`/refresh wiring. The IPC transport already branches to a Windows socket path. **No protocol or daemon change required.**
 
-**Reuse from existing code (don't reinvent):** `PlaceholderManager.localNameIssue()` (NTFS name validation) + `safeResolveLocal()` (traversal guard); the engine already *quarantines* unrepresentable names (#230), so the client only surfaces them.
+**Reuse from existing code (don't reinvent):** the two **package-level functions** in `PlaceholderManager.kt` — *top-level functions in `package org.krost.unidrive.sync`, NOT methods on the `PlaceholderManager` class; call them bare, e.g. `localNameIssue(p)`, not `PlaceholderManager.localNameIssue(p)`*: `localNameIssue(remotePath)` (NTFS-name validation; `internal fun`, L81; already on `main` via #230) and `safeResolveLocal(syncRoot, remotePath)` (path-traversal guard; L22, two required args). The engine already *quarantines* unrepresentable names (#230 is on `main`; folder-name coverage via `applyCreatePlaceholder` is pending in PR #245), so the client only surfaces them.
 
 **Build new (the C# CfAPI client):** (1) reconnecting AF_UNIX NDJSON IPC client; (2) the `cldflt` sync-root provider + callback→verb binding; (3) error-token→NTSTATUS mapping; (4) hydration-cache backing store + `recovery-` scanner rooted at `cacheKey=<profile.name>`; (5) `view.invalidated` → placeholder/dir invalidation.
 
@@ -118,7 +120,7 @@ Tradeoff accepted: a third language (Kotlin engine + Rust Linux mount + C# Windo
 ### 6.3 Still open (decide before / within Phase 1)
 
 - **Sync-root identity / packaging:** full Explorer integration (registration via `StorageProviderSyncRootManager`, overlays) needs a **package identity** → MSIX or a sparse package. Decide MSIX vs unpackaged + `CfRegisterSyncRoot`-only (lesser UX) early — it shapes packaging and the `%APPDATA%` virtualization concern (the MSIX sandbox virtualizes `%APPDATA%`; socket/config/cache locations must account for it).
-- **Daemon-on-Windows lifecycle:** Windows Service (auto-start, recovery) vs tray-spawned vs auto-spawn-on-connect (#142). Leaning Windows Service.
+- **Daemon-on-Windows lifecycle:** this dictates the *shape* of the client — (i) the client process **is** the Windows Service and supervises the JVM daemon; (ii) a tray/login app launches a separate daemon Service; or (iii) the client is a strict IPC consumer that expects the daemon already running (auto-spawn-on-connect, #142 — Medium priority). **Leaning (i)** (one Windows Service owns the daemon lifecycle + the CfAPI binding). Must be **firmed up in Phase 0, before Phase 1** — it determines the client's process model.
 - **v1 shell scope:** placeholders only, or overlays + context menu + "free up space" in v1?
 
 ---
@@ -133,6 +135,7 @@ Tradeoff accepted: a third language (Kotlin engine + Rust Linux mount + C# Windo
 - **NFC** — the client sends UTF-16/NFC; the daemon's `pluckPath()` normalizes (idempotent).
 - **Don't resurrect `protocol/` or a named-pipe transport** (ADR-0011/0012) — reuse the UDS NDJSON IPC; prefer code-co-located kotlinx-serialization DTOs if a typed contract is wanted.
 - **Test hygiene (#239)** — fix the Linux-path test assumptions (`MountCommandTest`/`SyncEngineTest` assert `/run/user/...` + forward-slash cache paths) before a Windows CI runner can gate; CI grows lazily once the tier has code (`multi-platform.md`).
+- **Windows version floor** — CfAPI exists since Win10 1709, but `StorageProviderSyncRootManager` capabilities + the shell-integration surface vary across builds. **Target Windows 11 22H2+** as the supported floor; document graceful degradation on older builds (e.g. drop full Explorer status-UI, keep basic placeholders) rather than chasing 1709 parity.
 
 ---
 
