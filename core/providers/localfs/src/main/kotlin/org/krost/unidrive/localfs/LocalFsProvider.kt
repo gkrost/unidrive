@@ -104,13 +104,27 @@ class LocalFsProvider(root: Path) : CloudProvider {
         )
     }
 
+    /**
+     * True when an existing [local] entry's real path stays within the real root — the
+     * symlink-safe filter for enumeration (listChildren / delta), mirroring [toLocal]'s
+     * guard for direct operations. False if the path can't be resolved.
+     */
+    private fun withinRoot(local: Path): Boolean =
+        runCatching {
+            val realRoot = rootNorm.toRealPath()
+            val real = local.toAbsolutePath().normalize().toRealPath()
+            real == realRoot || real.startsWith(realRoot)
+        }.getOrDefault(false)
+
     // ── reads ──────────────────────────────────────────────────────────────
 
     override suspend fun listChildren(path: String): List<CloudItem> =
         withContext(Dispatchers.IO) {
             val dir = toLocal(path)
             if (!Files.isDirectory(dir)) return@withContext emptyList<CloudItem>()
-            Files.newDirectoryStream(dir).use { stream -> stream.map { toItem(it) } }
+            Files.newDirectoryStream(dir).use { stream ->
+                stream.filter { withinRoot(it) }.map { toItem(it) }
+            }
         }
 
     override suspend fun getMetadata(path: String): CloudItem =
@@ -189,18 +203,15 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val items = mutableListOf<CloudItem>()
             if (Files.exists(rootNorm)) {
-                val realRoot = rootNorm.toRealPath()
-                // Files.walk doesn't follow symlinks, but it still yields the symlink entry
-                // itself — skip any entry whose real path escapes the root so enumeration
-                // can't surface (or have the engine act on) data outside root_path.
+                // Files.walk doesn't follow symlinks but still yields the link entry itself;
+                // skip any entry whose real path escapes the root (see withinRoot).
                 Files.walk(rootNorm).use { stream ->
                     stream.forEach { path ->
                         val norm = path.toAbsolutePath().normalize()
-                        if (norm == rootNorm) return@forEach
-                        val real = runCatching { norm.toRealPath() }.getOrNull()
-                        if (real == null || !(real == realRoot || real.startsWith(realRoot))) return@forEach
-                        items.add(toItem(path))
-                        if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
+                        if (norm != rootNorm && withinRoot(path)) {
+                            items.add(toItem(path))
+                            if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
+                        }
                     }
                 }
             }

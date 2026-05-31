@@ -89,6 +89,7 @@ class LocalFsProviderTest {
             val p = LocalFsProvider(root)
             p.authenticate()
             assertFalse(p.delta(null).items.any { it.path == "/link" }, "delta must not emit an escaping symlink")
+            assertFalse(p.listChildren("/").any { it.path == "/link" }, "listChildren must not emit an escaping symlink")
             assertFailsWith<IllegalArgumentException> { p.getMetadata("/link/secret.txt") }
         }
 
