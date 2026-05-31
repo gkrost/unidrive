@@ -72,4 +72,22 @@ class LocalFsProviderTest {
             p.authenticate()
             assertFailsWith<IllegalArgumentException> { p.getMetadata("/../escape.txt") }
         }
+
+    @Test
+    fun rejects_paths_through_a_symlink_escaping_root() =
+        runTest {
+            val root = newRoot()
+            val outside = Files.createTempDirectory("localfs-outside")
+            Files.writeString(outside.resolve("secret.txt"), "secret")
+            val link = root.resolve("link")
+            try {
+                Files.createSymbolicLink(link, outside)
+            } catch (e: Exception) {
+                // Windows without the symlink privilege / Developer Mode can't create one — skip.
+                org.junit.Assume.assumeNoException("symlinks unsupported in this environment", e)
+            }
+            val p = LocalFsProvider(root)
+            p.authenticate()
+            assertFailsWith<IllegalArgumentException> { p.getMetadata("/link/secret.txt") }
+        }
 }

@@ -62,6 +62,19 @@ class LocalFsProvider(root: Path) : CloudProvider {
         require(resolved == rootNorm || resolved.startsWith(rootNorm)) {
             "path escapes localfs root: $remotePath"
         }
+        // Symlink-aware guard: a symlink *under* the root can still point outside it, and the
+        // java.nio operations below follow symlinks — so the lexical check alone would let a
+        // read/write/delete escape through a symlinked directory. Resolve the real path of the
+        // deepest existing ancestor and require it to stay within the real root.
+        if (Files.exists(rootNorm)) {
+            val realRoot = rootNorm.toRealPath()
+            var probe = resolved
+            while (!Files.exists(probe) && probe.parent != null) probe = probe.parent
+            val realProbe = probe.toRealPath()
+            require(realProbe == realRoot || realProbe.startsWith(realRoot)) {
+                "path escapes localfs root via symlink: $remotePath"
+            }
+        }
         return resolved
     }
 
