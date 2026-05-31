@@ -329,7 +329,7 @@ class Main : Runnable {
             "port" to rp.port?.toString(),
             "user" to rp.user,
             "remote_path" to rp.remote_path,
-            "root_path" to (rp.sync_root ?: rp.root_path), // localfs uses sync_root or root_path in config
+            "root_path" to (rp.root_path ?: rp.sync_root), // localfs: remote dir is root_path; sync_root is the engine's separate local mirror
             "identity" to rp.identity,
             "password" to rp.password,
             "client_id" to rp.client_id,

@@ -54,7 +54,10 @@ class LocalFsProvider(root: Path) : CloudProvider {
     // ── path mapping (anti-traversal) ───────────────────────────────────────
 
     private fun toLocal(remotePath: String): Path {
-        val rel = remotePath.trim().trim('/')
+        // Strip only path separators, never whitespace: a remote filename may legally
+        // start or end with spaces (e.g. "/dir/report "), and trimming them here would
+        // silently redirect reads/writes to the wrong file.
+        val rel = remotePath.trim('/')
         val resolved = if (rel.isEmpty()) rootNorm else rootNorm.resolve(rel).normalize()
         require(resolved == rootNorm || resolved.startsWith(rootNorm)) {
             "path escapes localfs root: $remotePath"
