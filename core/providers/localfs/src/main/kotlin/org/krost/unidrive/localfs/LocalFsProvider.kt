@@ -189,12 +189,18 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val items = mutableListOf<CloudItem>()
             if (Files.exists(rootNorm)) {
+                val realRoot = rootNorm.toRealPath()
+                // Files.walk doesn't follow symlinks, but it still yields the symlink entry
+                // itself — skip any entry whose real path escapes the root so enumeration
+                // can't surface (or have the engine act on) data outside root_path.
                 Files.walk(rootNorm).use { stream ->
                     stream.forEach { path ->
-                        if (path.toAbsolutePath().normalize() != rootNorm) {
-                            items.add(toItem(path))
-                            if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
-                        }
+                        val norm = path.toAbsolutePath().normalize()
+                        if (norm == rootNorm) return@forEach
+                        val real = runCatching { norm.toRealPath() }.getOrNull()
+                        if (real == null || !(real == realRoot || real.startsWith(realRoot))) return@forEach
+                        items.add(toItem(path))
+                        if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
                     }
                 }
             }

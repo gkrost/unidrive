@@ -50,11 +50,11 @@ class LocalFsProviderFactory : ProviderFactory {
         return LocalFsProvider(root)
     }
 
-    /** localfs has no credentials, so it is always "authenticated" once configured. */
+    /** localfs has no credentials, but it's only usable once root_path is configured. */
     override fun isAuthenticated(
         properties: Map<String, String?>,
         profileDir: Path,
-    ): Boolean = true
+    ): Boolean = !properties["root_path"].isNullOrBlank()
 
     override fun describeConnection(
         properties: Map<String, String?>,

@@ -88,6 +88,15 @@ class LocalFsProviderTest {
             }
             val p = LocalFsProvider(root)
             p.authenticate()
+            assertFalse(p.delta(null).items.any { it.path == "/link" }, "delta must not emit an escaping symlink")
             assertFailsWith<IllegalArgumentException> { p.getMetadata("/link/secret.txt") }
         }
+
+    @Test
+    fun factory_reports_unhealthy_without_root_path() {
+        val factory = LocalFsProviderFactory()
+        val dir = Files.createTempDirectory("localfs-auth")
+        assertFalse(factory.isAuthenticated(emptyMap(), dir))
+        assertTrue(factory.isAuthenticated(mapOf("root_path" to "/some/dir"), dir))
+    }
 }
