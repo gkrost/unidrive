@@ -41,15 +41,19 @@ class MountCommandTest {
 
         val argv = MountCommand.buildArgv(binary, mountPoint, socket, cacheRoot)
 
+        // #239: assert the argv structure against the inputs' own toString() rather than
+        // hard-coded POSIX strings, so the test holds on Windows (where Paths.get renders
+        // backslash separators). The pinned contract is the flag order + that each path is
+        // passed through verbatim, untransformed.
         assertEquals(
             listOf(
-                "/home/u/.local/lib/unidrive/unidrive-mount",
+                binary.toString(),
                 "--mount",
-                "/tmp/mnt",
+                mountPoint.toString(),
                 "--ipc",
-                "/run/user/1000/unidrive-foo.sock",
+                socket.toString(),
                 "--cache",
-                "/home/u/.cache/unidrive/hydration/onedrive",
+                cacheRoot.toString(),
             ),
             argv,
         )
@@ -67,7 +71,8 @@ class MountCommandTest {
 
         val cacheIdx = argv.indexOf("--cache")
         assertTrue(cacheIdx >= 0, "argv must contain --cache flag")
-        val cacheValue = argv[cacheIdx + 1]
+        // #239: normalize separators so the layout assertions hold on Windows.
+        val cacheValue = argv[cacheIdx + 1].replace('\\', '/')
         assertTrue(
             cacheValue.endsWith("/posteo_onedrive"),
             "cache path must end with /<providerId>; got: $cacheValue",
@@ -124,9 +129,14 @@ class MountCommandTest {
 
     @Test
     fun `binary present returns 0`() {
-        val present = Paths.get("/bin/sh") // every POSIX host has this
-        val exit = MountCommand.checkBinaryExists(present)
-        assertEquals(0, exit)
+        // #239: any existing file qualifies (checkBinaryExists accepts isExecutable OR exists).
+        // The prior `/bin/sh` hardcode failed on Windows; use a temp file so the test is OS-agnostic.
+        val present = Files.createTempFile("unidrive-mount-present", ".bin")
+        try {
+            assertEquals(0, MountCommand.checkBinaryExists(present))
+        } finally {
+            Files.deleteIfExists(present)
+        }
     }
 
     @Test
