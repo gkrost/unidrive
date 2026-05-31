@@ -3590,8 +3590,9 @@ class SyncEngineTest {
             pathB,
             "two same-type accounts must NOT share a cache file for the same remote path",
         )
-        assertTrue(pathA.toString().contains("/hydration/posteo_onedrive/"))
-        assertTrue(pathB.toString().contains("/hydration/work_onedrive/"))
+        // #239: normalize separators so the layout assertion holds on Windows (backslash paths).
+        assertTrue(pathA.toString().replace('\\', '/').contains("/hydration/posteo_onedrive/"))
+        assertTrue(pathB.toString().replace('\\', '/').contains("/hydration/work_onedrive/"))
     }
 
     // cacheKey defaults to providerId, preserving the pre-fix layout for any
@@ -3610,7 +3611,8 @@ class SyncEngineTest {
             )
         val path = engineTypeOnly.resolveCachePath("/foo.txt")
         assertTrue(
-            path.toString().contains("/hydration/internxt/"),
+            // #239: normalize separators so the assertion holds on Windows.
+            path.toString().replace('\\', '/').contains("/hydration/internxt/"),
             "with no explicit cacheKey, layout must fall back to providerId; got $path",
         )
     }
