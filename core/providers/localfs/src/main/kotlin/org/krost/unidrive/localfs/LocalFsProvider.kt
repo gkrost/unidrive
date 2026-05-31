@@ -12,6 +12,7 @@ import org.krost.unidrive.ScanContext
 import org.slf4j.LoggerFactory
 import java.io.FileNotFoundException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.BasicFileAttributes
@@ -163,7 +164,21 @@ class LocalFsProvider(root: Path) : CloudProvider {
         }
 
     override suspend fun delete(remotePath: String) {
-        withContext(Dispatchers.IO) { toLocal(remotePath).toFile().deleteRecursively() }
+        withContext(Dispatchers.IO) { deleteRecursivelyNoFollow(toLocal(remotePath)) }
+    }
+
+    /**
+     * Recursive delete that never follows symlinks: a symlinked entry is removed as the link
+     * itself, not descended into. Prevents a symlink *inside* a deleted directory from
+     * redirecting the delete outside root_path (kotlin's File.deleteRecursively / FileTreeWalk
+     * would follow it).
+     */
+    private fun deleteRecursivelyNoFollow(path: Path) {
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+        if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            Files.newDirectoryStream(path).use { stream -> stream.forEach { deleteRecursivelyNoFollow(it) } }
+        }
+        Files.deleteIfExists(path)
     }
 
     override suspend fun createFolder(path: String): CloudItem =

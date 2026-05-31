@@ -100,4 +100,22 @@ class LocalFsProviderTest {
         assertFalse(factory.isAuthenticated(emptyMap(), dir))
         assertTrue(factory.isAuthenticated(mapOf("root_path" to "/some/dir"), dir))
     }
+
+    @Test
+    fun delete_does_not_follow_symlinks_out_of_root() =
+        runTest {
+            val root = newRoot()
+            val outside = Files.createTempDirectory("localfs-outside-del")
+            Files.writeString(outside.resolve("keep.txt"), "keep")
+            val p = LocalFsProvider(root)
+            p.authenticate()
+            p.createFolder("/sub")
+            try {
+                Files.createSymbolicLink(root.resolve("sub").resolve("lnk"), outside)
+            } catch (e: Exception) {
+                org.junit.Assume.assumeNoException("symlinks unsupported in this environment", e)
+            }
+            p.delete("/sub")
+            assertTrue(Files.exists(outside.resolve("keep.txt")), "delete must not follow a symlink outside root")
+        }
 }
