@@ -3,7 +3,6 @@
 unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/Android/Linux UI). See [multi-platform.md](docs/adr/multi-platform.md). Read this before changing anything.
 
 ## Hard rules
-- **Two cloud providers, Internxt and OneDrive.** Adding a third needs platform-surface justification. SPI in `core/providers/`.
 - **Smoke tests are the live-integration target** (5+5+2=12). Add when coverage gaps emerge. Structural-safety invariants earn their keep; tracking-set lemma is the example. Unit tests with intent. Per-test pruning (ask).
 - **Doc surface is bounded.** Allowed: this file, `README.md`, `BACKLOG.md`, `CLOSED.md`, `BOOSTERS.md`, ADRs (`docs/adr/`), audits (`docs/audits/`), specs (`docs/dev/specs/`), plans (`docs/dev/plans/`), per-module `README.md`. Closing BACKLOG entry cites spec path.
 - **No IDs, dates, or version numbers** in commits, filenames, or docs.
@@ -12,11 +11,10 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 - **Never hot-swap a `.jar` on a running JVM.** Stop daemon first.
 
 ## How to work
-1. Read top of `BACKLOG.md`. Pick first unblocked item.
+1. Read github issues
 2. Read three nearby source files before writing.
-3. If work exceeds BACKLOG item scope (sideband cuts, deletions, new abstractions), pause for confirmation.
-4. Make change. Run `./gradlew check`. Iterate.
-5. Move item BACKLOG→CLOSED in same commit. One commit, one item.
+3. Make change. Run `./gradlew check`. Iterate.
+4. One commit, one item.
 
 ## Verification
 - Verify load-bearing claims with full pass, not summaries.
@@ -25,7 +23,6 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 ## What lives where
 - `core/providers/{internxt,onedrive}/` — cloud clients
 - `core/app/{core,sync,sync-tracking,cli,config}/` — engine modules
-- `BOOSTERS.md` — provider API capabilities and priorities
 - `docs/audits/` — Internxt notes
 - `docs/adr/` — architectural decisions
 
@@ -56,7 +53,6 @@ Live-integration tests need `UNIDRIVE_INTEGRATION_TESTS=true` + `UNIDRIVE_TEST_A
 File future-only constraints in BACKLOG.md *Design constraints*: rule, file:line, trigger.
 
 ## What not to do
-- Don't reintroduce removed providers (s3, sftp, webdav, rclone, localfs).
 - Don't grow daemon to host UI. Platforms are separate apps.
 - Don't put UI strings, platform APIs, or user interaction in engine code.
 - Don't rename files to add dates/IDs/versions.
@@ -64,4 +60,4 @@ File future-only constraints in BACKLOG.md *Design constraints*: rule, file:line
 - Don't combine core + platform work in same PR.
 - Ask before deleting unfamiliar files.
 
-If it isn't in `BACKLOG.md`, it isn't going to happen. Add it or drop it.
+If it isn't in github issues, it isn't going to happen. Add it or drop it.
