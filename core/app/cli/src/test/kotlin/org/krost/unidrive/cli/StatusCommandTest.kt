@@ -714,4 +714,30 @@ class StatusCommandTest {
         assertFalse(lastScanIsRecent("not-a-timestamp", now))
         assertTrue(lastScanIsRecent(now.minusSeconds(30).toString(), now))
     }
+
+    // ── #243 review: STALE grace scales with the configured max_poll_interval ──
+
+    @Test
+    fun `effectiveStaleGrace floors at the 15-min default but scales with max_poll_interval`() {
+        // PR #243 review: the grace must not be shorter than the daemon's poll heartbeat.
+        assertEquals(STALE_GRACE, effectiveStaleGrace(300), "default 300s poll keeps the 15-min grace floor")
+        assertEquals(Duration.ofMinutes(30), effectiveStaleGrace(900), "15-min poll -> 30-min grace (two intervals)")
+        assertEquals(Duration.ofHours(2), effectiveStaleGrace(3600), "1-hour poll -> 2-hour grace")
+    }
+
+    @Test
+    fun `legacyRowStatus honours a tuned grace so a slow-polling daemon is not falsely STALE`() {
+        // A scan 20 min ago is STALE under the default 15-min grace, but OK once the profile's
+        // max_poll_interval implies a longer heartbeat (PR #243 review).
+        val now = Instant.parse("2026-05-29T12:00:00Z")
+        val scan20mAgo = now.minus(Duration.ofMinutes(20)).toString()
+        assertTrue(
+            "STALE" in legacyRowStatus(isExpiring = true, lastSyncRaw = scan20mAgo, now = now).second,
+            "default 15-min grace: a 20-min-old scan is STALE",
+        )
+        val (status, label) =
+            legacyRowStatus(isExpiring = true, lastSyncRaw = scan20mAgo, now = now, grace = Duration.ofMinutes(30))
+        assertEquals("ok", status, "30-min grace (tuned max_poll_interval): a 20-min-old scan is still OK")
+        assertFalse("STALE" in label, "expected non-stale label under the tuned grace, got: $label")
+    }
 }
