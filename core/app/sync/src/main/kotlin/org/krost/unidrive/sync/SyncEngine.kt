@@ -2662,6 +2662,21 @@ open class SyncEngine(
     }
 
     private suspend fun applyCreatePlaceholder(action: SyncAction.CreatePlaceholder) {
+        // #230 (PR #242 review): applyDownload guards the file-download path, but folders and
+        // "both new" adopt placeholders reach createFolder/createPlaceholder here. A name that
+        // cannot exist on the local filesystem (Windows reserved / all-dots / trailing-dot, etc.)
+        // would fail the mkdir every poll cycle. Quarantine the row instead — the same flag
+        // handlePermanentDownloadFailure sets, so the reconciler's recovery loop skips it
+        // thereafter (Reconciler.kt) — rather than re-attempting an impossible create forever.
+        localNameIssue(action.path)?.let { issue ->
+            log.warn("Cannot represent '{}' on the local filesystem ({}) — quarantining row", action.path, issue)
+            reporter.onWarning("Permanent failure: ${action.path} - cannot represent on the local filesystem: $issue")
+            val remoteId = action.remoteItem.id
+            if (remoteId.isNotEmpty()) {
+                db.setDownloadQuarantine(remoteId, Instant.now())
+            }
+            return
+        }
         // UD-222: under the new routing (Reconciler), CreatePlaceholder is only emitted for
         //   - folders (mkdir)
         //   - "both new" adopt (local file already matches remote size)
