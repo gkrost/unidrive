@@ -36,11 +36,40 @@ class BuildInfoTest {
         }
     }
 
+    // spec §3.5 (unidrive-distribution-design): tagged-release builds print
+    // the bare semver with NO commit suffix; non-tag (dev) builds keep the
+    // "(commit)" / "(commit-dirty)" enrichment. These two invariants share
+    // versionString()'s code path but are orthogonal — one named test each so
+    // a future edit can't silently weaken one while the other still passes.
+    //
+    // The build mode is detected from BuildInfo itself: a bare semver
+    // (versionString() == VERSION) is a tagged release; anything else is a
+    // dev build. If either test is removed or loosened, the corresponding
+    // §3.5 invariant silently regresses.
+
+    private val isTaggedRelease: Boolean
+        get() = BuildInfo.versionString() == BuildInfo.VERSION
+
     @Test
-    fun `UD-733 - versionString embeds COMMIT`() {
+    fun `spec 3-5 - dev build versionString embeds COMMIT`() {
+        if (isTaggedRelease) return // invariant N/A on tagged-release builds
         assertTrue(
             BuildInfo.versionString().contains(BuildInfo.COMMIT),
-            "versionString must contain the COMMIT short SHA; was '${BuildInfo.versionString()}'",
+            "non-tag builds must embed the COMMIT short SHA; was '${BuildInfo.versionString()}'",
+        )
+    }
+
+    @Test
+    fun `spec 3-5 - tagged-release versionString is bare semver with no commit suffix`() {
+        if (!isTaggedRelease) return // invariant N/A on dev builds
+        assertEquals(
+            BuildInfo.VERSION,
+            BuildInfo.versionString(),
+            "tagged-release builds must print the bare semver with no '(commit)' suffix",
+        )
+        assertFalse(
+            BuildInfo.versionString().contains("("),
+            "tagged-release versionString must not contain a commit/dirty suffix",
         )
     }
 }

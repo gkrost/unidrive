@@ -90,6 +90,17 @@ val generateBuildInfo =
                     commandLine("git", "ls-files", "--others", "--exclude-standard")
                 }.standardOutput.asText
                 .map { it.trim().isNotEmpty() }
+        // Per docs/dev/specs/unidrive-distribution-design.md §3.5,
+        // tagged-release builds print the bare semver (e.g. "0.0.1")
+        // with no commit suffix. Non-tag (dev) builds keep the existing
+        // "(commit)" / "(commit-dirty)" enrichment for bug-report
+        // tractability.
+        val gitTagAtHead =
+            providers
+                .exec {
+                    commandLine("git", "tag", "--points-at", "HEAD")
+                }.standardOutput.asText
+                .map { it.trim() }
 
         doLast {
             val commit =
@@ -105,8 +116,21 @@ val generateBuildInfo =
                     false
                 }
             val buildInstant = Instant.now().toString()
+            val taggedRelease =
+                try {
+                    !dirty &&
+                        gitTagAtHead.get().lines().any {
+                            it.matches(Regex("^v?$version(-pkg\\d+)?$"))
+                        }
+                } catch (_: Exception) {
+                    false
+                }
             val versionString =
-                if (dirty) "$version ($commit-dirty)" else "$version ($commit)"
+                when {
+                    taggedRelease -> version
+                    dirty -> "$version ($commit-dirty)"
+                    else -> "$version ($commit)"
+                }
             val dir = outputDir.get().asFile.resolve("org/krost/unidrive/cli")
             dir.mkdirs()
             dir.resolve("BuildInfo.kt").writeText(
