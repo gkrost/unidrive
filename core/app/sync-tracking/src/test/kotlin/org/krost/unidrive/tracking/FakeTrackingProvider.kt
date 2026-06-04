@@ -97,10 +97,70 @@ class FakeTrackingProvider : CloudProvider {
      */
     var failFullReenumeration: Boolean = false
 
+    // ── #161: JWT / OAuth-refresh fault-injection hooks ──────────────────────
+    //
+    // A real provider's HTTP client owns token refresh: a 401 mid-enumeration
+    // triggers a refresh-token round-trip inside `delta()` and the call retries
+    // transparently, so the tracking engine never sees the blip. These hooks
+    // model that boundary inside the fake's `delta()` — the only place the
+    // engine touches the provider during enumeration.
+
+    /** Test hook (#161): the JWT is considered expired starting at this 0-based
+     *  [delta] call index. -1 (default) means the token never expires. */
+    var tokenExpiresAtDeltaCall: Int = -1
+
+    /** Test hook (#161): when true, an expired-token [delta] transparently
+     *  refreshes (increments [refreshCount]) and the retried call succeeds —
+     *  mirroring a provider whose HTTP layer recovers a 401 via refresh-token.
+     *  When false, the expired-token [delta] surfaces [AuthenticationException]
+     *  to the engine instead (models a refresh that itself failed). */
+    var refreshOnTokenExpiry: Boolean = true
+
+    /** Observability (#161): how many transparent token refreshes fired. A
+     *  test asserts this is exactly 1 to prove the refresh path was exercised
+     *  rather than the token simply outliving the run. */
+    var refreshCount: Int = 0
+        private set
+
+    /** Observability (#161): how many times [authenticate] was invoked. */
+    var authenticateCount: Int = 0
+        private set
+
+    // ── #162: throttling / 429-storm fault-injection hooks ───────────────────
+    //
+    // The engine has no 429-retry of its own; the provider's HttpRetryBudget
+    // absorbs the storm. What the engine DOES see is the storm's downstream
+    // effect: a budget that exhausts its retries mid-walk yields a PARTIAL
+    // inventory (`DeltaPage.complete = false`). These hooks reproduce that
+    // signal so the engine's delete-suppression + convergence is exercised.
+
+    /** Test hook (#162): the next N [delta] calls return `complete = false`
+     *  (throttle storm exhausted the retry budget → partial inventory), after
+     *  which calls complete normally. Counts DOWN — each throttled call
+     *  decrements it — so a test sets it relative to "the next pass," not the
+     *  provider's lifetime call count. 0 (default) means no storm. */
+    var throttleIncompletePasses: Int = 0
+
+    /** Test hook (#162): server-hinted Retry-After (ms) recorded on each
+     *  throttled pass; surfaced via [observedRetryAfterMs] so a test can assert
+     *  the backoff hint was honoured rather than discarded. */
+    var retryAfterMs: Long = 2_000L
+
+    /** Observability (#162): the Retry-After hints recorded across throttled
+     *  passes, in call order. Empty when no storm was injected. */
+    val observedRetryAfterMs: MutableList<Long> = mutableListOf()
+
+    /** Observability (#161/#162): total [delta] invocations, for assertions on
+     *  how many passes the engine needed to converge. */
+    var deltaCallCount: Int = 0
+        private set
+
     override fun capabilities(): Set<Capability> =
         setOf(Capability.Delta, Capability.VerifyItem)
 
-    override suspend fun authenticate() {}
+    override suspend fun authenticate() {
+        authenticateCount++
+    }
 
     override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
 
@@ -163,13 +223,47 @@ class FakeTrackingProvider : CloudProvider {
         onPageProgress: ((Int) -> Unit)?,
         scanContext: ScanContext?,
     ): DeltaPage {
+        val callIndex = deltaCallCount
+        deltaCallCount++
         deltaCursors += cursor
+
+        // #161: JWT/OAuth-refresh seam. When this call index reaches the
+        // configured expiry point, the token is stale. A real provider's HTTP
+        // client either (a) refreshes transparently and the call succeeds, or
+        // (b) surfaces the auth failure when the refresh itself fails.
+        if (tokenExpiresAtDeltaCall in 0..callIndex) {
+            if (refreshOnTokenExpiry) {
+                // Transparent refresh-token round-trip, exactly once: bump the
+                // counter, clear the expiry so subsequent calls are clean, and
+                // fall through to serve the page as if nothing happened.
+                refreshCount++
+                tokenExpiresAtDeltaCall = -1
+            } else {
+                throw org.krost.unidrive.AuthenticationException(
+                    "simulated 401: token expired at delta call $callIndex and refresh failed",
+                )
+            }
+        }
+
         if (cursor != null && cursor == expiredCursor) {
             throw DeltaCursorExpiredException("simulated 410 Gone on cursor=$cursor")
         }
         if (cursor == null && failFullReenumeration) {
             throw org.krost.unidrive.ProviderException("simulated full re-enumeration failure")
         }
+
+        // #162: throttle-storm seam. While the storm is active the provider's
+        // retry budget is exhausted mid-walk, so it returns a PARTIAL inventory
+        // (complete = false) — the exact signal the engine reacts to. Record the
+        // server-hinted Retry-After so a test can assert the backoff was
+        // observed, and count the storm DOWN so the engine eventually converges.
+        val throttledThisPass = throttleIncompletePasses > 0
+        if (throttledThisPass) {
+            observedRetryAfterMs += retryAfterMs
+            throttleIncompletePasses--
+        }
+        val passComplete = deltaComplete && !throttledThisPass
+
         val items =
             if (incrementalAware && cursor != null) {
                 // Incremental delta: only changed + explicitly-deleted items.
@@ -190,7 +284,7 @@ class FakeTrackingProvider : CloudProvider {
             } else {
                 files.entries.map { (path, bytes) -> itemFor(path, bytes) }
             }
-        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = deltaComplete)
+        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = passComplete)
     }
 
     override suspend fun quota(): QuotaInfo = QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)

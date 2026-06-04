@@ -1,0 +1,47 @@
+name: nightly-live-tests
+
+# #133: routine-vs-nightly live-test tiering.
+#
+# The routine (fast) tier runs on every PR via the `build` workflow
+# (`./gradlew check`, which runs the sync-tracking `test` task on the default
+# routine tier). This scheduled job runs the SLOW tier — the real-account
+# TrackingEngine live tests that took up to 62 min and are unfit for a per-PR
+# loop.
+#
+# On stock CI (no provider credentials) the real-account tests self-skip
+# (`UNIDRIVE_INTEGRATION_TESTS` unset + no token/credentials on disk), so this
+# job is green and serves as a continuous check that the nightly-tier task
+# itself stays wired correctly. To exercise the real providers, populate the
+# provider credentials and set `UNIDRIVE_INTEGRATION_TESTS=true` in this job's
+# environment (e.g. from repository secrets) — see the live tests' Gate 1/Gate 2
+# skip messages for the exact paths each provider reads.
+
+on:
+  schedule:
+    # 03:17 UTC daily — off-peak, offset from the CodeQL 05:28 Sunday cron.
+    - cron: '17 3 * * *'
+  # Allow on-demand runs from the Actions tab without waiting for the cron.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run nightly live-test tier
+        working-directory: core
+        run: ./gradlew :app:sync-tracking:liveTestNightly --no-daemon --console=plain
