@@ -75,7 +75,7 @@ class DaemonRuntime(
                         "(likely from a kill -9'd `unidrive mount` parent or prior daemon): " +
                         staleMounts.joinToString(),
                 )
-                // #170: emit one ready-to-run command per detected mount (real path,
+                // Emit one ready-to-run command per detected mount (real path,
                 // not a `<path>` placeholder) so the operator can copy-paste directly.
                 System.err.println("These mounts no longer serve data. Clean up with:")
                 staleMounts.forEach { System.err.println("  fusermount3 -u $it") }

@@ -7,7 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * #164: `RefreshRpcHandler` previously escaped only double-quotes
+ * `RefreshRpcHandler` previously escaped only double-quotes
  * (`e.message?.replace("\"", "\\\"")`) before embedding an exception/provider
  * message into the hand-built `refresh.done` terminal event. JSON strings also
  * require escaping backslashes, control characters (`\n`, `\r`, `\t`, `\b`,
@@ -34,7 +34,7 @@ class RefreshRpcHandlerJsonEscapeTest {
     }
 
     /**
-     * INVARIANT (#164): a message with a backslash, an embedded quote, a newline
+     * INVARIANT: a message with a backslash, an embedded quote, a newline
      * and a control char round-trips through the event as valid JSON with the
      * EXACT original content. This is the case the quote-only escape broke.
      *
@@ -53,7 +53,7 @@ class RefreshRpcHandlerJsonEscapeTest {
     }
 
     /**
-     * INVARIANT (#164): a plain message (no special chars) still round-trips
+     * INVARIANT: a plain message (no special chars) still round-trips
      * unchanged — the fix must not corrupt the common case.
      */
     @Test
@@ -63,7 +63,7 @@ class RefreshRpcHandlerJsonEscapeTest {
     }
 
     /**
-     * INVARIANT (#164): a null message degrades to the empty JSON string,
+     * INVARIANT: a null message degrades to the empty JSON string,
      * matching the prior `?: ""` behaviour — no NPE, still valid JSON.
      */
     @Test
