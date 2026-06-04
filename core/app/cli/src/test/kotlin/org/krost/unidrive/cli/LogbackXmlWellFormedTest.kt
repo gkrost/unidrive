@@ -7,7 +7,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.fail
 
 /**
- * #158: build-time guard that the bundled `logback.xml` is well-formed XML.
+ * Build-time guard that the bundled `logback.xml` is well-formed XML.
  *
  * Logback's config loader is forgiving: a parse error makes it silently fall
  * back to a BasicConfiguration (console-only, INFO), so a malformed

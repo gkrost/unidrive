@@ -90,7 +90,7 @@ class RefreshRpcHandler(
                                 """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
                             } else {
                                 log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
-                                // #164: emit a fully-escaped JSON string literal (quotes,
+                                // Emit a fully-escaped JSON string literal (quotes,
                                 // backslashes, control chars, newlines) — not just quote-escaped —
                                 // so an exotic provider error message can't produce invalid JSON.
                                 val msg = jsonString(result.error)
@@ -109,7 +109,7 @@ class RefreshRpcHandler(
                         """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
                     } catch (e: Exception) {
                         log.warn("refresh.run failed: job_id=$jobId", e)
-                        // #164: see jsonString() — full JSON-string escaping, not quote-only.
+                        // See jsonString() — full JSON-string escaping, not quote-only.
                         val msg = jsonString(e.message)
                         """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":$msg}"""
                     } finally {
@@ -147,7 +147,7 @@ class RefreshRpcHandler(
         private val FORCE_DELETE_TRUE_REGEX = Regex("\"force_delete\"\\s*:\\s*true")
 
         /**
-         * #164: render [s] as a fully-escaped, quote-wrapped JSON string literal.
+         * Render [s] as a fully-escaped, quote-wrapped JSON string literal.
          * A null becomes the empty JSON string `""`. Delegates to
          * `kotlinx.serialization`'s `JsonPrimitive`, which escapes quotes,
          * backslashes, control characters (`\n`, `\r`, `\t`, `\b`, `\f`) and

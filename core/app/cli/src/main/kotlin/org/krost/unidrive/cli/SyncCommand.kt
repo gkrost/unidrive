@@ -234,7 +234,7 @@ open class SyncCommand : Runnable {
                 "WARNING: detected ${staleMounts.size} stale unidrive FUSE mount(s) " +
                     "(likely from a kill -9'd `unidrive mount` parent): ${staleMounts.joinToString()}.",
             )
-            // #170: emit one ready-to-run command per detected mount (real path,
+            // Emit one ready-to-run command per detected mount (real path,
             // not a `<path>` placeholder) so the operator can copy-paste directly.
             System.err.println("These mounts no longer serve data. Clean up with:")
             staleMounts.forEach { System.err.println("  fusermount3 -u $it") }
