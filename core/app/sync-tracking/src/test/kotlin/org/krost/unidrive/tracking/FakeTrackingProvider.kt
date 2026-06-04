@@ -162,7 +162,53 @@ class FakeTrackingProvider : CloudProvider {
         authenticateCount++
     }
 
-    override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
+    /**
+     * Test hook for the directory-reaping path: directory paths whose [delete]
+     * should throw, to model a provider that fails a folder delete. The thrown
+     * type is a generic provider error so the engine's best-effort catch is
+     * exercised.
+     */
+    val failDeleteDirs: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Immediate children of [path], derived from the [files] map: files directly
+     * under [path] plus one synthesized folder item per immediate subdirectory.
+     * A normalised "/" matches the root. Lets the engine verify a directory is
+     * empty before reaping it.
+     */
+    override suspend fun listChildren(path: String): List<CloudItem> {
+        val prefix = if (path == "/") "/" else "$path/"
+        val out = mutableListOf<CloudItem>()
+        val seenDirs = mutableSetOf<String>()
+        for ((filePath, bytes) in files) {
+            if (!filePath.startsWith(prefix)) continue
+            val rest = filePath.substring(prefix.length)
+            if (rest.isEmpty()) continue
+            val slash = rest.indexOf('/')
+            if (slash < 0) {
+                // Direct file child.
+                out += itemFor(filePath, bytes)
+            } else {
+                // Immediate subdirectory child; synthesize a folder item once.
+                val childDir = prefix + rest.substring(0, slash)
+                if (seenDirs.add(childDir)) {
+                    out +=
+                        CloudItem(
+                            id = "folder-$childDir",
+                            name = childDir.substringAfterLast('/'),
+                            path = childDir,
+                            size = 0,
+                            isFolder = true,
+                            modified = Instant.parse("2026-05-21T00:00:00Z"),
+                            created = Instant.parse("2026-05-21T00:00:00Z"),
+                            hash = null,
+                            mimeType = null,
+                        )
+                }
+            }
+        }
+        return out
+    }
 
     override suspend fun getMetadata(path: String): CloudItem {
         val bytes = files[path] ?: throw NoSuchElementException("no remote at $path")
@@ -192,7 +238,18 @@ class FakeTrackingProvider : CloudProvider {
     }
 
     override suspend fun delete(remotePath: String) {
-        files.remove(remotePath)
+        if (remotePath in failDeleteDirs) {
+            throw org.krost.unidrive.ProviderException("simulated folder-delete failure for $remotePath")
+        }
+        if (files.containsKey(remotePath)) {
+            // File delete.
+            files.remove(remotePath)
+        } else {
+            // Directory delete: cascade-remove every file under the prefix,
+            // modelling Internxt's folder-trash (which takes the whole subtree).
+            val prefix = "$remotePath/"
+            files.keys.filter { it.startsWith(prefix) }.forEach { files.remove(it) }
+        }
         deletedPaths += remotePath
     }
 
