@@ -34,7 +34,7 @@ allprojects {
     configurations.all {
         resolutionStrategy {
             force("com.squareup.okhttp3:okhttp:4.12.0")
-            force("org.json:json:20231013")
+            force("org.json:json:20260522")
         }
     }
 }
