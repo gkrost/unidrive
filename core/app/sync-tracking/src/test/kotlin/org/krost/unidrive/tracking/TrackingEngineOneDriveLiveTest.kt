@@ -46,7 +46,7 @@ class TrackingEngineOneDriveLiveTest {
 
     @Test
     fun `tracking engine against live OneDrive — lemma holds, plan is downloads-only`() {
-        // Gate 0 (#133) — nightly tier only. This pass walks the full OneDrive
+        // Gate 0 — nightly tier only. This pass walks the full OneDrive
         // delta against a real profile; it shares the slow-tier cost class with
         // the Internxt live test and must stay off the routine (per-PR) tier.
         // SKIPPED on the routine tier; runs on `./gradlew liveTestNightly` or the

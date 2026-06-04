@@ -3,18 +3,18 @@ package org.krost.unidrive.tracking
 import org.junit.Assume.assumeTrue
 
 /**
- * #133: routine-vs-nightly live-test tiering.
+ * Routine-vs-nightly live-test tiering.
  *
  * The tracking-set live tests fall into two cost classes:
  *
  *  - **Routine** — fast (<30 s), deterministic, no network or credentials.
  *    These run on every PR as part of `./gradlew check`. They drive the
  *    engine against [FakeTrackingProvider] and its fault-injection hooks,
- *    so the structural code paths (refresh recovery #161, throttle/incomplete
- *    handling #162, delete-suppression) are exercised without a real account.
+ *    so the structural code paths (refresh recovery, throttle/incomplete
+ *    handling, delete-suppression) are exercised without a real account.
  *
  *  - **Nightly** — slow (the real-account `TrackingEngineInternxtLiveTest`
- *    took 62 min against a 195 k-file Internxt profile, per #133). These hit
+ *    took over an hour against a ~195 k-file Internxt profile). These hit
  *    a real provider, need `UNIDRIVE_INTEGRATION_TESTS=true` + on-disk
  *    credentials, and are far too slow for a per-PR loop. They run only on the
  *    scheduled nightly CI job (`.github/workflows/nightly.yml`) or when an

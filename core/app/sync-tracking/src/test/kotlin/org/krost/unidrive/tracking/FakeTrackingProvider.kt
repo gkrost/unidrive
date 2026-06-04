@@ -97,7 +97,7 @@ class FakeTrackingProvider : CloudProvider {
      */
     var failFullReenumeration: Boolean = false
 
-    // ── #161: JWT / OAuth-refresh fault-injection hooks ──────────────────────
+    // ── JWT / OAuth-refresh fault-injection hooks ────────────────────────────
     //
     // A real provider's HTTP client owns token refresh: a 401 mid-enumeration
     // triggers a refresh-token round-trip inside `delta()` and the call retries
@@ -105,28 +105,28 @@ class FakeTrackingProvider : CloudProvider {
     // model that boundary inside the fake's `delta()` — the only place the
     // engine touches the provider during enumeration.
 
-    /** Test hook (#161): the JWT is considered expired starting at this 0-based
+    /** Test hook: the JWT is considered expired starting at this 0-based
      *  [delta] call index. -1 (default) means the token never expires. */
     var tokenExpiresAtDeltaCall: Int = -1
 
-    /** Test hook (#161): when true, an expired-token [delta] transparently
+    /** Test hook: when true, an expired-token [delta] transparently
      *  refreshes (increments [refreshCount]) and the retried call succeeds —
      *  mirroring a provider whose HTTP layer recovers a 401 via refresh-token.
      *  When false, the expired-token [delta] surfaces [AuthenticationException]
      *  to the engine instead (models a refresh that itself failed). */
     var refreshOnTokenExpiry: Boolean = true
 
-    /** Observability (#161): how many transparent token refreshes fired. A
+    /** Observability: how many transparent token refreshes fired. A
      *  test asserts this is exactly 1 to prove the refresh path was exercised
      *  rather than the token simply outliving the run. */
     var refreshCount: Int = 0
         private set
 
-    /** Observability (#161): how many times [authenticate] was invoked. */
+    /** Observability: how many times [authenticate] was invoked. */
     var authenticateCount: Int = 0
         private set
 
-    // ── #162: throttling / 429-storm fault-injection hooks ───────────────────
+    // ── throttling / 429-storm fault-injection hooks ─────────────────────────
     //
     // The engine has no 429-retry of its own; the provider's HttpRetryBudget
     // absorbs the storm. What the engine DOES see is the storm's downstream
@@ -134,23 +134,23 @@ class FakeTrackingProvider : CloudProvider {
     // inventory (`DeltaPage.complete = false`). These hooks reproduce that
     // signal so the engine's delete-suppression + convergence is exercised.
 
-    /** Test hook (#162): the next N [delta] calls return `complete = false`
+    /** Test hook: the next N [delta] calls return `complete = false`
      *  (throttle storm exhausted the retry budget → partial inventory), after
      *  which calls complete normally. Counts DOWN — each throttled call
      *  decrements it — so a test sets it relative to "the next pass," not the
      *  provider's lifetime call count. 0 (default) means no storm. */
     var throttleIncompletePasses: Int = 0
 
-    /** Test hook (#162): server-hinted Retry-After (ms) recorded on each
+    /** Test hook: server-hinted Retry-After (ms) recorded on each
      *  throttled pass; surfaced via [observedRetryAfterMs] so a test can assert
      *  the backoff hint was honoured rather than discarded. */
     var retryAfterMs: Long = 2_000L
 
-    /** Observability (#162): the Retry-After hints recorded across throttled
+    /** Observability: the Retry-After hints recorded across throttled
      *  passes, in call order. Empty when no storm was injected. */
     val observedRetryAfterMs: MutableList<Long> = mutableListOf()
 
-    /** Observability (#161/#162): total [delta] invocations, for assertions on
+    /** Observability: total [delta] invocations, for assertions on
      *  how many passes the engine needed to converge. */
     var deltaCallCount: Int = 0
         private set
@@ -227,9 +227,9 @@ class FakeTrackingProvider : CloudProvider {
         deltaCallCount++
         deltaCursors += cursor
 
-        // #161: JWT/OAuth-refresh seam. When this call index reaches the
-        // configured expiry point, the token is stale. A real provider's HTTP
-        // client either (a) refreshes transparently and the call succeeds, or
+        // JWT/OAuth-refresh seam. When this call index reaches the configured
+        // expiry point, the token is stale. A real provider's HTTP client
+        // either (a) refreshes transparently and the call succeeds, or
         // (b) surfaces the auth failure when the refresh itself fails.
         if (tokenExpiresAtDeltaCall in 0..callIndex) {
             if (refreshOnTokenExpiry) {
@@ -252,7 +252,7 @@ class FakeTrackingProvider : CloudProvider {
             throw org.krost.unidrive.ProviderException("simulated full re-enumeration failure")
         }
 
-        // #162: throttle-storm seam. While the storm is active the provider's
+        // throttle-storm seam. While the storm is active the provider's
         // retry budget is exhausted mid-walk, so it returns a PARTIAL inventory
         // (complete = false) — the exact signal the engine reacts to. Record the
         // server-hinted Retry-After so a test can assert the backoff was

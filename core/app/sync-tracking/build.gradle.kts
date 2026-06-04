@@ -29,16 +29,16 @@ dependencies {
     testImplementation(project(":providers:onedrive"))
 }
 
-// #133: live-test tiering. The tier is selected by the `unidrive.liveTier`
+// Live-test tiering. The tier is selected by the `unidrive.liveTier`
 // system property, read by `LiveTier` in the test source set:
 //
 //   routine  (default) — fast, deterministic, no network/credentials. Runs on
 //                        every PR via `./gradlew check`. Includes the engine
-//                        refresh (#161) and throttle (#162) tests, which drive
+//                        refresh and throttle tests, which drive
 //                        FakeTrackingProvider's fault-injection seams.
 //   nightly            — also admits the slow real-account live tests
 //                        (TrackingEngine{Internxt,OneDrive}LiveTest), which took
-//                        up to 62 min against a real profile. Run by the
+//                        over an hour against a real profile. Run by the
 //                        scheduled `.github/workflows/nightly.yml` job or
 //                        `./gradlew liveTestNightly`.
 //
@@ -50,7 +50,7 @@ val liveTierProperty = "unidrive.liveTier"
 // The default `test` task (and therefore `check`) runs the ROUTINE tier: the
 // slow real-account tests skip via assumeNightly even if a developer has
 // UNIDRIVE_INTEGRATION_TESTS=true exported. Forcing the property here is the
-// guard that keeps `./gradlew check` bounded (#133).
+// guard that keeps `./gradlew check` bounded.
 tasks.test {
     useJUnit()
     systemProperty(liveTierProperty, System.getProperty(liveTierProperty, "routine"))
@@ -65,12 +65,12 @@ tasks.test {
     }
 }
 
-// Explicit routine-tier task (#133). Functionally the same as `test` with the
+// Explicit routine-tier task. Functionally the same as `test` with the
 // default tier, but named so CI and operators can invoke the fast live-test
 // loop unambiguously. Reuses the test source set and classpath.
 tasks.register<Test>("liveTestRoutine") {
     group = "verification"
-    description = "Fast live-test tier (#133): fake-driven engine tests incl. refresh (#161) + throttle (#162). Runs on every PR."
+    description = "Fast live-test tier: fake-driven engine tests incl. refresh + throttle. Runs on every PR."
     useJUnit()
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath
@@ -81,14 +81,14 @@ tasks.register<Test>("liveTestRoutine") {
     }
 }
 
-// Slow nightly-tier task (#133). Admits the real-account live tests
+// Slow nightly-tier task. Admits the real-account live tests
 // (TrackingEngine{Internxt,OneDrive}LiveTest) in addition to the routine set.
 // Those tests still self-skip unless UNIDRIVE_INTEGRATION_TESTS=true and the
 // provider credentials are present, so this task is green on stock infra and
 // only does real work when a real account is wired up (the scheduled CI job).
 tasks.register<Test>("liveTestNightly") {
     group = "verification"
-    description = "Slow live-test tier (#133): includes real-account TrackingEngine live tests. For the nightly CI job."
+    description = "Slow live-test tier: includes real-account TrackingEngine live tests. For the nightly CI job."
     useJUnit()
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath

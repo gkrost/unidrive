@@ -1,6 +1,6 @@
 name: nightly-live-tests
 
-# #133: routine-vs-nightly live-test tiering.
+# Routine-vs-nightly live-test tiering.
 #
 # The routine (fast) tier runs on every PR via the `build` workflow
 # (`./gradlew check`, which runs the sync-tracking `test` task on the default

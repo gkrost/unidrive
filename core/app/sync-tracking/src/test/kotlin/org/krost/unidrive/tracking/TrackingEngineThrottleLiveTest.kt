@@ -10,12 +10,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * #162: throttling / 429-storm handling — structurally exercised through the
- * engine.
+ * Throttling / 429-storm handling — structurally exercised through the engine.
  *
- * The gap #162 names: neither real-account run tripped its provider's rate
- * limiter (Internxt at 195k files, OneDrive at 3,232 files), so the engine's
- * interaction with a throttle storm was never verified end-to-end.
+ * The gap this closes: real-account runs never tripped their provider's rate
+ * limiter (the natural request rate of a single bulk enumeration stayed under
+ * the limit), so the engine's interaction with a throttle storm was never
+ * verified end-to-end.
  *
  * The engine has no 429-retry of its own — the provider's `HttpRetryBudget`
  * (honour-Retry-After, circuit-breaker, concurrency-halving) absorbs the storm
@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * be read as remote-gone), and once the storm clears and a complete inventory
  * arrives, the engine converges to the correct plan.**
  *
- * These run on the ROUTINE tier (#133): deterministic, fake-driven, no network
+ * These run on the ROUTINE tier: deterministic, fake-driven, no network
  * or credentials, milliseconds to run.
  */
 class TrackingEngineThrottleLiveTest {
@@ -50,7 +50,7 @@ class TrackingEngineThrottleLiveTest {
     }
 
     /**
-     * INVARIANT (#162 safety): while a throttle storm forces partial
+     * INVARIANT (safety): while a throttle storm forces partial
      * enumerations, NO tracked path is deleted even though local copies are
      * gone and a permissive BatchGuard would otherwise wave the deletes
      * through. A throttled partial view is not authority to delete.
@@ -118,7 +118,7 @@ class TrackingEngineThrottleLiveTest {
     }
 
     /**
-     * INVARIANT (#162 convergence): once the storm clears and a COMPLETE
+     * INVARIANT (convergence): once the storm clears and a COMPLETE
      * inventory arrives, the engine converges to the correct plan — a genuine
      * remote deletion that happened is finally reaped, and surviving paths are
      * kept. Throttling delays convergence; it does not corrupt it.

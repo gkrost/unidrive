@@ -10,12 +10,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * #161: JWT / OAuth-refresh path — structurally exercised through the engine.
+ * JWT / OAuth-refresh path — structurally exercised through the engine.
  *
- * The gap #161 names: a 62-minute real Internxt enumeration produced ZERO
- * token-refresh log lines, and the 23.55 s OneDrive pass started minutes
- * after a fresh `auth`, so neither real-account run actually spanned a token
- * refresh. The live tests passed without proving the refresh path works.
+ * The gap this closes: long real-account enumerations produced ZERO
+ * token-refresh log lines, and short passes started just after a fresh `auth`,
+ * so neither real-account run actually spanned a token refresh. The live tests
+ * passed without proving the refresh path works.
  *
  * The tracking engine has no token logic of its own — refresh is owned by the
  * provider's HTTP client, which recovers a 401 mid-enumeration via a
@@ -28,9 +28,9 @@ import kotlin.test.assertTrue
  * does NOT propagate deletes** (an auth blip must never be read as
  * remote-gone).
  *
- * These run on the ROUTINE tier (#133): they use [FakeTrackingProvider]'s
- * refresh seam, are deterministic, need no network or credentials, and finish
- * in milliseconds — exactly the tests that belong on the per-PR loop the slow
+ * These run on the ROUTINE tier: they use [FakeTrackingProvider]'s refresh
+ * seam, are deterministic, need no network or credentials, and finish in
+ * milliseconds — exactly the tests that belong on the per-PR loop the slow
  * real-account live tests were evicted from.
  */
 class TrackingEngineRefreshLiveTest {
@@ -53,7 +53,7 @@ class TrackingEngineRefreshLiveTest {
     }
 
     /**
-     * INVARIANT (#161 happy path): a token that expires on the first
+     * INVARIANT (happy path): a token that expires on the first
      * enumeration call is transparently refreshed, the pass completes, the
      * refresh fired exactly once, and the plan is identical to the no-expiry
      * case (every remote file → DownloadRemote, zero deletes).
@@ -61,7 +61,7 @@ class TrackingEngineRefreshLiveTest {
      * Regression mode if this test is removed/loosened: a stale-token failure
      * mid-enumeration would never be reproduced in CI; production could surface
      * silent enumeration stalls or spurious deletes after the JWT TTL elapses
-     * on a long sync, exactly the #161 blind spot.
+     * on a long sync, exactly the blind spot this test closes.
      */
     @Test
     fun `token expiry mid-enumeration is transparently refreshed and the pass converges`() {
@@ -104,7 +104,7 @@ class TrackingEngineRefreshLiveTest {
     }
 
     /**
-     * INVARIANT (#161 safety): if the refresh itself fails (the 401 cannot be
+     * INVARIANT (safety): if the refresh itself fails (the 401 cannot be
      * recovered), the resulting enumeration is incomplete and the engine
      * suppresses EVERY delete — an auth failure must never be read as
      * remote-gone. Tracked rows survive; the next pass retries.
@@ -166,7 +166,7 @@ class TrackingEngineRefreshLiveTest {
     }
 
     /**
-     * INVARIANT (#161 observability): the refresh seam fires only when the
+     * INVARIANT (observability): the refresh seam fires only when the
      * token actually expires — a clean run performs ZERO refreshes. This pins
      * the seam itself so the happy-path test's `refreshCount == 1` is
      * meaningful (not an artefact of the fake always refreshing).
