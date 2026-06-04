@@ -8,7 +8,6 @@ logback = "1.5.34"
 picocli = "4.7.7"
 ktor = "3.4.3"
 shadow = "9.4.2"
-sshd = "2.18.0"
 bouncycastle = "1.84"
 eddsa = "0.3.0"
 playwright = "1.60.0"
@@ -36,8 +35,6 @@ ktor-client-java = { module = "io.ktor:ktor-client-java", version.ref = "ktor" }
 ktor-client-apache5 = { module = "io.ktor:ktor-client-apache5", version.ref = "ktor" }
 ktor-client-auth = { module = "io.ktor:ktor-client-auth", version.ref = "ktor" }
 ktor-client-mock = { module = "io.ktor:ktor-client-mock", version.ref = "ktor" }
-sshd-sftp = { module = "org.apache.sshd:sshd-sftp", version.ref = "sshd" }
-sshd-core = { module = "org.apache.sshd:sshd-core", version.ref = "sshd" }
 bcpkix-jdk18on = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
 bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
 eddsa = { module = "net.i2p.crypto:eddsa", version.ref = "eddsa" }
@@ -46,7 +43,6 @@ socket-io-client = { module = "io.socket:socket.io-client", version.ref = "socke
 
 [bundles]
 ktor-client = ["ktor-client-core", "ktor-client-cio", "ktor-client-content-negotiation", "ktor-serialization-kotlinx-json", "ktor-client-logging"]
-sshd = ["sshd-sftp", "sshd-core"]
 bouncycastle = ["bcpkix-jdk18on", "bcprov-jdk18on"]
 
 [plugins]
