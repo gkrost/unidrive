@@ -352,6 +352,34 @@ class SyncConfigTest {
         assertTrue(profile.syncRoot.toString().endsWith("OneDrive"))
     }
 
+    // The default sync-root directory name now comes from the provider's
+    // metadata (ProviderMetadata.syncRootDirName), not a hardcoded map in
+    // SyncConfig. These two tests pin both halves of that contract.
+
+    @Test
+    fun `defaultSyncRoot uses the provider metadata dir name when declared`() {
+        // The onedrive stub factory declares syncRootDirName = "OneDrive",
+        // mirroring the real factory. Title-casing the id would give
+        // "Onedrive" — asserting the exact casing proves the metadata value is
+        // used, not the fallback. Regression mode: existing OneDrive users
+        // silently get a new empty ~/Onedrive directory and their data looks gone.
+        assertTrue(
+            SyncConfig.defaultSyncRoot("onedrive").toString().endsWith("OneDrive"),
+            "onedrive must resolve to ~/OneDrive via provider metadata, not the ~/Onedrive title-case fallback",
+        )
+    }
+
+    @Test
+    fun `defaultSyncRoot title-cases the id when the provider declares no dir name`() {
+        // The internxt stub declares no syncRootDirName, so the layer falls
+        // back to title-casing the id. This is the default path every new
+        // provider gets for free without touching SyncConfig.
+        assertTrue(
+            SyncConfig.defaultSyncRoot("internxt").toString().endsWith("Internxt"),
+            "a provider with no syncRootDirName override must title-case its id",
+        )
+    }
+
     // ── detectDuplicateSyncRoots tests ──────────────────────────────────────
 
     @Test

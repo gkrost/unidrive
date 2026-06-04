@@ -66,6 +66,9 @@ open class OneDriveProviderFactory : ProviderFactory {
             benchmarkGrade = "A",
             maxConcurrentTransfers = 8,
             minRequestSpacingMs = 200L,
+            // Backwards-compat: existing users have a ~/OneDrive directory.
+            // Title-casing the id would give ~/Onedrive, silently orphaning it.
+            syncRootDirName = "OneDrive",
         )
 
     override fun create(

@@ -45,6 +45,11 @@ import java.nio.file.Path
  */
 abstract class StubProviderFactory(
     final override val id: String,
+    // Mirror the real factory's syncRootDirName so SyncConfig.defaultSyncRoot
+    // resolves the same directory name in :app:sync tests as in production.
+    // Null = title-case the id (the production default for providers that
+    // don't override it).
+    syncRootDirName: String? = null,
 ) : ProviderFactory {
     final override val metadata =
         ProviderMetadata(
@@ -58,6 +63,7 @@ abstract class StubProviderFactory(
             cloudActExposure = false,
             signupUrl = null,
             tier = "Test",
+            syncRootDirName = syncRootDirName,
         )
 
     final override fun create(
@@ -74,8 +80,10 @@ abstract class StubProviderFactory(
 /** UD-821: stub matching real `localfs` factory id. */
 class StubLocalfsFactory : StubProviderFactory("localfs")
 
-/** UD-821: stub matching real `onedrive` factory id. */
-class StubOnedriveFactory : StubProviderFactory("onedrive")
+/** UD-821: stub matching real `onedrive` factory id. Mirrors the real
+ *  factory's syncRootDirName ("OneDrive") so the default-sync-root resolution
+ *  test exercises the production directory name. */
+class StubOnedriveFactory : StubProviderFactory("onedrive", syncRootDirName = "OneDrive")
 
 /** UD-821: stub matching real `rclone` factory id. */
 class StubRcloneFactory : StubProviderFactory("rclone")

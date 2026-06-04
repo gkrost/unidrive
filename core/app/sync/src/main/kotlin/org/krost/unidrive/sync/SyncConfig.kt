@@ -455,24 +455,20 @@ data class SyncConfig(
             return parse(content, providerId)
         }
 
-        // UD-012: directory-name overrides for sync roots where the provider's
-        // metadata.displayName isn't the historically-shipped directory name.
-        // Kept narrow on purpose — we don't want a new in-tree provider to
-        // silently change a user's home-directory layout. New providers
-        // default to a Title-cased provider id (e.g. "sftp" → ~/Sftp).
-        //
-        // Previously this map lived inline with a single `"onedrive" to
-        // "OneDrive"` entry; the comment-as-source-of-truth role is unchanged,
-        // only the historical "onedrive" literal at the call site is gone
-        // (callers no longer pass it as a default).
-        private val syncRootDirNameOverrides =
-            mapOf(
-                // allow: UD-012 backwards-compat — preserves existing users' ~/OneDrive directory name.
-                "onedrive" to "OneDrive",
-            )
-
-        fun defaultSyncRoot(providerId: String): Path =
-            Paths.get(home, syncRootDirNameOverrides[providerId] ?: providerId.replaceFirstChar { it.uppercase() })
+        // The default sync-root directory name comes from the provider's own
+        // metadata (`ProviderMetadata.syncRootDirName`), so a provider
+        // self-declares any name that differs from the title-cased id. A
+        // provider that doesn't set it — and any id with no discovered
+        // metadata — defaults to a title-cased id (e.g. "sftp" → ~/Sftp).
+        // OneDrive declares "OneDrive" to preserve existing users' ~/OneDrive
+        // layout; without that, title-casing would resolve to ~/Onedrive.
+        // This is the last provider-name dispatch site removed from SyncConfig.
+        fun defaultSyncRoot(providerId: String): Path {
+            val dirName =
+                org.krost.unidrive.ProviderRegistry.getMetadata(providerId)?.syncRootDirName
+                    ?: providerId.replaceFirstChar { it.uppercase() }
+            return Paths.get(home, dirName)
+        }
 
         val KNOWN_TYPES: Set<String> get() = org.krost.unidrive.ProviderRegistry.knownTypes
 
