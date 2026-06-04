@@ -41,6 +41,28 @@ class ProviderMetadataTest {
         }
     }
 
+    @Test
+    fun `syncRootDirName defaults to null and round-trips when set`() {
+        // Default: a provider that doesn't declare a sync-root dir name leaves
+        // the field null, which SyncConfig reads as "title-case the id".
+        val noOverride =
+            ProviderMetadata(
+                id = "x",
+                displayName = "X",
+                description = "d",
+                authType = "a",
+                encryption = "e",
+                jurisdiction = "j",
+                gdprCompliant = true,
+                cloudActExposure = false,
+                signupUrl = null,
+                tier = "Test",
+            )
+        assertNull(noOverride.syncRootDirName, "syncRootDirName must default to null")
+        // Set: the declared value is carried verbatim (the OneDrive case).
+        assertEquals("OneDrive", noOverride.copy(syncRootDirName = "OneDrive").syncRootDirName)
+    }
+
     // UD-810 audit: renamed from `allMetadata returns list`. The body's
     // for-loop runs 0 iterations when the provider classpath is empty
     // (the case in :app:core, where provider modules are not on the
