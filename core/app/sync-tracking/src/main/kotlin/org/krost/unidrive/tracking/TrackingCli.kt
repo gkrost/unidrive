@@ -46,7 +46,7 @@ class TrackingCliExtension : CliExtension {
 @Command(
     name = "ts",
     description = [
-        "Tracking-set sync engine (EXPERIMENTAL — not yet verified against real providers).",
+        "Tracking-set sync engine (experimental — not yet the default engine).",
         "Subcommands: sync, claim, unclaim, status.",
     ],
     mixinStandardHelpOptions = true,
@@ -150,7 +150,7 @@ class TsSyncCommand : Runnable {
 
     override fun run() {
         System.err.println(
-            "EXPERIMENTAL: tracking-set engine not yet verified against real Internxt/OneDrive. " +
+            "EXPERIMENTAL: tracking-set engine is not yet the default sync engine. " +
                 "Use --dry-run first.",
         )
         val autoMatch =
