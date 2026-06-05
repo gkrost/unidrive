@@ -266,8 +266,12 @@ class FakeTrackingProvider : CloudProvider {
         deletedPaths += remotePath
     }
 
-    override suspend fun createFolder(path: String): CloudItem =
-        CloudItem(
+    /** Remote folders created via createFolder/createFolders, for test assertions. */
+    val createdFolders: MutableList<String> = mutableListOf()
+
+    override suspend fun createFolder(path: String): CloudItem {
+        createdFolders += path
+        return CloudItem(
             id = "folder-$path",
             name = path.substringAfterLast('/'),
             path = path,
@@ -278,6 +282,7 @@ class FakeTrackingProvider : CloudProvider {
             hash = null,
             mimeType = null,
         )
+    }
 
     override suspend fun move(
         fromPath: String,
