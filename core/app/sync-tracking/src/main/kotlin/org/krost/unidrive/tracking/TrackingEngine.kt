@@ -141,11 +141,12 @@ class TrackingEngine(
 
             val applied = if (dryRun) emptyList() else applyActions(effectivePlan)
 
-            // After file deletes land, reap any remote directory they emptied. The
+            // After file deletes land, reap any remote directory they emptied (and
+            // retry any directory whose reap was deferred on an earlier pass). The
             // engine tracks files only (folders are skipped in enumeration), so a
             // locally-deleted folder otherwise leaves an empty remote-directory
-            // shell behind. Apply-only: dry-run deletes nothing, so nothing is
-            // reaped.
+            // shell behind. Apply-only: dry-run deletes nothing and retries
+            // nothing.
             val reapedDirs =
                 if (dryRun) {
                     emptyList()
@@ -297,52 +298,82 @@ class TrackingEngine(
     }
 
     /**
-     * Reap remote directories emptied by this pass's file deletions.
+     * Reap remote directories emptied by file deletions.
      *
      * The engine tracks files only, so a locally-deleted folder propagates its
-     * file deletions but leaves the empty remote directory behind. This walks the
-     * ancestor directories of every successfully-deleted file and deletes those
-     * that are now empty remotely.
+     * file deletions but leaves the empty remote directory behind. This deletes
+     * those now-empty directories.
+     *
+     * Candidate set = the ancestor directories of every file deleted THIS pass
+     * (`deletedFilePaths`) UNION the directories whose reap was deferred on an
+     * earlier pass ([TrackingSet.pendingReaps]). The persisted set is what makes
+     * reaping converge: the tracking row for a deleted file is removed the moment
+     * its delete succeeds, so a directory skipped on the pass that emptied it
+     * would otherwise never re-appear as a candidate. Persisting the deferral and
+     * replaying it each pass gives an eventually-consistent provider time to
+     * settle.
+     *
+     * Per candidate, after listing its children:
+     *  - **empty** → delete it. On success, clear it from the pending set; on a
+     *    provider error, persist it for retry on a later pass.
+     *  - **non-empty** → it has a surviving child. If a TRACKED file still lives
+     *    under it, the directory is legitimately populated and is retired from
+     *    the pending set (not ours to reap). If no tracked descendant remains,
+     *    the listing is treated as not-yet-consistent (a just-trashed file still
+     *    shown) and the directory is persisted for a retry.
      *
      * Safety:
      *  - **Empty-verify before delete.** Some providers (Internxt) trash a folder
      *    by CASCADING its whole subtree — so a delete on a non-empty directory
      *    would take untracked children with it. We never rely on the provider to
-     *    refuse a non-empty directory; we confirm emptiness via [CloudProvider.listChildren]
-     *    first and skip any directory that still has a non-deleted child. A
-     *    not-yet-consistent listing (e.g. a just-trashed file still shown) reads
-     *    as non-empty → skipped this pass → reaped on a later pass once the
-     *    listing settles. Worst case is the empty directory persists one extra
-     *    pass — the same as today, never a wrong deletion.
+     *    refuse a non-empty directory; the [CloudProvider.listChildren] gate above
+     *    is the primary guard. A wrong deletion is never issued.
      *  - **Deepest-first**, so a nested empty tree collapses bottom-up: reaping
      *    `/a/b/c` first lets `/a/b` then become empty and be reaped in the same pass.
      *  - **Sync root is never a candidate** (ancestor walk is root-exclusive).
-     *  - **Best-effort.** A provider error on one directory is logged and skipped;
-     *    it never aborts the pass.
+     *  - **Best-effort.** A provider error on one directory is logged, persisted
+     *    for retry, and skipped; it never aborts the pass.
      */
     private suspend fun reapEmptyDirs(deletedFilePaths: List<String>): List<String> {
-        if (deletedFilePaths.isEmpty()) return emptyList()
+        val thisPassCandidates = deletedFilePaths.flatMap { ancestorDirsToRoot(it) }
         val candidates =
-            deletedFilePaths
-                .flatMap { ancestorDirsToRoot(it) }
+            (thisPassCandidates + trackingSet.pendingReaps())
                 .distinct()
                 // Deepest paths first so children are reaped before their parents.
                 .sortedByDescending { it.count { ch -> ch == '/' } }
+        if (candidates.isEmpty()) return emptyList()
+
+        val trackedPaths = trackingSet.paths()
         val reaped = mutableListOf<String>()
         for (dir in candidates) {
             try {
                 val children = provider.listChildren(dir)
                 val stillPopulated = children.any { !it.deleted }
-                if (stillPopulated) continue
+                if (stillPopulated) {
+                    // A tracked file under this dir means it is legitimately
+                    // populated → retire it. Otherwise the listing is treated as
+                    // lagging → persist for a retry.
+                    val prefix = "$dir/"
+                    val hasTrackedChild = trackedPaths.any { it.startsWith(prefix) }
+                    if (hasTrackedChild) {
+                        trackingSet.removePendingReap(dir)
+                    } else {
+                        trackingSet.addPendingReap(dir)
+                    }
+                    continue
+                }
                 provider.delete(dir)
+                trackingSet.removePendingReap(dir)
                 reaped += dir
-            } catch (_: org.krost.unidrive.FolderNotEmptyException) {
-                // Provider refused a non-empty directory — leave it. Not all
-                // providers raise this (Internxt cascades), which is why the
-                // listChildren gate above is the primary guard.
-                log.debug("Skipped reaping non-empty directory: {}", dir)
+            } catch (e: org.krost.unidrive.FolderNotEmptyException) {
+                // Provider refused a non-empty directory — leave it but retry
+                // later. Not all providers raise this (Internxt cascades), which
+                // is why the listChildren gate above is the primary guard.
+                log.debug("Skipped reaping non-empty directory {}: {}", dir, e.message)
+                trackingSet.addPendingReap(dir)
             } catch (e: Exception) {
                 log.warn("Failed to reap empty directory {}: {}", dir, e.message)
+                trackingSet.addPendingReap(dir)
             }
         }
         return reaped

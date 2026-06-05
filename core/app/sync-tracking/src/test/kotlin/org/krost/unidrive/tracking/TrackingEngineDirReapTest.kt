@@ -193,4 +193,113 @@ class TrackingEngineDirReapTest {
             tracking.close()
         }
     }
+
+    /**
+     * CONVERGENCE INVARIANT (the review finding): a directory whose listing lags
+     * on the pass that empties it (a just-trashed file still shown) is NOT
+     * reaped that pass, but IS reaped on a later pass once the listing settles —
+     * because the deferral is persisted. The file's tracking row is gone after
+     * its delete, so without persistence the directory would never be revisited.
+     */
+    @Test
+    fun `a dir whose listing lags is reaped on a later pass`() {
+        seedAndDeleteLocal("/a/b/file.txt")
+        // The directories report a phantom child on their first listing this pass.
+        provider.lagDirsOnce += "/a/b"
+        provider.lagDirsOnce += "/a"
+
+        // Pass 1: empties the file, but the lagging listing blocks the reap.
+        val t1 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val r1 = TrackingEngine(provider, t1, syncRoot, batchGuard = permissive).syncOnce()
+            assertTrue(r1.reapedDirs.isEmpty(), "lagging listing must defer the reap")
+            assertEquals(
+                setOf("/a/b", "/a"),
+                t1.pendingReaps(),
+                "deferred directories must be persisted for retry",
+            )
+        } finally {
+            t1.close()
+        }
+
+        // Pass 2: nothing new deleted, but the persisted candidates retry and
+        // (listing now settled) reap. Deepest-first.
+        val t2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val r2 = TrackingEngine(provider, t2, syncRoot, batchGuard = permissive).syncOnce()
+            assertEquals(listOf("/a/b", "/a"), r2.reapedDirs, "persisted candidates must reap once the listing settles")
+            assertTrue(t2.pendingReaps().isEmpty(), "a reaped directory must be cleared from the pending set")
+        } finally {
+            t2.close()
+        }
+    }
+
+    /**
+     * CONVERGENCE INVARIANT: a directory whose delete fails is persisted and
+     * retried on the next pass, succeeding once the provider recovers.
+     */
+    @Test
+    fun `a dir whose delete fails is retried and reaped next pass`() {
+        seedAndDeleteLocal("/x/y/file.txt")
+        provider.failDeleteDirs += "/x/y"
+
+        val t1 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val r1 = TrackingEngine(provider, t1, syncRoot, batchGuard = permissive).syncOnce()
+            assertFalse(r1.reapedDirs.contains("/x/y"), "the failing delete must not report a reap")
+            assertTrue(t1.pendingReaps().contains("/x/y"), "the failed directory must be persisted for retry")
+        } finally {
+            t1.close()
+        }
+
+        provider.failDeleteDirs.clear() // provider recovers
+        val t2 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val r2 = TrackingEngine(provider, t2, syncRoot, batchGuard = permissive).syncOnce()
+            assertTrue(r2.reapedDirs.contains("/x/y"), "the recovered directory must reap on retry")
+            assertFalse(t2.pendingReaps().contains("/x/y"), "a reaped directory must be cleared from the pending set")
+        } finally {
+            t2.close()
+        }
+    }
+
+    /**
+     * RETIREMENT INVARIANT: a persisted candidate that turns out to hold a
+     * TRACKED file (legitimately populated, not lag) is dropped from the pending
+     * set rather than retried forever.
+     */
+    @Test
+    fun `a persisted candidate with a tracked child is retired not retried`() {
+        // Sync two files in the same dir; delete one locally.
+        provider.files["/dir/keep.txt"] = "keep".toByteArray()
+        provider.files["/dir/gone.txt"] = "gone".toByteArray()
+        val t0 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            TrackingEngine(provider, t0, syncRoot).syncOnce()
+            // Pre-seed a stale pending-reap for the dir (as if an earlier pass deferred it).
+            t0.addPendingReap("/dir")
+        } finally {
+            t0.close()
+        }
+        Files.delete(syncRoot.resolve("dir/gone.txt"))
+        val tcur = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            tcur.saveDeltaCursor(null)
+        } finally {
+            tcur.close()
+        }
+
+        val t1 = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val r1 = TrackingEngine(provider, t1, syncRoot, batchGuard = permissive).syncOnce()
+            assertTrue(r1.reapedDirs.isEmpty(), "a dir with a surviving tracked file must not be reaped")
+            assertFalse(
+                t1.pendingReaps().contains("/dir"),
+                "a dir with a tracked child must be retired from the pending set, not retried forever",
+            )
+            assertTrue(provider.files.containsKey("/dir/keep.txt"), "the tracked sibling must survive")
+        } finally {
+            t1.close()
+        }
+    }
 }

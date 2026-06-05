@@ -171,12 +171,25 @@ class FakeTrackingProvider : CloudProvider {
     val failDeleteDirs: MutableSet<String> = mutableSetOf()
 
     /**
+     * Test hook: directory paths that report one phantom child on the FIRST
+     * [listChildren] call and then settle to their real (empty) contents —
+     * modelling an eventually-consistent provider's read-after-write lag where a
+     * just-trashed file lingers in the listing for one pass. A path is removed
+     * from this set the first time it is listed.
+     */
+    val lagDirsOnce: MutableSet<String> = mutableSetOf()
+
+    /**
      * Immediate children of [path], derived from the [files] map: files directly
      * under [path] plus one synthesized folder item per immediate subdirectory.
      * A normalised "/" matches the root. Lets the engine verify a directory is
      * empty before reaping it.
      */
     override suspend fun listChildren(path: String): List<CloudItem> {
+        if (lagDirsOnce.remove(path)) {
+            // First listing after a delete: pretend a stale child is still shown.
+            return listOf(itemFor("$path/.__lagging__", ByteArray(0)))
+        }
         val prefix = if (path == "/") "/" else "$path/"
         val out = mutableListOf<CloudItem>()
         val seenDirs = mutableSetOf<String>()
