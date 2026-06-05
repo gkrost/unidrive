@@ -88,8 +88,13 @@ internal data class TsContext(
             val services =
                 servicesRef
                     ?: error("Tracking-set extension was not initialised with CliServices — internal wiring bug")
+            // Precedence: an explicit per-subcommand `-p` wins; otherwise honour
+            // the global `-p` the user gave the root command (so
+            // `unidrive -p X ts sync` resolves to X); otherwise fall back to the
+            // first configured profile.
             val profileName =
                 profileOpt
+                    ?: services.resolvedGlobalProfile()
                     ?: services.listProfileNames().firstOrNull()
                     ?: error("No profiles configured. Run `unidrive profile add <type> <name>` first.")
             val configDir = services.configBaseDir().resolve(profileName)

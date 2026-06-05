@@ -85,6 +85,15 @@ interface CliServices {
 
     fun listProfileNames(): List<String>
 
+    /**
+     * The profile the user selected with the global `-p/--profile` option on
+     * the root command, or null if none was given. Extensions that add their
+     * own subcommands should consult this so a root-level `unidrive -p X <ext>`
+     * resolves to X, rather than falling back to a default profile when the
+     * extension's own per-subcommand option is absent.
+     */
+    fun resolvedGlobalProfile(): String?
+
     val unidriveVersion: String
 
     /** Terminal formatting helper; honours NO_COLOR / non-TTY environments. */
