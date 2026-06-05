@@ -1718,6 +1718,13 @@ open class SyncEngine(
             promotePendingCursor()
         }
 
+        // Reap remote directories emptied by this pass's remote file deletions.
+        // The reconciler's folder-delete is gated by the never-hydrated-folder
+        // guard, so an emptied remote directory is otherwise left behind. This
+        // deletes only directories verified empty via listChildren, so it never
+        // removes content the guard exists to protect.
+        reapEmptyRemoteDirs(actions)
+
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(
             downloaded.get(),
@@ -1726,6 +1733,68 @@ open class SyncEngine(
             duration,
             failed = passOneFailures.get() + transferFailures.get(),
         )
+    }
+
+    /**
+     * Delete remote directories emptied by this pass's remote file deletions.
+     *
+     * The reconciler skips DeleteRemote for never-hydrated folder rows (a guard
+     * against the accidental mass-deletion of remote folders the user never saw
+     * locally). A side effect: when the FILES inside a remote folder are deleted,
+     * the now-empty folder is left behind as a shell. This reaps those shells.
+     *
+     * Safety:
+     *  - **Empty-verify before delete.** A directory is deleted only if a live
+     *    `listChildren` shows no surviving child. We never trust the provider to
+     *    refuse a non-empty directory (some providers cascade a folder delete
+     *    over the whole subtree), so the listing is the guard. This also keeps
+     *    the never-hydrated guard's intent intact: an EMPTY directory has no
+     *    content to lose, so reaping it does not delete anything the user never
+     *    saw.
+     *  - **Scoped to this pass.** Only directories that were ancestors of a file
+     *    deleted on this pass are candidates — never an arbitrary sweep of
+     *    remote directories.
+     *  - **Deepest-first**, so a nested empty tree collapses bottom-up.
+     *  - **Best-effort.** A provider error on one directory is logged and
+     *    skipped; it never fails the pass.
+     */
+    private suspend fun reapEmptyRemoteDirs(actions: List<SyncAction>) {
+        val deletedRemoteFiles =
+            actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
+        if (deletedRemoteFiles.isEmpty()) return
+        val candidates =
+            deletedRemoteFiles
+                .flatMap { ancestorDirsToSyncRoot(it) }
+                .distinct()
+                .sortedByDescending { it.count { ch -> ch == '/' } }
+        for (dir in candidates) {
+            try {
+                val children = provider.listChildren(dir).filterNot { it.deleted }
+                if (children.isNotEmpty()) continue
+                provider.delete(dir)
+                db.getEntry(dir)?.let { db.deleteEntry(dir) }
+                log.debug("Reaped empty remote directory: {}", dir)
+            } catch (e: Exception) {
+                log.warn("Failed to reap empty remote directory {}: {}", dir, e.message)
+            }
+        }
+    }
+
+    /**
+     * Ancestor directories of [filePath], immediate parent up to — but not
+     * including — the sync root. `/a/b/c.txt` → `["/a/b", "/a"]`; a root-level
+     * file → `[]`, so the sync root is never a reap candidate.
+     */
+    private fun ancestorDirsToSyncRoot(filePath: String): List<String> {
+        val out = mutableListOf<String>()
+        var current = filePath
+        while (true) {
+            val slash = current.lastIndexOf('/')
+            if (slash <= 0) break
+            current = current.substring(0, slash)
+            out += current
+        }
+        return out
     }
 
     private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
