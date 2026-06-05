@@ -961,6 +961,75 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `empty remote directory is reaped after its last file is deleted`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A tracked file under /dir whose local copy is gone → DeleteRemote.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/dir/only.txt",
+                    remoteId = "id-only",
+                    remoteHash = "h",
+                    remoteSize = 10,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 10,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            // After the file delete, /dir lists no children → reapable.
+            provider.childrenByParent["/dir"] = emptyList()
+            Files.writeString(syncRoot.resolve("other.txt"), "keep") // satisfy empty-root guard
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertTrue(provider.deletedPaths.contains("/dir/only.txt"), "the file must be deleted")
+            assertTrue(
+                provider.deletedPaths.contains("/dir"),
+                "the now-empty directory must be reaped; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    @Test
+    fun `remote directory with a surviving sibling is NOT reaped`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/dir/gone.txt",
+                    remoteId = "id-gone",
+                    remoteHash = "h",
+                    remoteSize = 10,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 10,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            // /dir still has a surviving child after the delete → must NOT be reaped.
+            provider.childrenByParent["/dir"] = listOf(cloudItem("/dir/keep.txt", size = 5))
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertTrue(provider.deletedPaths.contains("/dir/gone.txt"), "the file must be deleted")
+            assertFalse(
+                provider.deletedPaths.contains("/dir"),
+                "a directory with a surviving child must NOT be reaped; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    @Test
     fun `#137 bidirectional with empty sync_root and hydrated DB still fires the empty-sync_root guard`() =
         runTest {
             // Data-safety preserved: bidirectional sync with empty local + hydrated DB
