@@ -196,6 +196,54 @@ class TrackingEngineIntegrationTest {
     }
 
     /**
+     * Two-way: a file created locally that the remote doesn't have is
+     * uploaded, becomes tracked, and the next pass is a no-op. This is the
+     * first-upload path — without it, `ts sync` can download/delete/modify but
+     * cannot push a user's new file to the cloud.
+     */
+    @Test
+    fun `first-upload — a new local file is uploaded and then a no-op`() {
+        Files.createDirectories(syncRoot)
+        Files.write(syncRoot.resolve("new.txt"), "fresh".toByteArray())
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val first = engine(tracking = tracking).syncOnce()
+            assertEquals(1, first.plan.size, "expected one upload action, was ${first.plan}")
+            assertTrue(first.plan.single() is ReconcileAction.UploadLocal, "expected UploadLocal, was ${first.plan}")
+            assertTrue(provider.files.containsKey("/new.txt"), "the new file must be uploaded to the remote")
+            assertEquals("fresh", String(provider.files["/new.txt"]!!))
+            assertEquals(1, tracking.countsByState()[TrackState.TrackedSynced])
+
+            val second = engine(tracking = tracking).syncOnce()
+            assertEquals(0, second.plan.size, "second pass should be a no-op, was ${second.plan}")
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
+     * First-upload of a file in a NOT-YET-EXISTING remote directory: the engine
+     * must create the parent directory chain before uploading, otherwise the
+     * upload fails with "folder not found". Regression guard for the
+     * subdirectory case (a root-level upload alone does not exercise it).
+     */
+    @Test
+    fun `first-upload — a new local file in a nested dir creates parents then uploads`() {
+        Files.createDirectories(syncRoot.resolve("a/b"))
+        Files.write(syncRoot.resolve("a/b/deep.txt"), "nested".toByteArray())
+        val tracking = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = tracking).syncOnce()
+            assertTrue(provider.createdFolders.contains("/a"), "parent /a must be created; got ${provider.createdFolders}")
+            assertTrue(provider.createdFolders.contains("/a/b"), "parent /a/b must be created; got ${provider.createdFolders}")
+            assertTrue(provider.files.containsKey("/a/b/deep.txt"), "the nested file must be uploaded")
+            assertEquals("nested", String(provider.files["/a/b/deep.txt"]!!))
+        } finally {
+            tracking.close()
+        }
+    }
+
+    /**
      * Sanity: a tracked path that disappears locally DOES produce a
      * delete intent — the engine is not paralysed, only protected
      * against untracked-path deletion.

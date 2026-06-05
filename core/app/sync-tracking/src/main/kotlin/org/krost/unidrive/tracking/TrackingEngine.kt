@@ -269,11 +269,44 @@ class TrackingEngine(
             )
         trackingSet.upsert(pending)
 
+        // Ensure the remote parent directories exist before uploading a new file
+        // into them — a first upload of /a/b/c.txt must create /a, then /a/b.
+        // Create them ONE AT A TIME shallowest-first: a child folder can only be
+        // created once its parent exists, so a single batch call (which may try
+        // to create /a/b before /a commits) is not enough. createFolder tolerates
+        // an already-existing folder, so this is idempotent.
+        if (existing?.remoteFileId == null) {
+            for (dir in ancestorDirsToRoot(path).reversed()) { // shallowest-first
+                try {
+                    provider.createFolder(dir)
+                } catch (e: Exception) {
+                    log.debug("createFolder {} raised (likely already exists): {}", dir, e.message)
+                }
+            }
+        }
+
         val uploaded = provider.upload(src, path, existingRemoteId = existing?.remoteFileId)
         val l = observeLocal(path)
         val r = observeRemote(path).copy(remoteFileId = uploaded.id, etag = uploaded.hash, hash = uploaded.hash, size = uploaded.size)
         trackingSet.adopt(path, provider.id, l, r)
         return AppliedAction(action, ApplyOutcome.SUCCESS, null)
+    }
+
+    /**
+     * Ancestor directories of [filePath], immediate parent up to — but not
+     * including — the sync root. `/a/b/c.txt` → `["/a/b", "/a"]`; a root-level
+     * file → `[]`.
+     */
+    private fun ancestorDirsToRoot(filePath: String): List<String> {
+        val out = mutableListOf<String>()
+        var current = filePath
+        while (true) {
+            val slash = current.lastIndexOf('/')
+            if (slash <= 0) break
+            current = current.substring(0, slash)
+            out += current
+        }
+        return out
     }
 
     private suspend fun applyPropagateLocalDelete(action: ReconcileAction.PropagateLocalDelete): AppliedAction {
@@ -377,24 +410,6 @@ class TrackingEngine(
             }
         }
         return reaped
-    }
-
-    /**
-     * Ancestor directories of [filePath], from the immediate parent up to — but
-     * NOT including — the sync root. `/a/b/c.txt` → `["/a/b", "/a"]`. Returns
-     * empty for a root-level file (`/top.txt` → `[]`), so the sync root is never
-     * a reap candidate.
-     */
-    private fun ancestorDirsToRoot(filePath: String): List<String> {
-        val out = mutableListOf<String>()
-        var current = filePath
-        while (true) {
-            val slash = current.lastIndexOf('/')
-            if (slash <= 0) break // no parent above root
-            current = current.substring(0, slash)
-            out += current
-        }
-        return out
     }
 
     // ---- observation helpers ----

@@ -58,10 +58,13 @@ class TrackingReconciler(
                 )
             }
 
-            // Pure-local untracked: invisible to deletion logic. Engine will not
-            // upload it until the user `ts claim`s it. That keeps drop-a-file-into-
-            // sync_root from auto-uploading on next sync — explicit-only.
-            if (local.exists && !remote.exists) return ReconcileAction.NoOp(path)
+            // Pure-local untracked: a file created locally that the remote does
+            // not have yet → upload it. This is the first-upload path, symmetric
+            // with pure-remote-untracked → DownloadRemote below, and is what makes
+            // the engine genuinely two-way (drop a file into sync_root, `ts sync`
+            // pushes it). It is an UPLOAD only — untracked paths still never
+            // produce a delete, so the lemma holds.
+            if (local.exists && !remote.exists) return ReconcileAction.UploadLocal(path)
 
             // Pure-remote untracked: download. This is how first-sync from a
             // populated remote works — every remote path is untracked, every one
