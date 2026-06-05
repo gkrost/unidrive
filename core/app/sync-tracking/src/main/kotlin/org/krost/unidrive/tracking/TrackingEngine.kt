@@ -270,16 +270,17 @@ class TrackingEngine(
         trackingSet.upsert(pending)
 
         // Ensure the remote parent directories exist before uploading a new file
-        // into them — a first upload of /a/b/c.txt must create /a then /a/b. The
-        // provider's createFolder tolerates already-existing folders, so creating
-        // the chain shallowest-first is safe and idempotent.
+        // into them — a first upload of /a/b/c.txt must create /a, then /a/b.
+        // Create them ONE AT A TIME shallowest-first: a child folder can only be
+        // created once its parent exists, so a single batch call (which may try
+        // to create /a/b before /a commits) is not enough. createFolder tolerates
+        // an already-existing folder, so this is idempotent.
         if (existing?.remoteFileId == null) {
-            val ancestors = ancestorDirsToRoot(path).reversed() // shallowest-first
-            if (ancestors.isNotEmpty()) {
+            for (dir in ancestorDirsToRoot(path).reversed()) { // shallowest-first
                 try {
-                    provider.createFolders(ancestors)
+                    provider.createFolder(dir)
                 } catch (e: Exception) {
-                    log.debug("createFolders for {} ancestors raised (likely already exist): {}", path, e.message)
+                    log.debug("createFolder {} raised (likely already exists): {}", dir, e.message)
                 }
             }
         }
