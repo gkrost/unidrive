@@ -27,6 +27,8 @@ class CliExtensionLoaderTest {
 
             override fun listProfileNames() = emptyList<String>()
 
+            override fun resolvedGlobalProfile(): String? = null
+
             override val unidriveVersion = "test"
             override val formatter =
                 object : org.krost.unidrive.cli.ext.Formatter {
