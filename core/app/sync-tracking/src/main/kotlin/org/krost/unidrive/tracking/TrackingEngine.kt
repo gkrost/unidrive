@@ -141,6 +141,30 @@ class TrackingEngine(
 
             val applied = if (dryRun) emptyList() else applyActions(effectivePlan)
 
+            // After file deletes land, reap any remote directory they emptied (and
+            // retry any directory whose reap was deferred on an earlier pass). The
+            // engine tracks files only (folders are skipped in enumeration), so a
+            // locally-deleted folder otherwise leaves an empty remote-directory
+            // shell behind. Apply-only: dry-run deletes nothing and retries
+            // nothing.
+            val reapedDirs =
+                if (dryRun) {
+                    emptyList()
+                } else {
+                    // PropagateLocalDelete renders as "del-remote": the local file
+                    // vanished, so its remote counterpart was deleted via
+                    // provider.delete. Those are the deletions that can empty a
+                    // remote directory.
+                    val deletedFilePaths =
+                        applied
+                            .filter {
+                                it.outcome == ApplyOutcome.SUCCESS &&
+                                    it.action is ReconcileAction.PropagateLocalDelete
+                            }
+                            .map { it.action.path }
+                    reapEmptyDirs(deletedFilePaths)
+                }
+
             PassReport(
                 plan = plan,
                 effectivePlan = effectivePlan,
@@ -150,6 +174,7 @@ class TrackingEngine(
                 guardVerdict = verdict,
                 remoteEnumerationComplete = remoteEnum.complete,
                 cleanedUp = cleanedUp,
+                reapedDirs = reapedDirs,
             )
         }
 
@@ -270,6 +295,106 @@ class TrackingEngine(
         Files.deleteIfExists(local)
         trackingSet.remove(path)
         return AppliedAction(action, ApplyOutcome.SUCCESS, null)
+    }
+
+    /**
+     * Reap remote directories emptied by file deletions.
+     *
+     * The engine tracks files only, so a locally-deleted folder propagates its
+     * file deletions but leaves the empty remote directory behind. This deletes
+     * those now-empty directories.
+     *
+     * Candidate set = the ancestor directories of every file deleted THIS pass
+     * (`deletedFilePaths`) UNION the directories whose reap was deferred on an
+     * earlier pass ([TrackingSet.pendingReaps]). The persisted set is what makes
+     * reaping converge: the tracking row for a deleted file is removed the moment
+     * its delete succeeds, so a directory skipped on the pass that emptied it
+     * would otherwise never re-appear as a candidate. Persisting the deferral and
+     * replaying it each pass gives an eventually-consistent provider time to
+     * settle.
+     *
+     * Per candidate, after listing its children:
+     *  - **empty** → delete it. On success, clear it from the pending set; on a
+     *    provider error, persist it for retry on a later pass.
+     *  - **non-empty** → it has a surviving child. If a TRACKED file still lives
+     *    under it, the directory is legitimately populated and is retired from
+     *    the pending set (not ours to reap). If no tracked descendant remains,
+     *    the listing is treated as not-yet-consistent (a just-trashed file still
+     *    shown) and the directory is persisted for a retry.
+     *
+     * Safety:
+     *  - **Empty-verify before delete.** Some providers (Internxt) trash a folder
+     *    by CASCADING its whole subtree — so a delete on a non-empty directory
+     *    would take untracked children with it. We never rely on the provider to
+     *    refuse a non-empty directory; the [CloudProvider.listChildren] gate above
+     *    is the primary guard. A wrong deletion is never issued.
+     *  - **Deepest-first**, so a nested empty tree collapses bottom-up: reaping
+     *    `/a/b/c` first lets `/a/b` then become empty and be reaped in the same pass.
+     *  - **Sync root is never a candidate** (ancestor walk is root-exclusive).
+     *  - **Best-effort.** A provider error on one directory is logged, persisted
+     *    for retry, and skipped; it never aborts the pass.
+     */
+    private suspend fun reapEmptyDirs(deletedFilePaths: List<String>): List<String> {
+        val thisPassCandidates = deletedFilePaths.flatMap { ancestorDirsToRoot(it) }
+        val candidates =
+            (thisPassCandidates + trackingSet.pendingReaps())
+                .distinct()
+                // Deepest paths first so children are reaped before their parents.
+                .sortedByDescending { it.count { ch -> ch == '/' } }
+        if (candidates.isEmpty()) return emptyList()
+
+        val trackedPaths = trackingSet.paths()
+        val reaped = mutableListOf<String>()
+        for (dir in candidates) {
+            try {
+                val children = provider.listChildren(dir)
+                val stillPopulated = children.any { !it.deleted }
+                if (stillPopulated) {
+                    // A tracked file under this dir means it is legitimately
+                    // populated → retire it. Otherwise the listing is treated as
+                    // lagging → persist for a retry.
+                    val prefix = "$dir/"
+                    val hasTrackedChild = trackedPaths.any { it.startsWith(prefix) }
+                    if (hasTrackedChild) {
+                        trackingSet.removePendingReap(dir)
+                    } else {
+                        trackingSet.addPendingReap(dir)
+                    }
+                    continue
+                }
+                provider.delete(dir)
+                trackingSet.removePendingReap(dir)
+                reaped += dir
+            } catch (e: org.krost.unidrive.FolderNotEmptyException) {
+                // Provider refused a non-empty directory — leave it but retry
+                // later. Not all providers raise this (Internxt cascades), which
+                // is why the listChildren gate above is the primary guard.
+                log.debug("Skipped reaping non-empty directory {}: {}", dir, e.message)
+                trackingSet.addPendingReap(dir)
+            } catch (e: Exception) {
+                log.warn("Failed to reap empty directory {}: {}", dir, e.message)
+                trackingSet.addPendingReap(dir)
+            }
+        }
+        return reaped
+    }
+
+    /**
+     * Ancestor directories of [filePath], from the immediate parent up to — but
+     * NOT including — the sync root. `/a/b/c.txt` → `["/a/b", "/a"]`. Returns
+     * empty for a root-level file (`/top.txt` → `[]`), so the sync root is never
+     * a reap candidate.
+     */
+    private fun ancestorDirsToRoot(filePath: String): List<String> {
+        val out = mutableListOf<String>()
+        var current = filePath
+        while (true) {
+            val slash = current.lastIndexOf('/')
+            if (slash <= 0) break // no parent above root
+            current = current.substring(0, slash)
+            out += current
+        }
+        return out
     }
 
     // ---- observation helpers ----
@@ -555,6 +680,12 @@ data class PassReport(
     val remoteEnumerationComplete: Boolean = true,
     /** Tracked paths removed because both local and remote vanished (spec "both gone" cleanup). */
     val cleanedUp: List<String> = emptyList(),
+    /**
+     * Remote directories deleted because this pass's file deletions emptied them.
+     * Apply-only (empty in dry-run); each was verified empty via `listChildren`
+     * before deletion. Deepest-first.
+     */
+    val reapedDirs: List<String> = emptyList(),
 ) {
     fun deleteCount(): Int =
         plan.count {

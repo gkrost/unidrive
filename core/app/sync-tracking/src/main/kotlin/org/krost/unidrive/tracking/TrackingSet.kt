@@ -68,6 +68,23 @@ interface TrackingSet {
      * incomplete pass must leave the prior cursor untouched.
      */
     fun saveDeltaCursor(cursor: String?)
+
+    /**
+     * Remote directory paths whose reap was deferred (skipped because the
+     * remote listing still showed content, or the delete failed) and should be
+     * retried on a later pass. Directory rows are NOT in the tracking set, and
+     * the file whose deletion emptied a directory is removed from the set the
+     * moment its delete succeeds — so without this persisted set, a directory
+     * skipped once (e.g. on an eventually-consistent provider's listing lag)
+     * would never be revisited. Empty when nothing is pending.
+     */
+    fun pendingReaps(): Set<String>
+
+    /** Mark a remote directory path for a reap retry on a later pass. Idempotent. */
+    fun addPendingReap(path: String)
+
+    /** Clear a remote directory path once it is reaped or proven legitimately populated. Idempotent. */
+    fun removePendingReap(path: String)
 }
 
 /**
@@ -145,6 +162,15 @@ class SqliteTrackingSet(
                 CREATE TABLE IF NOT EXISTS tracking_meta (
                     key   TEXT PRIMARY KEY,
                     value TEXT
+                )
+                """,
+            )
+            // Deferred empty-directory reaps to retry on a later pass. Added via
+            // CREATE TABLE IF NOT EXISTS so existing databases gain it transparently.
+            stmt.executeUpdate(
+                """
+                CREATE TABLE IF NOT EXISTS pending_reap (
+                    path TEXT PRIMARY KEY
                 )
                 """,
             )
@@ -282,6 +308,36 @@ class SqliteTrackingSet(
         ).use { ps ->
             ps.setString(1, DELTA_CURSOR_KEY)
             ps.setString(2, cursor)
+            ps.executeUpdate()
+        }
+    }
+
+    @Synchronized
+    override fun pendingReaps(): Set<String> {
+        val c = conn ?: error("not initialized")
+        val out = mutableSetOf<String>()
+        c.prepareStatement("SELECT path FROM pending_reap").use { ps ->
+            ps.executeQuery().use { rs ->
+                while (rs.next()) out += rs.getString(1)
+            }
+        }
+        return out
+    }
+
+    @Synchronized
+    override fun addPendingReap(path: String) {
+        val c = conn ?: error("not initialized")
+        c.prepareStatement("INSERT OR IGNORE INTO pending_reap (path) VALUES (?)").use { ps ->
+            ps.setString(1, path)
+            ps.executeUpdate()
+        }
+    }
+
+    @Synchronized
+    override fun removePendingReap(path: String) {
+        val c = conn ?: error("not initialized")
+        c.prepareStatement("DELETE FROM pending_reap WHERE path = ?").use { ps ->
+            ps.setString(1, path)
             ps.executeUpdate()
         }
     }
