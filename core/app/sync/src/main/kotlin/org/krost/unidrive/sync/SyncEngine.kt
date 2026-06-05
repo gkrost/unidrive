@@ -3425,50 +3425,38 @@ open class SyncEngine(
         val localPath = placeholder.resolveLocal(action.path)
         val ext = action.path.substringAfterLast(".", "")
         val base = action.path.substringBeforeLast(".")
+        // The side copy holds the user's OWN edit, so it is named "conflict-local".
+        // Keeping the user's edit on a side path (rather than the canonical path)
+        // means a later delete of the canonical path by another actor reaps the
+        // remote-derived canonical — NOT the user's surviving edit. The canonical
+        // path becomes the remote version (the tracked entity).
         val conflictSuffix =
             if (ext.isNotEmpty()) {
-                ".conflict-remote-$timestamp.$ext"
+                ".conflict-local-$timestamp.$ext"
             } else {
-                ".conflict-remote-$timestamp"
+                ".conflict-local-$timestamp"
             }
 
         if (action.remoteItem != null && !action.remoteItem.deleted) {
-            val conflictPath = "$base$conflictSuffix"
-            val conflictLocal = placeholder.resolveLocal(conflictPath)
-            withEchoSuppression(conflictPath) {
-                // UD-225b: id-based dispatch (see applyCreatePlaceholder).
-                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, conflictLocal)
-            }
-            if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
-                if (Files.exists(localPath)) {
-                    val result =
-                        // UD-366: COPY-MERGE conflict — remote already has a UUID; overwrite
-                        // it in place rather than POSTing a duplicate that 409s.
-                        provider.upload(
-                            localPath,
-                            action.path,
-                            existingRemoteId = action.remoteItem.id,
-                        ) { transferred, total ->
-                            reporter.onTransferProgress(action.path, transferred, total)
-                        }
-                    val mtime = Files.getLastModifiedTime(localPath).toMillis()
-                    db.upsertEntry(
-                        SyncEntry(
-                            path = action.path,
-                            remoteId = result.id,
-                            remoteHash = result.hash,
-                            remoteSize = result.size,
-                            remoteModified = result.modified,
-                            localMtime = mtime,
-                            localSize = Files.size(localPath),
-                            isFolder = false,
-                            isPinned = false,
-                            isHydrated = true,
-                            lastSynced = Instant.now(),
-                        ),
-                    )
+            // Both sides diverged: preserve the local edit as a side copy, then
+            // let the remote take the canonical path.
+            if ((action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) &&
+                Files.exists(localPath)
+            ) {
+                val conflictPath = "$base$conflictSuffix"
+                val conflictLocal = placeholder.resolveLocal(conflictPath)
+                // Move the user's edit aside under the conflict-local name. It is a
+                // local-only file (untracked, never uploaded) — the user's recoverable
+                // copy of their own work.
+                withEchoSuppression(conflictPath) {
+                    Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
             }
+            // The remote version takes the canonical path and becomes the tracked
+            // entity (real bytes, not a NUL stub).
+            applyCreatePlaceholder(
+                SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
+            )
         } else if (action.localState == ChangeState.DELETED && action.remoteItem != null) {
             // UD-222: remote wins the conflict — download real bytes, not a NUL stub.
             applyCreatePlaceholder(
