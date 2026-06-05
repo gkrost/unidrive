@@ -2863,6 +2863,53 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `KEEP_BOTH both-modified — remote takes canonical, local edit kept as conflict-local side copy`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A previously-synced file.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/c.txt",
+                    remoteId = "id-c",
+                    remoteHash = "base",
+                    remoteSize = 4,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 4,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            // Local edited (content + mtime differ from the snapshot).
+            Files.writeString(syncRoot.resolve("c.txt"), "MINE")
+            Files.setLastModifiedTime(
+                syncRoot.resolve("c.txt"),
+                java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000),
+            )
+            // Remote edited too (different size → remote MODIFIED) → MODIFIED/MODIFIED conflict.
+            provider.files["/c.txt"] = "THEIRS".toByteArray()
+            provider.deltaItems = listOf(cloudItem("/c.txt", size = 6))
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            // Canonical path holds the REMOTE version (it is the tracked entity).
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "canonical must hold the remote version")
+            // The user's OWN edit is preserved under a conflict-local side copy.
+            val sideCopies =
+                Files.list(syncRoot).use { stream ->
+                    stream.filter { it.fileName.toString().contains(".conflict-local-") }.toList()
+                }
+            assertEquals(1, sideCopies.size, "exactly one conflict-local side copy must exist; got $sideCopies")
+            assertEquals("MINE", Files.readString(sideCopies.single()), "the side copy must hold the user's own edit")
+            // The side copy is NOT the tracked entity, so a later delete of the
+            // canonical by another actor cannot reap the user's edit.
+            assertNull(db.getEntry(sideCopies.single().fileName.toString()), "the side copy must be untracked")
+        }
+
+    @Test
     fun `parent folders are created before their children under bounded concurrency`() =
         runTest {
             // A multi-level tree with several same-depth siblings exercises the
