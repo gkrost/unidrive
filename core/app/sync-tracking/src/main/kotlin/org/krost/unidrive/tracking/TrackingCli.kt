@@ -215,6 +215,12 @@ class TsSyncCommand : Runnable {
             val failed = report.applied.count { it.outcome == ApplyOutcome.FAILED }
             val skipped = report.applied.count { it.outcome == ApplyOutcome.SKIPPED }
             println("  applied:    $success ok, $failed failed, $skipped skipped")
+            if (report.reapedDirs.isNotEmpty()) {
+                println("  reaped:     ${report.reapedDirs.size} empty director(ies)")
+                for (dir in report.reapedDirs) {
+                    println("    - rmdir $dir")
+                }
+            }
         }
     }
 
