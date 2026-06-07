@@ -48,10 +48,12 @@ class TrackingReconcilerTest {
     }
 
     @Test
-    fun `untracked + pure local → no-op (NOT an upload)`() {
-        // Critical: dropping a file into sync_root must NOT auto-upload.
+    fun `untracked + pure local → upload (first-upload path)`() {
+        // A file created locally that the remote doesn't have is uploaded:
+        // this is what makes the engine two-way (drop a file into sync_root,
+        // `ts sync` pushes it). It is an UPLOAD, never a delete — the lemma holds.
         val a = rec.reconcile("/p", local(true), remote(false), null)
-        assertTrue(a is ReconcileAction.NoOp, "expected NoOp for pure-local untracked, got $a")
+        assertTrue(a is ReconcileAction.UploadLocal, "expected UploadLocal for pure-local untracked, got $a")
     }
 
     @Test

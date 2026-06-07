@@ -55,6 +55,24 @@ class CliServicesImplTest {
     }
 
     @Test
+    fun `resolvedGlobalProfile returns the global -p value when set`() {
+        // The global `-p` is held by Main.provider; an extension subcommand
+        // must be able to read it so `unidrive -p X <ext>` resolves to X.
+        val dir = tmp.newFolder("cfg").toPath()
+        val main = freshMain(dir)
+        main.provider = "chosen_profile"
+        val services = CliServicesImpl(main)
+        assertEquals("chosen_profile", services.resolvedGlobalProfile())
+    }
+
+    @Test
+    fun `resolvedGlobalProfile is null when no global -p was given`() {
+        val dir = tmp.newFolder("cfg").toPath()
+        val services = CliServicesImpl(freshMain(dir))
+        assertEquals(null, services.resolvedGlobalProfile())
+    }
+
+    @Test
     fun `formatter is non-null and delegates to AnsiHelper adapter`() {
         val dir = tmp.newFolder("cfg").toPath()
         val services = CliServicesImpl(freshMain(dir))

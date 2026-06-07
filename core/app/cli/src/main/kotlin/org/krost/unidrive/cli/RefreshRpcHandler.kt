@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
@@ -89,8 +90,11 @@ class RefreshRpcHandler(
                                 """{"event":"refresh.done","job_id":"$jobId","ok":true$forceDeleteIgnored}"""
                             } else {
                                 log.warn("refresh.run enumerate failed: job_id=$jobId error=${result.error}")
-                                val msg = result.error?.replace("\"", "\\\"") ?: ""
-                                """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                                // Emit a fully-escaped JSON string literal (quotes,
+                                // backslashes, control chars, newlines) — not just quote-escaped —
+                                // so an exotic provider error message can't produce invalid JSON.
+                                val msg = jsonString(result.error)
+                                """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":$msg}"""
                             }
                         } else {
                             if (reset) {
@@ -105,8 +109,9 @@ class RefreshRpcHandler(
                         """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
                     } catch (e: Exception) {
                         log.warn("refresh.run failed: job_id=$jobId", e)
-                        val msg = e.message?.replace("\"", "\\\"") ?: ""
-                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":"$msg"}"""
+                        // See jsonString() — full JSON-string escaping, not quote-only.
+                        val msg = jsonString(e.message)
+                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":$msg}"""
                     } finally {
                         inFlight.set(null)
                     }
@@ -140,5 +145,16 @@ class RefreshRpcHandler(
     companion object {
         private val RESET_TRUE_REGEX = Regex("\"reset\"\\s*:\\s*true")
         private val FORCE_DELETE_TRUE_REGEX = Regex("\"force_delete\"\\s*:\\s*true")
+
+        /**
+         * Render [s] as a fully-escaped, quote-wrapped JSON string literal.
+         * A null becomes the empty JSON string `""`. Delegates to
+         * `kotlinx.serialization`'s `JsonPrimitive`, which escapes quotes,
+         * backslashes, control characters (`\n`, `\r`, `\t`, `\b`, `\f`) and
+         * other bytes below 0x20 — everything the prior quote-only `.replace`
+         * missed. The result already includes the surrounding double-quotes, so
+         * call sites interpolate it WITHOUT adding their own (`"message":$msg`).
+         */
+        internal fun jsonString(s: String?): String = JsonPrimitive(s ?: "").toString()
     }
 }

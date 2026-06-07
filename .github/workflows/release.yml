@@ -1,0 +1,135 @@
+name: release
+
+# Fires on annotated or lightweight tag push matching v* (e.g. v0.0.1).
+# Per the spec, only the unidrive-dist repo enforces the strict tag regex
+# `^v(\d+\.\d+\.\d+)(-pkg\d+)?$`. On this repo we accept anything starting
+# with `v` so a future pre-release scheme can be opted into without
+# editing CI.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # required to create the GH Release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # never cancel an in-flight release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Full history so the existing BuildInfo.kt generator (which calls
+          # `git rev-parse --short HEAD` and `git diff HEAD --numstat`) finds
+          # something to work against.
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build shadowJar
+        working-directory: core
+        run: ./gradlew :app:cli:shadowJar --no-daemon -q
+
+      - name: Verify expected JAR filename
+        run: |
+          set -euo pipefail
+          jar="core/app/cli/build/libs/unidrive-${GITHUB_REF_NAME#v}.jar"
+          test -f "$jar" || {
+            echo "ERROR: expected $jar to exist after shadowJar build" >&2
+            ls -la core/app/cli/build/libs/ >&2
+            exit 1
+          }
+          echo "JAR present: $jar"
+
+      - name: Stage release artefacts
+        run: |
+          set -euo pipefail
+          mkdir -p release-staging
+          ver="${GITHUB_REF_NAME#v}"
+          cp "core/app/cli/build/libs/unidrive-${ver}.jar" release-staging/
+          cd release-staging
+          sha256sum "unidrive-${ver}.jar" > "unidrive-${ver}.jar.sha256"
+          cat "unidrive-${ver}.jar.sha256"
+
+      - name: Import signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: GPG_PRIVATE_KEY secret is not set on this repo." >&2
+            echo "  This key is provisioned by Plan P3 (krost-infra signing setup)." >&2
+            echo "  Add it under Settings -> Secrets and variables -> Actions before retrying." >&2
+            exit 1
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+      - name: Sign artefacts
+        env:
+          GPG_KEY_FINGERPRINT: ${{ secrets.GPG_KEY_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_KEY_FINGERPRINT:-}" ]; then
+            echo "ERROR: GPG_KEY_FINGERPRINT secret is not set on this repo." >&2
+            exit 1
+          fi
+          ver="${GITHUB_REF_NAME#v}"
+          cd release-staging
+          gpg --batch --yes --pinentry-mode loopback \
+              --local-user "$GPG_KEY_FINGERPRINT" \
+              --armor --detach-sign \
+              --output "unidrive-${ver}.jar.asc" \
+              "unidrive-${ver}.jar"
+          gpg --batch --yes --pinentry-mode loopback \
+              --local-user "$GPG_KEY_FINGERPRINT" \
+              --armor --detach-sign \
+              --output "unidrive-${ver}.jar.sha256.asc" \
+              "unidrive-${ver}.jar.sha256"
+          ls -1
+
+      - name: Verify signatures
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          cd release-staging
+          gpg --verify "unidrive-${ver}.jar.asc" "unidrive-${ver}.jar"
+          gpg --verify "unidrive-${ver}.jar.sha256.asc" "unidrive-${ver}.jar.sha256"
+
+      - name: Create GitHub Release
+        # Pin to a SHA -- `v2` is a moving tag. Update the SHA when bumping
+        # the action. As of writing, v2.0.8 = 01570a1f39cb168c169c802c3bceb9e93fb10974
+        uses: softprops/action-gh-release@01570a1f39cb168c169c802c3bceb9e93fb10974
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # Release notes are intentionally minimal here. The full RELEASES.md
+          # narrative is published by unidrive-dist's release workflow (Plan P4)
+          # which pulls this JAR + the Rust binary tarballs.
+          body: |
+            UniDrive CLI ${{ github.ref_name }}
+
+            JVM artefact for the coordinated UniDrive release. Distro packages
+            and the canonical end-user tarball are produced by unidrive-dist
+            and published at https://unidrive.krost.org/install/.
+
+            Verify with:
+              gpg --verify unidrive-*.jar.asc unidrive-*.jar
+              sha256sum -c unidrive-*.jar.sha256
+          files: |
+            release-staging/unidrive-*.jar
+            release-staging/unidrive-*.jar.sha256
+            release-staging/unidrive-*.jar.asc
+            release-staging/unidrive-*.jar.sha256.asc
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

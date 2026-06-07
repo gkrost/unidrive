@@ -67,6 +67,11 @@ internal class CliServicesImpl(
         return raw.providers.keys.toList()
     }
 
+    // The raw global `-p` value (null when the user passed no global profile).
+    // Returning the raw field — not a resolved default — lets an extension keep
+    // its own fallback when no global `-p` was given.
+    override fun resolvedGlobalProfile(): String? = main.provider
+
     /**
      * Save `main.provider`, set it to [name], run [block], restore.
      *

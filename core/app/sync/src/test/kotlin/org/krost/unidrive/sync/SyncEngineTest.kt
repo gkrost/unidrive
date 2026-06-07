@@ -961,6 +961,75 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `empty remote directory is reaped after its last file is deleted`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A tracked file under /dir whose local copy is gone → DeleteRemote.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/dir/only.txt",
+                    remoteId = "id-only",
+                    remoteHash = "h",
+                    remoteSize = 10,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 10,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            // After the file delete, /dir lists no children → reapable.
+            provider.childrenByParent["/dir"] = emptyList()
+            Files.writeString(syncRoot.resolve("other.txt"), "keep") // satisfy empty-root guard
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertTrue(provider.deletedPaths.contains("/dir/only.txt"), "the file must be deleted")
+            assertTrue(
+                provider.deletedPaths.contains("/dir"),
+                "the now-empty directory must be reaped; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    @Test
+    fun `remote directory with a surviving sibling is NOT reaped`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/dir/gone.txt",
+                    remoteId = "id-gone",
+                    remoteHash = "h",
+                    remoteSize = 10,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 10,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            // /dir still has a surviving child after the delete → must NOT be reaped.
+            provider.childrenByParent["/dir"] = listOf(cloudItem("/dir/keep.txt", size = 5))
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertTrue(provider.deletedPaths.contains("/dir/gone.txt"), "the file must be deleted")
+            assertFalse(
+                provider.deletedPaths.contains("/dir"),
+                "a directory with a surviving child must NOT be reaped; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    @Test
     fun `#137 bidirectional with empty sync_root and hydrated DB still fires the empty-sync_root guard`() =
         runTest {
             // Data-safety preserved: bidirectional sync with empty local + hydrated DB
@@ -2794,6 +2863,53 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `KEEP_BOTH both-modified — remote takes canonical, local edit kept as conflict-local side copy`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            // A previously-synced file.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/c.txt",
+                    remoteId = "id-c",
+                    remoteHash = "base",
+                    remoteSize = 4,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 4,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            // Local edited (content + mtime differ from the snapshot).
+            Files.writeString(syncRoot.resolve("c.txt"), "MINE")
+            Files.setLastModifiedTime(
+                syncRoot.resolve("c.txt"),
+                java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000),
+            )
+            // Remote edited too (different size → remote MODIFIED) → MODIFIED/MODIFIED conflict.
+            provider.files["/c.txt"] = "THEIRS".toByteArray()
+            provider.deltaItems = listOf(cloudItem("/c.txt", size = 6))
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            // Canonical path holds the REMOTE version (it is the tracked entity).
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "canonical must hold the remote version")
+            // The user's OWN edit is preserved under a conflict-local side copy.
+            val sideCopies =
+                Files.list(syncRoot).use { stream ->
+                    stream.filter { it.fileName.toString().contains(".conflict-local-") }.toList()
+                }
+            assertEquals(1, sideCopies.size, "exactly one conflict-local side copy must exist; got $sideCopies")
+            assertEquals("MINE", Files.readString(sideCopies.single()), "the side copy must hold the user's own edit")
+            // The side copy is NOT the tracked entity, so a later delete of the
+            // canonical by another actor cannot reap the user's edit.
+            assertNull(db.getEntry(sideCopies.single().fileName.toString()), "the side copy must be untracked")
+        }
+
+    @Test
     fun `parent folders are created before their children under bounded concurrency`() =
         runTest {
             // A multi-level tree with several same-depth siblings exercises the
@@ -3420,6 +3536,35 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#230 an invalid-named remote folder is quarantined, not a mkdir-every-pass failure`() =
+        runTest {
+            // PR #242 review: applyDownload guards file downloads; folders + adopt placeholders
+            // reach createFolder/createPlaceholder via applyCreatePlaceholder. A Windows-invalid
+            // folder name must be quarantined here too, not fail the mkdir every poll cycle.
+            // localNameIssue's cross-platform rules are unit-tested in PlaceholderManagerTest;
+            // this gates on Windows, where such names are actually unrepresentable.
+            org.junit.Assume.assumeTrue(
+                "folder-name representability is a Windows-FS constraint",
+                System.getProperty("os.name", "").lowercase().contains("win"),
+            )
+            provider.deltaItems = listOf(cloudItem("/CON", isFolder = true))
+
+            // Must NOT throw (pre-fix: createFolder('/CON') threw a reserved-name error every pass).
+            engine.syncOnce(dryRun = false)
+
+            val entry = db.getEntry("/CON")
+            assertNotNull(entry, "the invalid-named folder row should be tracked")
+            assertTrue(
+                entry.downloadQuarantined,
+                "invalid folder name must be quarantined (recovery loop skips it thereafter)",
+            )
+            assertFalse(
+                Files.exists(syncRoot.resolve("CON")),
+                "an unrepresentable folder name must not be created locally",
+            )
+        }
+
+    @Test
     fun `fresh delta event clears download quarantine`() =
         runTest {
             // Establish quarantine.
@@ -3590,8 +3735,9 @@ class SyncEngineTest {
             pathB,
             "two same-type accounts must NOT share a cache file for the same remote path",
         )
-        assertTrue(pathA.toString().contains("/hydration/posteo_onedrive/"))
-        assertTrue(pathB.toString().contains("/hydration/work_onedrive/"))
+        // #239: normalize separators so the layout assertion holds on Windows (backslash paths).
+        assertTrue(pathA.toString().replace('\\', '/').contains("/hydration/posteo_onedrive/"))
+        assertTrue(pathB.toString().replace('\\', '/').contains("/hydration/work_onedrive/"))
     }
 
     // cacheKey defaults to providerId, preserving the pre-fix layout for any
@@ -3610,7 +3756,8 @@ class SyncEngineTest {
             )
         val path = engineTypeOnly.resolveCachePath("/foo.txt")
         assertTrue(
-            path.toString().contains("/hydration/internxt/"),
+            // #239: normalize separators so the assertion holds on Windows.
+            path.toString().replace('\\', '/').contains("/hydration/internxt/"),
             "with no explicit cacheKey, layout must fall back to providerId; got $path",
         )
     }

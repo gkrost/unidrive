@@ -9,6 +9,17 @@ plugins {
     jacoco
 }
 
+// Pin the JaCoCo tool version explicitly so it does not float with the Gradle
+// default. Dependabot regenerates the dependency lockfiles with its own Gradle
+// toolchain, which resolved a different default (0.8.13) than the project
+// wrapper (0.8.14) and produced a strict-lock conflict on every gradle bump PR.
+// Pinning here makes the resolved version deterministic regardless of toolchain.
+val jacocoToolVersion = "0.8.14"
+
+configure<JacocoPluginExtension> {
+    toolVersion = jacocoToolVersion
+}
+
 allprojects {
     group = "org.krost.unidrive"
     // Greenfield monorepo restart baseline. Next planned release: 0.0.1. See docs/CHANGELOG.md.
@@ -33,8 +44,8 @@ allprojects {
     // lands above its own advisory floor, so it needs no explicit force.
     configurations.all {
         resolutionStrategy {
-            force("com.squareup.okhttp3:okhttp:4.12.0")
-            force("org.json:json:20231013")
+            force("com.squareup.okhttp3:okhttp:5.3.2")
+            force("org.json:json:20260522")
         }
     }
 }
@@ -48,6 +59,9 @@ val ktlintEnabled = false
 
 subprojects {
     apply(plugin = "jacoco")
+    configure<JacocoPluginExtension> {
+        toolVersion = jacocoToolVersion
+    }
     // UD-706: ktlint lint + format tasks on every subproject (warn-only).
     if (ktlintEnabled) {
         apply(plugin = "org.jlleitschuh.gradle.ktlint")

@@ -46,6 +46,13 @@ class TrackingEngineOneDriveLiveTest {
 
     @Test
     fun `tracking engine against live OneDrive — lemma holds, plan is downloads-only`() {
+        // Gate 0 — nightly tier only. This pass walks the full OneDrive
+        // delta against a real profile; it shares the slow-tier cost class with
+        // the Internxt live test and must stay off the routine (per-PR) tier.
+        // SKIPPED on the routine tier; runs on `./gradlew liveTestNightly` or the
+        // scheduled nightly CI job.
+        LiveTier.assumeNightly("TrackingEngineOneDriveLiveTest")
+
         // Gate 1 — env var must be enabled. SKIPPED with reason on miss.
         if (!shouldRun) {
             val reason = "UNIDRIVE_INTEGRATION_TESTS env var is not 'true' " +

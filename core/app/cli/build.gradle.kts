@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 buildscript {
     configurations.classpath {
         resolutionStrategy {
-            force("org.apache.logging.log4j:log4j-core:2.25.4")
+            force("org.apache.logging.log4j:log4j-core:2.26.0")
             force("org.codehaus.plexus:plexus-utils:4.0.3")
         }
     }
@@ -90,6 +90,17 @@ val generateBuildInfo =
                     commandLine("git", "ls-files", "--others", "--exclude-standard")
                 }.standardOutput.asText
                 .map { it.trim().isNotEmpty() }
+        // Per docs/dev/specs/unidrive-distribution-design.md §3.5,
+        // tagged-release builds print the bare semver (e.g. "0.0.1")
+        // with no commit suffix. Non-tag (dev) builds keep the existing
+        // "(commit)" / "(commit-dirty)" enrichment for bug-report
+        // tractability.
+        val gitTagAtHead =
+            providers
+                .exec {
+                    commandLine("git", "tag", "--points-at", "HEAD")
+                }.standardOutput.asText
+                .map { it.trim() }
 
         doLast {
             val commit =
@@ -105,8 +116,21 @@ val generateBuildInfo =
                     false
                 }
             val buildInstant = Instant.now().toString()
+            val taggedRelease =
+                try {
+                    !dirty &&
+                        gitTagAtHead.get().lines().any {
+                            it.matches(Regex("^v?$version(-pkg\\d+)?$"))
+                        }
+                } catch (_: Exception) {
+                    false
+                }
             val versionString =
-                if (dirty) "$version ($commit-dirty)" else "$version ($commit)"
+                when {
+                    taggedRelease -> version
+                    dirty -> "$version ($commit-dirty)"
+                    else -> "$version ($commit)"
+                }
             val dir = outputDir.get().asFile.resolve("org/krost/unidrive/cli")
             dir.mkdirs()
             dir.resolve("BuildInfo.kt").writeText(
@@ -419,6 +443,7 @@ dependencies {
     implementation(project(":app:core"))
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
+    implementation(project(":providers:localfs"))
     implementation(project(":app:sync"))
     // Runtime-only: the tracking-set engine implements the CliExtension SPI
     // that lives in this module, so :app:sync-tracking depends on :app:cli.

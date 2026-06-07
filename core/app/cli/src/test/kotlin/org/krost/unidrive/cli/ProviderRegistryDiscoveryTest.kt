@@ -48,4 +48,16 @@ class ProviderRegistryDiscoveryTest {
         assertEquals("Global", meta.tier)
         assertTrue(meta.cloudActExposure, "OneDrive is hosted by Microsoft — CloudActExposure must be true")
     }
+
+    @Test
+    fun `OneDrive declares its backwards-compat sync-root directory name`() {
+        // The real factory must declare syncRootDirName = "OneDrive" so
+        // SyncConfig.defaultSyncRoot resolves ~/OneDrive (the historically
+        // shipped layout) instead of title-casing the id to ~/Onedrive. If
+        // this declaration is dropped, existing OneDrive users silently get a
+        // new empty directory and their synced data appears to vanish.
+        val meta = ProviderRegistry.getMetadata("onedrive")
+        assertNotNull(meta, "OneDrive metadata must be discoverable via ServiceLoader on :app:cli")
+        assertEquals("OneDrive", meta.syncRootDirName)
+    }
 }

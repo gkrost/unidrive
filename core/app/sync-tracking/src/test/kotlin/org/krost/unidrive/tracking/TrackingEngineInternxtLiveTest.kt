@@ -38,6 +38,12 @@ class TrackingEngineInternxtLiveTest {
 
     @Test
     fun `tracking engine against live Internxt — lemma holds, plan is downloads-only`() {
+        // Gate 0 — nightly tier only. A full `syncOnce()` against a real
+        // Internxt profile took over an hour on a large account; far too slow
+        // for the routine (per-PR) tier. SKIPPED on the routine tier; runs on
+        // `./gradlew liveTestNightly` or the scheduled nightly CI job.
+        LiveTier.assumeNightly("TrackingEngineInternxtLiveTest")
+
         // Gate 1 — env var must be enabled. SKIPPED with reason on miss.
         if (!shouldRun) {
             val reason = "UNIDRIVE_INTEGRATION_TESTS env var is not 'true' " +

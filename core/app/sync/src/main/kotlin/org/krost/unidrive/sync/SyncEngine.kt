@@ -1718,6 +1718,13 @@ open class SyncEngine(
             promotePendingCursor()
         }
 
+        // Reap remote directories emptied by this pass's remote file deletions.
+        // The reconciler's folder-delete is gated by the never-hydrated-folder
+        // guard, so an emptied remote directory is otherwise left behind. This
+        // deletes only directories verified empty via listChildren, so it never
+        // removes content the guard exists to protect.
+        reapEmptyRemoteDirs(actions)
+
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(
             downloaded.get(),
@@ -1726,6 +1733,68 @@ open class SyncEngine(
             duration,
             failed = passOneFailures.get() + transferFailures.get(),
         )
+    }
+
+    /**
+     * Delete remote directories emptied by this pass's remote file deletions.
+     *
+     * The reconciler skips DeleteRemote for never-hydrated folder rows (a guard
+     * against the accidental mass-deletion of remote folders the user never saw
+     * locally). A side effect: when the FILES inside a remote folder are deleted,
+     * the now-empty folder is left behind as a shell. This reaps those shells.
+     *
+     * Safety:
+     *  - **Empty-verify before delete.** A directory is deleted only if a live
+     *    `listChildren` shows no surviving child. We never trust the provider to
+     *    refuse a non-empty directory (some providers cascade a folder delete
+     *    over the whole subtree), so the listing is the guard. This also keeps
+     *    the never-hydrated guard's intent intact: an EMPTY directory has no
+     *    content to lose, so reaping it does not delete anything the user never
+     *    saw.
+     *  - **Scoped to this pass.** Only directories that were ancestors of a file
+     *    deleted on this pass are candidates — never an arbitrary sweep of
+     *    remote directories.
+     *  - **Deepest-first**, so a nested empty tree collapses bottom-up.
+     *  - **Best-effort.** A provider error on one directory is logged and
+     *    skipped; it never fails the pass.
+     */
+    private suspend fun reapEmptyRemoteDirs(actions: List<SyncAction>) {
+        val deletedRemoteFiles =
+            actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
+        if (deletedRemoteFiles.isEmpty()) return
+        val candidates =
+            deletedRemoteFiles
+                .flatMap { ancestorDirsToSyncRoot(it) }
+                .distinct()
+                .sortedByDescending { it.count { ch -> ch == '/' } }
+        for (dir in candidates) {
+            try {
+                val children = provider.listChildren(dir).filterNot { it.deleted }
+                if (children.isNotEmpty()) continue
+                provider.delete(dir)
+                db.getEntry(dir)?.let { db.deleteEntry(dir) }
+                log.debug("Reaped empty remote directory: {}", dir)
+            } catch (e: Exception) {
+                log.warn("Failed to reap empty remote directory {}: {}", dir, e.message)
+            }
+        }
+    }
+
+    /**
+     * Ancestor directories of [filePath], immediate parent up to — but not
+     * including — the sync root. `/a/b/c.txt` → `["/a/b", "/a"]`; a root-level
+     * file → `[]`, so the sync root is never a reap candidate.
+     */
+    private fun ancestorDirsToSyncRoot(filePath: String): List<String> {
+        val out = mutableListOf<String>()
+        var current = filePath
+        while (true) {
+            val slash = current.lastIndexOf('/')
+            if (slash <= 0) break
+            current = current.substring(0, slash)
+            out += current
+        }
+        return out
     }
 
     private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
@@ -2662,6 +2731,21 @@ open class SyncEngine(
     }
 
     private suspend fun applyCreatePlaceholder(action: SyncAction.CreatePlaceholder) {
+        // #230 (PR #242 review): applyDownload guards the file-download path, but folders and
+        // "both new" adopt placeholders reach createFolder/createPlaceholder here. A name that
+        // cannot exist on the local filesystem (Windows reserved / all-dots / trailing-dot, etc.)
+        // would fail the mkdir every poll cycle. Quarantine the row instead — the same flag
+        // handlePermanentDownloadFailure sets, so the reconciler's recovery loop skips it
+        // thereafter (Reconciler.kt) — rather than re-attempting an impossible create forever.
+        localNameIssue(action.path)?.let { issue ->
+            log.warn("Cannot represent '{}' on the local filesystem ({}) — quarantining row", action.path, issue)
+            reporter.onWarning("Permanent failure: ${action.path} - cannot represent on the local filesystem: $issue")
+            val remoteId = action.remoteItem.id
+            if (remoteId.isNotEmpty()) {
+                db.setDownloadQuarantine(remoteId, Instant.now())
+            }
+            return
+        }
         // UD-222: under the new routing (Reconciler), CreatePlaceholder is only emitted for
         //   - folders (mkdir)
         //   - "both new" adopt (local file already matches remote size)
@@ -3341,50 +3425,38 @@ open class SyncEngine(
         val localPath = placeholder.resolveLocal(action.path)
         val ext = action.path.substringAfterLast(".", "")
         val base = action.path.substringBeforeLast(".")
+        // The side copy holds the user's OWN edit, so it is named "conflict-local".
+        // Keeping the user's edit on a side path (rather than the canonical path)
+        // means a later delete of the canonical path by another actor reaps the
+        // remote-derived canonical — NOT the user's surviving edit. The canonical
+        // path becomes the remote version (the tracked entity).
         val conflictSuffix =
             if (ext.isNotEmpty()) {
-                ".conflict-remote-$timestamp.$ext"
+                ".conflict-local-$timestamp.$ext"
             } else {
-                ".conflict-remote-$timestamp"
+                ".conflict-local-$timestamp"
             }
 
         if (action.remoteItem != null && !action.remoteItem.deleted) {
-            val conflictPath = "$base$conflictSuffix"
-            val conflictLocal = placeholder.resolveLocal(conflictPath)
-            withEchoSuppression(conflictPath) {
-                // UD-225b: id-based dispatch (see applyCreatePlaceholder).
-                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, conflictLocal)
-            }
-            if (action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) {
-                if (Files.exists(localPath)) {
-                    val result =
-                        // UD-366: COPY-MERGE conflict — remote already has a UUID; overwrite
-                        // it in place rather than POSTing a duplicate that 409s.
-                        provider.upload(
-                            localPath,
-                            action.path,
-                            existingRemoteId = action.remoteItem.id,
-                        ) { transferred, total ->
-                            reporter.onTransferProgress(action.path, transferred, total)
-                        }
-                    val mtime = Files.getLastModifiedTime(localPath).toMillis()
-                    db.upsertEntry(
-                        SyncEntry(
-                            path = action.path,
-                            remoteId = result.id,
-                            remoteHash = result.hash,
-                            remoteSize = result.size,
-                            remoteModified = result.modified,
-                            localMtime = mtime,
-                            localSize = Files.size(localPath),
-                            isFolder = false,
-                            isPinned = false,
-                            isHydrated = true,
-                            lastSynced = Instant.now(),
-                        ),
-                    )
+            // Both sides diverged: preserve the local edit as a side copy, then
+            // let the remote take the canonical path.
+            if ((action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) &&
+                Files.exists(localPath)
+            ) {
+                val conflictPath = "$base$conflictSuffix"
+                val conflictLocal = placeholder.resolveLocal(conflictPath)
+                // Move the user's edit aside under the conflict-local name. It is a
+                // local-only file (untracked, never uploaded) — the user's recoverable
+                // copy of their own work.
+                withEchoSuppression(conflictPath) {
+                    Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
             }
+            // The remote version takes the canonical path and becomes the tracked
+            // entity (real bytes, not a NUL stub).
+            applyCreatePlaceholder(
+                SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
+            )
         } else if (action.localState == ChangeState.DELETED && action.remoteItem != null) {
             // UD-222: remote wins the conflict — download real bytes, not a NUL stub.
             applyCreatePlaceholder(

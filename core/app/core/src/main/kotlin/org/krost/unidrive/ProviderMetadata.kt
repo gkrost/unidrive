@@ -33,6 +33,15 @@ data class ProviderMetadata(
      * acceptable simplicity tradeoff per UD-263 acceptance #4.
      */
     val minRequestSpacingMs: Long = 0L,
+    /**
+     * Preferred home-directory name for this provider's default sync root.
+     * Null (the default) means "title-case the provider id" — e.g. "sftp"
+     * resolves to ~/Sftp. Set this only when the historically-shipped
+     * directory name differs from the title-cased id: OneDrive ships ~/OneDrive,
+     * not ~/Onedrive. Lets a provider self-declare its directory name so
+     * SyncConfig doesn't carry a per-provider-name override map.
+     */
+    val syncRootDirName: String? = null,
 )
 
 object ProviderRegistry {

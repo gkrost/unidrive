@@ -97,12 +97,131 @@ class FakeTrackingProvider : CloudProvider {
      */
     var failFullReenumeration: Boolean = false
 
+    // ── JWT / OAuth-refresh fault-injection hooks ────────────────────────────
+    //
+    // A real provider's HTTP client owns token refresh: a 401 mid-enumeration
+    // triggers a refresh-token round-trip inside `delta()` and the call retries
+    // transparently, so the tracking engine never sees the blip. These hooks
+    // model that boundary inside the fake's `delta()` — the only place the
+    // engine touches the provider during enumeration.
+
+    /** Test hook: the JWT is considered expired starting at this 0-based
+     *  [delta] call index. -1 (default) means the token never expires. */
+    var tokenExpiresAtDeltaCall: Int = -1
+
+    /** Test hook: when true, an expired-token [delta] transparently
+     *  refreshes (increments [refreshCount]) and the retried call succeeds —
+     *  mirroring a provider whose HTTP layer recovers a 401 via refresh-token.
+     *  When false, the expired-token [delta] surfaces [AuthenticationException]
+     *  to the engine instead (models a refresh that itself failed). */
+    var refreshOnTokenExpiry: Boolean = true
+
+    /** Observability: how many transparent token refreshes fired. A
+     *  test asserts this is exactly 1 to prove the refresh path was exercised
+     *  rather than the token simply outliving the run. */
+    var refreshCount: Int = 0
+        private set
+
+    /** Observability: how many times [authenticate] was invoked. */
+    var authenticateCount: Int = 0
+        private set
+
+    // ── throttling / 429-storm fault-injection hooks ─────────────────────────
+    //
+    // The engine has no 429-retry of its own; the provider's HttpRetryBudget
+    // absorbs the storm. What the engine DOES see is the storm's downstream
+    // effect: a budget that exhausts its retries mid-walk yields a PARTIAL
+    // inventory (`DeltaPage.complete = false`). These hooks reproduce that
+    // signal so the engine's delete-suppression + convergence is exercised.
+
+    /** Test hook: the next N [delta] calls return `complete = false`
+     *  (throttle storm exhausted the retry budget → partial inventory), after
+     *  which calls complete normally. Counts DOWN — each throttled call
+     *  decrements it — so a test sets it relative to "the next pass," not the
+     *  provider's lifetime call count. 0 (default) means no storm. */
+    var throttleIncompletePasses: Int = 0
+
+    /** Test hook: server-hinted Retry-After (ms) recorded on each
+     *  throttled pass; surfaced via [observedRetryAfterMs] so a test can assert
+     *  the backoff hint was honoured rather than discarded. */
+    var retryAfterMs: Long = 2_000L
+
+    /** Observability: the Retry-After hints recorded across throttled
+     *  passes, in call order. Empty when no storm was injected. */
+    val observedRetryAfterMs: MutableList<Long> = mutableListOf()
+
+    /** Observability: total [delta] invocations, for assertions on
+     *  how many passes the engine needed to converge. */
+    var deltaCallCount: Int = 0
+        private set
+
     override fun capabilities(): Set<Capability> =
         setOf(Capability.Delta, Capability.VerifyItem)
 
-    override suspend fun authenticate() {}
+    override suspend fun authenticate() {
+        authenticateCount++
+    }
 
-    override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
+    /**
+     * Test hook for the directory-reaping path: directory paths whose [delete]
+     * should throw, to model a provider that fails a folder delete. The thrown
+     * type is a generic provider error so the engine's best-effort catch is
+     * exercised.
+     */
+    val failDeleteDirs: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Test hook: directory paths that report one phantom child on the FIRST
+     * [listChildren] call and then settle to their real (empty) contents —
+     * modelling an eventually-consistent provider's read-after-write lag where a
+     * just-trashed file lingers in the listing for one pass. A path is removed
+     * from this set the first time it is listed.
+     */
+    val lagDirsOnce: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Immediate children of [path], derived from the [files] map: files directly
+     * under [path] plus one synthesized folder item per immediate subdirectory.
+     * A normalised "/" matches the root. Lets the engine verify a directory is
+     * empty before reaping it.
+     */
+    override suspend fun listChildren(path: String): List<CloudItem> {
+        if (lagDirsOnce.remove(path)) {
+            // First listing after a delete: pretend a stale child is still shown.
+            return listOf(itemFor("$path/.__lagging__", ByteArray(0)))
+        }
+        val prefix = if (path == "/") "/" else "$path/"
+        val out = mutableListOf<CloudItem>()
+        val seenDirs = mutableSetOf<String>()
+        for ((filePath, bytes) in files) {
+            if (!filePath.startsWith(prefix)) continue
+            val rest = filePath.substring(prefix.length)
+            if (rest.isEmpty()) continue
+            val slash = rest.indexOf('/')
+            if (slash < 0) {
+                // Direct file child.
+                out += itemFor(filePath, bytes)
+            } else {
+                // Immediate subdirectory child; synthesize a folder item once.
+                val childDir = prefix + rest.substring(0, slash)
+                if (seenDirs.add(childDir)) {
+                    out +=
+                        CloudItem(
+                            id = "folder-$childDir",
+                            name = childDir.substringAfterLast('/'),
+                            path = childDir,
+                            size = 0,
+                            isFolder = true,
+                            modified = Instant.parse("2026-05-21T00:00:00Z"),
+                            created = Instant.parse("2026-05-21T00:00:00Z"),
+                            hash = null,
+                            mimeType = null,
+                        )
+                }
+            }
+        }
+        return out
+    }
 
     override suspend fun getMetadata(path: String): CloudItem {
         val bytes = files[path] ?: throw NoSuchElementException("no remote at $path")
@@ -132,12 +251,27 @@ class FakeTrackingProvider : CloudProvider {
     }
 
     override suspend fun delete(remotePath: String) {
-        files.remove(remotePath)
+        if (remotePath in failDeleteDirs) {
+            throw org.krost.unidrive.ProviderException("simulated folder-delete failure for $remotePath")
+        }
+        if (files.containsKey(remotePath)) {
+            // File delete.
+            files.remove(remotePath)
+        } else {
+            // Directory delete: cascade-remove every file under the prefix,
+            // modelling Internxt's folder-trash (which takes the whole subtree).
+            val prefix = "$remotePath/"
+            files.keys.filter { it.startsWith(prefix) }.forEach { files.remove(it) }
+        }
         deletedPaths += remotePath
     }
 
-    override suspend fun createFolder(path: String): CloudItem =
-        CloudItem(
+    /** Remote folders created via createFolder/createFolders, for test assertions. */
+    val createdFolders: MutableList<String> = mutableListOf()
+
+    override suspend fun createFolder(path: String): CloudItem {
+        createdFolders += path
+        return CloudItem(
             id = "folder-$path",
             name = path.substringAfterLast('/'),
             path = path,
@@ -148,6 +282,7 @@ class FakeTrackingProvider : CloudProvider {
             hash = null,
             mimeType = null,
         )
+    }
 
     override suspend fun move(
         fromPath: String,
@@ -163,13 +298,47 @@ class FakeTrackingProvider : CloudProvider {
         onPageProgress: ((Int) -> Unit)?,
         scanContext: ScanContext?,
     ): DeltaPage {
+        val callIndex = deltaCallCount
+        deltaCallCount++
         deltaCursors += cursor
+
+        // JWT/OAuth-refresh seam. When this call index reaches the configured
+        // expiry point, the token is stale. A real provider's HTTP client
+        // either (a) refreshes transparently and the call succeeds, or
+        // (b) surfaces the auth failure when the refresh itself fails.
+        if (tokenExpiresAtDeltaCall in 0..callIndex) {
+            if (refreshOnTokenExpiry) {
+                // Transparent refresh-token round-trip, exactly once: bump the
+                // counter, clear the expiry so subsequent calls are clean, and
+                // fall through to serve the page as if nothing happened.
+                refreshCount++
+                tokenExpiresAtDeltaCall = -1
+            } else {
+                throw org.krost.unidrive.AuthenticationException(
+                    "simulated 401: token expired at delta call $callIndex and refresh failed",
+                )
+            }
+        }
+
         if (cursor != null && cursor == expiredCursor) {
             throw DeltaCursorExpiredException("simulated 410 Gone on cursor=$cursor")
         }
         if (cursor == null && failFullReenumeration) {
             throw org.krost.unidrive.ProviderException("simulated full re-enumeration failure")
         }
+
+        // throttle-storm seam. While the storm is active the provider's
+        // retry budget is exhausted mid-walk, so it returns a PARTIAL inventory
+        // (complete = false) — the exact signal the engine reacts to. Record the
+        // server-hinted Retry-After so a test can assert the backoff was
+        // observed, and count the storm DOWN so the engine eventually converges.
+        val throttledThisPass = throttleIncompletePasses > 0
+        if (throttledThisPass) {
+            observedRetryAfterMs += retryAfterMs
+            throttleIncompletePasses--
+        }
+        val passComplete = deltaComplete && !throttledThisPass
+
         val items =
             if (incrementalAware && cursor != null) {
                 // Incremental delta: only changed + explicitly-deleted items.
@@ -190,7 +359,7 @@ class FakeTrackingProvider : CloudProvider {
             } else {
                 files.entries.map { (path, bytes) -> itemFor(path, bytes) }
             }
-        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = deltaComplete)
+        return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = passComplete)
     }
 
     override suspend fun quota(): QuotaInfo = QuotaInfo(total = 1_000_000, used = 0, remaining = 1_000_000)
