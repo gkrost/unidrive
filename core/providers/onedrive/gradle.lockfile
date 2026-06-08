@@ -146,5 +146,5 @@ org.ow2.asm:asm-tree:9.9=jacocoAnt
 org.ow2.asm:asm:9.9=jacocoAnt
 org.slf4j:slf4j-api:2.0.17=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.slf4j:slf4j-api:2.0.7=ktlint
-org.xerial:sqlite-jdbc:3.53.1.0=testRuntimeClasspath
+org.xerial:sqlite-jdbc:3.53.2.0=testRuntimeClasspath
 empty=annotationProcessor,implementationDependenciesMetadata,kotlinCompilerPluginClasspath,kotlinNativeCompilerPluginClasspath,kotlinScriptDefExtensions,testAnnotationProcessor,testImplementationDependenciesMetadata,testKotlinScriptDefExtensions
