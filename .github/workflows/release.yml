@@ -108,7 +108,7 @@ jobs:
       - name: Create GitHub Release
         # Pin to a SHA -- `v2` is a moving tag. Update the SHA when bumping
         # the action. As of writing, v2.0.8 = 01570a1f39cb168c169c802c3bceb9e93fb10974
-        uses: softprops/action-gh-release@01570a1f39cb168c169c802c3bceb9e93fb10974
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
