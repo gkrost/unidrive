@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development` to execute each unit task-by-task. One unit → one branch → one PR → merge → next. Strictly sequential; never two open PRs at once.
 
-**Goal:** Bring both providers (OneDrive, Internxt) to a flawless sync + mount state across the JVM core (`unidrive`) and the Rust FUSE co-daemon (`unidrive-mount-linux`), then validate and cut a release.
+**Goal:** Bring both providers (OneDrive, Internxt) to a flawless sync + mount state across the JVM core (`unidrive`), the Rust FUSE co-daemon (`unidrive-mount-linux`), and the Windows **read-only** CfAPI tier (`unidrive-windows`), then validate each surface against `docs/dev/specs/mvp-acceptance-criteria.md` (#342) and cut a release.
 
 **Approach:** This supersedes and extends `critical-high-fix-sequence.md` (its Units 1–8). Ordering is dependency- and data-risk-first, then provider correctness, then mount POSIX correctness, then CLI trust, then validation + release. Cross-repo and shared-file edits force strict serialization — which is also the user's hard constraint (no parallel PRs).
 
-**Repos / engine:** `unidrive` (Kotlin/JVM, legacy `SyncEngine` is the MVP engine), `unidrive-mount-linux` (Rust FUSE co-daemon). Test accounts: `internxt_test`, `posteo_onedrive`. The **primary** Internxt profile (`internxt_gernot_krost_posteo`) is read-mostly — **remote deletions forbidden; never a destructive test target.**
+**Repos / engine:** `unidrive` (Kotlin/JVM — legacy `SyncEngine` is the MVP engine; tracking-set frozen for MVP, decision #343), `unidrive-mount-linux` (Rust FUSE co-daemon), `unidrive-windows` (C#/.NET CfAPI client — read-only tier in MVP, #290), `unidrive-dist` (packaging; Windows channel = unidrive-dist#12). Test accounts: `internxt_test`, `posteo_onedrive`. The **primary** Internxt profile (`internxt_gernot_krost_posteo`) is read-mostly — **remote deletions forbidden; never a destructive test target.**
 
 ---
 
@@ -34,7 +34,9 @@ Defer: pure efficiency optimizations (unless they cause wholesale abort), daemon
 
 ## Scope decisions (locked)
 
-- **Tracking-set engine is IN MVP.** The clean fix for the primary Internxt profile's deletion-safeguard trap (#108) is migrating it onto the hardened tracking-set engine. Phase H (#104, #134, #108, #118-ts, ts live-tests #133/#161/#162/#167/#168/#169) is in the chain before release. #99 is the engine umbrella.
+- **Tracking-set engine is OUT of the MVP** (decision #343, reversing the earlier lock). The legacy `SyncEngine` is the only engine the MVP certifies; ts receives data-safety fixes only and graduates post-MVP behind its own epic. #108's resolution falls back to the plan's documented alternative — a one-shot, operator-supervised force-delete on the legacy engine (**no destructive op on the primary profile without explicit operator go-ahead**). Phase H moves to Deferred; #118-ts follows it.
+- **Windows read-only tier is IN the MVP** (decision #290): daemon + CLI sync + read-only CfAPI mount (`unidrive-windows` Phases 0–1 incl. 1.4/1.5 verification, unidrive-windows#3/#4). Writeback / shell UX / MSIX are post-MVP (unidrive-windows#5/#6/#7).
+- **Acceptance is mechanical:** every surface gates on `docs/dev/specs/mvp-acceptance-criteria.md` (#342), instrumented by `unidrive verify` (#341). Soaks overlap with interactive work on the next surface by design.
 - **Include everything incl. webhooks.** Phase E (mount POSIX correctness), Phase F (NFC + mount freshness), and C5 (#111 OneDrive webhooks) are all in MVP.
 - Still deferred: pure efficiency optimizations, daemon-decomposition phases 2/3 (#141/#142), pure observability/UX/CLI polish, test-coverage-only and build-hygiene tasks (except #175 if it blocks the suite), and mount perf/hygiene (ML #31/#32/#33/#36-#43).
 
@@ -43,6 +45,22 @@ Defer: pure efficiency optimizations (unless they cause wholesale abort), daemon
 ## The sequential PR chain
 
 Each unit = one branch (`fix/...`), one PR, merged before the next starts. Every unit's acceptance includes a **live test-drive on both test accounts** (provider-specific units note the single relevant account). Verify every subagent commit with `git log`/`git branch --contains` before merging.
+
+### Phase D0 — Data-safety batch (deep-review criticals; before everything else)
+The production-readiness review (#287–#340) surfaced data-loss paths *beneath* the existing phases. One PR each, in this order (shared `SyncEngine.kt`/provider surfaces force serialization):
+- **D0.1 · #289** (Critical) — temp-file + fsync + `ATOMIC_MOVE` for every download path (both providers, hydration cache); never restore a placeholder over real bytes.
+- **D0.2 · #287** (Critical) — OneDrive delta tombstones: deletion facets short-circuit the vault/root filters; surface tombstones by id.
+- **D0.3 · #291** (High) — If-Match plumbing engine→upload; ≤4 MiB PUT precondition; 412 → collision.
+- **D0.4 · #294** (High) — detectMoves: require basename (+hash when available) before pairing delete+upload.
+- **D0.5 · #297** (High) — unhydrated-row local edits: divergence check before the recovery download.
+- **D0.6 · #298** (High) — dry-run contractually side-effect-free (no `updateRemoteEntries`, no cursor promotion, no scanner pre-writes).
+- **D0.7 · #301** (High) — dehydrate/reap refuse cache eviction while an upload slot is live or the row is dirty.
+
+*(#288/#292/#299/#302 are ts-engine — frozen per #343, handled in the post-MVP ts epic.)*
+
+### Phase P — Portability floor (parallel with D0; no shared files)
+- **P1 · #344** — `windows-latest` CI: `./gradlew check` + daemon start→stop AF_UNIX round-trip (advisory; guards closed #239, exercises #320).
+- **P2 · #345** — IPC `protocol_version` + golden NDJSON contract corpus (companions: unidrive-windows#8, unidrive-mount-linux#70).
 
 ### Phase 0 — Verify gate (no/tiny code)
 - **V1 · ML #27** (Critical) — live OneDrive mount smoke (`unidrive -p posteo_onedrive mount`): confirm mount completes in ~5s. Code shows the claimed fix present. If green → close #27 (+ its mount BACKLOG line). If it still hangs → promote to a real fix as unit A0 (strace the co-daemon startup; surfaces `mount/src/{main,ipc,reconnect}.rs` + JVM `HydrationIpcHandler` subscribe/list).
@@ -86,31 +104,35 @@ Each unit = one branch (`fix/...`), one PR, merged before the next starts. Every
 - **G1 · #117** (High, correctness) — `status` and `status --all` enumerate different profile sources (FS-scan vs `config.toml`) → orphan-profile divergence. Pick FS-scan as truth, flag orphans.
 - **G2 · #118** (High, observability) — `status` doesn't reflect tracking-set profiles (reads legacy `state.db`). Renders `tracking.db` → **sequenced inside Phase H** (after the ts engine is hardened), not here.
 
-### Phase H — Tracking-set engine (IN MVP)
-- **H1 · #104** (High, data-safety) — adopt-on-content-match degrades to size-only for Internxt null-hash → different-content same-size files adopted as identical.
-- **H2 · #134** (Medium) — ts/legacy `state.db` coexistence & migration.
-- **H3 · #133, #161, #162, #167, #168, #169** — ts live-test runtime + auth/throttle coverage + CLI `-p` + EXPERIMENTAL warning.
-- **H3b · #118** (High) — `status`/`status --all` render tracking-set profiles from `tracking.db` (was Phase G2; needs the hardened engine).
-- **H4 · #108** (High, **handle with care**) — primary-Internxt deletion-safeguard trap. Resolution = migrate the primary profile onto the hardened ts engine (after H1–H3) **or** a one-shot operator `--force-delete`. **No destructive op on the primary profile without explicit operator go-ahead.**
+### Phase H — Tracking-set engine — **moved post-MVP** (decision #343)
+H1–H4 (#104, #134, ts live-tests #133/#161/#162/#167/#168/#169, #118-ts, #108-via-migration) leave the MVP chain and form the post-MVP ts epic, joined by the deep-review ts data-safety set (#288 #292 #299 #302). What remains in-MVP from old H4: resolve #108 on the **legacy** engine via the one-shot, operator-supervised `--force-delete` — **no destructive op on the primary profile without explicit operator go-ahead.**
+
+### Phase W — Windows read-only surface (after D0 + provider phases; interactive on the Windows dev box)
+- **W1** — engine-side Windows blockers: #306 (daemon stop transport), #310 (case folding), #319 (state-dir fragmentation), #321 (credential ACL/DPAPI) — plus whatever the soak surfaces.
+- **W2 · unidrive-windows#3/#4** — verify CfAPI Phases 1.4 (dehydrate; blocked on #301) and 1.5 (live refresh; needs F2's `view.invalidated`).
+- **W3 · unidrive-windows#7 + unidrive-dist#12 (MVP half)** — minimal install story (zip/script, prerequisites, login-start, recovery-aware uninstall).
+- **Gate: unidrive-windows#9** per the acceptance-criteria spec; the Linux box runs its core soak in the background throughout.
 
 ### Phase I — Release + acceptance gate
 - **I1 · #175** — fix `Task 'testClasses' not found` if it blocks running the test suite/CI (verify first; may be environmental).
 - **I2 · #107** (High) — cut first `unidrive-mount-linux` release tarball + wire `dist/install.sh` to download + SHA256-verify. Ship-blocker, no data risk.
-- **I3 · #109** (High) — reach the 5+5+2 live-integration smoke target (5 OneDrive, 5 Internxt, 2 sync). **Final acceptance.**
+- **I3 · #109** (High) — reach the 5+5+2 live-integration smoke target (5 OneDrive, 5 Internxt, 2 sync).
+- **I4 · #341** — `unidrive verify` convergence audit lands early enough to instrument every soak.
+- **I5 — Surface gates** per `docs/dev/specs/mvp-acceptance-criteria.md` (#342): core+Linux (soaking since Phase D0 on the Linux box) and Windows read-only (unidrive-windows#9). **Final acceptance = all three checklists walked clean.**
 
 ---
 
 ## Deferred (post-MVP)
 
-Efficiency: #124 #125 #126 #127 #128 #129 #130 #131 #153 #154 #155 #148. Daemon phases: #141 #142. Observability/UX/CLI: #143 #150 #151 #152 #156 #157 #159 #164 #165 #166 #170. Test/build: #146 #158 #163. Internxt inherent: #132 (≥60 min /files reap lag — document, cross-check folder-contents endpoint, not fully fixable client-side). Mount perf/hygiene: ML #31 #32 #36 #37 #38 #39 #40 #41 #42 #43. (ML #33 thumbnail bulk-hydration moved into Phase E consideration — re-tier if it causes egress blowups.) #99 is the tracking-set engine umbrella (core landed; Phase H completes it).
+**Tracking-set epic (#343):** Phase H entire (#99 umbrella, #104 #134 #133 #161 #162 #167 #168 #169 #118-ts, #108-via-migration) + deep-review ts set (#288 #292 #299 #302). **Windows beyond read-only:** writeback (unidrive-windows#5), shell UX (unidrive-windows#6), MSIX/Authenticode/winget (unidrive-dist#12 post-MVP half). Efficiency: #124 #125 #126 #127 #128 #129 #130 #131 #153 #154 #155 #148. Daemon phases: #141 #142. Observability/UX/CLI: #143 #150 #151 #152 #156 #157 #159 #164 #165 #166 #170. Test/build: #146 #158 #163. Internxt inherent: #132 (≥60 min /files reap lag — document, cross-check folder-contents endpoint, not fully fixable client-side). Mount perf/hygiene: ML #31 #32 #36 #37 #38 #39 #40 #41 #42 #43. (ML #33 thumbnail bulk-hydration moved into Phase E consideration — re-tier if it causes egress blowups.) Deep-review medium/low findings (#307–#339) tier into the existing buckets; data-loss-relevant ones are already in Phase D0.
 
 ## Shared-file serialization map (why parallel is unsafe)
 
 | File | Units |
 |---|---|
-| `SyncEngine.kt` (apply/guard/reap) | B1, B2, D1, D3, D5, D6 |
+| `SyncEngine.kt` (apply/guard/reap) | D0.1, D0.3–D0.7, B1, B2, D1, D3, D5, D6 |
 | `StateDatabase.kt` | D4, D5 |
-| `GraphApiService` / OneDrive provider | C1, C2, C3, C4 |
+| `GraphApiService` / OneDrive provider | D0.1, D0.2, D0.3, C1, C2, C3, C4 |
 | `HydrationImpl.kt` | E2, E3, E4, E5 |
 | `HydrationIpcHandler` (JVM IPC) | A1, F2 |
 | `mount/src/reconnect.rs` | V1(if hang), A1 |
