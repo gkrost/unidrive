@@ -17,7 +17,7 @@ Second, the product direction has expanded. The core is the foundation for three
 | Surface | Purpose | Status |
 |---|---|---|
 | Linux daemon | Background sync with a CLI control surface. | Active — Internxt + OneDrive |
-| Windows desktop client | Full Explorer integration via the Cloud Files API. Placeholder representation of cloud-only items. Replaces the first-party OneDrive / Internxt desktop clients. | Planned |
+| Windows desktop client | Full Explorer integration via the Cloud Files API. Placeholder representation of cloud-only items. Replaces the first-party OneDrive / Internxt desktop clients. | In progress — `unidrive-windows`; read-only tier in MVP (#290), writeback post-MVP |
 | Android app | Cloud-drive sync (browse, hydrate, upload). Out of scope: in-app document editing, mail, contacts, anything that isn't sync. | Planned |
 | Linux UI | FUSE-backed file-on-demand + Dolphin context menus (hydrate / dehydrate per directory or file). | Planned |
 
@@ -32,7 +32,7 @@ This supersedes `linux-only.md` and `shipping-surface.md`. Their historical cont
 - **Virtual filesystem layer (placeholders) is no longer indefinitely deferred.** The Windows desktop surface requires Cloud Files API placeholders; the Linux UI requires FUSE-backed file-on-demand. Each gets its own platform tier; the core grows the hydration / pin primitives those tiers need.
 - **Smoke target stays per-surface.** The current 5+5+2 target was sized for the Linux daemon. Each new surface gets its own smoke set; defer those until that surface has working code rather than writing speculative ones now.
 - **CI matrix grows lazily.** One Linux runner today. Windows + Android runners come online as those tiers gain code, not preemptively.
-- **No platform-parity claim yet.** README + AGENTS.md signal future expansion without overpromising. Until a second surface has working code, "multi-platform core" is a direction, not a current capability.
+- **No platform-parity claim yet.** README + AGENTS.md signal future expansion without overpromising. The Windows tier now has working read-only code (`unidrive-windows`); parity claims wait until its surface gate (unidrive-windows#9, per `docs/dev/specs/mvp-acceptance-criteria.md`) is green.
 - **Abstractions earn their keep, but the bar is no longer zero.** The slim "no new abstractions" rule made sense when the answer was always "two implementations isn't enough." With four surfaces planned, some module seams are required. New abstractions still have to clear the bar (named justification tied to a surface or to a structural-safety property), they just no longer get refused on principle.
 
 ## Re-opening criteria

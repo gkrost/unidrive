@@ -1,6 +1,6 @@
 # `unidrive`
 
-Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Internxt Drive (AES-GCM encrypted) and Microsoft OneDrive (Graph API). Runs as a user-space Linux daemon via systemd.
+Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Internxt Drive (zero-knowledge E2EE) and Microsoft OneDrive (Graph API). Runs as a user-space Linux daemon via systemd; platform tiers consume the engine over IPC — [`unidrive-mount-linux`](https://github.com/gkrost/unidrive-mount-linux) (FUSE) and [`unidrive-windows`](https://github.com/gkrost/unidrive-windows) (CfAPI, read-only tier in MVP).
 
 ## Technical Layout
 
