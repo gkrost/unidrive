@@ -26,6 +26,7 @@ import java.io.RandomAccessFile
 import java.net.URLEncoder
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 class GraphApiService(
@@ -252,16 +253,24 @@ class GraphApiService(
                         val written =
                             withContext(Dispatchers.IO) {
                                 Files.createDirectories(destPath.parent)
-                                Files.newOutputStream(destPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                                    val buf = ByteArray(8192)
-                                    var w = 0L
-                                    while (true) {
-                                        val n = channel.readAvailable(buf)
-                                        if (n <= 0) break
-                                        out.write(buf, 0, n)
-                                        w += n
+                                val tmpPath = destPath.parent.resolve("${destPath.fileName}.unidrive-tmp")
+                                try {
+                                    Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                                        val buf = ByteArray(8192)
+                                        var w = 0L
+                                        while (true) {
+                                            val n = channel.readAvailable(buf)
+                                            if (n <= 0) break
+                                            out.write(buf, 0, n)
+                                            w += n
+                                        }
+                                        w
+                                    }.also {
+                                        Files.move(tmpPath, destPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
                                     }
-                                    w
+                                } catch (e: Exception) {
+                                    Files.deleteIfExists(tmpPath)
+                                    throw e
                                 }
                             }
                         // Truncation guard: a connection that closes mid-body can yield a
