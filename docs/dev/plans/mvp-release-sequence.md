@@ -51,15 +51,16 @@ The production-readiness review (#287–#340) surfaced data-loss paths *beneath*
 - **D0.1 · #289** (Critical) — temp-file + fsync + `ATOMIC_MOVE` for every download path (both providers, hydration cache); never restore a placeholder over real bytes.
 - **D0.2 · #287** (Critical) — OneDrive delta tombstones: deletion facets short-circuit the vault/root filters; surface tombstones by id.
 - **D0.3 · #291** (High) — If-Match plumbing engine→upload; ≤4 MiB PUT precondition; 412 → collision.
-- **D0.4 · #294** (High) — detectMoves: require basename (+hash when available) before pairing delete+upload.
-- **D0.5 · #297** (High) — unhydrated-row local edits: divergence check before the recovery download.
-- **D0.6 · #298** (High) — dry-run contractually side-effect-free (no `updateRemoteEntries`, no cursor promotion, no scanner pre-writes).
-- **D0.7 · #301** (High) — dehydrate/reap refuse cache eviction while an upload slot is live or the row is dirty.
+- **D0.4 · #296** (High) — detectMoves: require basename (+hash when available) before pairing delete+upload.
+- **D0.5 · #294** (High) — Internxt `getMetadata`: exact-name match across the listing before any base-name fallback (wrong-sibling delete/download/move).
+- **D0.6 · #297** (High) — unhydrated-row local edits: divergence check before the recovery download.
+- **D0.7 · #298** (High) — dry-run contractually side-effect-free (no `updateRemoteEntries`, no cursor promotion, no scanner pre-writes).
+- **D0.8 · #301** (High) — dehydrate/reap refuse cache eviction while an upload slot is live or the row is dirty.
 
 *(#288/#292/#299/#302 are ts-engine — frozen per #343, handled in the post-MVP ts epic.)*
 
 ### Phase P — Portability floor (parallel with D0; no shared files)
-- **P1 · #344** — `windows-latest` CI: `./gradlew check` + daemon start→stop AF_UNIX round-trip (advisory; guards closed #239, exercises #320).
+- **P1 · #344** — `windows-latest` CI: `./gradlew check` + daemon start→stop AF_UNIX round-trip (advisory; guards closed #239, exercises #327).
 - **P2 · #345** — IPC `protocol_version` + golden NDJSON contract corpus (companions: unidrive-windows#8, unidrive-mount-linux#70).
 
 ### Phase 0 — Verify gate (no/tiny code)
@@ -108,7 +109,7 @@ The production-readiness review (#287–#340) surfaced data-loss paths *beneath*
 H1–H4 (#104, #134, ts live-tests #133/#161/#162/#167/#168/#169, #118-ts, #108-via-migration) leave the MVP chain and form the post-MVP ts epic, joined by the deep-review ts data-safety set (#288 #292 #299 #302). What remains in-MVP from old H4: resolve #108 on the **legacy** engine via the one-shot, operator-supervised `--force-delete` — **no destructive op on the primary profile without explicit operator go-ahead.**
 
 ### Phase W — Windows read-only surface (after D0 + provider phases; interactive on the Windows dev box)
-- **W1** — engine-side Windows blockers: #306 (daemon stop transport), #310 (case folding), #319 (state-dir fragmentation), #321 (credential ACL/DPAPI) — plus whatever the soak surfaces.
+- **W1** — engine-side Windows blockers: #306 (daemon stop transport), #309 (case folding), #328 (credential ACL/DPAPI), the state-dir-fragmentation inventory recorded in #290 — plus whatever the soak surfaces.
 - **W2 · unidrive-windows#3/#4** — verify CfAPI Phases 1.4 (dehydrate; blocked on #301) and 1.5 (live refresh; needs F2's `view.invalidated`).
 - **W3 · unidrive-windows#7 + unidrive-dist#12 (MVP half)** — minimal install story (zip/script, prerequisites, login-start, recovery-aware uninstall).
 - **Gate: unidrive-windows#9** per the acceptance-criteria spec; the Linux box runs its core soak in the background throughout.
@@ -130,7 +131,7 @@ H1–H4 (#104, #134, ts live-tests #133/#161/#162/#167/#168/#169, #118-ts, #108-
 
 | File | Units |
 |---|---|
-| `SyncEngine.kt` (apply/guard/reap) | D0.1, D0.3–D0.7, B1, B2, D1, D3, D5, D6 |
+| `SyncEngine.kt` (apply/guard/reap) | D0.1, D0.3–D0.4, D0.6–D0.8, B1, B2, D1, D3, D5, D6 |
 | `StateDatabase.kt` | D4, D5 |
 | `GraphApiService` / OneDrive provider | D0.1, D0.2, D0.3, C1, C2, C3, C4 |
 | `HydrationImpl.kt` | E2, E3, E4, E5 |
