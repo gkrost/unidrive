@@ -1,6 +1,6 @@
 # Plan — Windows 11 mount via the Cloud Files API (CfAPI)
 
-**Status:** Proposed · post-MVP. Gated on the multi-platform re-opening criteria (`docs/adr/multi-platform.md`): a funded effort with a committed maintainer for the Windows tier.
+**Status:** Active — superseded in part by the #290 decision: the **read-only tier (Phases 0–1) is in the MVP**; writeback, shell UX and MSIX packaging (Phases 2–4) are post-MVP (unidrive-windows#5/#6/#7). Implementation lives in `gkrost/unidrive-windows` (Phase 1.3 reached; 1.4/1.5 verification tracked as unidrive-windows#3/#4). Surface gate: unidrive-windows#9 against `docs/dev/specs/mvp-acceptance-criteria.md`.
 **Date:** 2026-05-29
 **Related ADRs:** `docs/adr/multi-platform.md` (authoritative — the planned Windows desktop tier), `docs/adr/core-app-contract.md` (engine/client split), `docs/adr/linux-only.md` (ADR-0012, Windows out of MVP), `docs/adr/shipping-surface.md` (ADR-0011, `shell-win` removal).
 **Related specs:** `docs/dev/specs/unidrive-daemon-design.md`, `docs/dev/specs/mount-view-refresh-design.md`, `docs/dev/specs/sparse-hydration-roadmap-design.md`.
