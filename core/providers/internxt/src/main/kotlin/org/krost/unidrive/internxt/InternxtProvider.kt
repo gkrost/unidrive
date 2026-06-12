@@ -190,14 +190,32 @@ class InternxtProvider(
         val folder = content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == name }
         if (folder != null) return folder.toCloudItem(parentPath)
 
-        val file =
+        // Two-pass match: an exact full-name (base + type) match anywhere in the
+        // listing always wins. Folding the extension-stripped baseName into the
+        // same pass let `Makefile` resolve to the sibling `Makefile.am`
+        // (plainName=Makefile, type=am) depending on listing order — and the
+        // path-based consumers (deleteRemote, download, move) then hit the
+        // wrong file. The baseName fallback only fires when NO exact match
+        // exists in the whole listing.
+        val exactFile =
             content.files.find { file ->
                 val baseName = sanitizeName(file.plainName ?: file.name ?: "")
                 val cleanType = file.type?.let { sanitizeName(it) }
                 val fullName = if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) "$baseName.$cleanType" else baseName
-                fullName == name || baseName == name
+                fullName == name
             }
-        if (file != null) return file.toCloudItem(parentPath)
+        if (exactFile != null) return exactFile.toCloudItem(parentPath)
+
+        val baseNameFile = content.files.find { file -> sanitizeName(file.plainName ?: file.name ?: "") == name }
+        if (baseNameFile != null) {
+            log.warn(
+                "getMetadata: no exact name match for {}; falling back to baseName match (uuid={}, type={})",
+                path,
+                baseNameFile.uuid,
+                baseNameFile.type,
+            )
+            return baseNameFile.toCloudItem(parentPath)
+        }
 
         throw ProviderException("Item not found: $path")
     }
