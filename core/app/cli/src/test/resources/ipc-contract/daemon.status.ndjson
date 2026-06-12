@@ -1,0 +1,2 @@
+{"verb":"daemon.status"}
+{"ok":true,"protocol_version":1,"uptime_ms":0,"clients_connected":1,"refresh_in_flight":false,"refresh_job_id":null}

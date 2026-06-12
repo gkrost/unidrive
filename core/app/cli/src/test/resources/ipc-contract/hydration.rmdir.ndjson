@@ -1,0 +1,6 @@
+{"verb":"hydration.rmdir","path":"/docs/sub"}
+{"ok":true}
+{"verb":"hydration.rmdir","path":"/docs/report.txt"}
+{"ok":false,"error":"path_is_file"}
+{"verb":"hydration.rmdir","path":"/docs/nonempty"}
+{"ok":false,"error":"not_empty"}

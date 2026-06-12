@@ -1,0 +1,4 @@
+{"verb":"hydration.hydrate","path":"/docs/report.txt"}
+{"ok":true}
+{"verb":"hydration.hydrate","path":"/missing.txt"}
+{"ok":false,"error":"unknown_path"}

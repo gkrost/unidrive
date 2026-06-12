@@ -227,14 +227,17 @@ class DaemonRuntime(
                 // serveScope so it cancels with the daemon at shutdown.
                 EnumeratePoller(enumerateHandler, pollIntervalMs, serveScope).start()
 
-                // daemon.status verb (spec §4.3)
+                // daemon.status verb (spec §4.3). protocol_version is the
+                // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
+                // co-clients warn/refuse on mismatch instead of failing on a
+                // missing field mid-operation.
                 server.registerHandler("daemon.status") { _, _ ->
                     val uptimeMs = System.currentTimeMillis() - startedAtMs
                     val clientCount = server.clientCount
                     val refreshInFlight = refreshHandler.isInFlight()
                     val refreshJobId = refreshHandler.inFlightJobId()
                     val jobIdJson = if (refreshJobId != null) "\"$refreshJobId\"" else "null"
-                    """{"ok":true,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson}"""
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson}"""
                 }
 
                 System.err.println(
@@ -291,5 +294,14 @@ class DaemonRuntime(
 
     companion object {
         const val SHUTDOWN_DEADLINE_MS: Long = 10_000
+
+        // Cross-repo IPC wire-protocol version, surfaced as the additive
+        // protocol_version field in the daemon.status reply so co-clients
+        // (Rust FUSE crate, C# CfAPI client) can warn/refuse on mismatch
+        // instead of failing on a missing field mid-operation. Bump ONLY on
+        // a breaking wire change; additive fields do not bump it. The golden
+        // corpus under src/test/resources/ipc-contract/ pins the current
+        // shape (IpcContractCorpusTest).
+        const val IPC_PROTOCOL_VERSION: Int = 1
     }
 }

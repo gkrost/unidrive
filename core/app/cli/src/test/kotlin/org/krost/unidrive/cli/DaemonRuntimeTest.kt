@@ -273,6 +273,10 @@ class DaemonRuntimeTest {
             channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
             val reply = readUntil(channel, "\"ok\"", timeoutMs = 5_000L)
             assertTrue(reply.contains("\"ok\":true"), "expected ok:true; got: $reply")
+            assertTrue(
+                reply.contains("\"protocol_version\":${DaemonRuntime.IPC_PROTOCOL_VERSION}"),
+                "expected protocol_version handshake field; got: $reply",
+            )
             assertTrue(reply.contains("\"uptime_ms\""), "expected uptime_ms field; got: $reply")
             assertTrue(reply.contains("\"clients_connected\""), "expected clients_connected; got: $reply")
             assertTrue(reply.contains("\"refresh_in_flight\":false"), "expected refresh_in_flight:false; got: $reply")

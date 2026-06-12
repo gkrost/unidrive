@@ -1,0 +1,4 @@
+{"verb":"hydration.last_synced","path":"/docs/report.txt"}
+{"ok":true,"mtime_ms":1234567890123}
+{"verb":"hydration.last_synced","path":"/missing.txt"}
+{"ok":false,"error":"unknown_path"}
