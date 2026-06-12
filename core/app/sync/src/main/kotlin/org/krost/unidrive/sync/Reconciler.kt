@@ -1091,9 +1091,31 @@ class Reconciler(
             val entry = entryByPath[del.path] ?: continue
             if (entry.isFolder || entry.remoteId == null) continue
 
-            val candidate =
+            // #296: size alone is NOT evidence of a move. An unrelated new file
+            // that happens to byte-match a deleted one (padded formats, templates,
+            // camera files) used to be converted into a remote rename — the cloud
+            // kept the deleted file's bytes under the new name and the new file's
+            // real content was never uploaded. Require a structural anchor on top
+            // of the size match, mirroring the folder branch above: same basename
+            // (cross-folder move) OR same parent (rename in place — the #115
+            // alias-folder rename invariant depends on this arm). Hash equality
+            // would be stronger, but the reconciler doesn't know the provider's
+            // hash algorithm; anchor + size is the v1.
+            val delName = del.path.substringAfterLast("/")
+            val delParent = del.path.substringBeforeLast("/")
+            val candidates =
                 uploadsBySize[entry.remoteSize]
-                    ?.firstOrNull { it.path !in matchedUploads } ?: continue
+                    ?.filter { up ->
+                        up.path !in matchedUploads &&
+                            (
+                                up.path.substringAfterLast("/") == delName ||
+                                    up.path.substringBeforeLast("/") == delParent
+                            )
+                    }.orEmpty()
+            // 2+ anchored candidates → ambiguous; guessing wrong converts a real
+            // file into a rename of unrelated bytes. Fall back to the independent
+            // DeleteRemote + Upload — correct, just less efficient.
+            val candidate = candidates.singleOrNull() ?: continue
             actions.remove(del)
             actions.remove(candidate)
             actions.add(
