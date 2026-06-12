@@ -29,4 +29,4 @@
 ## Notes
 
 - Criteria 1–2 are continuously checkable; 3–5 are per-gate campaigns. Soaks for an earlier surface keep running in the background while the next surface is worked interactively — overlap is intended.
-- Efficiency findings gate via criterion 5, not via taste (#311, #312 are the current known blockers for the envelope above).
+- Efficiency findings gate via criterion 5, not via taste (#316, #317 are the current known blockers for the envelope above).
