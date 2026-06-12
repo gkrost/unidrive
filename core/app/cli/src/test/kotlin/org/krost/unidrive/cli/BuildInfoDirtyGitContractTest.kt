@@ -57,6 +57,11 @@ class BuildInfoDirtyGitContractTest {
         // The whole point of the test is mode-bit handling; force fileMode on
         // so the fixture is deterministic regardless of the host git config.
         git(dir, "config", "core.fileMode", "true")
+        // With host-level autocrlf=true (Git for Windows default), `git diff`
+        // emits a "LF will be replaced by CRLF" warning on stderr, which
+        // redirectErrorStream merges into the parsed numstat output. Disable
+        // conversion in the fixture so the shapes stay deterministic.
+        git(dir, "config", "core.autocrlf", "false")
         return dir
     }
 
@@ -69,6 +74,12 @@ class BuildInfoDirtyGitContractTest {
 
     @Test
     fun `mode-only chmod of a tracked file surfaces as a zero-zero numstat line`() {
+        // POSIX-only: NTFS has no executable bit, so File.setExecutable is a
+        // no-op there and git can never observe a mode-only change — the
+        // `0\t0` shape this pins is a POSIX-git contract. Mirrors the
+        // isWindows guard in LocalScannerTest's visitFileFailed test.
+        val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
+        org.junit.Assume.assumeFalse("POSIX-only: mode-only changes are unrepresentable on NTFS", isWindows)
         val dir = initRepo()
         val script = dir.resolve("run.sh")
         Files.writeString(script, "echo hi\n")
