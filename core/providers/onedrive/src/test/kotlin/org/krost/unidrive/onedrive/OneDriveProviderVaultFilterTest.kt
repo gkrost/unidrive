@@ -210,8 +210,8 @@ class OneDriveProviderVaultFilterTest {
             // would destroy still-valid data. The provider's DEBUG log still distinguishes
             // hard from soft from unspecified for diagnostics (logDeletionStateSummary is
             // independent of the deleted-flag decision). Real-world delta deletion items
-            // just carry id + removal marker (no name, no facets) — anything richer would
-            // trip the facet-less zero-size vault filter.
+            // just carry id + removal marker (no name, no facets); richer tombstone
+            // shapes are covered by the dedicated short-circuit tests below.
             val body =
                 """
                 {
@@ -270,6 +270,115 @@ class OneDriveProviderVaultFilterTest {
                 providerLogger.detachAppender(appender)
                 providerLogger.level = previousLevel
             }
+        }
+
+    @Test
+    fun `delta surfaces a named facet-less zero-size tombstone instead of vault-filtering it`() =
+        runTest {
+            // A hard-deleted file's tombstone can carry name + size 0 and no
+            // file/folder facet — exactly the vault fallback signature. The
+            // deletion facet must short-circuit the vault filter, or the remote
+            // delete never propagates and a later local edit resurrects the file.
+            // The genuine vault stub (no deletion facet) is still filtered.
+            val body =
+                """
+                {
+                  "value": [
+                    {
+                      "id": "vault-stub",
+                      "name": "Personal Vault",
+                      "size": 0,
+                      "parentReference": {"path": "/drive/root:"}
+                    },
+                    {
+                      "id": "tomb-named",
+                      "name": "quarterly-report.docx",
+                      "size": 0,
+                      "@microsoft.graph.removed": {"state": "deleted"},
+                      "parentReference": {"path": "/drive/root:"}
+                    }
+                  ],
+                  "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=NEXT"
+                }
+                """.trimIndent()
+
+            val provider = mockedProvider(body)
+            val page = provider.delta(cursor = null)
+
+            assertFalse(
+                page.items.any { it.id == "vault-stub" },
+                "genuine vault stub must still be filtered from delta output",
+            )
+            val tombstone = page.items.find { it.id == "tomb-named" }
+            kotlin.test.assertNotNull(tombstone, "named facet-less zero-size tombstone must survive the vault filter")
+            assertTrue(tombstone.deleted, "surviving tombstone must surface as deleted")
+            provider.close()
+        }
+
+    @Test
+    fun `delta surfaces a zero-byte deleted file tombstone as deleted`() =
+        runTest {
+            // Deleting a zero-byte file yields a tombstone indistinguishable from
+            // the vault stub except for the deleted facet — it must reach the
+            // engine flagged deleted.
+            val body =
+                """
+                {
+                  "value": [
+                    {
+                      "id": "zero-byte-tomb",
+                      "name": "empty.txt",
+                      "size": 0,
+                      "deleted": {"state": "deleted"},
+                      "parentReference": {"path": "/drive/root:"}
+                    }
+                  ],
+                  "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=NEXT"
+                }
+                """.trimIndent()
+
+            val provider = mockedProvider(body)
+            val page = provider.delta(cursor = null)
+
+            val tombstone = page.items.find { it.id == "zero-byte-tomb" }
+            kotlin.test.assertNotNull(tombstone, "zero-byte deleted file tombstone must survive both delta filters")
+            assertTrue(tombstone.deleted, "surviving tombstone must surface as deleted")
+            provider.close()
+        }
+
+    @Test
+    fun `listChildren keeps an ordinary folder that shares the vault display name`() =
+        runTest {
+            // A real user folder named exactly like the vault carries a folder
+            // facet; the name match alone must not drop it. Only the facet-less
+            // zero-size stub is the genuine vault.
+            val body =
+                """
+                {
+                  "value": [
+                    {
+                      "id": "user-folder",
+                      "name": "Personal Vault",
+                      "size": 0,
+                      "folder": {"childCount": 4},
+                      "parentReference": {"path": "/drive/root:"}
+                    },
+                    {
+                      "id": "vault-stub",
+                      "name": "Personal Vault",
+                      "size": 0,
+                      "parentReference": {"path": "/drive/root:"}
+                    }
+                  ]
+                }
+                """.trimIndent()
+
+            val provider = mockedProvider(body)
+            val children = provider.listChildren("/")
+
+            assertEquals(1, children.size, "only the genuine facet-less stub is filtered")
+            assertEquals("user-folder", children[0].id)
+            provider.close()
         }
 
     @Test

@@ -108,6 +108,41 @@ class DeltaRemovedStateTest {
         }
 
     @Test
+    fun `delta_tombstone_without_parent_path_survives_root_filter`() =
+        runTest {
+            // Graph's documented minimal tombstone shape carries just id + removal
+            // marker; parentReference, when present at all, has no path. The
+            // null-path root heuristic must not swallow these — the engine resolves
+            // a pathless tombstone via its remote id. The true root item (no
+            // deletion facet) is still filtered.
+            val body =
+                """
+                {
+                  "value": [
+                    {"id": "root-id", "name": "root", "size": 0, "folder": {"childCount": 2}},
+                    {"id": "TOMB-NO-PATH", "@microsoft.graph.removed": {"state": "deleted"}, "parentReference": {"driveId": "b!drive"}},
+                    {"id": "TOMB-NO-PARENT", "deleted": {"state": "deleted"}}
+                  ],
+                  "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=NEXT"
+                }
+                """.trimIndent()
+            val provider = mockedProvider(body)
+
+            val page = provider.delta(null)
+            assertTrue(page.items.none { it.id == "root-id" }, "the true root item must still be filtered")
+
+            val noPath = page.items.find { it.id == "TOMB-NO-PATH" }
+            assertNotNull(noPath, "tombstone whose parentReference lacks a path must survive the root filter")
+            assertTrue(noPath.deleted, "surviving tombstone must surface as deleted")
+
+            val noParent = page.items.find { it.id == "TOMB-NO-PARENT" }
+            assertNotNull(noParent, "tombstone without any parentReference must survive the root filter")
+            assertTrue(noParent.deleted, "surviving tombstone must surface as deleted")
+
+            provider.close()
+        }
+
+    @Test
     fun `delta_removed_facet_without_state_is_treated_as_deleted`() =
         runTest {
             // Pre-2017 schema fallback: the removed facet is present but carries no
