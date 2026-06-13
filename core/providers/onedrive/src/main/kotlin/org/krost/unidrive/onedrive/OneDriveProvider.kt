@@ -343,7 +343,16 @@ class OneDriveProvider(
             }
         }
 
-    private fun DriveItem.isRootItem(): Boolean = parentReference?.path == null || parentReference?.path == "/drive/root"
+    // #287: a deletion tombstone is never the root item. Graph's documented minimal
+    // tombstone shape carries just id + removal marker — parentReference, when present
+    // at all, has no path — so the null-path heuristic would swallow it and the remote
+    // delete would never propagate. Check the deletion facets first; the engine
+    // resolves a pathless tombstone via its remote id.
+    private fun DriveItem.isRootItem(): Boolean {
+        if (removed != null || deleted != null) return false
+        val parentPath = parentReference?.path
+        return parentPath == null || parentPath == "/drive/root"
+    }
 
     private fun noteAndSkipVault(item: DriveItem): Boolean {
         if (!item.isPersonalVault) return false
