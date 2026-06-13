@@ -92,11 +92,13 @@ class DeltaCursorExpiredTest {
             val provider =
                 mockedProvider(HttpStatusCode.InternalServerError, """{"error":{"code":"serviceError"}}""")
 
-            val ex =
-                assertFailsWith<GraphApiException> {
-                    provider.delta("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=ABC")
-                }
-            assertTrue(ex !is DeltaCursorExpiredException, "500 must NOT be classified as cursor-expired")
+            // assertFailsWith<GraphApiException> already pins the type: a 500 must
+            // surface as a generic GraphApiException, NOT the DeltaCursorExpiredException
+            // sibling. (DeltaCursorExpiredException is not a GraphApiException, so the
+            // type narrowing here IS the cursor-expired-classification guard.)
+            assertFailsWith<GraphApiException> {
+                provider.delta("https://graph.microsoft.com/v1.0/me/drive/root/delta?token=ABC")
+            }
             provider.close()
         }
 
