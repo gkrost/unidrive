@@ -45,11 +45,17 @@ jobs:
         include:
         - language: actions
           build-mode: none
-        - language: java-kotlin
-          # Manual build: autobuild can't build the Gradle project (it lives in core/,
-          # not the repo root), and source-only (none) sees no Kotlin. Compile core/
-          # under the CodeQL tracer instead (see the manual build step below).
-          build-mode: manual
+        # java-kotlin is temporarily disabled: the CodeQL extractor hard-aborts
+        # with "Kotlin version 2.4.0 is too recent (supports versions below
+        # 2.3.30)" since the #285 bump, failing the leg on every PR. CodeQL is
+        # advisory per AGENTS.md (`./gradlew check` is the sole gate), so a leg
+        # that cannot run must not paint every PR red. Re-enable by restoring
+        # this entry once the CodeQL bundle supports Kotlin 2.4.0 (#358).
+        # - language: java-kotlin
+        #   # Manual build: autobuild can't build the Gradle project (it lives in core/,
+        #   # not the repo root), and source-only (none) sees no Kotlin. Compile core/
+        #   # under the CodeQL tracer instead (see the manual build step below).
+        #   build-mode: manual
         # CodeQL supports the following values keywords for 'language': 'actions', 'c-cpp', 'csharp', 'go', 'java-kotlin', 'javascript-typescript', 'python', 'ruby', 'rust', 'swift'
         # Use `c-cpp` to analyze code written in C, C++ or both
         # Use 'java-kotlin' to analyze code written in Java, Kotlin or both
