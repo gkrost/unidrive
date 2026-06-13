@@ -1355,6 +1355,75 @@ class ReconcilerTest {
         assertTrue(actions.any { it is SyncAction.Upload && it.path == "/new.bin" })
     }
 
+    // ── #296: detectMoves file-move needs a structural anchor, not size alone ──
+    // Deleting /a/report.pdf and creating an unrelated same-size /b/photo.jpg in
+    // the same pass used to be collapsed into a remote rename: the cloud kept
+    // report.pdf's bytes under the new name and photo.jpg's real content was
+    // never uploaded. A move candidate now needs same basename (cross-folder
+    // move) or same parent (rename in place) on top of the size match, and 2+
+    // anchored candidates are ambiguous — fall back to delete + upload.
+
+    @Test
+    fun `detectMoves does not pair unrelated same-size files across folders`() {
+        db.upsertEntry(dbEntry("/a/report.pdf", isHydrated = true))
+        Files.createDirectories(syncRoot.resolve("b"))
+        Files.writeString(syncRoot.resolve("b/photo.jpg"), "x".repeat(100))
+
+        val localChanges =
+            mapOf(
+                "/a/report.pdf" to ChangeState.DELETED,
+                "/b/photo.jpg" to ChangeState.NEW,
+            )
+
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        assertTrue(actions.none { it is SyncAction.MoveRemote }, "no move expected: $actions")
+        assertTrue(actions.any { it is SyncAction.DeleteRemote && it.path == "/a/report.pdf" })
+        assertTrue(actions.any { it is SyncAction.Upload && it.path == "/b/photo.jpg" })
+    }
+
+    @Test
+    fun `detectMoves pairs same-basename same-size files across folders`() {
+        db.upsertEntry(dbEntry("/a/x.pdf", isHydrated = true))
+        Files.createDirectories(syncRoot.resolve("b"))
+        Files.writeString(syncRoot.resolve("b/x.pdf"), "x".repeat(100))
+
+        val localChanges =
+            mapOf(
+                "/a/x.pdf" to ChangeState.DELETED,
+                "/b/x.pdf" to ChangeState.NEW,
+            )
+
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        val moves = actions.filterIsInstance<SyncAction.MoveRemote>()
+        assertEquals(1, moves.size, "expected one MoveRemote, got: $actions")
+        assertEquals("/b/x.pdf", moves[0].path)
+        assertEquals("/a/x.pdf", moves[0].fromPath)
+        assertTrue(actions.none { it is SyncAction.DeleteRemote && it.path == "/a/x.pdf" })
+        assertTrue(actions.none { it is SyncAction.Upload && it.path == "/b/x.pdf" })
+    }
+
+    @Test
+    fun `detectMoves rejects ambiguous same-size same-basename tie`() {
+        db.upsertEntry(dbEntry("/a/x.pdf", isHydrated = true))
+        Files.createDirectories(syncRoot.resolve("b"))
+        Files.createDirectories(syncRoot.resolve("c"))
+        Files.writeString(syncRoot.resolve("b/x.pdf"), "x".repeat(100))
+        Files.writeString(syncRoot.resolve("c/x.pdf"), "y".repeat(100))
+
+        val localChanges =
+            mapOf(
+                "/a/x.pdf" to ChangeState.DELETED,
+                "/b/x.pdf" to ChangeState.NEW,
+                "/c/x.pdf" to ChangeState.NEW,
+            )
+
+        val actions = reconciler.reconcile(emptyMap(), localChanges)
+        assertTrue(actions.none { it is SyncAction.MoveRemote }, "ambiguous tie must not move: $actions")
+        assertTrue(actions.any { it is SyncAction.DeleteRemote && it.path == "/a/x.pdf" })
+        assertTrue(actions.any { it is SyncAction.Upload && it.path == "/b/x.pdf" })
+        assertTrue(actions.any { it is SyncAction.Upload && it.path == "/c/x.pdf" })
+    }
+
     @Test
     fun `remote rename detected via remoteId match`() {
         db.upsertEntry(
