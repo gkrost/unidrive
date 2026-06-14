@@ -242,6 +242,7 @@ class FakeTrackingProvider : CloudProvider {
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val bytes = Files.readAllBytes(localPath)
@@ -250,7 +251,7 @@ class FakeTrackingProvider : CloudProvider {
         return itemFor(remotePath, bytes)
     }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         if (remotePath in failDeleteDirs) {
             throw org.krost.unidrive.ProviderException("simulated folder-delete failure for $remotePath")
         }
@@ -432,6 +433,7 @@ class HashlessFakeProvider : CloudProvider {
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): org.krost.unidrive.CloudItem {
         val bytes = Files.readAllBytes(localPath)
@@ -439,7 +441,7 @@ class HashlessFakeProvider : CloudProvider {
         return itemFor(remotePath, bytes)
     }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         files.remove(remotePath)
     }
 

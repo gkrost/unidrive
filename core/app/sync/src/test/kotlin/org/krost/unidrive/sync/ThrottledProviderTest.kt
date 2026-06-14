@@ -24,6 +24,7 @@ class ThrottledProviderTest {
 
         var downloadCalled = false
         var uploadCalled = false
+        var lastUploadIfMatch: String? = null
 
         override suspend fun authenticate() {}
 
@@ -41,7 +42,7 @@ class ThrottledProviderTest {
 
         override suspend fun quota() = QuotaInfo(0, 0, 0)
 
-        override suspend fun delete(remotePath: String) {}
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {}
 
         override suspend fun createFolder(path: String) = error("not used")
 
@@ -62,9 +63,11 @@ class ThrottledProviderTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
             uploadCalled = true
+            lastUploadIfMatch = ifMatchETag
             return CloudItem(
                 id = "id",
                 name = "f",
@@ -105,6 +108,25 @@ class ThrottledProviderTest {
                 val result = throttled.upload(tmpFile, "/file.bin")
                 assertTrue(stub.uploadCalled)
                 assertEquals(200L, result.size)
+            } finally {
+                Files.deleteIfExists(tmpFile)
+            }
+        }
+
+    @Test
+    fun `forwards ifMatchETag to inner provider upload`() =
+        runBlocking {
+            val stub = StubProvider(uploadBytes = 10)
+            val throttled = ThrottledProvider(stub, maxBytesPerSecond = 1_000_000)
+            val tmpFile = Files.createTempFile("throttle-test", ".bin")
+            try {
+                Files.write(tmpFile, ByteArray(10))
+                throttled.upload(tmpFile, "/file.bin", existingRemoteId = "rid", ifMatchETag = "etag-xyz")
+                assertEquals(
+                    "etag-xyz",
+                    stub.lastUploadIfMatch,
+                    "ThrottledProvider must forward the optimistic-concurrency token, else the guard is silently dropped",
+                )
             } finally {
                 Files.deleteIfExists(tmpFile)
             }
