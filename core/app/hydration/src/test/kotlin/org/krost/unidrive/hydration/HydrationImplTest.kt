@@ -86,6 +86,7 @@ internal class MinimalFakeProvider(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
@@ -115,7 +116,7 @@ internal class MinimalFakeProvider(
         }
     }
 
-    override suspend fun delete(remotePath: String) = error("delete not used")
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("delete not used")
 
     override suspend fun createFolder(path: String): CloudItem = error("createFolder not used")
 

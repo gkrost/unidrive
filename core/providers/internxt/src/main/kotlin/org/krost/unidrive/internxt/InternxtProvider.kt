@@ -462,6 +462,9 @@ class InternxtProvider(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        // #291: Internxt replace-in-place keys on the file UUID (existingRemoteId), not an eTag;
+        // it has no If-Match-style conditional PUT, so the optimistic-concurrency token is ignored.
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val segments = pathSegments(remotePath)
@@ -956,7 +959,9 @@ class InternxtProvider(
         }
     }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
+        // #291: Internxt has no conditional-delete primitive, so the optimistic-concurrency
+        // token is accepted-and-ignored; routine deletes already route to the recycle bin below.
         // UD-367: route routine sync-driven deletes through Internxt's recycle bin
         // (POST /storage/trash/add) so any spurious del-local from a partial delta()
         // gather is recoverable rather than permanently destructive. The permanent

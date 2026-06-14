@@ -3148,6 +3148,7 @@ class SyncEngineTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
             lastUploadExistingRemoteId = existingRemoteId
@@ -3174,7 +3175,7 @@ class SyncEngineTest {
         // When non-null, the NEXT delete() call throws this exception (single-use, cleared after throw).
         var deleteThrow: Throwable? = null
 
-        override suspend fun delete(remotePath: String) {
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {
             deleteThrow?.also { deleteThrow = null; throw it }
             if (deleteFailCount > 0) {
                 deleteFailCount--
@@ -4080,10 +4081,11 @@ class SyncEngineTest {
                         localPath: Path,
                         remotePath: String,
                         existingRemoteId: String?,
+                        ifMatchETag: String?,
                         onProgress: ((Long, Long) -> Unit)?,
                     ): CloudItem = getMetadata(remotePath)
 
-                    override suspend fun delete(remotePath: String) {}
+                    override suspend fun delete(remotePath: String, ifMatchETag: String?) {}
 
                     override suspend fun createFolder(path: String): CloudItem = getMetadata(path)
 

@@ -107,6 +107,7 @@ class OneDriveProvider(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val attrs = Files.readAttributes(localPath, BasicFileAttributes::class.java)
@@ -122,27 +123,42 @@ class OneDriveProvider(
         // A CREATE (existingRemoteId == null) uploads with "fail" so a pre-existing remote at
         // the path is never blind-overwritten (UD-366 data-loss); the create-collision is then
         // resolved by keeping BOTH below.
-        suspend fun put(conflictBehavior: String, ifMatchETag: String? = null) =
+        suspend fun put(conflictBehavior: String, etag: String? = null) =
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
-                graphApi.uploadSimple(remotePath, content, fsInfo, conflictBehavior)
+                graphApi.uploadSimple(remotePath, content, fsInfo, conflictBehavior, etag)
             } else {
-                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior, ifMatchETag)
+                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior, etag)
             }
 
         if (existingRemoteId != null) {
-            // MODIFIED file we own → replace-in-place. For large-file uploads the session-create
-            // is guarded by If-Match so a concurrent edit surfaces as 412 instead of silently
-            // overwriting the other editor's change (#113).
-            val ifMatchETag =
-                if (fileSize > 4 * 1024 * 1024) {
-                    runCatching { graphApi.getItemByPath(remotePath) }.getOrNull()?.eTag
-                } else {
-                    null
-                }
+            // MODIFIED file we own → replace-in-place, guarded by If-Match so a concurrent edit
+            // surfaces as 412 instead of silently overwriting the other editor's change. #291
+            // extends this guard to the ≤4 MiB simple-PUT path (previously only >4 MiB sessions
+            // carried it, #113). Prefer the engine's PLAN-TIME eTag when supplied; otherwise fall
+            // back to an at-upload-time fetch (closes the narrower fetch→PUT window, not the
+            // engine's stale-view window — see #291 for the plan-time-persistence limitation).
+            val guardETag =
+                ifMatchETag
+                    ?: runCatching { graphApi.getItemByPath(remotePath) }.getOrNull()?.eTag
             return try {
-                put("replace", ifMatchETag).toCloudItem()
+                put("replace", guardETag).toCloudItem()
             } catch (e: GraphApiException) {
+                if (e.statusCode == 412) {
+                    // #291: 412 Precondition Failed means a concurrent remote edit landed after the
+                    // engine planned this replace. Overwriting it would be the classic lost update.
+                    // Keep BOTH: the concurrent remote edit stays untouched and the local copy lands
+                    // under a server-assigned name via "rename" (no If-Match — this is a fresh name,
+                    // not a guarded replace). Routes distinctly from a 409 nameAlreadyExists below.
+                    log.warn(
+                        "#291: OneDrive replace of '{}' hit 412 Precondition Failed — a concurrent remote " +
+                            "edit landed since the engine planned this upload. Preserving the remote change " +
+                            "untouched and landing the local copy as a keep-both copy (conflictBehavior=rename) " +
+                            "rather than overwriting it.",
+                        remotePath,
+                    )
+                    return put("rename").toCloudItem()
+                }
                 if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
                     log.warn(
                         "UD-307: OneDrive rejected '{}' with nameAlreadyExists on a replace — likely a " +
@@ -175,7 +191,7 @@ class OneDriveProvider(
         }
     }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         val item =
             try {
                 graphApi.getItemByPath(remotePath)
@@ -183,7 +199,11 @@ class OneDriveProvider(
                 if (e.statusCode == 404) return // Already deleted
                 throw e
             }
-        graphApi.deleteItem(item.id)
+        // #291: when the engine supplies a plan-time eTag, guard the delete with If-Match so a
+        // concurrent edit since the plan surfaces as 412 rather than destroying an unseen version.
+        // Null (the legacy default and the current engine call sites, which persist no plan-time
+        // eTag) preserves the unconditional delete-by-id.
+        graphApi.deleteItem(item.id, ifMatchETag)
     }
 
     override suspend fun createFolder(path: String): CloudItem {

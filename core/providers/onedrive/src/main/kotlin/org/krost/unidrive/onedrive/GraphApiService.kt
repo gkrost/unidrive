@@ -388,6 +388,7 @@ class GraphApiService(
         content: ByteArray,
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
+        ifMatchETag: String? = null,
     ): DriveItem {
         log.debug("Upload (simple): {} ({} bytes, conflictBehavior={})", remotePath, content.size, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
@@ -406,6 +407,12 @@ class GraphApiService(
                 }
                 bearerAuth(tokenProvider(false))
                 contentType(ContentType.Application.OctetStream)
+                // #291: If-Match makes the content PUT conditional on the caller's view of the item
+                // being current. A concurrent edit between the engine's plan and this PUT flips the
+                // server-side eTag and Graph returns 412 Precondition Failed instead of silently
+                // overwriting the other editor's change. Caller passes null to opt out (a NEW file,
+                // or a call site without an eTag in hand). Mirrors the upload-session If-Match guard.
+                if (ifMatchETag != null) header(HttpHeaders.IfMatch, ifMatchETag)
                 setBody(content)
             }
 
@@ -453,11 +460,15 @@ class GraphApiService(
         return json.decodeFromString<DriveItem>(response.bodyAsText())
     }
 
-    suspend fun deleteItem(itemId: String) {
+    suspend fun deleteItem(itemId: String, ifMatchETag: String? = null) {
         val response =
             httpClient.request("$baseUrl/me/drive/items/$itemId") {
                 bearerAuth(tokenProvider(false))
                 method = HttpMethod("DELETE")
+                // #291: If-Match guards the delete against a concurrent edit between plan and apply.
+                // A non-null eTag makes Graph return 412 Precondition Failed if the item moved on,
+                // rather than destroying a version the engine never saw. Null = legacy unconditional.
+                if (ifMatchETag != null) header(HttpHeaders.IfMatch, ifMatchETag)
             }
 
         if (response.status == HttpStatusCode.Unauthorized) {
