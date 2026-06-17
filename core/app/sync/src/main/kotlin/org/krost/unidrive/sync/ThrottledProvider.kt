@@ -49,10 +49,13 @@ class ThrottledProvider(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val startMs = System.currentTimeMillis()
-        val result = inner.upload(localPath, remotePath, existingRemoteId, onProgress)
+        // #291: forward the optimistic-concurrency token to the real provider; dropping it here
+        // would silently disable the If-Match guard whenever a rate limit is configured.
+        val result = inner.upload(localPath, remotePath, existingRemoteId, ifMatchETag, onProgress)
         // Use the result size as bytes transferred; fall back to 0 if unavailable.
         throttle(result.size.coerceAtLeast(0), startMs)
         return result

@@ -164,6 +164,7 @@ class SyncExceptionStormTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
             uploadCalls.incrementAndGet()
@@ -185,7 +186,7 @@ class SyncExceptionStormTest {
             )
         }
 
-        override suspend fun delete(remotePath: String) {}
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {}
 
         override suspend fun createFolder(path: String) =
             CloudItem(
