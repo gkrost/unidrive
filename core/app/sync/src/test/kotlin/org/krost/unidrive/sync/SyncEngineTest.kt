@@ -3312,6 +3312,32 @@ class SyncEngineTest {
     )
 
     @Test
+    fun `sync-path scope does not match sibling paths sharing its prefix`() =
+        runTest {
+            provider.files["/_INBOX/a.txt"] = ByteArray(8)
+            provider.files["/_INBOXX/b.txt"] = ByteArray(8)
+            provider.files["/_INBOX-old/c.txt"] = ByteArray(8)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/_INBOX", isFolder = true),
+                    cloudItem("/_INBOX/a.txt", size = 8),
+                    cloudItem("/_INBOXX", isFolder = true),
+                    cloudItem("/_INBOXX/b.txt", size = 8),
+                    cloudItem("/_INBOX-old", isFolder = true),
+                    cloudItem("/_INBOX-old/c.txt", size = 8),
+                )
+            Files.createDirectories(syncRoot.resolve("_INBOXX"))
+            Files.write(syncRoot.resolve("_INBOXX/local.txt"), ByteArray(8))
+
+            engineForScope(syncPath = "/_INBOX").syncOnce()
+
+            assertTrue(Files.exists(syncRoot.resolve("_INBOX/a.txt")))
+            assertFalse(Files.exists(syncRoot.resolve("_INBOXX/b.txt")))
+            assertFalse(Files.exists(syncRoot.resolve("_INBOX-old")))
+            assertFalse(provider.uploadedPaths.contains("/_INBOXX/local.txt"))
+        }
+
+    @Test
     fun `UD-256 first run with --sync-path persists the scope into sync_state`() =
         runTest {
             provider.deltaItems = emptyList()

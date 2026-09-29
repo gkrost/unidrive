@@ -997,7 +997,7 @@ open class SyncEngine(
                 if (syncPath != null) {
                     val ancestors = syncPathAncestors(syncPath)
                     allLocalChangesPre.filterKeys {
-                        it.startsWith(syncPath) || it == syncPath || it in ancestors
+                        Reconciler.pathInSyncScope(it, syncPath) || it in ancestors
                     }
                 } else {
                     allLocalChangesPre
@@ -1037,7 +1037,7 @@ open class SyncEngine(
 
         val remoteChanges =
             if (syncPath != null) {
-                allRemoteChanges.filterKeys { it.startsWith(syncPath) || it == syncPath }
+                allRemoteChanges.filterKeys { Reconciler.pathInSyncScope(it, syncPath) }
             } else {
                 allRemoteChanges
             }
@@ -1106,7 +1106,7 @@ open class SyncEngine(
             localChanges =
                 if (syncPath != null) {
                     val ancestors = syncPathAncestors(syncPath)
-                    allLocalChanges.filterKeys { it.startsWith(syncPath) || it == syncPath || it in ancestors }
+                    allLocalChanges.filterKeys { Reconciler.pathInSyncScope(it, syncPath) || it in ancestors }
                 } else {
                     allLocalChanges
                 }
