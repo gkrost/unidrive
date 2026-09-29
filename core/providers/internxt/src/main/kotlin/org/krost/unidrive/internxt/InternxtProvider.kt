@@ -1208,12 +1208,15 @@ class InternxtProvider(
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Parallel listing pagination. Files and folders streams run concurrently;
-        // inside each stream up to 2 page fetches stay in flight at a time. Measured
-        // on a live account 2026-09-29 (#392): /folders/content latency p50 ~0.3s,
-        // p99 ~2-4s, max ~8s, and throughput still scaled with concurrency 8
-        // (8.7 calls/s) with zero throttling — the 2-wide cap is conservative
-        // headroom, not a measured limit. It roughly halves scan wall-clock vs
-        // the prior sequential loop anyway.
+        // inside each stream up to 2 page fetches stay in flight at a time — the
+        // same width as the Drive HttpRetryBudget every listing call passes
+        // through (driveBudget maxConcurrency = 2, InternxtApiService), so a
+        // speculative fetch never queues behind another page call for a budget
+        // slot. The API itself tolerates more (measured on a live account
+        // 2026-09-29, #392: throughput still scaled at concurrency 8, 8.7
+        // calls/s, zero throttling; /folders/content p50 ~0.3s, p99 ~2-4s,
+        // max ~8s) — the overlap exists to absorb the p99 tail instead of
+        // stalling the stream behind one slow page.
         // Running counts via AtomicInteger so the heartbeat reports monotonically
         // non-decreasing totals as pages arrive on either stream. The resumed-row
         // contribution is baked in up front so the heartbeat total is monotonic

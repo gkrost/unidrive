@@ -113,6 +113,15 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/folders/content/{uuid}/folders` | GET | ◯ | — | |
 | `/folders/content/{uuid}/folders/existence` | POST | ◯ | — | Could replace the 409-recovery dance in `createFolder` (`InternxtProvider.kt:256-267`). |
 | `/folders/content/{uuid}/files/existence` | POST | ◯ | — | |
+| `/folders/{uuid}/meta` | GET | ◯ | — | |
+| `/folders/{uuid}/meta` | PUT | ✅ | `InternxtApiService.kt` `renameFolder` | UD-369: rename folder. `UpdateFolderMetaDto` is `{plainName}` only — same encrypted-name caveat as `renameFile`. |
+| `/folders/{uuid}` | PATCH | ✅ | `InternxtApiService.kt:199-205` | `moveFolder`. |
+| `/folders/{uuid}` | DELETE | ◯ | — | Provider uses `DELETE /folders` (collection form) instead — see above. |
+| `/folders/{uuid}/stats` | GET | ◯ | — | |
+| `/folders/{uuid}/ancestors` | GET | ◯ | — | Could short-circuit `buildFolderPath` recursion. |
+| `/folders/{uuid}/tree` | GET | ◯ | — | Could collapse `delta()` and `collectFilesFromFolders` into one call. |
+| `/folders/{uuid}/size` | GET | ◯ | — | |
+| `/folders/meta` | GET (?path) | ◯ | — | |
 
 **Addendum 2026-09-29 (#392, live equivalence check).** The "paginated
 variants could replace `/folders/content/{uuid}` for large folders" note
@@ -123,15 +132,6 @@ pages) — the plain listing returned **exactly** the union of the paginated
 seen, so a listing cap at or above 1,000 entries is **not** ruled out;
 treat the plain listing as unbounded-unverified and keep the paginated
 variants as the fallback plan for oversized folders.
-| `/folders/{uuid}/meta` | GET | ◯ | — | |
-| `/folders/{uuid}/meta` | PUT | ✅ | `InternxtApiService.kt` `renameFolder` | UD-369: rename folder. `UpdateFolderMetaDto` is `{plainName}` only — same encrypted-name caveat as `renameFile`. |
-| `/folders/{uuid}` | PATCH | ✅ | `InternxtApiService.kt:199-205` | `moveFolder`. |
-| `/folders/{uuid}` | DELETE | ◯ | — | Provider uses `DELETE /folders` (collection form) instead — see above. |
-| `/folders/{uuid}/stats` | GET | ◯ | — | |
-| `/folders/{uuid}/ancestors` | GET | ◯ | — | Could short-circuit `buildFolderPath` recursion. |
-| `/folders/{uuid}/tree` | GET | ◯ | — | Could collapse `delta()` and `collectFilesFromFolders` into one call. |
-| `/folders/{uuid}/size` | GET | ◯ | — | |
-| `/folders/meta` | GET (?path) | ◯ | — | |
 
 ### Drive — Trash endpoints
 
