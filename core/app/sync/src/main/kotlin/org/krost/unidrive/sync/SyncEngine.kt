@@ -333,7 +333,7 @@ open class SyncEngine(
         // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
         // perfectly valid re-download.
         val current = db.getEntry(path) ?: entry
-        if (baselineDescribesSyncRootFile(current, path)) {
+        if (rowDescribesSyncRootFile(current, path)) {
             // #418: the download went to the cache, a different file from the one in the sync
             // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
             // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
@@ -341,9 +341,9 @@ open class SyncEngine(
             // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
             db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
         } else {
-            // No sync-root file the row describes (mount mode, or the file changed since the row
-            // was written): the cache copy is the local file. HydrationImpl.lastSynced() and the
-            // co-daemon's crash-recovery scanner use this localMtime as their watermark.
+            // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
+            // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
+            // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
             db.upsertEntry(
                 current.copy(
                     isHydrated = true,
@@ -357,23 +357,31 @@ open class SyncEngine(
         return cachePath
     }
 
-    // #418: true when [entry]'s local baseline still describes the regular file in the sync root,
-    // i.e. that file is there with exactly the mtime and size the row recorded. Any doubt (no
-    // baseline, no file, a changed file, an unresolvable name) answers false and keeps the
-    // cache-as-local-file behaviour.
-    private fun baselineDescribesSyncRootFile(
+    // #418: true when [entry] is about the regular file in the sync root rather than about the
+    // cache copy. Two cases:
+    //  - a NOT hydrated row with a file there: that file is a placeholder (`unidrive free`,
+    //    an interrupted download). Its mtime is not the row's baseline (dehydrate stamps the
+    //    remote modified time on it) and it holds no real bytes, so it must stay flagged as
+    //    such until a sync fills it;
+    //  - a hydrated row whose baseline still matches the file (same mtime and size).
+    // No file, a hydrated row whose file changed, or an unresolvable name answer false and keep
+    // the cache-as-local-file behaviour (mount mode).
+    private fun rowDescribesSyncRootFile(
         entry: SyncEntry,
         path: String,
-    ): Boolean {
-        val mtime = entry.localMtime ?: return false
-        val size = entry.localSize ?: return false
-        return runCatching {
+    ): Boolean =
+        runCatching {
             val local = placeholder.resolveLocal(path)
-            Files.isRegularFile(local) &&
-                Files.getLastModifiedTime(local).toMillis() == mtime &&
-                Files.size(local) == size
+            when {
+                !Files.isRegularFile(local) -> false
+                !entry.isHydrated -> true
+                else ->
+                    entry.localMtime != null &&
+                        entry.localSize != null &&
+                        Files.getLastModifiedTime(local).toMillis() == entry.localMtime &&
+                        Files.size(local) == entry.localSize
+            }
         }.getOrDefault(false)
-    }
 
     private fun isExcluded(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
