@@ -606,4 +606,29 @@ class LocalScannerTest {
 
         assertFalse("/out/keep.txt" in changes, "a tracked file outside the scope is not this run's business")
     }
+
+    @Test
+    fun `scanning a sync root that does not exist yet reads every tracked row as deleted`() {
+        db.upsertEntry(
+            SyncEntry(
+                path = "/tracked.txt",
+                remoteId = "r1",
+                remoteHash = null,
+                remoteSize = 1,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = 1L,
+                localSize = 1,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.parse("2026-03-28T12:00:00Z"),
+            ),
+        )
+        val missing = syncRoot.resolve("not-created-yet")
+
+        val changes = LocalScanner(missing, db).scan()
+
+        assertEquals(mapOf("/tracked.txt" to ChangeState.DELETED), changes)
+        assertFalse(Files.exists(missing), "scanning must not create the root")
+    }
 }

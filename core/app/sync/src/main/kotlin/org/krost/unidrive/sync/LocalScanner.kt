@@ -66,7 +66,7 @@ class LocalScanner(
         var batchCommitted = false
         try {
 
-        Files.walkFileTree(
+        if (Files.isDirectory(syncRoot)) Files.walkFileTree(
             syncRoot,
             object : SimpleFileVisitor<Path>() {
                 override fun visitFile(

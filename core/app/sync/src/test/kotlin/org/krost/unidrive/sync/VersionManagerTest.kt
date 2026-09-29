@@ -186,4 +186,24 @@ class VersionManagerTest {
         val result = manager.snapshot("missing.txt")
         assertNull(result)
     }
+
+    @Test
+    fun `expiredCount counts what pruneByAge would remove and removes nothing`() {
+        val versions = syncRoot.resolve(".unidrive-versions/doc")
+        Files.createDirectories(versions)
+        Files.writeString(versions.resolve("20200101T000000Z"), "old")
+        Files.writeString(versions.resolve("20200202T000000Z"), "older")
+        val manager = VersionManager(syncRoot)
+
+        assertEquals(2, manager.expiredCount(90))
+        assertTrue(Files.exists(versions.resolve("20200101T000000Z")), "expiredCount must not delete")
+
+        manager.pruneByAge(90)
+        assertEquals(0, manager.expiredCount(90))
+    }
+
+    @Test
+    fun `expiredCount is zero without a versions directory`() {
+        assertEquals(0, VersionManager(syncRoot).expiredCount(90))
+    }
 }

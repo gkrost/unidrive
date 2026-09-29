@@ -146,18 +146,8 @@ class DryRunPurityTest {
             },
         )
 
-    /** Categories a dry-run is still known to touch. Delete an entry when its fix lands. */
-    private val knownImpurities: Set<String> =
-        setOf(
-            // Streaming reconciliation runs real transfers mid-gather: #397.
-            "provider:content",
-            "provider:mutation",
-            // Streaming downloads, trash purge, version prune, sync_root creation, skipped-ops.jsonl: #397, #399.
-            "fs:sync",
-            "fs:logs",
-            // Follows from the real transfers above: the second dry-run finds them already done: #397.
-            "idempotence",
-        )
+    /** Categories a dry-run is still known to touch. Delete an entry when its fix lands. Target: empty. */
+    private val knownImpurities: Set<String> = emptySet()
 
     private fun run(s: Scenario): TwinResult =
         kotlinx.coroutines.runBlocking {
