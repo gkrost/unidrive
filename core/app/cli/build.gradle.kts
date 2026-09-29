@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
 buildscript {
     configurations.classpath {
         resolutionStrategy {
-            force("org.apache.logging.log4j:log4j-core:2.26.0")
+            force("org.apache.logging.log4j:log4j-core:2.26.1")
             force("org.codehaus.plexus:plexus-utils:4.0.3")
         }
     }
