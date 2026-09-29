@@ -88,6 +88,7 @@ class TwinProvider : CloudProvider {
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         calls += "upload $remotePath"
@@ -96,7 +97,10 @@ class TwinProvider : CloudProvider {
         return item(remotePath, size = bytes.size.toLong(), hash = "uploaded")
     }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(
+        remotePath: String,
+        ifMatchETag: String?,
+    ) {
         calls += "delete $remotePath"
         files.remove(remotePath)
     }
