@@ -217,7 +217,10 @@ class World(
         db.initialize()
     }
 
-    fun engine(opts: EngineOpts = EngineOpts()): SyncEngine =
+    fun engine(
+        opts: EngineOpts = EngineOpts(),
+        db: StateDatabase = this.db,
+    ): SyncEngine =
         SyncEngine(
             provider = provider,
             db = db,
@@ -235,11 +238,23 @@ class World(
             cacheRoot = cacheDir,
         )
 
+    /** A real pass runs on the world's database. A dry-run runs on a throwaway snapshot of it, as the CLI does. */
     suspend fun pass(
         opts: EngineOpts = EngineOpts(),
         dryRun: Boolean = false,
         skipTransfers: Boolean = false,
-    ) = engine(opts).syncOnce(dryRun = dryRun, skipTransfers = skipTransfers)
+    ) {
+        if (!dryRun) {
+            engine(opts).syncOnce(skipTransfers = skipTransfers)
+            return
+        }
+        val preview = StateDatabase.snapshotOf(dbFile, tempRoot = base.resolve("tmp"))
+        try {
+            engine(opts, preview).syncOnce(dryRun = true, skipTransfers = skipTransfers)
+        } finally {
+            preview.close()
+        }
+    }
 
     fun close() = db.close()
 

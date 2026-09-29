@@ -289,23 +289,22 @@ open class SyncCommand : Runnable {
         // detector still has a baseline to compare against (otherwise the
         // shadow would always look like "first sync ever" and the detector
         // would silently no-op).
-        val virtualReset = reset && dryRun
+        // A dry-run never touches the real state.db: it runs on a throwaway snapshot of it. With --reset the
+        // snapshot is wiped (a virtual reset), keeping only the stored sync_root so the drift detector still has
+        // a baseline to compare against.
         val db: StateDatabase
-        if (virtualReset) {
-            // Read sync_root from the real DB before opening the shadow.
-            val realSyncRoot =
-                StateDatabase(dbPath).run {
-                    initialize()
-                    val v = getSyncState("sync_root")
-                    close()
-                    v
+        if (dryRun) {
+            db = StateDatabase.snapshotOf(dbPath)
+            if (reset) {
+                val realSyncRoot = db.getSyncState("sync_root")
+                db.resetAll()
+                if (!realSyncRoot.isNullOrEmpty()) {
+                    db.setSyncState("sync_root", realSyncRoot)
                 }
-            db = StateDatabase(dbPath, inMemory = true)
-            db.initialize()
-            if (!realSyncRoot.isNullOrEmpty()) {
-                db.setSyncState("sync_root", realSyncRoot)
+                println("Sync state virtually reset (dry-run; on-disk state.db untouched).")
+            } else {
+                println("Dry-run: working on a throwaway copy of state.db; the real state is not touched.")
             }
-            println("Sync state virtually reset (dry-run; on-disk state.db untouched).")
         } else {
             db = StateDatabase(dbPath)
             db.initialize()
@@ -476,7 +475,8 @@ open class SyncCommand : Runnable {
             )
 
         // Webhook subscription store (shared DB file, separate table)
-        val subscriptionStore = SubscriptionStore(dbPath)
+        // In a dry-run the store must share the snapshot, not open the real database file.
+        val subscriptionStore = SubscriptionStore(if (dryRun) db.file else dbPath)
         subscriptionStore.initialize()
 
         try {

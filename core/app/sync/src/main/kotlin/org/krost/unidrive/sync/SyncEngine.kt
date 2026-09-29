@@ -615,7 +615,7 @@ open class SyncEngine(
         // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
         // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
         // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
-        applyScopeTransition(dryRun = false)
+        applyScopeTransition()
         if (reset) db.setSyncState("delta_cursor", "")
         val remoteChanges: Map<String, CloudItem> =
             try {
@@ -715,6 +715,12 @@ open class SyncEngine(
         // reason for being is to drain those.
         skipRemoteGather: Boolean = false,
     ) {
+        // A dry-run must never change real state. The engine writes to its database in many places (row
+        // upserts, cursor bookkeeping, scan checkpoints, scanner pre-writes), so purity is guaranteed by
+        // construction: the caller hands a dry-run a disposable database (StateDatabase.snapshotOf).
+        require(!dryRun || db.isDisposable) {
+            "A dry-run needs a disposable StateDatabase (StateDatabase.snapshotOf) so it cannot change the real state."
+        }
         // UD-254: short random scan id pushed into MDC so every DEBUG/WARN line
         // emitted inside this pass inherits it (e.g. InternxtProvider's
         // "Scanning files: N"). A single grep "scan=<id>" gives the slice
@@ -948,7 +954,7 @@ open class SyncEngine(
         // run must not leave an empty sync_root dir behind.
         java.nio.file.Files.createDirectories(syncRoot)
 
-        applyScopeTransition(dryRun)
+        applyScopeTransition()
 
         // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
         // for each phase to the reporter so the heartbeat can render a
@@ -2667,8 +2673,9 @@ open class SyncEngine(
     // outside the new scope without planning any delete: the local files stay and
     // the remote is untouched. Widening clears the delta cursor so the next gather
     // enumerates the newly in-scope subtrees; rows outside the old scope were never
-    // tracked, so an incremental delta could not find them. Dry-run only reports.
-    private fun applyScopeTransition(dryRun: Boolean) {
+    // tracked, so an incremental delta could not find them. A dry-run runs this on its disposable copy,
+    // so the preview shows exactly what the real run will do.
+    private fun applyScopeTransition() {
         val prior = loadTrackedScope()
         if (prior == trackScope) return
         val narrowed =
@@ -2679,16 +2686,6 @@ open class SyncEngine(
             }
         val widened =
             trackScope.isEmpty() || (prior.isNotEmpty() && trackScope.any { !SyncScope.contains(it, prior) })
-        if (dryRun) {
-            reporter.onWarning(
-                "Sync scope changed (tracked: ${prior.ifEmpty { listOf("whole drive") }} -> " +
-                    "${trackScope.ifEmpty { listOf("whole drive") }}); a real run would " +
-                    (if (narrowed) "stop tracking the rows outside the new scope (files stay on disk)" else "") +
-                    (if (narrowed && widened) " and " else "") +
-                    (if (widened) "re-enumerate the drive for the newly in-scope subtrees" else "") + ".",
-            )
-            return
-        }
         db.batch {
             if (narrowed) {
                 var untracked = 0

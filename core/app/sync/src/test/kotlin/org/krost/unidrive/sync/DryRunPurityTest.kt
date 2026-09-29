@@ -7,8 +7,10 @@ import org.krost.unidrive.sync.testfixtures.TwinResult
 import org.krost.unidrive.sync.testfixtures.World
 import org.krost.unidrive.sync.testfixtures.diffOf
 import org.krost.unidrive.sync.testfixtures.dryRunTwin
+import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -120,32 +122,41 @@ class DryRunPurityTest {
                 seedRemote()
                 pass(dryRun = true)
             },
+            Scenario("unhydrated folder rows with no local folder hit the delete guard") {
+                seedRemote()
+                listOf("/docs", "/empty").forEach { path ->
+                    db.upsertEntry(
+                        SyncEntry(
+                            path = path,
+                            remoteId = "id-$path",
+                            remoteHash = null,
+                            remoteSize = 0,
+                            remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                            localMtime = null,
+                            localSize = null,
+                            isFolder = true,
+                            isPinned = false,
+                            isHydrated = false,
+                            lastSynced = Instant.parse("2026-03-28T12:00:00Z"),
+                        ),
+                    )
+                }
+                db.setSyncState("delta_cursor", "cursor-1")
+                provider.incrementalItems = emptyList()
+            },
         )
 
     /** Categories a dry-run is still known to touch. Delete an entry when its fix lands. */
     private val knownImpurities: Set<String> =
         setOf(
-            // Row and cursor writes before the dry-run branch, scanner pre-writes: #298.
-            "db:sync_entries",
-            "db:sync_state.delta_cursor",
-            "db:sync_state.pending_cursor",
-            "db:sync_state.pending_cursor_complete",
-            "db:sync_state.last_full_scan",
-            "db:sync_state.last_gather_full",
-            "db:sync_state.last_scan_count_local",
-            "db:sync_state.last_scan_count_remote",
-            "db:sync_state.last_scan_secs_local",
-            "db:sync_state.last_scan_secs_remote",
-            "db:sync_state.sync_root",
-            // A second dry-run differs from the first because the first left state behind: #298.
-            "idempotence",
-            // Streaming reconciliation runs real transfers mid-gather and flips its sentinel: #397.
-            "db:sync_state.streaming_reconciliation_enabled",
+            // Streaming reconciliation runs real transfers mid-gather: #397.
             "provider:content",
             "provider:mutation",
-            // Trash purge, version prune, sync_root creation, skipped-ops.jsonl: #399.
+            // Streaming downloads, trash purge, version prune, sync_root creation, skipped-ops.jsonl: #397, #399.
             "fs:sync",
             "fs:logs",
+            // Follows from the real transfers above: the second dry-run finds them already done: #397.
+            "idempotence",
         )
 
     private fun run(s: Scenario): TwinResult =
@@ -186,16 +197,14 @@ class DryRunPurityTest {
     }
 
     /**
-     * Pins the near-miss seen on a real account (issue #298): a dry-run persists the remote folders as
-     * unhydrated rows and advances the cursor, so the following real run sees folders that "vanished
-     * locally" and plans DeleteRemote for them. Only the unhydrated-folder guard stops the deletes, and the
-     * mkdir actions the dry-run announced never run, so a folder without files is never created.
-     *
-     * When the #298 hotfix lands both assertions about the bug must be inverted (no skipped del-remote, empty
-     * folder created).
+     * The near-miss seen on a real account (issue #298): a dry-run used to persist the remote folders as
+     * unhydrated rows and advance the cursor, so the following real run saw folders that "vanished locally",
+     * planned DeleteRemote for them (only the unhydrated-folder guard stopped the deletes) and never ran the
+     * announced mkdir. A dry-run now runs on a throwaway snapshot, so the real run must behave exactly as if
+     * the dry-run had never happened.
      */
     @Test
-    fun `dry-run then a real run plans folder deletes and skips mkdir - pins issue 298`() =
+    fun `a dry-run before a real run changes nothing about the real run - issue 298`() =
         runTest {
             val (base, world) = tempWorld()
             try {
@@ -205,9 +214,11 @@ class DryRunPurityTest {
 
                 val skippedOps = world.logDir.resolve("skipped-ops.jsonl")
                 val skippedDeletes = if (Files.exists(skippedOps)) Files.readAllLines(skippedOps).count { it.contains("del-remote") } else 0
-                assertTrue(skippedDeletes > 0, "expected the guard to have dropped folder del-remote actions; the bug may be fixed, invert this test")
-                assertTrue(world.provider.mutations().none { it.startsWith("delete ") }, "the guard must keep holding: no remote delete")
-                assertFalse(Files.isDirectory(world.syncRoot.resolve("empty")), "the empty remote folder is only created if mkdir ran")
+                assertEquals(0, skippedDeletes, "the real run must not plan folder deletes after a dry-run")
+                assertTrue(world.provider.mutations().none { it.startsWith("delete ") }, "no remote delete")
+                assertTrue(Files.isDirectory(world.syncRoot.resolve("empty")), "the empty remote folder must be created by the real run")
+                assertTrue(Files.exists(world.syncRoot.resolve("docs/a.txt")) && Files.exists(world.syncRoot.resolve("b.txt")))
+                assertEquals("cursor-1", world.db.getSyncState("delta_cursor"))
             } finally {
                 world.close()
                 base.toFile().deleteRecursively()
