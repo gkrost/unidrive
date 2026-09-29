@@ -61,7 +61,7 @@ class Reconciler(
         // the DB regardless of its path. Confirmed live 2026-05-03: 107k
         // unrelated orphans surfaced when the user asked for ~106 in-scope
         // changes.
-        syncPath: String? = null,
+        syncPaths: List<String> = emptyList(),
         // #160: when true, a hydrated row whose local file is absent is planned
         // as a re-download instead of DeleteRemote. Only safe in download-only
         // mode — in bidirectional mode a locally-deleted hydrated file is a
@@ -266,7 +266,7 @@ class Reconciler(
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             // UD-901a: respect syncPath scope; orphans outside the user's requested
             // subtree must NOT be silently surfaced.
-            if (!pathInSyncScope(entry.path, syncPath)) continue
+            if (!SyncScope.contains(entry.path, syncPaths)) continue
             // Permanent-failure quarantine: skip rows whose last download
             // returned a stable 404 ("Bucket entry … not found"). Without
             // this guard, UD-225 recovery re-emits a DownloadContent every
@@ -308,7 +308,7 @@ class Reconciler(
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             // UD-901a: same scope guard as the UD-225 loop above.
-            if (!pathInSyncScope(entry.path, syncPath)) continue
+            if (!SyncScope.contains(entry.path, syncPaths)) continue
             val localPath = safeResolveLocal(syncRoot, entry.path)
             if (!Files.isRegularFile(localPath)) continue
             // #115: preserve any persisted canonical remote path as remoteTarget
@@ -396,7 +396,7 @@ class Reconciler(
     fun resolveSlice(
         pageRemote: Map<String, CloudItem>,
         localChanges: Map<String, ChangeState>,
-        syncPath: String? = null,
+        syncPaths: List<String> = emptyList(),
         // #115 streaming fix: stable set of ALL remote top-level folder names known
         // across all pages, supplied by the streaming gather before any slice fires.
         // When null (single-shot reconcile or test call without the argument), the
@@ -426,7 +426,7 @@ class Reconciler(
         val allPaths =
             (pageRemoteLocal.keys + localChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
-                .filter { pathInSyncScope(it, syncPath) }
+                .filter { SyncScope.contains(it, syncPaths) }
 
         for (path in allPaths) {
             val remoteItem = pageRemoteLocal[path]
@@ -470,7 +470,7 @@ class Reconciler(
         streamedActions: List<SyncAction>,
         fullRemote: Map<String, CloudItem>,
         fullLocal: Map<String, ChangeState>,
-        syncPath: String? = null,
+        syncPaths: List<String> = emptyList(),
         // #160: mirror of the same flag on reconcile(). The streamed actions
         // from resolveSlice already used this flag; finalizeStreaming receives
         // it only for completeness (the recovery loops don't call resolveAction).
@@ -538,7 +538,7 @@ class Reconciler(
             if (entry.remoteSize <= 0) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
-            if (!pathInSyncScope(entry.path, syncPath)) continue
+            if (!SyncScope.contains(entry.path, syncPaths)) continue
             // #115: delta keyed at the canonical remote path; DownloadContent
             // path stays real-local so bytes land in the alias-named folder.
             val effectiveRemote = entry.remotePath ?: entry.path
@@ -564,7 +564,7 @@ class Reconciler(
             if (!entry.isHydrated) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
-            if (!pathInSyncScope(entry.path, syncPath)) continue
+            if (!SyncScope.contains(entry.path, syncPaths)) continue
             val localPath = safeResolveLocal(syncRoot, entry.path)
             if (!Files.isRegularFile(localPath)) continue
             // #115: preserve persisted canonical remote path as remoteTarget.
@@ -1228,29 +1228,6 @@ class Reconciler(
             var i = 0
             while (i < a.size && i < b.size && a[i] == b[i]) i++
             return i
-        }
-
-        /**
-         * UD-901a: predicate matching the engine's own scope filter at
-         * [SyncEngine.kt:163-168]. Encoded once here so the recovery
-         * loops can reuse it without drifting from the main filter's
-         * semantics.
-         *
-         * Returns true when:
-         *   - syncPath is null (no scope = everything in scope), or
-         *   - path equals syncPath (the scope's own root), or
-         *   - path is a strict descendant of syncPath (path startsWith
-         *     "$syncPath/").
-         *
-         * Note `startsWith("$syncPath/")` not `startsWith(syncPath)` —
-         * otherwise `/foo` would match `/footer.txt` etc.
-         */
-        fun pathInSyncScope(
-            path: String,
-            syncPath: String?,
-        ): Boolean {
-            if (syncPath == null) return true
-            return path == syncPath || path.startsWith("$syncPath/")
         }
 
         /**

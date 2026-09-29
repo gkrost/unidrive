@@ -3300,13 +3300,14 @@ class SyncEngineTest {
         syncPath: String? = null,
         syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
         allowFullTreeReconciliation: Boolean = false,
+        syncPaths: List<String> = listOfNotNull(syncPath),
     ) = SyncEngine(
         provider = provider,
         db = db,
         syncRoot = syncRoot,
         conflictPolicy = ConflictPolicy.KEEP_BOTH,
         reporter = reporter,
-        syncPath = syncPath,
+        syncPaths = syncPaths,
         syncDirection = syncDirection,
         allowFullTreeReconciliation = allowFullTreeReconciliation,
     )
@@ -3335,6 +3336,33 @@ class SyncEngineTest {
             assertFalse(Files.exists(syncRoot.resolve("_INBOXX/b.txt")))
             assertFalse(Files.exists(syncRoot.resolve("_INBOX-old")))
             assertFalse(provider.uploadedPaths.contains("/_INBOXX/local.txt"))
+        }
+
+    @Test
+    fun `several sync-path roots all materialize and persist while siblings stay out`() =
+        runTest {
+            provider.files["/_INBOX/a.txt"] = ByteArray(8)
+            provider.files["/gernot_ssh/id"] = ByteArray(8)
+            provider.files["/other/c.txt"] = ByteArray(8)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/_INBOX", isFolder = true),
+                    cloudItem("/_INBOX/a.txt", size = 8),
+                    cloudItem("/gernot_ssh", isFolder = true),
+                    cloudItem("/gernot_ssh/id", size = 8),
+                    cloudItem("/other", isFolder = true),
+                    cloudItem("/other/c.txt", size = 8),
+                )
+
+            engineForScope(syncPaths = listOf("/_INBOX", "/gernot_ssh")).syncOnce()
+
+            assertTrue(Files.exists(syncRoot.resolve("_INBOX/a.txt")))
+            assertTrue(Files.exists(syncRoot.resolve("gernot_ssh/id")))
+            assertFalse(Files.exists(syncRoot.resolve("other")))
+            assertEquals(
+                setOf("/_INBOX", "/gernot_ssh"),
+                db.getSyncState("effective_scope")!!.split("	").toSet(),
+            )
         }
 
     @Test

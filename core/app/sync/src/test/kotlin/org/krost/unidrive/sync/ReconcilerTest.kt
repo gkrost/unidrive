@@ -978,7 +978,7 @@ class ReconcilerTest {
             reconciler.reconcile(
                 remoteChanges = emptyMap(),
                 localChanges = emptyMap(),
-                syncPath = "/internal",
+                syncPaths = listOf("/internal"),
             )
         val uploads = actions.filterIsInstance<SyncAction.Upload>()
         assertEquals(
@@ -1022,7 +1022,7 @@ class ReconcilerTest {
             reconciler.reconcile(
                 remoteChanges = emptyMap(),
                 localChanges = emptyMap(),
-                syncPath = "/internal",
+                syncPaths = listOf("/internal"),
             )
         val downloads = actions.filterIsInstance<SyncAction.DownloadContent>()
         assertEquals(
@@ -1064,24 +1064,6 @@ class ReconcilerTest {
         val actions = reconciler.reconcile(emptyMap(), emptyMap())
         val uploads = actions.filterIsInstance<SyncAction.Upload>()
         assertEquals(3, uploads.size, "no-scope recovery must surface all 3 orphans")
-    }
-
-    @Test
-    fun `UD-901a pathInSyncScope matches the engine scope filter exactly`() {
-        // Direct unit test of the predicate so future refactors of the engine's
-        // own filter (SyncEngine.kt:163) and this one stay in lockstep.
-        // null syncPath → everything in scope.
-        assertTrue(Reconciler.pathInSyncScope("/anything", null))
-        // Exact match.
-        assertTrue(Reconciler.pathInSyncScope("/internal", "/internal"))
-        // Strict descendant.
-        assertTrue(Reconciler.pathInSyncScope("/internal/sub/file.bin", "/internal"))
-        // Sibling that shares a prefix is OUT of scope (the bug `/foo` matching
-        // `/footer.txt` if we'd used startsWith naively).
-        assertFalse(Reconciler.pathInSyncScope("/internal-other", "/internal"))
-        assertFalse(Reconciler.pathInSyncScope("/footer.txt", "/foo"))
-        // Out-of-tree.
-        assertFalse(Reconciler.pathInSyncScope("/Project Notes/x", "/internal"))
     }
 
     // ── UD-901b: orphan upload synthesises parent CreateRemoteFolder ────────
@@ -1762,7 +1744,7 @@ class ReconcilerTest {
         // items: same per-path verdict as the single-shot reconcile, but
         // without recovery loops or final sort firing.
         val pageRemote = mapOf("/a.txt" to cloudItem("/a.txt"))
-        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), null)
+        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), emptyList())
         assertEquals(1, actions.size)
         assertIs<SyncAction.DownloadContent>(actions[0])
         assertEquals("/a.txt", actions[0].path)
@@ -1770,7 +1752,7 @@ class ReconcilerTest {
 
     @Test
     fun `resolveSlice with empty page returns empty`() {
-        val actions = reconciler.resolveSlice(emptyMap(), emptyMap(), null)
+        val actions = reconciler.resolveSlice(emptyMap(), emptyMap(), emptyList())
         assertTrue(actions.isEmpty())
     }
 
@@ -1782,7 +1764,7 @@ class ReconcilerTest {
                 "/keep.txt" to cloudItem("/keep.txt"),
                 "/skip.tmp" to cloudItem("/skip.tmp"),
             )
-        val actions = excluded.resolveSlice(pageRemote, emptyMap(), null)
+        val actions = excluded.resolveSlice(pageRemote, emptyMap(), emptyList())
         assertEquals(1, actions.size)
         assertEquals("/keep.txt", actions[0].path)
     }
@@ -1794,9 +1776,22 @@ class ReconcilerTest {
                 "/in/x.txt" to cloudItem("/in/x.txt"),
                 "/out/y.txt" to cloudItem("/out/y.txt"),
             )
-        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), syncPath = "/in")
+        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), syncPaths = listOf("/in"))
         assertEquals(1, actions.size)
         assertEquals("/in/x.txt", actions[0].path)
+    }
+
+    @Test
+    fun `resolveSlice admits every configured scope root and nothing else`() {
+        val pageRemote =
+            mapOf(
+                "/in/x.txt" to cloudItem("/in/x.txt"),
+                "/also/z.txt" to cloudItem("/also/z.txt"),
+                "/out/y.txt" to cloudItem("/out/y.txt"),
+                "/in-old/w.txt" to cloudItem("/in-old/w.txt"),
+            )
+        val actions = reconciler.resolveSlice(pageRemote, emptyMap(), syncPaths = listOf("/in", "/also"))
+        assertEquals(setOf("/in/x.txt", "/also/z.txt"), actions.map { it.path }.toSet())
     }
 
     @Test
@@ -1823,7 +1818,7 @@ class ReconcilerTest {
         )
         // Streaming would have emitted nothing for this path (no remote
         // page touches it, no local change). Finalize fills the gap.
-        val finalized = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap(), null)
+        val finalized = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap(), emptyList())
         assertEquals(1, finalized.size)
         assertIs<SyncAction.Upload>(finalized[0])
         assertEquals("/orphan.bin", finalized[0].path)
@@ -1856,8 +1851,8 @@ class ReconcilerTest {
                         mimeType = null,
                     ),
             )
-        val pageActions = reconciler.resolveSlice(coalesced, emptyMap(), null)
-        val finalized = reconciler.finalizeStreaming(pageActions, coalesced, emptyMap(), null)
+        val pageActions = reconciler.resolveSlice(coalesced, emptyMap(), emptyList())
+        val finalized = reconciler.finalizeStreaming(pageActions, coalesced, emptyMap(), emptyList())
         // After finalize there should be a single MoveLocal, NOT a
         // DownloadContent for /new.txt plus a DeleteLocal of /old.txt.
         val moves = finalized.filterIsInstance<SyncAction.MoveLocal>()
@@ -1883,7 +1878,7 @@ class ReconcilerTest {
                 SyncAction.DeleteRemote("/old.txt"),
                 SyncAction.Upload("/new.txt"),
             )
-        val finalized = reconciler.finalizeStreaming(streamed, emptyMap(), emptyMap(), null)
+        val finalized = reconciler.finalizeStreaming(streamed, emptyMap(), emptyMap(), emptyList())
         assertEquals(1, finalized.size)
         val move = assertIs<SyncAction.MoveRemote>(finalized[0])
         assertEquals("/new.txt", move.path)

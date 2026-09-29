@@ -22,6 +22,7 @@ import org.krost.unidrive.sync.SubscriptionStore
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.SyncDirection
 import org.krost.unidrive.sync.SyncEngine
+import org.krost.unidrive.sync.SyncScope
 import org.krost.unidrive.sync.ThrottledProvider
 import org.krost.unidrive.sync.TrashManager
 import org.krost.unidrive.hydration.HydrationImpl
@@ -72,8 +73,11 @@ open class SyncCommand : Runnable {
     @Option(names = ["--reset"], description = ["Clear sync state and rescan everything from scratch"])
     var reset: Boolean = false
 
-    @Option(names = ["--sync-path"], description = ["Limit sync to a subtree, e.g. --sync-path /Documents"])
-    var syncPath: String? = null
+    @Option(
+        names = ["--sync-path"],
+        description = ["Limit sync to a subtree, e.g. --sync-path /Documents. Repeatable."],
+    )
+    var syncPaths: MutableList<String> = mutableListOf()
 
     // UD-256: operator opt-in to take a profile out of scoped-bidirectional mode.
     // After any --sync-path run, the engine persists the scope and refuses bare
@@ -209,10 +213,10 @@ open class SyncCommand : Runnable {
         // UD-256: --full-tree (clear persisted scope, reconcile whole cloud) and
         // --sync-path (constrain to a subtree, add to persisted scope) are
         // contradictory in the same invocation. Reject at parse time.
-        if (fullTree && syncPath != null) {
+        if (fullTree && syncPaths.isNotEmpty()) {
             throw CommandLine.ParameterException(
                 spec.commandLine(),
-                "--full-tree and --sync-path are mutually exclusive: --full-tree clears the persisted scope and reconciles the whole cloud; --sync-path constrains a single subtree.",
+                "--full-tree and --sync-path are mutually exclusive: --full-tree clears the persisted scope and reconciles the whole cloud; --sync-path constrains the run to the given subtrees.",
             )
         }
         // UD-405: normalise --sync-path at the CLI boundary. PowerShell tab-
@@ -222,7 +226,7 @@ open class SyncCommand : Runnable {
         // matches nothing and the sync runs against zero in-scope items.
         // Mirrors UD-299's sync_root normalisation philosophy: do-what-I-mean
         // for paths instead of failing loud.
-        syncPath = normalizeSyncPath(syncPath)
+        syncPaths = SyncScope.normalize(syncPaths).toMutableList()
         val lock = parent.acquireProfileLock()
         Runtime.getRuntime().addShutdownHook(Thread { lock.unlock() })
 
@@ -341,7 +345,7 @@ open class SyncCommand : Runnable {
         // UD-741: include sync_path conditionally — silent when unset (the
         // common case), surfaced when set so the user can spot a typo'd
         // sub-path before the scan eats minutes of wall-clock.
-        val syncPathSegment = if (syncPath != null) " sync_path=$syncPath" else ""
+        val syncPathSegment = if (syncPaths.isNotEmpty()) " sync_path=${syncPaths.joinToString(",")}" else ""
         println(
             "sync: profile=${profile.name} type=${profile.type} " +
                 "sync_root=${config.syncRoot}$syncPathSegment mode=$mode",
@@ -424,7 +428,7 @@ open class SyncCommand : Runnable {
                 reporter = reporter,
                 failureLogPath = parent.providerConfigDir().resolve("failures.jsonl"),
                 conflictLog = conflictLog,
-                syncPath = syncPath,
+                syncPaths = syncPaths,
                 syncDirection = effectiveDirection,
                 propagateDeletes = propagateDeletes,
                 maxDeletePercentage = config.maxDeletePercentage,
@@ -964,14 +968,7 @@ open class SyncCommand : Runnable {
         internal fun isOperatorFacing(failure: Throwable): Boolean =
             failure is IllegalStateException || failure is IllegalArgumentException
 
-        internal fun normalizeSyncPath(raw: String?): String? {
-            if (raw.isNullOrEmpty()) return null
-            var s = raw.replace('\\', '/')
-            s = s.replace(Regex("/+"), "/")
-            if (!s.startsWith("/")) s = "/$s"
-            if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
-            return if (s == "/") null else s
-        }
+        internal fun normalizeSyncPath(raw: String?): String? = SyncScope.normalizePath(raw)
 
         internal fun scheduleForceHalt(
             exitCode: Int,

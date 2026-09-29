@@ -103,6 +103,13 @@ class SyncCommandTest {
         assertNull(SyncCommand.normalizeSyncPath("//"))
     }
 
+    @Test
+    fun `--sync-path is repeatable and collects every value`() {
+        val parsed = CommandLine(Main()).parseArgs("sync", "--sync-path", "/_INBOX", "--sync-path", "/gernot_ssh")
+        val sync = parsed.subcommand().commandSpec().userObject() as SyncCommand
+        assertEquals(listOf("/_INBOX", "/gernot_ssh"), sync.syncPaths)
+    }
+
     // ── sync failures render a formatted error, never a stack trace ──────────
 
     // Invariant: an operator-correctable failure — the mis-pointed

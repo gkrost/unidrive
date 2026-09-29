@@ -34,7 +34,7 @@ open class SyncEngine(
     private val reporter: ProgressReporter = ProgressReporter.Silent,
     private val failureLogPath: Path? = null,
     private val conflictLog: ConflictLog? = null,
-    private val syncPath: String? = null,
+    private val syncPaths: List<String> = emptyList(),
     private val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
     // UD-737: --upload-only is push-additive by default — local deletes do NOT
     // propagate to remote. Set to true to opt back in to legacy "local is
@@ -803,10 +803,10 @@ open class SyncEngine(
         // A profile that has ever been operated with `--sync-path` accumulates
         // a persisted `effective_scope` (sync_state key, TAB-separated list of
         // normalised paths). On every run:
-        //  - If `syncPath` is set this run: UNION it into the persisted scope
+        //  - If `syncPaths` is non-empty this run: UNION them into the persisted scope
         //    (whether the scope was previously empty or not). The run proceeds
         //    with the runtime scope filter as before.
-        //  - If `syncPath` is NULL and the persisted scope is non-empty and the
+        //  - If `syncPaths` is empty and the persisted scope is non-empty and the
         //    run is bidirectional-apply: REFUSE unless --full-tree was passed.
         //    The reconciler would otherwise treat every cloud path outside the
         //    persisted scope as "user-deleted-locally" and propagate DELETE.
@@ -843,19 +843,19 @@ open class SyncEngine(
                     priorScope.size,
                 )
             }
-        } else if (syncPath != null) {
-            val unioned = (priorScope + syncPath).distinct()
+        } else if (syncPaths.isNotEmpty()) {
+            val unioned = (priorScope + syncPaths).distinct()
             if (unioned.size != priorScope.size && !dryRun) {
                 log.info(
-                    "UD-256: persisting effective_scope += '{}' (now {} entry/entries)",
-                    syncPath,
+                    "UD-256: persisting effective_scope += {} (now {} entry/entries)",
+                    syncPaths,
                     unioned.size,
                 )
                 db.setSyncState("effective_scope", unioned.joinToString("\t"))
             } else if (unioned.size != priorScope.size && dryRun) {
                 log.info(
-                    "UD-256: --dry-run with new --sync-path '{}' — would extend effective_scope to {} entries (not persisted)",
-                    syncPath,
+                    "UD-256: --dry-run with new --sync-path {} — would extend effective_scope to {} entries (not persisted)",
+                    syncPaths,
                     unioned.size,
                 )
             }
@@ -994,10 +994,10 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             val localChangesPre =
-                if (syncPath != null) {
-                    val ancestors = syncPathAncestors(syncPath)
+                if (syncPaths.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(syncPaths)
                     allLocalChangesPre.filterKeys {
-                        Reconciler.pathInSyncScope(it, syncPath) || it in ancestors
+                        SyncScope.contains(it, syncPaths) || it in ancestors
                     }
                 } else {
                     allLocalChangesPre
@@ -1036,8 +1036,8 @@ open class SyncEngine(
         }
 
         val remoteChanges =
-            if (syncPath != null) {
-                allRemoteChanges.filterKeys { Reconciler.pathInSyncScope(it, syncPath) }
+            if (syncPaths.isNotEmpty()) {
+                allRemoteChanges.filterKeys { SyncScope.contains(it, syncPaths) }
             } else {
                 allRemoteChanges
             }
@@ -1059,7 +1059,7 @@ open class SyncEngine(
         // skipRemoteGather (apply mode) has no fresh listing to judge.
         val actualFullEnumeration =
             db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
-        if (actualFullEnumeration && syncPath == null && !skipRemoteGather) {
+        if (actualFullEnumeration && syncPaths.isEmpty() && !skipRemoteGather) {
             val observedAlive = allRemoteChanges.values.count { !it.deleted }
             remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
                 if (dryRun) {
@@ -1104,9 +1104,9 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             localChanges =
-                if (syncPath != null) {
-                    val ancestors = syncPathAncestors(syncPath)
-                    allLocalChanges.filterKeys { Reconciler.pathInSyncScope(it, syncPath) || it in ancestors }
+                if (syncPaths.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(syncPaths)
+                    allLocalChanges.filterKeys { SyncScope.contains(it, syncPaths) || it in ancestors }
                 } else {
                     allLocalChanges
                 }
@@ -1135,11 +1135,11 @@ open class SyncEngine(
             skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
         val reconciledActions =
             if (streamingActions != null) {
-                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath,
+                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             } else {
-                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath,
+                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             }
@@ -2426,7 +2426,7 @@ open class SyncEngine(
                             reconciler.resolveSlice(
                                 pageSlice.slice,
                                 localChanges,
-                                syncPath,
+                                syncPaths,
                                 pageSlice.stableRemoteTopLevelNames,
                                 downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                             )
@@ -3691,15 +3691,6 @@ open class SyncEngine(
                 e,
             )
         }
-    }
-
-    private fun syncPathAncestors(path: String): Set<String> {
-        val parts = path.trimStart('/').split('/')
-        val ancestors = mutableSetOf<String>()
-        for (i in 1 until parts.size) {
-            ancestors.add("/" + parts.subList(0, i).joinToString("/"))
-        }
-        return ancestors
     }
 
     // UD-256: read the persisted `effective_scope` list (TAB-separated, no entries
