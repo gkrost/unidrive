@@ -863,6 +863,9 @@ internal fun renderConfigMissingMessage(
     }
 
 fun main(args: Array<String>) {
+    // #391: choose stdout/stderr charsets before anything prints — redirected
+    // output must be UTF-8 so captured plan lines round-trip non-ASCII names.
+    CliEncoding.apply()
     org.slf4j.MDC.put("build", BuildInfo.COMMIT)
     // UD-733: startup banner gives every captured log a version anchor at
     // line 1 — operators reading `unidrive.log` see the build SHA without
