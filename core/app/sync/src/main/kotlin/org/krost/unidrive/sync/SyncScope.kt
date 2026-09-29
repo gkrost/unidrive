@@ -38,6 +38,33 @@ object SyncScope {
         return kept.sorted()
     }
 
+    /**
+     * Validates and normalises a configured `sync_path` for [profile]. Unlike
+     * the CLI, config must spell absolute remote paths: each entry starts with
+     * `/`, uses forward slashes, and has no `..` segment or control character.
+     */
+    fun fromConfig(
+        raw: List<String>?,
+        profile: String,
+    ): List<String> {
+        if (raw == null) return emptyList()
+        for (entry in raw) {
+            val problem =
+                when {
+                    entry.isBlank() -> "is empty"
+                    !entry.startsWith("/") -> "is not an absolute remote path (it must start with '/')"
+                    '\\' in entry -> "contains a backslash (remote paths use '/')"
+                    entry.any { it.isISOControl() } -> "contains a control character"
+                    entry.split('/').any { it == ".." } -> "contains a '..' segment"
+                    else -> null
+                }
+            if (problem != null) {
+                throw IllegalArgumentException("config.toml [providers.$profile] sync_path entry '$entry' $problem")
+            }
+        }
+        return normalize(raw)
+    }
+
     fun contains(
         path: String,
         roots: List<String>,

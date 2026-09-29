@@ -69,6 +69,7 @@ class DaemonRunCommand : Runnable {
             syncRoot = config.syncRoot,
             socketPath = socketPath,
             providerFactory = { parent.createProvider() },
+            syncPaths = config.syncPaths,
             pollIntervalMs = pollIntervalMs,
         )
 

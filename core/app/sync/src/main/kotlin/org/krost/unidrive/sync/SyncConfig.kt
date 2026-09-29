@@ -2,7 +2,14 @@ package org.krost.unidrive.sync
 
 import com.akuleshov7.ktoml.Toml
 import com.akuleshov7.ktoml.TomlInputConfig
+import com.akuleshov7.ktoml.exceptions.TomlDecodingException
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -196,6 +203,24 @@ data class RawGeneral(
     val streaming_reconciliation: Boolean? = null,
 )
 
+/** Decodes a TOML value that may be written as a single string or an array of strings. */
+internal object StringOrListSerializer : KSerializer<List<String>> {
+    private val list = ListSerializer(String.serializer())
+    override val descriptor: SerialDescriptor = list.descriptor
+
+    override fun serialize(
+        encoder: Encoder,
+        value: List<String>,
+    ) = list.serialize(encoder, value)
+
+    override fun deserialize(decoder: Decoder): List<String> =
+        try {
+            list.deserialize(decoder)
+        } catch (_: TomlDecodingException) {
+            listOf(decoder.decodeString())
+        }
+}
+
 @Serializable
 data class RawProvider(
     // Profile metadata
@@ -206,6 +231,10 @@ data class RawProvider(
     val pin_patterns: RawPinPatterns? = null,
     val conflict_overrides: Map<String, String>? = null,
     val exclude_patterns: List<String>? = null,
+    // Remote subtree(s) this profile syncs, e.g. "/_INBOX" or ["/_INBOX", "/gernot_ssh"].
+    // Absent = the whole drive. The CLI --sync-path overrides it per invocation.
+    @Serializable(with = StringOrListSerializer::class)
+    val sync_path: List<String>? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -310,6 +339,8 @@ data class SyncConfig(
     // hard default) happens in [resolveStreamingReconciliation] so the CLI
     // can pass the same constant set without re-implementing the precedence.
     val streamingReconciliation: Boolean? = null,
+    // Validated, normalised `[providers.<profile>] sync_path`; empty = whole drive.
+    val syncPaths: List<String> = emptyList(),
     private val providers: Map<String, ProviderConfig>,
 ) {
     fun providerPinIncludes(providerId: String): List<String> = providers[providerId]?.pinIncludes ?: emptyList()
@@ -682,6 +713,7 @@ data class SyncConfig(
                 maxVersions = (general.max_versions ?: 5).coerceAtLeast(1),
                 versionRetentionDays = (general.version_retention_days ?: 90).coerceAtLeast(1),
                 streamingReconciliation = general.streaming_reconciliation,
+                syncPaths = SyncScope.fromConfig(profile?.sync_path, profileName),
                 providers = providerConfigs,
             )
         }

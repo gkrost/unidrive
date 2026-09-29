@@ -247,6 +247,18 @@ open class SyncCommand : Runnable {
         val profile = parent.resolveCurrentProfile()
         val rawProvider = parent.createProvider()
         val config = parent.loadSyncConfig()
+        // A sync_path in config.toml is the profile's standing scope; --sync-path
+        // replaces it for this invocation. --full-tree would run unscoped against a
+        // profile whose scope is configured, so it is refused rather than silently
+        // overriding what the user wrote down.
+        if (fullTree && config.syncPaths.isNotEmpty()) {
+            throw CommandLine.ParameterException(
+                spec.commandLine(),
+                "--full-tree conflicts with sync_path in config.toml for profile '${profile.name}' " +
+                    "(${config.syncPaths.joinToString(", ")}). Remove sync_path from the profile to reconcile the whole drive.",
+            )
+        }
+        val effectiveSyncPaths = resolveSyncPaths(syncPaths, config.syncPaths)
         val effectiveDirection =
             when {
                 uploadOnly -> SyncDirection.UPLOAD
@@ -345,7 +357,7 @@ open class SyncCommand : Runnable {
         // UD-741: include sync_path conditionally — silent when unset (the
         // common case), surfaced when set so the user can spot a typo'd
         // sub-path before the scan eats minutes of wall-clock.
-        val syncPathSegment = if (syncPaths.isNotEmpty()) " sync_path=${syncPaths.joinToString(",")}" else ""
+        val syncPathSegment = if (effectiveSyncPaths.isNotEmpty()) " sync_path=${effectiveSyncPaths.joinToString(",")}" else ""
         println(
             "sync: profile=${profile.name} type=${profile.type} " +
                 "sync_root=${config.syncRoot}$syncPathSegment mode=$mode",
@@ -428,7 +440,7 @@ open class SyncCommand : Runnable {
                 reporter = reporter,
                 failureLogPath = parent.providerConfigDir().resolve("failures.jsonl"),
                 conflictLog = conflictLog,
-                syncPaths = syncPaths,
+                syncPaths = effectiveSyncPaths,
                 syncDirection = effectiveDirection,
                 propagateDeletes = propagateDeletes,
                 maxDeletePercentage = config.maxDeletePercentage,
@@ -969,6 +981,11 @@ open class SyncCommand : Runnable {
             failure is IllegalStateException || failure is IllegalArgumentException
 
         internal fun normalizeSyncPath(raw: String?): String? = SyncScope.normalizePath(raw)
+
+        internal fun resolveSyncPaths(
+            cli: List<String>,
+            configured: List<String>,
+        ): List<String> = cli.ifEmpty { configured }
 
         internal fun scheduleForceHalt(
             exitCode: Int,
