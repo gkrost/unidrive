@@ -332,16 +332,47 @@ open class SyncEngine(
         // this is the current truth. Without it a remote that changed size since the last
         // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
         // perfectly valid re-download.
-        db.upsertEntry(
-            (db.getEntry(path) ?: entry).copy(
-                isHydrated = true,
-                remoteSize = downloadedSize,
-                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
-                localSize = Files.size(cachePath),
-                lastSynced = Instant.now(),
-            ),
-        )
+        val current = db.getEntry(path) ?: entry
+        if (baselineDescribesSyncRootFile(current, path)) {
+            // #418: the download went to the cache, a different file from the one in the sync
+            // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
+            // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
+            // start claiming it does). Rewriting them from the cache copy made the next scan read an
+            // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
+            db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
+        } else {
+            // No sync-root file the row describes (mount mode, or the file changed since the row
+            // was written): the cache copy is the local file. HydrationImpl.lastSynced() and the
+            // co-daemon's crash-recovery scanner use this localMtime as their watermark.
+            db.upsertEntry(
+                current.copy(
+                    isHydrated = true,
+                    remoteSize = downloadedSize,
+                    localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                    localSize = Files.size(cachePath),
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
         return cachePath
+    }
+
+    // #418: true when [entry]'s local baseline still describes the regular file in the sync root,
+    // i.e. that file is there with exactly the mtime and size the row recorded. Any doubt (no
+    // baseline, no file, a changed file, an unresolvable name) answers false and keeps the
+    // cache-as-local-file behaviour.
+    private fun baselineDescribesSyncRootFile(
+        entry: SyncEntry,
+        path: String,
+    ): Boolean {
+        val mtime = entry.localMtime ?: return false
+        val size = entry.localSize ?: return false
+        return runCatching {
+            val local = placeholder.resolveLocal(path)
+            Files.isRegularFile(local) &&
+                Files.getLastModifiedTime(local).toMillis() == mtime &&
+                Files.size(local) == size
+        }.getOrDefault(false)
     }
 
     private fun isExcluded(path: String): Boolean =
