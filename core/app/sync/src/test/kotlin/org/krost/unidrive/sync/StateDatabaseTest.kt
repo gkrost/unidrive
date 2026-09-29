@@ -708,6 +708,52 @@ class StateDatabaseTest {
         assertNull(db.getSyncState("migration:dedupe_remote_id"))
     }
 
+    // #411: `--reset` wiped the schema stamp together with the rest of sync_state, so the
+    // NEXT open saw "sync_state without schema_version", took the pre-redesign path and
+    // dropped every row the reset run had just written.
+    @Test
+    fun `resetAll keeps the schema stamp so rows written after it survive a reopen`() {
+        val path = Files.createTempDirectory("unidrive-reset").resolve("state.db")
+        val first = StateDatabase(path)
+        first.initialize()
+        first.upsertEntry(entry("/before.txt"))
+        first.setSyncState("delta_cursor", "old")
+        first.resetAll()
+        assertNull(first.getEntry("/before.txt"))
+        assertNull(first.getSyncState("delta_cursor"), "reset still clears the rest of sync_state")
+        assertEquals(StateDatabase.SCHEMA_VERSION.toString(), first.getSyncState(StateDatabase.SCHEMA_VERSION_KEY))
+        first.upsertEntry(entry("/after.txt"))
+        first.setSyncState("delta_cursor", "new")
+        first.close()
+
+        val reopened = StateDatabase(path)
+        reopened.initialize()
+        try {
+            assertNotNull(reopened.getEntry("/after.txt"), "a reset database must not be read as pre-redesign")
+            assertEquals("new", reopened.getSyncState("delta_cursor"))
+        } finally {
+            reopened.close()
+        }
+    }
+
+    @Test
+    fun `a dry-run snapshot of a database that was reset and repopulated still has its rows`() {
+        val dir = Files.createTempDirectory("unidrive-reset-snap")
+        val path = dir.resolve("state.db")
+        val real = StateDatabase(path)
+        real.initialize()
+        real.resetAll()
+        real.upsertEntry(entry("/kept.txt"))
+        real.close()
+
+        val snap = StateDatabase.snapshotOf(path, tempRoot = dir.resolve("tmp"))
+        try {
+            assertNotNull(snap.getEntry("/kept.txt"), "the preview must see the rows the real run would see")
+        } finally {
+            snap.close()
+        }
+    }
+
     @Test
     fun `upgrade path — current-version DB is a no-op`() {
         // Re-initialize an already-current DB. Schema and rows survive.
