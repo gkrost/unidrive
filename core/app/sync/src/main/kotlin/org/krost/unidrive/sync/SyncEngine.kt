@@ -2016,10 +2016,11 @@ open class SyncEngine(
                 changes[resolved.path] = resolved
             }
             persistPendingCursor(page.cursor)
-            // UD-742: heartbeat after each remote page. Internxt paginates 50/page,
-            // so a 113k-item drive emits ~2260 update events — cheap, and the
-            // reporter is responsible for throttling display (CliProgressReporter
-            // overwrites the same line via printInline).
+            // UD-742: heartbeat after each remote page. Internxt paginates
+            // LISTING_PAGE_SIZE = 999 per page (measured + source-verified, #392
+            // 2026-09-29), so a 113k-item drive emits ~113 update events — cheap,
+            // and the reporter is responsible for throttling display
+            // (CliProgressReporter overwrites the same line via printInline).
             reporter.onScanProgress("remote", changes.size)
 
             while (page.hasMore) {

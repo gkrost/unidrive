@@ -123,6 +123,16 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/folders/{uuid}/size` | GET | ◯ | — | |
 | `/folders/meta` | GET (?path) | ◯ | — | |
 
+**Addendum 2026-09-29 (#392, live equivalence check).** The "paginated
+variants could replace `/folders/content/{uuid}` for large folders" note
+above was probed on a real account (`/_INBOX`: 126 folders, 1,433 files):
+for 12 sampled folders — including the largest (869 files, 18 paginated
+pages) — the plain listing returned **exactly** the union of the paginated
+`/files` + `/folders` sub-endpoints. No folder with ≥ 1,000 entries was
+seen, so a listing cap at or above 1,000 entries is **not** ruled out;
+treat the plain listing as unbounded-unverified and keep the paginated
+variants as the fallback plan for oversized folders.
+
 ### Drive — Trash endpoints
 
 | Endpoint | Verb | Status | Provider site | Notes |
