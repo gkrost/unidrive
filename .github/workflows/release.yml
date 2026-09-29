@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Full history so the existing BuildInfo.kt generator (which calls
           # `git rev-parse --short HEAD` and `git diff HEAD --numstat`) finds
