@@ -3333,6 +3333,12 @@ class SyncEngineTest {
         var deltaFromLatestCalls = 0
         var deltaCalls = 0
 
+        // #396: null = hashless provider (Internxt-style, the default); set before the
+        // engine is constructed to stand in for a hash-capable one (OneDrive-style).
+        var hashAlgorithmOverride: HashAlgorithm? = null
+
+        override fun hashAlgorithm(): HashAlgorithm? = hashAlgorithmOverride
+
         override fun capabilities(): Set<org.krost.unidrive.Capability> =
             buildSet {
                 add(org.krost.unidrive.Capability.Delta)

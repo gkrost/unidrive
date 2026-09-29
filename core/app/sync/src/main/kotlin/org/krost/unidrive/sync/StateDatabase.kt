@@ -149,7 +149,8 @@ class StateDatabase(
                     status               TEXT NOT NULL DEFAULT 'EXISTS'
                                          CHECK (status IN ('EXISTS','TRASHED','DELETED')),
                     download_quarantined INTEGER NOT NULL DEFAULT 0,
-                    last_error_at        TEXT
+                    last_error_at        TEXT,
+                    local_hash           TEXT
                 )
             """,
             )
@@ -282,6 +283,16 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN remote_path TEXT",
                 )
             }
+            // #396: SHA-256 of the local bytes the engine last wrote or sent, for
+            // providers with no remote content hash. Same additive-column pattern —
+            // no schema_version bump, NULL = "unknown" so every pre-#396 row keeps
+            // today's mtime+size behaviour until the engine next transfers the file.
+            // The CREATE TABLE above already includes it for fresh installs.
+            if (!columnExists("sync_entries", "local_hash")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN local_hash TEXT",
+                )
+            }
         }
     }
 
@@ -412,8 +423,8 @@ class StateDatabase(
             INSERT OR REPLACE INTO sync_entries
                 (remote_id, parent_uuid, path, remote_path, remote_hash, remote_size, remote_modified,
                  local_mtime, local_size, is_folder, is_pinned, is_hydrated, last_synced, status,
-                 download_quarantined, last_error_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 download_quarantined, last_error_at, local_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             ).use { stmt ->
                 val storedId = entry.remoteId ?: pickSyntheticIdForPath(entry.path)
@@ -433,6 +444,10 @@ class StateDatabase(
                 stmt.setString(14, entry.status.name)
                 stmt.setInt(15, if (entry.downloadQuarantined) 1 else 0)
                 stmt.setString(16, entry.lastErrorAt?.toString())
+                // #396: a row without real local bytes (placeholder, freed) has nothing a hash could
+                // describe. Dropping it here means every dehydrate path clears it and a later
+                // re-hydrate can never inherit a hash of bytes that are gone.
+                stmt.setString(17, if (entry.isHydrated) entry.localHash else null)
                 stmt.executeUpdate()
             }
     }
@@ -1262,6 +1277,7 @@ class StateDatabase(
             status = EntryStatus.valueOf(getString("status")),
             downloadQuarantined = getInt("download_quarantined") == 1,
             lastErrorAt = getString("last_error_at")?.let { Instant.parse(it) },
+            localHash = getString("local_hash"),
         )
     }
 

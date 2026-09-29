@@ -456,6 +456,8 @@ open class SyncEngine(
                     localMtime = mtime,
                     localSize = size,
                     isHydrated = true,
+                    // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
+                    localHash = null,
                 ) ?: SyncEntry(
                     path = path,
                     remoteId = null,
@@ -531,6 +533,8 @@ open class SyncEngine(
                     localSize = size,
                     isHydrated = true,
                     lastSynced = Instant.now(),
+                    // #396: the write-back changed the bytes behind this mtime/size; drop the stale hash.
+                    localHash = null,
                 ) ?: SyncEntry(
                     path = path,
                     remoteId = result.id,
@@ -2994,7 +2998,9 @@ open class SyncEngine(
         }
 
         val isHydrated = hasRealContent || item.size == 0L || shouldDownload
-        db.upsertEntry(entryFromCloudItem(item, action.path, isHydrated))
+        val entry = entryFromCloudItem(item, action.path, isHydrated)
+        // #396: only bytes the engine just wrote get a local hash; an adopted file is not re-read.
+        db.upsertEntry(if (shouldDownload) withLocalHash(entry) else entry)
     }
 
     private suspend fun applyUpdatePlaceholder(action: SyncAction.UpdatePlaceholder) {
@@ -3022,7 +3028,9 @@ open class SyncEngine(
             }
         }
 
-        db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
+        val entry = entryFromCloudItem(item, action.path, action.wasHydrated)
+        // #396: the hydrated branch above re-downloaded real bytes; metadata-only updates did not.
+        db.upsertEntry(if (action.wasHydrated && !item.isFolder) withLocalHash(entry) else entry)
     }
 
     internal suspend fun downloadByIdOrPath(
@@ -3071,7 +3079,7 @@ open class SyncEngine(
                 }
             }
 
-            db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            db.upsertEntry(withLocalHash(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true)))
             auditLog?.emit(
                 action = "Download",
                 path = action.path,
@@ -3146,7 +3154,7 @@ open class SyncEngine(
                 isPinned = false,
                 isHydrated = true,
                 lastSynced = Instant.now(),
-            ),
+            ).let { withLocalHash(it) }, // #396: hashless providers get the SHA-256 of the bytes just sent
         )
         // UD-113: success path. Failure path emits inside the try/catch above.
         auditLog?.emit(
@@ -3225,6 +3233,8 @@ open class SyncEngine(
                 isPinned = false,
                 isHydrated = oldEntry?.isHydrated ?: true,
                 lastSynced = Instant.now(),
+                // #396: a rename does not touch the bytes, so the recorded local hash stays valid.
+                localHash = oldEntry?.localHash,
             ),
         )
         // UD-113: success path for the remote-side rename/move.
@@ -3696,7 +3706,7 @@ open class SyncEngine(
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = Instant.now(),
-                ),
+                ).let { withLocalHash(it) },
             )
         }
     }
@@ -3754,6 +3764,33 @@ open class SyncEngine(
         isHydrated = isHydrated,
         lastSynced = Instant.now(),
     )
+
+    // #396: for a provider with no remote content hash (Internxt), record the SHA-256 of the
+    // bytes the engine itself just wrote (download) or sent (upload). LocalScanner uses it to
+    // recognise a file whose mtime was bumped by something else (shell handler, indexer,
+    // antivirus) as unchanged instead of planning a redundant re-upload. Hash-capable
+    // providers are left alone: the scanner already compares against the remote hash there.
+    //
+    // The hash is kept only if the file still has the mtime and size the row records, so a
+    // write that lands while we are hashing cannot turn the new bytes into the tracked
+    // baseline. Any read failure just leaves the hash null (today's mtime+size behaviour).
+    private fun withLocalHash(entry: SyncEntry): SyncEntry {
+        if (provider.hashAlgorithm() != null || entry.isFolder) return entry
+        val mtime = entry.localMtime ?: return entry
+        val size = entry.localSize ?: return entry
+        val local = placeholder.resolveLocal(entry.path)
+        return try {
+            val hash = HashVerifier.computeSha256Hex(local)
+            if (Files.getLastModifiedTime(local).toMillis() == mtime && Files.size(local) == size) {
+                entry.copy(localHash = hash)
+            } else {
+                entry
+            }
+        } catch (e: java.io.IOException) {
+            log.debug("#396: cannot hash {} for the local-hash column: {}", entry.path, e.message)
+            entry
+        }
+    }
 
     private fun buildCanonicalToLocalTopMap(remoteChanges: Map<String, CloudItem>): Map<String, String> {
         val topLevelNames = remoteChanges.keys

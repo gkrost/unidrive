@@ -43,6 +43,12 @@ data class SyncEntry(
     // Recorded for operator audit; not currently used as input to any
     // policy decision.
     val lastErrorAt: Instant? = null,
+    // #396: SHA-256 (lowercase hex) of the local file's bytes as the engine last wrote
+    // (download) or sent (upload) them. Recorded only for providers with no remote content
+    // hash (hashAlgorithm() == null), where it is the only way LocalScanner can tell a
+    // touched-but-unchanged file (mtime bumped by a shell handler, indexer, antivirus...)
+    // from a real edit. Null = unknown, which keeps the plain mtime+size behaviour.
+    val localHash: String? = null,
 )
 
 /**

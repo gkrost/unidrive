@@ -553,6 +553,126 @@ class LocalScannerTest {
         )
     }
 
+    // ---- #396: touch-only shield for providers with NO remote content hash (Internxt) ----
+
+    /** A synced row for [file] as a hashless provider's engine leaves it: no remote hash, optional local hash. */
+    private fun hashlessRow(
+        path: String,
+        file: Path,
+        localHash: String?,
+    ) = SyncEntry(
+        path = path,
+        remoteId = "id",
+        remoteHash = null,
+        remoteSize = Files.size(file),
+        remoteModified = Instant.now(),
+        localMtime = Files.getLastModifiedTime(file).toMillis(),
+        localSize = Files.size(file),
+        isFolder = false,
+        isPinned = false,
+        isHydrated = true,
+        lastSynced = Instant.now(),
+        localHash = localHash,
+    )
+
+    @Test
+    fun `#396 touched file with a recorded local hash is not flagged and its tracked mtime is refreshed`() {
+        val file = syncRoot.resolve("eml.txt")
+        Files.writeString(file, "identical content")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val hash = HashVerifier.computeSha256Hex(file)
+        db.upsertEntry(hashlessRow("/eml.txt", file, hash))
+
+        // An external writer (shell handler, indexer, NTFS alternate stream) bumps the mtime;
+        // size and bytes are untouched.
+        file.toFile().setLastModified(originalMtime + 60_000L)
+        val touchedMtime = Files.getLastModifiedTime(file).toMillis()
+        assertNotEquals(originalMtime, touchedMtime, "precondition: mtime really moved")
+
+        val changes = scanner.scan()
+
+        assertNull(changes["/eml.txt"], "touch-only change on a hashless provider must not be flagged MODIFIED")
+        val updated = db.getEntry("/eml.txt")
+        assertNotNull(updated)
+        assertEquals(touchedMtime, updated.localMtime, "tracked mtime must be refreshed to the touched value")
+        assertEquals(hash, updated.localHash, "the recorded local hash must survive the refresh")
+        assertTrue(scanner.scan().isEmpty(), "the refreshed row must make the next scan a no-op")
+    }
+
+    @Test
+    fun `#396 same size but different bytes with a recorded local hash IS flagged MODIFIED`() {
+        val file = syncRoot.resolve("edited396.txt")
+        Files.writeString(file, "aaa")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val hash = HashVerifier.computeSha256Hex(file)
+        db.upsertEntry(hashlessRow("/edited396.txt", file, hash))
+
+        Files.writeString(file, "bbb") // same length, different content
+        file.toFile().setLastModified(originalMtime + 60_000L)
+
+        val changes = scanner.scan()
+
+        assertEquals(ChangeState.MODIFIED, changes["/edited396.txt"], "a one-byte edit must still be flagged MODIFIED")
+        assertEquals(originalMtime, db.getEntry("/edited396.txt")?.localMtime, "a real edit must not refresh the tracked mtime")
+    }
+
+    @Test
+    fun `#396 touched file WITHOUT a local hash behaves as before and is flagged MODIFIED`() {
+        val file = syncRoot.resolve("legacy396.txt")
+        Files.writeString(file, "pre-396 row")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        db.upsertEntry(hashlessRow("/legacy396.txt", file, localHash = null))
+
+        file.toFile().setLastModified(originalMtime + 60_000L)
+
+        assertEquals(ChangeState.MODIFIED, scanner.scan()["/legacy396.txt"])
+    }
+
+    @Test
+    fun `#396 size change with a local hash is flagged MODIFIED without consulting the hash`() {
+        val file = syncRoot.resolve("grown396.txt")
+        Files.writeString(file, "short")
+        val hash = HashVerifier.computeSha256Hex(file)
+        db.upsertEntry(hashlessRow("/grown396.txt", file, hash))
+
+        Files.writeString(file, "considerably longer now")
+
+        assertEquals(ChangeState.MODIFIED, scanner.scan()["/grown396.txt"])
+    }
+
+    @Test
+    fun `#396 a file whose mtime and size are unchanged is never hashed`() {
+        val file = syncRoot.resolve("untouched396.txt")
+        Files.writeString(file, "stable")
+        // A deliberately wrong hash: if the scanner hashed every file on every scan it would
+        // notice the mismatch and flag MODIFIED. Untouched files must be skipped on stat alone.
+        db.upsertEntry(hashlessRow("/untouched396.txt", file, "0".repeat(64)))
+
+        assertTrue(scanner.scan().isEmpty())
+    }
+
+    @Test
+    fun `#396 provider with a remote hash keeps the #112 behaviour and ignores the local hash column`() {
+        val file = syncRoot.resolve("remote396.txt")
+        Files.writeString(file, "content")
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+        val md5 = HashVerifier.computeMd5Hex(file)
+        val hashScanner = LocalScanner(syncRoot, db, hashAlgorithm = HashAlgorithm.Md5Hex)
+
+        // Remote hash matches the bytes: touch-only skip via #112, exactly as before.
+        db.upsertEntry(hashlessRow("/remote396.txt", file, localHash = null).copy(remoteHash = md5))
+        file.toFile().setLastModified(originalMtime + 60_000L)
+        assertNull(hashScanner.scan()["/remote396.txt"], "touch-only must still be skipped through the remote hash")
+
+        // Remote hash does NOT match the bytes: MODIFIED, even though a local hash of the current
+        // bytes is on the row. The remote hash keeps precedence; the local hash is only a fallback.
+        db.upsertEntry(
+            hashlessRow("/remote396.txt", file, HashVerifier.computeSha256Hex(file)).copy(remoteHash = "not-the-md5"),
+        )
+        file.toFile().setLastModified(originalMtime + 120_000L)
+        assertEquals(ChangeState.MODIFIED, hashScanner.scan()["/remote396.txt"])
+    }
+
     @Test
     fun `scoped scan neither reports nor records local files outside the scope`() {
         Files.createDirectories(syncRoot.resolve("_INBOX/sub"))
