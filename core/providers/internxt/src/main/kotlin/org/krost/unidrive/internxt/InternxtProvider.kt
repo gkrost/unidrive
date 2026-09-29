@@ -12,6 +12,7 @@ import org.krost.unidrive.*
 import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
+import org.krost.unidrive.internxt.model.tryParseInternxtInstant
 import org.krost.unidrive.sync.ScanHeartbeat
 import java.nio.file.Files
 import java.nio.file.Path
@@ -779,7 +780,7 @@ class InternxtProvider(
                             size = fileSize,
                             fileId = bucketEntry.id,
                             modificationTime = localMtime,
-                        ).withServerModified()
+                        ).afterReplace(localMtime)
                 finalItem = replaced.toCloudItem(parentPath)
             }
         } else {
@@ -850,7 +851,7 @@ class InternxtProvider(
                                 size = fileSize,
                                 fileId = bucketEntry.id,
                                 modificationTime = localMtime,
-                            ).withServerModified()
+                            ).afterReplace(localMtime)
                     } else {
                         // KEEP BOTH: leave remote untouched; land local under a conflict name.
                         val today =
@@ -1100,14 +1101,16 @@ class InternxtProvider(
         // cycle for what is metadata-only on the wire. Cross-parent moves keep PATCH; mixed
         // (different parent AND different name) does both in sequence.
         // #417: every leg below stamps a new modificationTime server-side but answers with the
-        // pre-update one; the result is re-read once at the end (withServerModified).
+        // pre-update one; the result is re-read once at the end (afterMove), against the modified
+        // time the item had when we started.
+        val startedFrom = metadata.modified
         if (sameParent) {
             return if (metadata.isFolder) {
-                api.renameFolder(metadata.id, toName).withServerModified().toCloudItem(toParentPath)
+                api.renameFolder(metadata.id, toName).afterMove(startedFrom).toCloudItem(toParentPath)
             } else {
                 val newType = newFileType(toName)
                 api.renameFile(metadata.id, plainName = stripExtension(toName), type = newType)
-                    .withServerModified()
+                    .afterMove(startedFrom)
                     .toCloudItem(toParentPath)
             }
         }
@@ -1116,18 +1119,18 @@ class InternxtProvider(
         if (metadata.isFolder) {
             val moved = api.moveFolder(metadata.id, destFolderUuid)
             return if (sameName) {
-                moved.withServerModified().toCloudItem(toParentPath)
+                moved.afterMove(startedFrom).toCloudItem(toParentPath)
             } else {
-                api.renameFolder(moved.uuid, toName).withServerModified().toCloudItem(toParentPath)
+                api.renameFolder(moved.uuid, toName).afterMove(startedFrom).toCloudItem(toParentPath)
             }
         } else {
             val moved = api.moveFile(metadata.id, destFolderUuid)
             return if (sameName) {
-                moved.withServerModified().toCloudItem(toParentPath)
+                moved.afterMove(startedFrom).toCloudItem(toParentPath)
             } else {
                 val newType = newFileType(toName)
                 api.renameFile(moved.uuid, plainName = stripExtension(toName), type = newType)
-                    .withServerModified()
+                    .afterMove(startedFrom)
                     .toCloudItem(toParentPath)
             }
         }
@@ -1147,34 +1150,86 @@ class InternxtProvider(
     // replace/move. Best effort: the write has already landed and a move cannot be retried
     // (its source path is gone), so a failed read degrades to the write response (the pre-#417
     // behaviour, one redundant download) instead of failing the operation.
-    private suspend fun InternxtFile.withServerModified(): InternxtFile =
+    //
+    // The meta read itself can lag the write (seen live: an intermittent echo right after a
+    // rename). So a value that is provably still the pre-write one is re-read up to
+    // [modifiedRereadDelaysMs].size more times, waiting the listed delays in between (1.9 s at
+    // most by default), and the first value that is not lagging wins. If it never moves, the last
+    // value read is kept and logged at debug: the write is not undone by a slow read.
+    //   - replace: lagging = older than the modified time we SENT (truncated to whole seconds, so
+    //     neither a rounding nor a truncating server trips it). A value equal to or newer than
+    //     what we sent is final, which also covers a replace with an unchanged mtime (no retry).
+    //   - rename/move: lagging = equal to the time the item had before (the entity we started
+    //     from, or the write response), because the server always stamps a new time there.
+    internal var modifiedRereadDelaysMs: List<Long> = listOf(300L, 600L, 1_000L)
+
+    private suspend fun InternxtFile.afterReplace(sent: Instant): InternxtFile {
+        val sentSecond = sent.truncatedTo(ChronoUnit.SECONDS)
+        return withServerModified { it < sentSecond }
+    }
+
+    private suspend fun InternxtFile.afterMove(startedFrom: Instant?): InternxtFile =
+        withServerModified { it == startedFrom || it == modificationInstant }
+
+    private suspend fun InternxtFolder.afterMove(startedFrom: Instant?): InternxtFolder =
+        copy(
+            modificationTime =
+                rereadModificationTime("folder", uuid, modificationTime, { it == startedFrom || it == modificationInstant }) {
+                    api.getFolderMeta(uuid).modificationTime
+                },
+        )
+
+    private suspend fun InternxtFile.withServerModified(isLagging: (Instant) -> Boolean): InternxtFile =
+        copy(
+            modificationTime =
+                rereadModificationTime("file", uuid, modificationTime, isLagging) {
+                    api.getFileMeta(uuid).modificationTime
+                },
+        )
+
+    // Returns the modificationTime string to use for [uuid]: the first fresh value that is not
+    // [isLagging] (bounded by [modifiedRereadDelaysMs]), else the last value read, else [fallback]
+    // (the write response's own value) when the read is unavailable. Never throws except for
+    // cancellation.
+    private suspend fun rereadModificationTime(
+        kind: String,
+        uuid: String,
+        fallback: String?,
+        isLagging: (Instant) -> Boolean,
+        read: suspend () -> String?,
+    ): String? {
+        var latest: String? = null
         try {
-            copy(modificationTime = api.getFileMeta(uuid).modificationTime ?: modificationTime)
+            latest = read() ?: return fallback
+            for (delayMs in modifiedRereadDelaysMs) {
+                val instant = tryParseInternxtInstant(latest)
+                if (instant == null || !isLagging(instant)) return latest
+                kotlinx.coroutines.delay(delayMs)
+                latest = read() ?: return latest
+            }
+            val last = tryParseInternxtInstant(latest)
+            if (last != null && isLagging(last)) {
+                log.debug(
+                    "#417: {} {} still reports the pre-write modified time {} after {} re-reads; keeping it",
+                    kind,
+                    uuid,
+                    latest,
+                    modifiedRereadDelaysMs.size,
+                )
+            }
+            return latest
         } catch (ce: kotlinx.coroutines.CancellationException) {
             throw ce
         } catch (e: Exception) {
             log.warn(
-                "#417: re-reading file {} after write failed ({}); keeping the write response's modified time",
+                "#417: re-reading {} {} after write failed ({}); keeping the last known modified time",
+                kind,
                 uuid,
                 e.message ?: e.javaClass.simpleName,
             )
-            this
+            return latest ?: fallback
         }
-
-    private suspend fun InternxtFolder.withServerModified(): InternxtFolder =
-        try {
-            copy(modificationTime = api.getFolderMeta(uuid).modificationTime ?: modificationTime)
-        } catch (ce: kotlinx.coroutines.CancellationException) {
-            throw ce
-        } catch (e: Exception) {
-            log.warn(
-                "#417: re-reading folder {} after write failed ({}); keeping the write response's modified time",
-                uuid,
-                e.message ?: e.javaClass.simpleName,
-            )
-            this
-        }
-
+    }
 
     /**
      * Fast-bootstrap: adopt the current wall-clock instant as the cursor with
