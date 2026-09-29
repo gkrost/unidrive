@@ -1937,6 +1937,7 @@ open class SyncEngine(
                 resumeMarker = activeScan?.marker,
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+                scopeRoots = trackScope,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -2025,6 +2026,7 @@ open class SyncEngine(
                     resumeMarker = null,
                     resumedItems = emptyList(),
                     persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
+                    scopeRoots = trackScope,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =
@@ -2315,6 +2317,7 @@ open class SyncEngine(
                 resumeMarker = activeScan?.marker,
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+                scopeRoots = trackScope,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {

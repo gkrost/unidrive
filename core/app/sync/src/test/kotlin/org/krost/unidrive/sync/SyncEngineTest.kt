@@ -3500,6 +3500,36 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a standing scope is handed to the provider so it can enumerate just those roots`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPaths = listOf("/_INBOX"), standingScope = listOf("/_INBOX")).syncOnce()
+
+            assertEquals(listOf("/_INBOX"), provider.lastScanContext?.scopeRoots)
+        }
+
+    @Test
+    fun `a per-run sync-path without a standing scope keeps the whole-drive enumeration`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPath = "/_INBOX").syncOnce()
+
+            assertEquals(emptyList(), provider.lastScanContext?.scopeRoots)
+        }
+
+    @Test
+    fun `a per-run sync-path outside the standing scope is enumerated too`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPaths = listOf("/b"), standingScope = listOf("/a")).syncOnce()
+
+            assertEquals(listOf("/a", "/b"), provider.lastScanContext?.scopeRoots)
+        }
+
+    @Test
     fun `UD-256 first run with --sync-path persists the scope into sync_state`() =
         runTest {
             provider.deltaItems = emptyList()
