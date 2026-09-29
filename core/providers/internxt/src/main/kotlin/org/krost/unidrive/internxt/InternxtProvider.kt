@@ -1208,9 +1208,12 @@ class InternxtProvider(
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Parallel listing pagination. Files and folders streams run concurrently;
-        // inside each stream up to 2 page fetches stay in flight at a time (matches
-        // the Drive HttpRetryBudget concurrency cap). Under 28-52s per-page gateway
-        // latency, this roughly halves scan wall-clock vs the prior sequential loop.
+        // inside each stream up to 2 page fetches stay in flight at a time. Measured
+        // on a live account 2026-09-29 (#392): /folders/content latency p50 ~0.3s,
+        // p99 ~2-4s, max ~8s, and throughput still scaled with concurrency 8
+        // (8.7 calls/s) with zero throttling — the 2-wide cap is conservative
+        // headroom, not a measured limit. It roughly halves scan wall-clock vs
+        // the prior sequential loop anyway.
         // Running counts via AtomicInteger so the heartbeat reports monotonically
         // non-decreasing totals as pages arrive on either stream. The resumed-row
         // contribution is baked in up front so the heartbeat total is monotonic
@@ -1475,10 +1478,11 @@ class InternxtProvider(
 
     // Two-wide speculative page fetcher used by [delta]. Keeps up to 2 in-flight
     // [fetchPage] calls; when a page comes back with `size < limit` (the last
-    // page), any speculative siblings are cancelled rather than waited on — under
-    // the live 28-52s per-page latency, one wasted fetch is much cheaper than
-    // one extra round-trip's worth of wall-clock. Pages are appended in offset
-    // order so the resulting list matches the sequential walk.
+    // page), any speculative siblings are cancelled rather than waited on — a
+    // wasted fetch costs a few hundred ms (measured p50 ~0.3s, #392
+    // 2026-09-29), far cheaper than one extra round-trip's wall-clock at p99
+    // (~2-4s). Pages are appended in offset order so the resulting list
+    // matches the sequential walk.
     //
     // [startOffset] supports the resumable-scan handshake: a resumed scan
     // begins paginating from the persisted boundary rather than offset 0.
@@ -1680,10 +1684,13 @@ class InternxtProvider(
         //
         // Each child folder stamped into [folderAccumulator] has its
         // `parentUuid` set from the recursion context (the `folderUuid`
-        // arg). The /folders/:uuid/content endpoint omits `parentUuid` on
-        // the children listing — without this stamp, downstream
-        // `buildFolderPath` would treat the child as a root child and
-        // compute the wrong path. Threading these folders into the caller's
+        // arg) when the listing omitted it. Measured on a live account
+        // 2026-09-29 (#392): the /folders/:uuid/content listing DID carry
+        // `parentUuid` on every child folder (and `folderUuid` on every
+        // file), so the stamp is defensive and idempotent — it costs one
+        // comparison and keeps the path resolution correct against an
+        // endpoint that has been observed both ways. Threading these
+        // folders into the caller's
         // `allFolders` is what closes the ancestor-uuid-drop gap when the
         // fallback fires (otherwise `folderMap` only contains the
         // cursor-filtered /folders delta and most files get dropped).
@@ -1769,8 +1776,10 @@ class InternxtProvider(
         // exist fails the gather. A 500/503 inside a subtree is skipped and counted in
         // [skipped] like the /files fallback does; a failure while resolving a root
         // propagates. Folders are listed with at most [concurrency] requests in flight.
-        // Children carry no parentUuid and files no folderUuid in this listing, so
-        // both are stamped from the walk.
+        // Both folders and files are stamped from the walk (parentUuid/folderUuid).
+        // Measured on a live account 2026-09-29 (#392): the listing carries both
+        // fields on every child, so the stamp is defensive and idempotent, kept
+        // because the endpoint has been observed without them.
         internal suspend fun collectScopedInventoryImpl(
             getContents: suspend (String) -> FolderContentResponse,
             driveRootUuid: String,

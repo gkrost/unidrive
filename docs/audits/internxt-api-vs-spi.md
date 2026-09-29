@@ -113,6 +113,16 @@ Legend: ✅ Used — ⚠️ Used-but-divergent — ◯ Available-unused — ❓ 
 | `/folders/content/{uuid}/folders` | GET | ◯ | — | |
 | `/folders/content/{uuid}/folders/existence` | POST | ◯ | — | Could replace the 409-recovery dance in `createFolder` (`InternxtProvider.kt:256-267`). |
 | `/folders/content/{uuid}/files/existence` | POST | ◯ | — | |
+
+**Addendum 2026-09-29 (#392, live equivalence check).** The "paginated
+variants could replace `/folders/content/{uuid}` for large folders" note
+above was probed on a real account (`/_INBOX`: 126 folders, 1,433 files):
+for 12 sampled folders — including the largest (869 files, 18 paginated
+pages) — the plain listing returned **exactly** the union of the paginated
+`/files` + `/folders` sub-endpoints. No folder with ≥ 1,000 entries was
+seen, so a listing cap at or above 1,000 entries is **not** ruled out;
+treat the plain listing as unbounded-unverified and keep the paginated
+variants as the fallback plan for oversized folders.
 | `/folders/{uuid}/meta` | GET | ◯ | — | |
 | `/folders/{uuid}/meta` | PUT | ✅ | `InternxtApiService.kt` `renameFolder` | UD-369: rename folder. `UpdateFolderMetaDto` is `{plainName}` only — same encrypted-name caveat as `renameFile`. |
 | `/folders/{uuid}` | PATCH | ✅ | `InternxtApiService.kt:199-205` | `moveFolder`. |
