@@ -86,9 +86,15 @@ class StateDatabase(
 
     @Synchronized
     fun resetAll() {
-        conn.createStatement().use { stmt ->
-            stmt.executeUpdate("DELETE FROM sync_entries")
-            stmt.executeUpdate("DELETE FROM sync_state")
+        // sync_state also holds the schema stamp. Wiping it without restamping makes the
+        // next open read this file as a pre-redesign database and drop sync_entries (#411),
+        // so the restamp shares the transaction with the deletes.
+        batch {
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate("DELETE FROM sync_entries")
+                stmt.executeUpdate("DELETE FROM sync_state")
+            }
+            stampSchemaVersion()
         }
     }
 
