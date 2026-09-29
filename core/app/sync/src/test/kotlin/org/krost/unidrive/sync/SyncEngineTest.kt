@@ -12,13 +12,14 @@ import kotlin.test.*
 class SyncEngineTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
+    private lateinit var dbPath: java.nio.file.Path
     private lateinit var engine: SyncEngine
     private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
         syncRoot = Files.createTempDirectory("unidrive-engine-test")
-        val dbPath = Files.createTempDirectory("unidrive-engine-db").resolve("state.db")
+        dbPath = Files.createTempDirectory("unidrive-engine-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
         provider = FakeCloudProvider()
@@ -30,6 +31,22 @@ class SyncEngineTest {
                 conflictPolicy = ConflictPolicy.KEEP_BOTH,
                 reporter = ProgressReporter.Silent,
             )
+    }
+
+    /**
+     * Runs [block] the way `sync --dry-run` does: the engine builders it calls get a throwaway snapshot of the
+     * state database, never the real one. The real database is restored afterwards.
+     */
+    private suspend fun <R> preview(block: suspend () -> R): R {
+        val real = db
+        val snapshot = StateDatabase.snapshotOf(dbPath)
+        db = snapshot
+        try {
+            return block()
+        } finally {
+            db = real
+            snapshot.close()
+        }
     }
 
     @AfterTest
@@ -760,7 +777,9 @@ class SyncEngineTest {
             seedDbEntries(50)
             provider.deltaItems = emptyList()
             val reporter = RecordingReporter()
-            engineWithReporter(reporter).syncOnce(dryRun = true)
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            }
             assertTrue(
                 reporter.warnings.any { it.contains("sync_root") && it.contains("is empty") },
                 "expected empty-sync_root warning, got: ${reporter.warnings}",
@@ -801,7 +820,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
             val reporter = RecordingReporter()
             try {
-                engineWithReporter(reporter).syncOnce(dryRun = true)
+                preview {
+                    engineWithReporter(reporter).syncOnce(dryRun = true)
+                }
             } catch (_: IllegalStateException) {
                 // Tolerate other guards (UD-298 not in scope here).
             }
@@ -817,7 +838,9 @@ class SyncEngineTest {
             // No seedDbEntries — DB starts empty
             provider.deltaItems = emptyList()
             val reporter = RecordingReporter()
-            engineWithReporter(reporter).syncOnce(dryRun = true)
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            }
             assertFalse(
                 reporter.warnings.any { it.contains("is empty") },
                 "empty-sync_root warning fired on a fresh sync where there's nothing to delete",
@@ -1185,7 +1208,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
 
             val reporter = RecordingReporter()
-            engineWithReporter(reporter).syncOnce(dryRun = true)
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            }
 
             assertTrue(
                 reporter.warnings.any { it.contains("Deletion safeguard") && it.contains("sync_root") },
@@ -1216,7 +1241,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
 
             val reporter = RecordingReporter()
-            engineWithReporter(reporter).syncOnce(dryRun = true, forceDelete = true)
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true, forceDelete = true)
+            }
 
             assertFalse(
                 reporter.warnings.any { it.contains("Deletion safeguard") },
@@ -1314,7 +1341,9 @@ class SyncEngineTest {
 
             val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
             val reporter = RecordingReporter()
-            engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce(dryRun = true)
+            preview {
+                engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce(dryRun = true)
+            }
 
             // All deletes were filtered out, so no DeleteRemote events surface.
             assertTrue(
@@ -1416,7 +1445,9 @@ class SyncEngineTest {
                 )
 
             val reporter = RecordingReporter()
-            engineWithGuards(reporter = reporter).syncOnce(dryRun = true)
+            preview {
+                engineWithGuards(reporter = reporter).syncOnce(dryRun = true)
+            }
 
             // del-remote for the hydrated row must flow through.
             assertTrue(
@@ -1440,11 +1471,13 @@ class SyncEngineTest {
 
             val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
             val reporter = RecordingReporter()
-            engineWithGuards(
-                reporter = reporter,
-                ignoreTopLevelGuard = true,
-                skippedOpsLogPath = logPath,
-            ).syncOnce(dryRun = true)
+            preview {
+                engineWithGuards(
+                    reporter = reporter,
+                    ignoreTopLevelGuard = true,
+                    skippedOpsLogPath = logPath,
+                ).syncOnce(dryRun = true)
+            }
 
             // Opt-out does NOT keep unhydrated-folder deletes in the plan.
             assertTrue(
@@ -1490,8 +1523,10 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
 
             val reporter = RecordingReporter()
-            engineWithGuards(reporter = reporter, maxDeleteAbsolute = 50, maxDeletePercentage = 0)
-                .syncOnce(dryRun = true)
+            preview {
+                engineWithGuards(reporter = reporter, maxDeleteAbsolute = 50, maxDeletePercentage = 0)
+                    .syncOnce(dryRun = true)
+            }
 
             assertTrue(
                 reporter.warnings.any { it.contains("max_delete_absolute") },
@@ -2337,45 +2372,37 @@ class SyncEngineTest {
         }
 
     @Test
-    fun `dry-run persists remote state and reuses cursor`() =
+    fun `a dry-run on the real database is refused`() =
         runTest {
-            // First dry-run: remote has one file
+            provider.deltaItems = emptyList()
+            val e = assertFailsWith<IllegalArgumentException> { engine.syncOnce(dryRun = true) }
+            assertTrue("disposable" in e.message!!, e.message)
+            assertEquals(0, provider.deltaCalls, "it must refuse before touching the provider")
+        }
+
+    @Test
+    fun `dry-run leaves the real state untouched, so the next dry-run gathers from scratch`() =
+        runTest {
             provider.deltaItems = listOf(cloudItem("/test.txt", size = 100))
             provider.deltaCursor = "cursor-first"
             provider.files["/test.txt"] = ByteArray(100)
-            // Ensure no prior cursor
             db.setSyncState("delta_cursor", "")
             db.setSyncState("pending_cursor", "")
 
-            engine.syncOnce(dryRun = true)
+            preview { engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = true) }
 
-            // Cursor promoted (pending -> delta) because actions empty
-            assertEquals("cursor-first", db.getSyncState("delta_cursor"))
-            // Remote entry cached
-            val entry = db.getEntry("/test.txt")
-            assertNotNull(entry)
-            assertEquals("id-/test.txt", entry.remoteId)
-            assertEquals(100, entry.remoteSize)
-            assertFalse(entry.isHydrated) // local side unchanged
-            // No local file created
+            assertEquals("", db.getSyncState("delta_cursor"), "a dry-run must not promote the cursor")
+            assertNull(db.getSyncState("pending_cursor")?.takeIf { it.isNotEmpty() })
+            assertNull(db.getEntry("/test.txt"), "a dry-run must not cache remote rows")
             assertFalse(Files.exists(syncRoot.resolve("test.txt")))
-            // Delta called exactly once
             assertEquals(1, provider.deltaCalls)
 
-            // Second dry-run: provider returns same cursor, no new items
-            provider.deltaCursor = "cursor-second"
-            provider.deltaItems = emptyList()
-            // Reset counter
             provider.deltaCalls = 0
+            preview { engineWithReporter(ProgressReporter.Silent).syncOnce(dryRun = true) }
 
-            engine.syncOnce(dryRun = true)
-
-            // Cursor updated to second cursor
-            assertEquals("cursor-second", db.getSyncState("delta_cursor"))
-            // Delta called with previous cursor
-            assertEquals(1, provider.deltaCalls)
-            // Remote entry still present
-            assertNotNull(db.getEntry("/test.txt"))
+            assertEquals(1, provider.deltaCalls, "the second dry-run gathers again, from scratch")
+            assertEquals("", db.getSyncState("delta_cursor"))
+            assertNull(db.getEntry("/test.txt"))
         }
 
     // -- Resumable-scan integration tests --
@@ -3460,7 +3487,9 @@ class SyncEngineTest {
             stageTwoTrees(aFiles = 2, bFiles = 2)
             engineForScope().syncOnce()
 
-            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce(dryRun = true)
+            preview {
+                engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce(dryRun = true)
+            }
 
             assertNotNull(db.getEntry("/b/f0.txt"))
             assertNull(db.getSyncState("tracked_scope")?.takeIf { it.isNotEmpty() })
@@ -3577,7 +3606,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
             engineForScope(syncPath = "/Documents").syncOnce()
             val reporter = RecordingReporter()
-            engineForScope(reporter = reporter).syncOnce(dryRun = true)
+            preview {
+                engineForScope(reporter = reporter).syncOnce(dryRun = true)
+            }
             assertTrue(
                 reporter.warnings.any { it.contains("UD-256") && it.contains("/Documents") },
                 "expected UD-256 warning, got: ${reporter.warnings}",
@@ -3641,7 +3672,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
             engineForScope(syncPath = "/Documents").syncOnce()
             val before = db.getSyncState("effective_scope")
-            engineForScope(allowFullTreeReconciliation = true).syncOnce(dryRun = true)
+            preview {
+                engineForScope(allowFullTreeReconciliation = true).syncOnce(dryRun = true)
+            }
             val after = db.getSyncState("effective_scope")
             assertEquals(
                 before,
@@ -3656,7 +3689,9 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
             engineForScope(syncPath = "/Documents").syncOnce()
             val before = db.getSyncState("effective_scope")
-            engineForScope(syncPath = "/Photos").syncOnce(dryRun = true)
+            preview {
+                engineForScope(syncPath = "/Photos").syncOnce(dryRun = true)
+            }
             val after = db.getSyncState("effective_scope")
             assertEquals(
                 before,
@@ -3669,7 +3704,9 @@ class SyncEngineTest {
     fun `UD-256 PR45-Codex first --sync-path --dry-run on fresh profile does NOT persist anything`() =
         runTest {
             provider.deltaItems = emptyList()
-            engineForScope(syncPath = "/Documents").syncOnce(dryRun = true)
+            preview {
+                engineForScope(syncPath = "/Documents").syncOnce(dryRun = true)
+            }
             assertEquals(
                 null,
                 db.getSyncState("effective_scope"),

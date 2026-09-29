@@ -41,7 +41,15 @@ class StateDatabase(
     // still want to know "where the real one lives" but is not used for the
     // connection URL.
     private val inMemory: Boolean = false,
+    // A throwaway on-disk copy made by [snapshotOf]; close() deletes it.
+    private val disposableFile: Path? = null,
 ) {
+    /** True when this database can be discarded without losing real state (in-memory shadow or snapshot copy). */
+    val isDisposable: Boolean get() = inMemory || disposableFile != null
+
+    /** Path of the backing file (for a snapshot: the copy, not the source it was taken from). */
+    val file: Path get() = dbPath
+
     private var _conn: Connection? = null
     private val conn: Connection
         get() = _conn ?: error("StateDatabase not initialized — call initialize() first")
@@ -66,7 +74,15 @@ class StateDatabase(
     @Synchronized
     fun close() {
         _conn?.takeIf { !it.isClosed }?.close()
+        disposableFile?.let { copy ->
+            runCatching { Files.deleteIfExists(copy) }
+            runCatching { Files.deleteIfExists(copy.parent) }
+            snapshotShutdownHook?.let { hook -> runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
+            snapshotShutdownHook = null
+        }
     }
+
+    private var snapshotShutdownHook: Thread? = null
 
     @Synchronized
     fun resetAll() {
@@ -1286,6 +1302,86 @@ class StateDatabase(
     }
 
     companion object {
+        private const val SNAPSHOT_DIR_PREFIX = "unidrive-dryrun-"
+
+        /** Extra room required beyond the source size before a snapshot is attempted. */
+        private const val SNAPSHOT_SPACE_FACTOR = 1.2
+
+        /**
+         * A throwaway, initialized copy of the database at [source], for a run that must not change real
+         * state (`--dry-run`). The copy is a consistent snapshot taken through a read-only connection with
+         * `VACUUM INTO`, so it is safe while another connection (the daemon) holds writes. Migrations run on
+         * the copy only. A missing source gives a blank disposable database. [StateDatabase.close] deletes
+         * the copy; a shutdown hook covers a crash, and copies left by a killed process are swept after
+         * [staleAfter].
+         */
+        fun snapshotOf(
+            source: Path,
+            tempRoot: Path = Path.of(System.getProperty("java.io.tmpdir")),
+            staleAfter: Duration = Duration.ofHours(24),
+            usableSpace: (Path) -> Long = { Files.getFileStore(it).usableSpace },
+        ): StateDatabase {
+            Files.createDirectories(tempRoot)
+            sweepStaleSnapshots(tempRoot, staleAfter)
+            val dir = Files.createTempDirectory(tempRoot, SNAPSHOT_DIR_PREFIX)
+            val copy = dir.resolve("state.db")
+            try {
+                if (Files.exists(source)) {
+                    val size = Files.size(source)
+                    if (usableSpace(dir) < (size * SNAPSHOT_SPACE_FACTOR).toLong()) {
+                        throw IllegalStateException(
+                            "Not enough free space in '$tempRoot' to preview against a copy of state.db " +
+                                "(${size / 1_048_576} MB needed). Free some space, or use --reset --dry-run for a blank preview.",
+                        )
+                    }
+                    val uri = "jdbc:sqlite:file:${source.toAbsolutePath().toString().replace('\\', '/')}?mode=ro"
+                    DriverManager.getConnection(uri).use { c ->
+                        readSchemaVersionOf(c)?.let { recorded ->
+                            check(recorded <= SCHEMA_VERSION) {
+                                "state.db was written by a newer unidrive (schema $recorded, this build supports $SCHEMA_VERSION)."
+                            }
+                        }
+                        c.createStatement().use { it.execute("VACUUM INTO '${copy.toAbsolutePath().toString().replace('\\', '/').replace("'", "''")}'") }
+                    }
+                }
+                val db = StateDatabase(copy, disposableFile = copy)
+                db.initialize()
+                val hook = Thread { runCatching { dir.toFile().deleteRecursively() } }
+                runCatching { Runtime.getRuntime().addShutdownHook(hook) }.onSuccess { db.snapshotShutdownHook = hook }
+                return db
+            } catch (e: Exception) {
+                runCatching { dir.toFile().deleteRecursively() }
+                throw e
+            }
+        }
+
+        private fun readSchemaVersionOf(c: Connection): Int? =
+            try {
+                c.prepareStatement("SELECT value FROM sync_state WHERE key=?").use { st ->
+                    st.setString(1, SCHEMA_VERSION_KEY)
+                    st.executeQuery().use { rs -> if (rs.next()) rs.getString(1).toIntOrNull() else null }
+                }
+            } catch (_: java.sql.SQLException) {
+                null // no sync_state table yet: an empty or brand-new file
+            }
+
+        /** Deletes snapshot directories left in [tempRoot] by a process that was killed before it could clean up. */
+        fun sweepStaleSnapshots(
+            tempRoot: Path,
+            staleAfter: Duration = Duration.ofHours(24),
+        ) {
+            val cutoff = Instant.now().minus(staleAfter)
+            runCatching {
+                Files.newDirectoryStream(tempRoot, "$SNAPSHOT_DIR_PREFIX*").use { dirs ->
+                    for (d in dirs) {
+                        if (Files.isDirectory(d) && Files.getLastModifiedTime(d).toInstant().isBefore(cutoff)) {
+                            runCatching { d.toFile().deleteRecursively() }
+                        }
+                    }
+                }
+            }
+        }
+
         // Bumped to 2 by the redesign: 1 == pre-redesign (path-PK, no
         // tombstones), 2 == remote_id-PK with status + parent_uuid + alive view.
         // The resumable-scan slice lives in a new `scan_staging` table created
