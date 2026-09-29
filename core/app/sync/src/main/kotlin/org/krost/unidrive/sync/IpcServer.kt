@@ -78,6 +78,10 @@ class IpcServer(
     private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String, String) -> String>()
     private val closeListeners = CopyOnWriteArrayList<(String) -> Unit>()
     private var serverChannel: ServerSocketChannel? = null
+
+    // #419: set once start() has bound the socket, so close() removes only files this server owns.
+    @Volatile
+    private var ownsSocketFiles = false
     private var acceptJob: Job? = null
     private var broadcastJob: Job? = null
     private var ownedTransport: java.util.concurrent.ExecutorService? = null
@@ -223,6 +227,7 @@ class IpcServer(
 
         val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
         server.bind(UnixDomainSocketAddress.of(socketPath))
+        ownsSocketFiles = true
         // UD-100: defense-in-depth — set 0600 on socket file for parity with parent dir 0700 (tempSocketDir() at line 316).
         runCatching {
             Files.setPosixFilePermissions(
@@ -341,7 +346,14 @@ class IpcServer(
         clients.clear()
         syncSubscribers.clear()
         pendingPostReply.clear()
-        runCatching { Files.deleteIfExists(socketPath) }
+        // #419: only remove the files of a socket THIS server bound. A start() that was refused
+        // ("Another daemon is already listening") or failed to bind still gets close()d by its
+        // caller's cleanup, and must not unlink the live daemon's socket. Cleared afterwards so a
+        // second close() cannot delete a successor's socket.
+        if (ownsSocketFiles) {
+            ownsSocketFiles = false
+            deleteSocketFiles(socketPath)
+        }
         ownedTransport?.let { es ->
             es.shutdown()
             runCatching {
@@ -592,8 +604,39 @@ class IpcServer(
             socketPath: Path,
             profileName: String,
         ) {
-            val metaPath = socketPath.resolveSibling("${socketPath.fileName}.meta")
-            Files.writeString(metaPath, "$profileName\n")
+            Files.writeString(metaPathFor(socketPath), "$profileName\n")
+        }
+
+        private fun metaPathFor(socketPath: Path): Path = socketPath.resolveSibling("${socketPath.fileName}.meta")
+
+        private fun deleteSocketFiles(socketPath: Path) {
+            runCatching { Files.deleteIfExists(socketPath) }
+            runCatching { Files.deleteIfExists(metaPathFor(socketPath)) }
+        }
+
+        /**
+         * #419: remove the socket file at [socketPath] and its `.meta` sibling after the
+         * daemon that owned them is gone, ignoring failures. [close] never runs when the
+         * daemon is hard-killed (`daemon stop` on Windows is TerminateProcess, which skips
+         * shutdown hooks), so `daemon stop` calls this once the process has exited. A socket
+         * that still accepts a connection belongs to a live daemon and is left alone —
+         * the same probe [reclaimStaleSocket] uses on start.
+         */
+        fun removeStaleSocketFiles(socketPath: Path) {
+            runCatching {
+                if (Files.exists(socketPath)) {
+                    try {
+                        SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).close()
+                        return // somebody is listening: not ours to delete
+                    } catch (_: ConnectException) {
+                        // Stale socket — nobody listening
+                    } catch (_: java.net.SocketException) {
+                        // Stale socket — Windows "Invalid argument"
+                    }
+                    // Other IOExceptions abort via runCatching — never delete a socket we can't classify
+                }
+                deleteSocketFiles(socketPath)
+            }
         }
 
         fun defaultSocketPath(profileName: String): Path {

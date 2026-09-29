@@ -200,6 +200,14 @@ class DaemonStopCommand : Runnable {
         const val STOP_DEADLINE_MS: Long = 12_000  // 10s graceful + 2s buffer
     }
 
+    // #419: a daemon that was hard-killed never runs its shutdown code (`Process.destroy()` is
+    // TerminateProcess on Windows, which skips JVM shutdown hooks), so its socket file and
+    // .meta sibling outlive it. Remove them once the process is gone; a socket that still
+    // answers a connect belongs to a live daemon and is left alone. Best-effort.
+    private fun removeLeftoverSocket(profileName: String) {
+        runCatching { IpcServer.removeStaleSocketFiles(IpcServer.defaultSocketPath(profileName)) }
+    }
+
     override fun run() {
         val parent = daemonCmd.parent
         applyPositionalProfile(parent, profilePositional)
@@ -237,6 +245,7 @@ class DaemonStopCommand : Runnable {
         if (handle == null || !handle.isAlive) {
             println("daemon for profile '${profile.name}' (PID $pid) is not running (stale .lock.pid); cleaning up")
             runCatching { Files.deleteIfExists(pidFile) }
+            removeLeftoverSocket(profile.name)
             return
         }
 
@@ -264,6 +273,7 @@ class DaemonStopCommand : Runnable {
         handle.onExit().orTimeout(STOP_DEADLINE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             .handle { _, _ -> true }.get()
         if (!handle.isAlive) {
+            removeLeftoverSocket(profile.name)
             println("daemon for profile '${profile.name}' stopped")
         } else {
             System.err.println(

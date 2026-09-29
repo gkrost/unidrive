@@ -36,8 +36,13 @@ class IpcServerTest {
     fun tearDown() {
         server?.close()
         Files.deleteIfExists(socketPath)
+        Files.deleteIfExists(metaPath)
         Files.deleteIfExists(socketDir)
     }
+
+    // The `.meta` sibling defaultSocketPath() writes next to a hashed socket name.
+    private val metaPath: Path
+        get() = socketDir.resolve("test.sock.meta")
 
     private fun connectClient(): SocketChannel {
         val client = SocketChannel.open(StandardProtocolFamily.UNIX)
@@ -385,6 +390,89 @@ class IpcServerTest {
             server!!.close()
             server = null
             assertFalse(Files.exists(socketPath), "Socket file should be deleted after close")
+        }
+
+    // ── #419: `daemon stop` left the socket file (and its .meta sibling) behind ──
+
+    @Test
+    fun `#419 close deletes the meta sibling as well as the socket file`() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                // defaultSocketPath() writes this next to a hashed socket name.
+                Files.writeString(metaPath, "some-long-profile-name\n")
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
+                assertTrue(Files.exists(socketPath), "Socket file should exist after start")
+
+                server!!.close()
+                server = null
+
+                assertFalse(Files.exists(socketPath), "Socket file should be deleted after close")
+                assertFalse(Files.exists(metaPath), "Meta file should be deleted after close")
+            } finally {
+                serverScope.cancel()
+            }
+        }
+
+    @Test
+    fun `#419 closing a server whose start was refused does not delete the live daemon socket`() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
+
+                // A second daemon for the same socket is refused ("Another daemon is already
+                // listening"). DaemonRuntime still calls close() on it during cleanup; that
+                // must not unlink the socket the first daemon is serving on.
+                val second = IpcServer(socketPath)
+                assertFailsWith<IllegalStateException> { second.start(serverScope) }
+                second.close()
+
+                assertTrue(Files.exists(socketPath), "the live daemon's socket must survive the refused server's close")
+                connectClient().close() // still answers
+            } finally {
+                serverScope.cancel()
+            }
+        }
+
+    @Test
+    fun `#419 removeStaleSocketFiles clears the leftovers of a daemon that was hard-killed`() {
+        // A hard kill (daemon stop on Windows is TerminateProcess) runs no shutdown code, so the
+        // socket file and its meta sibling stay behind with nobody listening.
+        val dead = java.nio.channels.ServerSocketChannel.open(StandardProtocolFamily.UNIX)
+        dead.bind(UnixDomainSocketAddress.of(socketPath))
+        dead.close() // leaves the socket file behind
+        Files.writeString(metaPath, "some-long-profile-name\n")
+        assertTrue(Files.exists(socketPath), "precondition: leftover socket file")
+
+        IpcServer.removeStaleSocketFiles(socketPath)
+
+        assertFalse(Files.exists(socketPath), "leftover socket file must be removed")
+        assertFalse(Files.exists(metaPath), "leftover meta file must be removed")
+    }
+
+    @Test
+    fun `#419 removeStaleSocketFiles leaves a live daemon socket alone`() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
+                Files.writeString(metaPath, "some-long-profile-name\n")
+
+                IpcServer.removeStaleSocketFiles(socketPath)
+
+                assertTrue(Files.exists(socketPath), "a socket someone is listening on is not stale")
+                assertTrue(Files.exists(metaPath), "its meta file stays too")
+                connectClient().close() // still answers
+            } finally {
+                serverScope.cancel()
+            }
         }
 
     // ── UD-406: runBlocking returns after IpcServer.close() ──────────────────
