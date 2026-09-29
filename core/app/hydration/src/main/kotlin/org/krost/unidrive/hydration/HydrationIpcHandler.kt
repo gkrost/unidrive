@@ -348,31 +348,108 @@ class HydrationIpcHandler(
     // co-daemon may send a decomposed (NFD) name (macOS-origin accents) for a row
     // stored composed (NFC) — without this an NFD deleteRemote 404s on the NFC cloud
     // object and an NFD cache lookup misses the NFC-named file. Mirrors the existing
-    // ingestion-chokepoint approach. NOT applied to `cache_path` (a literal local
-    // filesystem path the co-daemon already created, used verbatim) or `prefix`
-    // (StateDatabase.listDirectChildren already normalizes it).
+    // ingestion-chokepoint approach. Runs on the JSON-DECODED value, so an escaped
+    // decomposed form (o + escaped combining diaeresis) is normalized too. NOT applied to
+    // `cache_path` (a literal local filesystem path the co-daemon already created, used
+    // verbatim) or `prefix` (StateDatabase.listDirectChildren already normalizes it).
     private fun pluckPath(line: String, key: String): String? =
         pluck(line, key)?.let { PathNormalizer.nfc(it) }
 
-    // Minimal JSON pluck — works for flat top-level string fields. Sufficient
-    // for our verb messages; we don't accept arbitrary client JSON shapes.
+    // Minimal JSON pluck — returns the decoded value of a TOP-LEVEL string member of the
+    // request object. Sufficient for our verb messages; we don't accept arbitrary client
+    // JSON shapes. Walks the object's members (skipping over any non-matching value, nested
+    // objects/arrays included) rather than searching for the first `"key"` substring, so a
+    // value or nested member that merely spells the key is never mistaken for it. A missing
+    // key, a non-string value (incl. null) or malformed text yields null.
     private fun pluck(line: String, key: String): String? {
-        val needle = "\"$key\""
-        val k = line.indexOf(needle)
-        if (k < 0) return null
-        val colon = line.indexOf(':', k + needle.length)
-        if (colon < 0) return null
-        val q1 = line.indexOf('"', colon)
-        if (q1 < 0) return null
-        val sb = StringBuilder()
-        var i = q1 + 1
-        while (i < line.length) {
-            val c = line[i]
-            if (c == '"') return sb.toString()
-            if (c == '\\' && i + 1 < line.length) { sb.append(line[i + 1]); i += 2; continue }
-            sb.append(c); i++
+        var i = skipWs(line, 0)
+        if (i >= line.length || line[i] != '{') return null
+        i = skipWs(line, i + 1)
+        while (i < line.length && line[i] == '"') {
+            val (name, afterName) = readString(line, i) ?: return null
+            i = skipWs(line, afterName)
+            if (i >= line.length || line[i] != ':') return null
+            i = skipWs(line, i + 1)
+            if (i >= line.length) return null
+            if (name == key) return if (line[i] == '"') readString(line, i)?.first else null
+            val afterValue = skipValue(line, i)
+            if (afterValue < 0) return null
+            i = skipWs(line, afterValue)
+            if (i < line.length && line[i] == ',') i = skipWs(line, i + 1) else break
         }
         return null
+    }
+
+    private fun skipWs(s: String, from: Int): Int {
+        var i = from
+        while (i < s.length && s[i].isWhitespace()) i++
+        return i
+    }
+
+    // Decodes the JSON string literal whose opening quote is at [start]; returns the text and
+    // the index just past the closing quote. Handles the full escape set — quote, backslash,
+    // slash, b, f, n, r, t and the four-hex-digit unicode escape (a surrogate pair is two
+    // consecutive escapes; appending each UTF-16 unit in turn reassembles it). .NET's
+    // System.Text.Json writes every non-ASCII char in that unicode form by default. A malformed
+    // escape returns null rather than a guess: silently keeping the digits is what made
+    // "K" + o-umlaut + "ln" arrive as "Ku00f6ln" (#416).
+    private fun readString(s: String, start: Int): Pair<String, Int>? {
+        val sb = StringBuilder()
+        var i = start + 1
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '"') return sb.toString() to i + 1
+            if (c != '\\') { sb.append(c); i++; continue }
+            if (i + 1 >= s.length) return null
+            when (val e = s[i + 1]) {
+                '"', '\\', '/' -> sb.append(e)
+                'b' -> sb.append('\b')
+                'f' -> sb.append(0x0C.toChar())
+                'n' -> sb.append('\n')
+                'r' -> sb.append('\r')
+                't' -> sb.append('\t')
+                'u' -> {
+                    if (i + 6 > s.length) return null
+                    var unit = 0
+                    for (d in i + 2 until i + 6) {
+                        val h = Character.digit(s[d], 16)
+                        if (h < 0 || s[d].code > 0x7F) return null
+                        unit = unit * 16 + h
+                    }
+                    sb.append(unit.toChar())
+                    i += 4
+                }
+                else -> return null
+            }
+            i += 2
+        }
+        return null
+    }
+
+    // Index just past the JSON value starting at [start] (string, object/array, or bare
+    // literal such as a number/true/null), or -1 if malformed. Strings are skipped whole so
+    // brackets and commas inside them are never counted.
+    private fun skipValue(s: String, start: Int): Int {
+        var depth = 0
+        var i = start
+        while (i < s.length) {
+            when (s[i]) {
+                '"' -> {
+                    i = readString(s, i)?.second ?: return -1
+                    if (depth == 0) return i
+                    continue
+                }
+                '{', '[' -> depth++
+                '}', ']' -> {
+                    if (depth == 0) return i
+                    depth--
+                    if (depth == 0) return i + 1
+                }
+                ',' -> if (depth == 0) return i
+            }
+            i++
+        }
+        return if (depth == 0) i else -1
     }
 }
 
