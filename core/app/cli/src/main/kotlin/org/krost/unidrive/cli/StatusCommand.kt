@@ -9,6 +9,7 @@ import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.RawSyncConfig
+import org.krost.unidrive.sync.Reconciler
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.SyncScope
@@ -360,6 +361,14 @@ class StatusCommand : Runnable {
                 emptyList()
             }
         scopeStatusLine(configured, persisted)?.let { println(it) }
+        if (configured.isNotEmpty()) {
+            val excludes = SyncConfig.DEFAULT_EXCLUDE_PATTERNS + profile.rawProvider?.exclude_patterns.orEmpty()
+            val outside =
+                SyncScope.outOfScopeLocal(profile.syncRoot, configured) { path ->
+                    excludes.any { Reconciler.matchesGlob(path, it) }
+                }
+            outOfScopeLine(outside)?.let { println(it) }
+        }
     }
 
     private fun showMultiProviderStatus() {
@@ -1188,6 +1197,13 @@ internal fun resolvesSingleProfileViaConfig(
     // in Main.resolveCurrentProfile.
     if (tryResolveByType(requestedName, raw) != null) return true
     return false
+}
+
+internal fun outOfScopeLine(outside: List<String>): String? {
+    if (outside.isEmpty()) return null
+    val shown = outside.take(5).joinToString(", ")
+    val more = if (outside.size > 5) ", and ${outside.size - 5} more" else ""
+    return "Out of scope on disk (left untouched): $shown$more"
 }
 
 internal fun scopeStatusLine(

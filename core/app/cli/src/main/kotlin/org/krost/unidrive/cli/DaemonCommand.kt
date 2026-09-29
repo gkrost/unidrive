@@ -70,6 +70,7 @@ class DaemonRunCommand : Runnable {
             socketPath = socketPath,
             providerFactory = { parent.createProvider() },
             syncPaths = config.syncPaths,
+            excludePatterns = config.effectiveExcludePatterns(profile.name),
             pollIntervalMs = pollIntervalMs,
         )
 

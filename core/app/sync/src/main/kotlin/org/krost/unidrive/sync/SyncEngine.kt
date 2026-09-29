@@ -35,6 +35,10 @@ open class SyncEngine(
     private val failureLogPath: Path? = null,
     private val conflictLog: ConflictLog? = null,
     private val syncPaths: List<String> = emptyList(),
+    // The profile's standing scope (config sync_path). It decides which remote rows
+    // state.db tracks; [syncPaths] only decides which actions this run plans. Empty =
+    // track the whole drive, so a one-off --sync-path never narrows tracking.
+    private val standingScope: List<String> = emptyList(),
     private val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
     // UD-737: --upload-only is push-additive by default — local deletes do NOT
     // propagate to remote. Set to true to opt back in to legacy "local is
@@ -128,7 +132,15 @@ open class SyncEngine(
         validateExcludePatterns(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
-    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm())
+    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm(), syncPaths)
+
+    // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,
+    // and the folders leading to them. Empty = the whole drive.
+    private val trackScope: List<String> =
+        if (standingScope.isEmpty()) emptyList() else SyncScope.normalize(standingScope + syncPaths)
+    private val trackAncestors: Set<String> = SyncScope.ancestors(trackScope)
+
+    private fun isTracked(remotePath: String): Boolean = SyncScope.contains(remotePath, trackScope) || remotePath in trackAncestors
 
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
@@ -603,10 +615,11 @@ open class SyncEngine(
         // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
         // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
         // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
+        applyScopeTransition(dryRun = false)
         if (reset) db.setSyncState("delta_cursor", "")
         val remoteChanges: Map<String, CloudItem> =
             try {
-                gatherRemoteChanges()
+                gatherRemoteChanges().filterKeys { isTracked(it) }
             } catch (e: ProviderException) {
                 return EnumerateResult(ok = false, error = e.message)
             }
@@ -935,6 +948,8 @@ open class SyncEngine(
         // run must not leave an empty sync_root dir behind.
         java.nio.file.Files.createDirectories(syncRoot)
 
+        applyScopeTransition(dryRun)
+
         // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
         // for each phase to the reporter so the heartbeat can render a
         // bucketed ETA. First-run / `--reset` scans simply have no key in
@@ -1146,7 +1161,7 @@ open class SyncEngine(
         logUnhydratedFolderSkips()
 
         db.batch {
-            updateRemoteEntries(allRemoteChanges)
+            updateRemoteEntries(allRemoteChanges.filterKeys { isTracked(it) })
         }
 
         // UD-264: top-level-never-hydrated guard. For every DeleteRemote action,
@@ -2642,6 +2657,56 @@ open class SyncEngine(
         changes to (safeAccumulator + deferred)
     }
 
+    private fun loadTrackedScope(): List<String> =
+        db.getSyncState("tracked_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
+
+    // Reconcile what state.db tracks with the standing scope. Narrowing drops rows
+    // outside the new scope without planning any delete: the local files stay and
+    // the remote is untouched. Widening clears the delta cursor so the next gather
+    // enumerates the newly in-scope subtrees; rows outside the old scope were never
+    // tracked, so an incremental delta could not find them. Dry-run only reports.
+    private fun applyScopeTransition(dryRun: Boolean) {
+        val prior = loadTrackedScope()
+        if (prior == trackScope) return
+        val narrowed =
+            if (prior.isEmpty()) {
+                trackScope.isNotEmpty()
+            } else {
+                trackScope.isNotEmpty() && prior.any { !SyncScope.contains(it, trackScope) }
+            }
+        val widened =
+            trackScope.isEmpty() || (prior.isNotEmpty() && trackScope.any { !SyncScope.contains(it, prior) })
+        if (dryRun) {
+            reporter.onWarning(
+                "Sync scope changed (tracked: ${prior.ifEmpty { listOf("whole drive") }} -> " +
+                    "${trackScope.ifEmpty { listOf("whole drive") }}); a real run would " +
+                    (if (narrowed) "stop tracking the rows outside the new scope (files stay on disk)" else "") +
+                    (if (narrowed && widened) " and " else "") +
+                    (if (widened) "re-enumerate the drive for the newly in-scope subtrees" else "") + ".",
+            )
+            return
+        }
+        db.batch {
+            if (narrowed) {
+                var untracked = 0
+                for (entry in db.getAllEntries()) {
+                    if (isTracked(entry.remotePath ?: entry.path)) continue
+                    db.deleteEntry(entry.path)
+                    untracked++
+                }
+                log.info("Sync scope narrowed to {}: stopped tracking {} row(s); local files left in place", trackScope, untracked)
+            }
+            if (widened) {
+                db.setSyncState("delta_cursor", "")
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { db.completeScan(it) }
+                val msg = "Sync scope widened to ${trackScope.ifEmpty { listOf("whole drive") }}: re-enumerating the drive."
+                log.warn(msg)
+                reporter.onWarning(msg)
+            }
+            db.setSyncState("tracked_scope", trackScope.joinToString("\t"))
+        }
+    }
+
     private fun promotePendingCursor() {
         val pendingCursor = db.getSyncState("pending_cursor") ?: return
         db.setSyncState("delta_cursor", pendingCursor)
@@ -2696,6 +2761,7 @@ open class SyncEngine(
             // (`remotePath ?: path`). For a non-aliased row this is just
             // entry.path — byte-identical to pre-#115 behaviour.
             val effectiveRemote = entry.remotePath ?: entry.path
+            if (!isTracked(effectiveRemote)) continue
             if (effectiveRemote in remoteChanges) continue
 
             val uploadedAt = recentlyUploaded[effectiveRemote]

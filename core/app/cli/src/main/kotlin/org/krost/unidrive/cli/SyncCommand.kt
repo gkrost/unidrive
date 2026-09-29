@@ -441,6 +441,7 @@ open class SyncCommand : Runnable {
                 failureLogPath = parent.providerConfigDir().resolve("failures.jsonl"),
                 conflictLog = conflictLog,
                 syncPaths = effectiveSyncPaths,
+                standingScope = config.syncPaths,
                 syncDirection = effectiveDirection,
                 propagateDeletes = propagateDeletes,
                 maxDeletePercentage = config.maxDeletePercentage,

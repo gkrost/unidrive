@@ -70,6 +70,39 @@ object SyncScope {
         roots: List<String>,
     ): Boolean = roots.isEmpty() || roots.any { path == it || path.startsWith("$it/") }
 
+    /**
+     * Top-level on-disk entries under [syncRoot] that lie outside [roots]: the
+     * content the engine leaves alone. Folders leading to a root are entered, not
+     * reported; anything else outside the scope is reported as one path without
+     * descending. [isExcluded] takes the remote-style path (`/name`).
+     */
+    fun outOfScopeLocal(
+        syncRoot: java.nio.file.Path,
+        roots: List<String>,
+        isExcluded: (String) -> Boolean = { false },
+    ): List<String> {
+        if (roots.isEmpty() || !java.nio.file.Files.isDirectory(syncRoot)) return emptyList()
+        val ancestors = ancestors(roots)
+        val found = mutableListOf<String>()
+
+        fun walk(dir: java.nio.file.Path, remoteDir: String) {
+            val children =
+                java.nio.file.Files.list(dir).use { stream -> stream.toList() }
+                    .sortedBy { it.fileName.toString() }
+            for (child in children) {
+                val remote = (if (remoteDir == "/") "" else remoteDir) + "/" + child.fileName
+                when {
+                    isExcluded(remote) -> Unit
+                    contains(remote, roots) -> Unit
+                    remote in ancestors && java.nio.file.Files.isDirectory(child) -> walk(child, remote)
+                    else -> found += remote
+                }
+            }
+        }
+        walk(syncRoot, "/")
+        return found
+    }
+
     /** Strict ancestors of every root, e.g. `/a/b` yields `/a`. */
     fun ancestors(roots: List<String>): Set<String> {
         val result = mutableSetOf<String>()

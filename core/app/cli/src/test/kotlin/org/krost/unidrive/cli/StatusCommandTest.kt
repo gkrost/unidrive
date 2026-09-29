@@ -760,4 +760,15 @@ class StatusCommandTest {
     fun `scope status line is silent for an unscoped profile`() {
         assertNull(scopeStatusLine(configured = emptyList(), persisted = emptyList()))
     }
+
+    @Test
+    fun `out-of-scope line lists a few entries and counts the rest`() {
+        assertNull(outOfScopeLine(emptyList()))
+        assertEquals("Out of scope on disk (left untouched): /a, /b", outOfScopeLine(listOf("/a", "/b")))
+        val many = (1..7).map { "/e$it" }
+        assertEquals(
+            "Out of scope on disk (left untouched): /e1, /e2, /e3, /e4, /e5, and 2 more",
+            outOfScopeLine(many),
+        )
+    }
 }

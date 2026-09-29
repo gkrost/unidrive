@@ -59,4 +59,38 @@ class SyncScopeTest {
         assertEquals(emptyList(), SyncScope.normalize(listOf("/a", "/")))
         assertEquals(emptyList(), SyncScope.normalize(emptyList()))
     }
+
+    private fun tree(vararg files: String): java.nio.file.Path {
+        val root = java.nio.file.Files.createTempDirectory("scope-local")
+        for (f in files) {
+            val target = root.resolve(f)
+            if (f.endsWith("/")) {
+                java.nio.file.Files.createDirectories(target)
+            } else {
+                java.nio.file.Files.createDirectories(target.parent)
+                java.nio.file.Files.writeString(target, "x")
+            }
+        }
+        return root
+    }
+
+    @Test
+    fun `outOfScopeLocal reports top-level entries outside the scope`() {
+        val root = tree("_INBOX/x.txt", "other/y.txt", "file.txt", ".unidrive-trash/z")
+        val outside = SyncScope.outOfScopeLocal(root, listOf("/_INBOX")) { it.startsWith("/.unidrive") }
+        assertEquals(listOf("/file.txt", "/other"), outside)
+    }
+
+    @Test
+    fun `outOfScopeLocal enters folders leading to a nested root`() {
+        val root = tree("a/b/x.txt", "a/c/y.txt", "z/w.txt")
+        assertEquals(listOf("/a/c", "/z"), SyncScope.outOfScopeLocal(root, listOf("/a/b")))
+    }
+
+    @Test
+    fun `outOfScopeLocal is empty when unscoped or the root is missing`() {
+        val root = tree("a/x.txt")
+        assertEquals(emptyList(), SyncScope.outOfScopeLocal(root, emptyList()))
+        assertEquals(emptyList(), SyncScope.outOfScopeLocal(root.resolve("missing"), listOf("/a")))
+    }
 }

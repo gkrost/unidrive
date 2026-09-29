@@ -19,8 +19,17 @@ class LocalScanner(
     // #112: algorithm used to compute remoteHash strings for this provider.
     // Null means "no verifiable hash" — fall back to mtime+size only.
     private val hashAlgorithm: HashAlgorithm? = null,
+    // Remote-style scope roots; empty = walk everything. Only in-scope subtrees and
+    // the folders leading to them are walked, so local content outside the scope is
+    // neither scanned nor given a pending-upload row.
+    private val scope: List<String> = emptyList(),
 ) {
     private val log = LoggerFactory.getLogger(LocalScanner::class.java)
+    private val scopeAncestors: Set<String> = SyncScope.ancestors(scope)
+
+    private fun inScope(relativePath: String): Boolean = SyncScope.contains(relativePath, scope)
+
+    private fun onScopePath(relativePath: String): Boolean = inScope(relativePath) || relativePath in scopeAncestors
 
     // UD-736: count of files where visitFileFailed swallowed an IOException so
     // the walk could continue. Reset at the start of each scan(). Caller can
@@ -68,6 +77,7 @@ class LocalScanner(
                     // NFC remote/state.db key in the reconciler.
                     val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(file).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.CONTINUE
+                    if (!inScope(relativePath)) return FileVisitResult.CONTINUE
                     seenPaths.add(relativePath)
                     visited++
 
@@ -141,6 +151,7 @@ class LocalScanner(
                     // #171: canonicalize to NFC (see visitFile).
                     val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(dir).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.SKIP_SUBTREE
+                    if (!onScopePath(relativePath)) return FileVisitResult.SKIP_SUBTREE
                     seenPaths.add(relativePath)
 
                     if (dbEntries[relativePath] == null) {
@@ -178,6 +189,7 @@ class LocalScanner(
         for (entry in dbEntries.values) {
             if (entry.path !in seenPaths) {
                 if (isExcluded(entry.path)) continue
+                if (!onScopePath(entry.path)) continue
                 val localPath = safeResolveLocal(syncRoot, entry.path)
                 if (!Files.exists(localPath)) {
                     changes[entry.path] = ChangeState.DELETED
