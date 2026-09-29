@@ -1,0 +1,21 @@
+# unidrive config.toml. Copy to the config directory and edit.
+# Keys mirror config.schema.json; every key is optional.
+
+[general]
+# default_profile = "internxt"
+# poll_interval = 60
+# conflict_policy = "keep_both"        # keep_both | last_writer_wins
+# sync_direction = "bidirectional"     # bidirectional | upload | download
+# exclude_patterns = ["/dev/git/**"]   # ignored in both directions
+
+[providers.internxt]
+type = "internxt"
+sync_root = "~/Internxt"
+
+# Sync only these remote subtrees. Nothing else materializes under sync_root.
+# A single path or a list; entries are absolute remote paths starting with "/".
+# Absent = the whole drive. `unidrive sync --sync-path ...` overrides it for one run.
+# sync_path = "/_INBOX"
+# sync_path = ["/_INBOX", "/gernot_ssh"]
+
+# exclude_patterns = ["/dev/git/**"]

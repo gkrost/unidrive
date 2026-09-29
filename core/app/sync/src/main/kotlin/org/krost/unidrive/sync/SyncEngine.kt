@@ -34,7 +34,11 @@ open class SyncEngine(
     private val reporter: ProgressReporter = ProgressReporter.Silent,
     private val failureLogPath: Path? = null,
     private val conflictLog: ConflictLog? = null,
-    private val syncPath: String? = null,
+    private val syncPaths: List<String> = emptyList(),
+    // The profile's standing scope (config sync_path). It decides which remote rows
+    // state.db tracks; [syncPaths] only decides which actions this run plans. Empty =
+    // track the whole drive, so a one-off --sync-path never narrows tracking.
+    private val standingScope: List<String> = emptyList(),
     private val syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
     // UD-737: --upload-only is push-additive by default — local deletes do NOT
     // propagate to remote. Set to true to opt back in to legacy "local is
@@ -128,7 +132,15 @@ open class SyncEngine(
         validateExcludePatterns(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),
         )
-    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm())
+    private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm(), syncPaths)
+
+    // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,
+    // and the folders leading to them. Empty = the whole drive.
+    private val trackScope: List<String> =
+        if (standingScope.isEmpty()) emptyList() else SyncScope.normalize(standingScope + syncPaths)
+    private val trackAncestors: Set<String> = SyncScope.ancestors(trackScope)
+
+    private fun isTracked(remotePath: String): Boolean = SyncScope.contains(remotePath, trackScope) || remotePath in trackAncestors
 
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
@@ -603,10 +615,11 @@ open class SyncEngine(
         // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
         // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
         // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
+        applyScopeTransition(dryRun = false)
         if (reset) db.setSyncState("delta_cursor", "")
         val remoteChanges: Map<String, CloudItem> =
             try {
-                gatherRemoteChanges()
+                gatherRemoteChanges().filterKeys { isTracked(it) }
             } catch (e: ProviderException) {
                 return EnumerateResult(ok = false, error = e.message)
             }
@@ -803,10 +816,10 @@ open class SyncEngine(
         // A profile that has ever been operated with `--sync-path` accumulates
         // a persisted `effective_scope` (sync_state key, TAB-separated list of
         // normalised paths). On every run:
-        //  - If `syncPath` is set this run: UNION it into the persisted scope
+        //  - If `syncPaths` is non-empty this run: UNION them into the persisted scope
         //    (whether the scope was previously empty or not). The run proceeds
         //    with the runtime scope filter as before.
-        //  - If `syncPath` is NULL and the persisted scope is non-empty and the
+        //  - If `syncPaths` is empty and the persisted scope is non-empty and the
         //    run is bidirectional-apply: REFUSE unless --full-tree was passed.
         //    The reconciler would otherwise treat every cloud path outside the
         //    persisted scope as "user-deleted-locally" and propagate DELETE.
@@ -843,19 +856,19 @@ open class SyncEngine(
                     priorScope.size,
                 )
             }
-        } else if (syncPath != null) {
-            val unioned = (priorScope + syncPath).distinct()
+        } else if (syncPaths.isNotEmpty()) {
+            val unioned = (priorScope + syncPaths).distinct()
             if (unioned.size != priorScope.size && !dryRun) {
                 log.info(
-                    "UD-256: persisting effective_scope += '{}' (now {} entry/entries)",
-                    syncPath,
+                    "UD-256: persisting effective_scope += {} (now {} entry/entries)",
+                    syncPaths,
                     unioned.size,
                 )
                 db.setSyncState("effective_scope", unioned.joinToString("\t"))
             } else if (unioned.size != priorScope.size && dryRun) {
                 log.info(
-                    "UD-256: --dry-run with new --sync-path '{}' — would extend effective_scope to {} entries (not persisted)",
-                    syncPath,
+                    "UD-256: --dry-run with new --sync-path {} — would extend effective_scope to {} entries (not persisted)",
+                    syncPaths,
                     unioned.size,
                 )
             }
@@ -935,6 +948,8 @@ open class SyncEngine(
         // run must not leave an empty sync_root dir behind.
         java.nio.file.Files.createDirectories(syncRoot)
 
+        applyScopeTransition(dryRun)
+
         // UD-747 (UD-744 slice): pass the previous run's wall-clock seconds
         // for each phase to the reporter so the heartbeat can render a
         // bucketed ETA. First-run / `--reset` scans simply have no key in
@@ -994,10 +1009,10 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             val localChangesPre =
-                if (syncPath != null) {
-                    val ancestors = syncPathAncestors(syncPath)
+                if (syncPaths.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(syncPaths)
                     allLocalChangesPre.filterKeys {
-                        it.startsWith(syncPath) || it == syncPath || it in ancestors
+                        SyncScope.contains(it, syncPaths) || it in ancestors
                     }
                 } else {
                     allLocalChangesPre
@@ -1036,8 +1051,8 @@ open class SyncEngine(
         }
 
         val remoteChanges =
-            if (syncPath != null) {
-                allRemoteChanges.filterKeys { it.startsWith(syncPath) || it == syncPath }
+            if (syncPaths.isNotEmpty()) {
+                allRemoteChanges.filterKeys { SyncScope.contains(it, syncPaths) }
             } else {
                 allRemoteChanges
             }
@@ -1059,7 +1074,7 @@ open class SyncEngine(
         // skipRemoteGather (apply mode) has no fresh listing to judge.
         val actualFullEnumeration =
             db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
-        if (actualFullEnumeration && syncPath == null && !skipRemoteGather) {
+        if (actualFullEnumeration && syncPaths.isEmpty() && !skipRemoteGather) {
             val observedAlive = allRemoteChanges.values.count { !it.deleted }
             remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
                 if (dryRun) {
@@ -1104,9 +1119,9 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             localChanges =
-                if (syncPath != null) {
-                    val ancestors = syncPathAncestors(syncPath)
-                    allLocalChanges.filterKeys { it.startsWith(syncPath) || it == syncPath || it in ancestors }
+                if (syncPaths.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(syncPaths)
+                    allLocalChanges.filterKeys { SyncScope.contains(it, syncPaths) || it in ancestors }
                 } else {
                     allLocalChanges
                 }
@@ -1135,18 +1150,18 @@ open class SyncEngine(
             skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
         val reconciledActions =
             if (streamingActions != null) {
-                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPath,
+                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             } else {
-                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPath,
+                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             }
         logUnhydratedFolderSkips()
 
         db.batch {
-            updateRemoteEntries(allRemoteChanges)
+            updateRemoteEntries(allRemoteChanges.filterKeys { isTracked(it) })
         }
 
         // UD-264: top-level-never-hydrated guard. For every DeleteRemote action,
@@ -1922,6 +1937,7 @@ open class SyncEngine(
                 resumeMarker = activeScan?.marker,
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+                scopeRoots = trackScope,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -2010,6 +2026,7 @@ open class SyncEngine(
                     resumeMarker = null,
                     resumedItems = emptyList(),
                     persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
+                    scopeRoots = trackScope,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =
@@ -2300,6 +2317,7 @@ open class SyncEngine(
                 resumeMarker = activeScan?.marker,
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
+                scopeRoots = trackScope,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -2426,7 +2444,7 @@ open class SyncEngine(
                             reconciler.resolveSlice(
                                 pageSlice.slice,
                                 localChanges,
-                                syncPath,
+                                syncPaths,
                                 pageSlice.stableRemoteTopLevelNames,
                                 downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                             )
@@ -2642,6 +2660,56 @@ open class SyncEngine(
         changes to (safeAccumulator + deferred)
     }
 
+    private fun loadTrackedScope(): List<String> =
+        db.getSyncState("tracked_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
+
+    // Reconcile what state.db tracks with the standing scope. Narrowing drops rows
+    // outside the new scope without planning any delete: the local files stay and
+    // the remote is untouched. Widening clears the delta cursor so the next gather
+    // enumerates the newly in-scope subtrees; rows outside the old scope were never
+    // tracked, so an incremental delta could not find them. Dry-run only reports.
+    private fun applyScopeTransition(dryRun: Boolean) {
+        val prior = loadTrackedScope()
+        if (prior == trackScope) return
+        val narrowed =
+            if (prior.isEmpty()) {
+                trackScope.isNotEmpty()
+            } else {
+                trackScope.isNotEmpty() && prior.any { !SyncScope.contains(it, trackScope) }
+            }
+        val widened =
+            trackScope.isEmpty() || (prior.isNotEmpty() && trackScope.any { !SyncScope.contains(it, prior) })
+        if (dryRun) {
+            reporter.onWarning(
+                "Sync scope changed (tracked: ${prior.ifEmpty { listOf("whole drive") }} -> " +
+                    "${trackScope.ifEmpty { listOf("whole drive") }}); a real run would " +
+                    (if (narrowed) "stop tracking the rows outside the new scope (files stay on disk)" else "") +
+                    (if (narrowed && widened) " and " else "") +
+                    (if (widened) "re-enumerate the drive for the newly in-scope subtrees" else "") + ".",
+            )
+            return
+        }
+        db.batch {
+            if (narrowed) {
+                var untracked = 0
+                for (entry in db.getAllEntries()) {
+                    if (isTracked(entry.remotePath ?: entry.path)) continue
+                    db.deleteEntry(entry.path)
+                    untracked++
+                }
+                log.info("Sync scope narrowed to {}: stopped tracking {} row(s); local files left in place", trackScope, untracked)
+            }
+            if (widened) {
+                db.setSyncState("delta_cursor", "")
+                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { db.completeScan(it) }
+                val msg = "Sync scope widened to ${trackScope.ifEmpty { listOf("whole drive") }}: re-enumerating the drive."
+                log.warn(msg)
+                reporter.onWarning(msg)
+            }
+            db.setSyncState("tracked_scope", trackScope.joinToString("\t"))
+        }
+    }
+
     private fun promotePendingCursor() {
         val pendingCursor = db.getSyncState("pending_cursor") ?: return
         db.setSyncState("delta_cursor", pendingCursor)
@@ -2696,6 +2764,7 @@ open class SyncEngine(
             // (`remotePath ?: path`). For a non-aliased row this is just
             // entry.path — byte-identical to pre-#115 behaviour.
             val effectiveRemote = entry.remotePath ?: entry.path
+            if (!isTracked(effectiveRemote)) continue
             if (effectiveRemote in remoteChanges) continue
 
             val uploadedAt = recentlyUploaded[effectiveRemote]
@@ -3691,15 +3760,6 @@ open class SyncEngine(
                 e,
             )
         }
-    }
-
-    private fun syncPathAncestors(path: String): Set<String> {
-        val parts = path.trimStart('/').split('/')
-        val ancestors = mutableSetOf<String>()
-        for (i in 1 until parts.size) {
-            ancestors.add("/" + parts.subList(0, i).joinToString("/"))
-        }
-        return ancestors
     }
 
     // UD-256: read the persisted `effective_scope` list (TAB-separated, no entries

@@ -44,6 +44,8 @@ class DaemonRuntime(
     private val syncRoot: Path,
     private val socketPath: Path,
     private val providerFactory: () -> CloudProvider,
+    private val syncPaths: List<String> = emptyList(),
+    private val excludePatterns: List<String> = emptyList(),
     // > 0 enables the in-process auto-poll (mount-view-refresh-design.md §5):
     // one periodic enumerate on serveScope, serialised by the sync.enumerate
     // in-flight guard. 0 = off (strictly reactive, the daemon default).
@@ -126,7 +128,8 @@ class DaemonRuntime(
                 // invalidation event originates outside the per-path hydration lifecycle.
                 var hydrationIpcRef: HydrationIpcHandler? = null
                 val engine = SyncEngine(
-                    provider, db!!, syncRoot = syncRoot, cacheKey = profileName,
+                    provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
+                    standingScope = syncPaths, excludePatterns = excludePatterns,
                     viewInvalidationSink = { changedPaths ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
                         val event = if (changedPaths.size > cap) {

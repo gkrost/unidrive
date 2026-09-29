@@ -12,6 +12,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class StatusCommandTest {
@@ -739,5 +740,35 @@ class StatusCommandTest {
             legacyRowStatus(isExpiring = true, lastSyncRaw = scan20mAgo, now = now, grace = Duration.ofMinutes(30))
         assertEquals("ok", status, "30-min grace (tuned max_poll_interval): a 20-min-old scan is still OK")
         assertFalse("STALE" in label, "expected non-stale label under the tuned grace, got: $label")
+    }
+
+    @Test
+    fun `scope status line lists the configured scope`() {
+        assertEquals(
+            "Sync scope: /_INBOX, /gernot_ssh",
+            scopeStatusLine(configured = listOf("/_INBOX", "/gernot_ssh"), persisted = emptyList()),
+        )
+    }
+
+    @Test
+    fun `scope status line warns about scoped history when nothing is configured`() {
+        val line = scopeStatusLine(configured = emptyList(), persisted = listOf("/old"))!!
+        assertTrue("/old" in line && "--full-tree" in line, "got: $line")
+    }
+
+    @Test
+    fun `scope status line is silent for an unscoped profile`() {
+        assertNull(scopeStatusLine(configured = emptyList(), persisted = emptyList()))
+    }
+
+    @Test
+    fun `out-of-scope line lists a few entries and counts the rest`() {
+        assertNull(outOfScopeLine(emptyList()))
+        assertEquals("Out of scope on disk (left untouched): /a, /b", outOfScopeLine(listOf("/a", "/b")))
+        val many = (1..7).map { "/e$it" }
+        assertEquals(
+            "Out of scope on disk (left untouched): /e1, /e2, /e3, /e4, /e5, and 2 more",
+            outOfScopeLine(many),
+        )
     }
 }

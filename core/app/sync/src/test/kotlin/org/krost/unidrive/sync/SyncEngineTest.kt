@@ -3301,16 +3301,234 @@ class SyncEngineTest {
         syncPath: String? = null,
         syncDirection: SyncDirection = SyncDirection.BIDIRECTIONAL,
         allowFullTreeReconciliation: Boolean = false,
+        syncPaths: List<String> = listOfNotNull(syncPath),
+        standingScope: List<String> = emptyList(),
     ) = SyncEngine(
         provider = provider,
         db = db,
         syncRoot = syncRoot,
         conflictPolicy = ConflictPolicy.KEEP_BOTH,
         reporter = reporter,
-        syncPath = syncPath,
+        syncPaths = syncPaths,
+        standingScope = standingScope,
         syncDirection = syncDirection,
         allowFullTreeReconciliation = allowFullTreeReconciliation,
     )
+
+    @Test
+    fun `sync-path scope does not match sibling paths sharing its prefix`() =
+        runTest {
+            provider.files["/_INBOX/a.txt"] = ByteArray(8)
+            provider.files["/_INBOXX/b.txt"] = ByteArray(8)
+            provider.files["/_INBOX-old/c.txt"] = ByteArray(8)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/_INBOX", isFolder = true),
+                    cloudItem("/_INBOX/a.txt", size = 8),
+                    cloudItem("/_INBOXX", isFolder = true),
+                    cloudItem("/_INBOXX/b.txt", size = 8),
+                    cloudItem("/_INBOX-old", isFolder = true),
+                    cloudItem("/_INBOX-old/c.txt", size = 8),
+                )
+            Files.createDirectories(syncRoot.resolve("_INBOXX"))
+            Files.write(syncRoot.resolve("_INBOXX/local.txt"), ByteArray(8))
+
+            engineForScope(syncPath = "/_INBOX", standingScope = listOf("/_INBOX")).syncOnce()
+
+            assertTrue(Files.exists(syncRoot.resolve("_INBOX/a.txt")))
+            assertFalse(Files.exists(syncRoot.resolve("_INBOXX/b.txt")))
+            assertFalse(Files.exists(syncRoot.resolve("_INBOX-old")))
+            assertNotNull(db.getEntry("/_INBOX/a.txt"))
+            assertNull(db.getEntry("/_INBOXX/b.txt"))
+            assertNull(db.getEntry("/_INBOX-old/c.txt"))
+            assertFalse(provider.uploadedPaths.contains("/_INBOXX/local.txt"))
+        }
+
+    @Test
+    fun `several sync-path roots all materialize and persist while siblings stay out`() =
+        runTest {
+            provider.files["/_INBOX/a.txt"] = ByteArray(8)
+            provider.files["/gernot_ssh/id"] = ByteArray(8)
+            provider.files["/other/c.txt"] = ByteArray(8)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/_INBOX", isFolder = true),
+                    cloudItem("/_INBOX/a.txt", size = 8),
+                    cloudItem("/gernot_ssh", isFolder = true),
+                    cloudItem("/gernot_ssh/id", size = 8),
+                    cloudItem("/other", isFolder = true),
+                    cloudItem("/other/c.txt", size = 8),
+                )
+
+            engineForScope(syncPaths = listOf("/_INBOX", "/gernot_ssh")).syncOnce()
+
+            assertTrue(Files.exists(syncRoot.resolve("_INBOX/a.txt")))
+            assertTrue(Files.exists(syncRoot.resolve("gernot_ssh/id")))
+            assertFalse(Files.exists(syncRoot.resolve("other")))
+            assertEquals(
+                setOf("/_INBOX", "/gernot_ssh"),
+                db.getSyncState("effective_scope")!!.split("\t").toSet(),
+            )
+        }
+
+    private fun stageTwoTrees(
+        aFiles: Int,
+        bFiles: Int,
+    ) {
+        val items = mutableListOf(cloudItem("/a", isFolder = true), cloudItem("/b", isFolder = true))
+        for (i in 0 until aFiles) {
+            provider.files["/a/f$i.txt"] = "a$i".toByteArray()
+            items += cloudItem("/a/f$i.txt", size = "a$i".length.toLong())
+        }
+        for (i in 0 until bFiles) {
+            provider.files["/b/f$i.txt"] = "b$i".toByteArray()
+            items += cloudItem("/b/f$i.txt", size = "b$i".length.toLong())
+        }
+        provider.deltaItems = items
+    }
+
+    @Test
+    fun `narrowing the standing scope stops tracking outside rows and deletes nothing`() =
+        runTest {
+            stageTwoTrees(aFiles = 5, bFiles = 30)
+            engineForScope().syncOnce()
+            assertNotNull(db.getEntry("/b/f0.txt"))
+
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+
+            assertNull(db.getEntry("/b/f0.txt"))
+            assertNull(db.getEntry("/b/f29.txt"))
+            assertNotNull(db.getEntry("/a/f0.txt"))
+            assertEquals("/a", db.getSyncState("tracked_scope"))
+            assertTrue(provider.deletedPaths.isEmpty(), "narrowing must not delete on the remote: ${provider.deletedPaths}")
+            for (i in 0 until 30) {
+                assertTrue(Files.exists(syncRoot.resolve("b/f$i.txt")), "b/f$i.txt must stay on disk")
+            }
+        }
+
+    @Test
+    fun `widening the standing scope re-enumerates and materializes the new subtree`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 3)
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+            assertFalse(Files.exists(syncRoot.resolve("b")))
+
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+            assertEquals("false", db.getSyncState("last_gather_full"), "an unchanged scope must stay incremental")
+
+            engineForScope(syncPaths = listOf("/a", "/b"), standingScope = listOf("/a", "/b")).syncOnce()
+
+            assertEquals("true", db.getSyncState("last_gather_full"), "widening must force a full enumeration")
+            assertTrue(Files.exists(syncRoot.resolve("b/f2.txt")))
+            assertNotNull(db.getEntry("/b/f2.txt"))
+            assertEquals("/a\t/b", db.getSyncState("tracked_scope"))
+        }
+
+    @Test
+    fun `re-widening after narrowing keeps the files that stayed on disk`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 4)
+            engineForScope().syncOnce()
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+
+            engineForScope(allowFullTreeReconciliation = true).syncOnce()
+
+            for (i in 0 until 4) {
+                assertEquals("b$i", Files.readString(syncRoot.resolve("b/f$i.txt")))
+            }
+            assertTrue(provider.deletedPaths.isEmpty(), "re-widening must not delete: ${provider.deletedPaths}")
+            assertTrue(provider.uploadedPaths.isEmpty(), "re-widening must not re-upload: ${provider.uploadedPaths}")
+            assertNotNull(db.getEntry("/b/f3.txt"))
+            assertEquals("", db.getSyncState("tracked_scope"))
+        }
+
+    @Test
+    fun `a per-run sync-path without a standing scope leaves tracking alone`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 2)
+            engineForScope().syncOnce()
+
+            engineForScope(syncPath = "/a").syncOnce()
+
+            assertNotNull(db.getEntry("/b/f0.txt"), "a one-off --sync-path must not untrack the rest of the drive")
+            assertNull(db.getSyncState("tracked_scope")?.takeIf { it.isNotEmpty() })
+        }
+
+    @Test
+    fun `dry-run reports a scope change without applying it`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 2)
+            engineForScope().syncOnce()
+
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce(dryRun = true)
+
+            assertNotNull(db.getEntry("/b/f0.txt"))
+            assertNull(db.getSyncState("tracked_scope")?.takeIf { it.isNotEmpty() })
+        }
+
+    @Test
+    fun `enumerate tracks only the standing scope`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 2)
+
+            val result = engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).enumerateRemoteIntoState(reset = false)
+
+            assertTrue(result.ok)
+            assertNotNull(db.getEntry("/a/f0.txt"))
+            assertNull(db.getEntry("/b/f0.txt"))
+            assertNull(db.getEntry("/b"))
+        }
+
+    @Test
+    fun `ancestor folders of a nested scope root stay tracked`() =
+        runTest {
+            provider.files["/a/b/x.txt"] = ByteArray(4)
+            provider.files["/a/other.txt"] = ByteArray(4)
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/a", isFolder = true),
+                    cloudItem("/a/b", isFolder = true),
+                    cloudItem("/a/b/x.txt", size = 4),
+                    cloudItem("/a/other.txt", size = 4),
+                )
+
+            engineForScope(syncPaths = listOf("/a/b"), standingScope = listOf("/a/b")).syncOnce()
+
+            assertNotNull(db.getEntry("/a"), "the folder leading to the scope root stays tracked")
+            assertNotNull(db.getEntry("/a/b/x.txt"))
+            assertNull(db.getEntry("/a/other.txt"))
+            assertFalse(Files.exists(syncRoot.resolve("a/other.txt")))
+        }
+
+    @Test
+    fun `a standing scope is handed to the provider so it can enumerate just those roots`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPaths = listOf("/_INBOX"), standingScope = listOf("/_INBOX")).syncOnce()
+
+            assertEquals(listOf("/_INBOX"), provider.lastScanContext?.scopeRoots)
+        }
+
+    @Test
+    fun `a per-run sync-path without a standing scope keeps the whole-drive enumeration`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPath = "/_INBOX").syncOnce()
+
+            assertEquals(emptyList(), provider.lastScanContext?.scopeRoots)
+        }
+
+    @Test
+    fun `a per-run sync-path outside the standing scope is enumerated too`() =
+        runTest {
+            provider.deltaItems = emptyList()
+
+            engineForScope(syncPaths = listOf("/b"), standingScope = listOf("/a")).syncOnce()
+
+            assertEquals(listOf("/a", "/b"), provider.lastScanContext?.scopeRoots)
+        }
 
     @Test
     fun `UD-256 first run with --sync-path persists the scope into sync_state`() =

@@ -24,6 +24,11 @@ package org.krost.unidrive
  * duplicate stored rows. The engine implementation backs this with a SQLite
  * transaction so the staged rows + the checkpoint marker advance atomically.
  *
+ * [scopeRoots] are the remote subtrees the profile tracks; empty means the
+ * whole drive. A full enumeration (cursor = null) may enumerate just these roots,
+ * which bounds its cost by the subtree size. Providers that cannot enumerate a
+ * subtree ignore it and the engine filters the result.
+ *
  * Providers that don't have a resume story (snapshot-once APIs, all-in-one
  * recursive listings) leave [ScanContext] unset on `delta()` and continue
  * accumulating in memory as before.
@@ -32,4 +37,5 @@ data class ScanContext(
     val resumeMarker: String?,
     val resumedItems: List<CloudItem>,
     val persistPage: suspend (items: List<CloudItem>, marker: String) -> Unit,
+    val scopeRoots: List<String> = emptyList(),
 )

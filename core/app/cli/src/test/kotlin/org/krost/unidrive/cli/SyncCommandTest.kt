@@ -103,6 +103,20 @@ class SyncCommandTest {
         assertNull(SyncCommand.normalizeSyncPath("//"))
     }
 
+    @Test
+    fun `CLI --sync-path replaces the configured scope for the invocation`() {
+        assertEquals(listOf("/cli"), SyncCommand.resolveSyncPaths(listOf("/cli"), listOf("/cfg")))
+        assertEquals(listOf("/cfg"), SyncCommand.resolveSyncPaths(emptyList(), listOf("/cfg")))
+        assertEquals(emptyList(), SyncCommand.resolveSyncPaths(emptyList(), emptyList()))
+    }
+
+    @Test
+    fun `--sync-path is repeatable and collects every value`() {
+        val parsed = CommandLine(Main()).parseArgs("sync", "--sync-path", "/_INBOX", "--sync-path", "/gernot_ssh")
+        val sync = parsed.subcommand().commandSpec().userObject() as SyncCommand
+        assertEquals(listOf("/_INBOX", "/gernot_ssh"), sync.syncPaths)
+    }
+
     // ── sync failures render a formatted error, never a stack trace ──────────
 
     // Invariant: an operator-correctable failure — the mis-pointed

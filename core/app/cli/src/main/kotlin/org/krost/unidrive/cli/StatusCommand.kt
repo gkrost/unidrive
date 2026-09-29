@@ -9,8 +9,10 @@ import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.RawSyncConfig
+import org.krost.unidrive.sync.Reconciler
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.sync.SyncScope
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
@@ -331,6 +333,42 @@ class StatusCommand : Runnable {
         val group = ProviderGroup(profile.type, providerDisplayName(profile.type), listOf(row))
         val ansi = AnsiHelper.isAnsiSupported()
         renderTable(listOf(group), ansi)
+        printScopeLine(profile, configDir)
+    }
+
+    private fun printScopeLine(
+        profile: ProfileInfo,
+        configDir: Path,
+    ) {
+        val configured =
+            try {
+                SyncScope.fromConfig(profile.rawProvider?.sync_path, profile.name)
+            } catch (e: IllegalArgumentException) {
+                println("Sync scope: invalid: ${e.message}")
+                return
+            }
+        val stateDbPath = configDir.resolve("state.db")
+        val persisted =
+            if (Files.exists(stateDbPath)) {
+                val db = StateDatabase(stateDbPath)
+                try {
+                    db.initialize()
+                    db.getSyncState("effective_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
+                } finally {
+                    db.close()
+                }
+            } else {
+                emptyList()
+            }
+        scopeStatusLine(configured, persisted)?.let { println(it) }
+        if (configured.isNotEmpty()) {
+            val excludes = SyncConfig.DEFAULT_EXCLUDE_PATTERNS + profile.rawProvider?.exclude_patterns.orEmpty()
+            val outside =
+                SyncScope.outOfScopeLocal(profile.syncRoot, configured) { path ->
+                    excludes.any { Reconciler.matchesGlob(path, it) }
+                }
+            outOfScopeLine(outside)?.let { println(it) }
+        }
     }
 
     private fun showMultiProviderStatus() {
@@ -1160,3 +1198,22 @@ internal fun resolvesSingleProfileViaConfig(
     if (tryResolveByType(requestedName, raw) != null) return true
     return false
 }
+
+internal fun outOfScopeLine(outside: List<String>): String? {
+    if (outside.isEmpty()) return null
+    val shown = outside.take(5).joinToString(", ")
+    val more = if (outside.size > 5) ", and ${outside.size - 5} more" else ""
+    return "Out of scope on disk (left untouched): $shown$more"
+}
+
+internal fun scopeStatusLine(
+    configured: List<String>,
+    persisted: List<String>,
+): String? =
+    when {
+        configured.isNotEmpty() -> "Sync scope: ${configured.joinToString(", ")}"
+        persisted.isNotEmpty() ->
+            "Sync scope: whole drive, but this profile has scoped history (${persisted.joinToString(", ")}); " +
+                "bare bidirectional sync is refused unless --full-tree is passed."
+        else -> null
+    }

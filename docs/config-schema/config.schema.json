@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "unidrive config.toml",
+  "description": "Mirrors RawGeneral and RawProvider in core/app/sync/.../SyncConfig.kt. A test keeps the property names in lockstep.",
+  "type": "object",
+  "properties": {
+    "general": {
+      "type": "object",
+      "properties": {
+        "default_profile": { "type": "string" },
+        "sync_root": { "type": "string" },
+        "poll_interval": { "type": "integer" },
+        "min_poll_interval": { "type": "integer" },
+        "max_poll_interval": { "type": "integer" },
+        "conflict_policy": { "type": "string", "enum": ["keep_both", "last_writer_wins"] },
+        "log_file": { "type": "string" },
+        "max_bandwidth_kbps": { "type": "integer" },
+        "max_delete_percentage": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "max_delete_absolute": { "type": "integer", "minimum": 0 },
+        "max_delete_per_subtree_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "sync_direction": { "type": "string", "enum": ["bidirectional", "upload", "download"] },
+        "client_location": { "type": "string" },
+        "client_network": { "type": "string" },
+        "exclude_patterns": { "type": "array", "items": { "type": "string" } },
+        "desktop_notifications": { "type": "boolean" },
+        "verify_integrity": { "type": "boolean" },
+        "use_trash": { "type": "boolean" },
+        "trash_emulation": { "type": "boolean" },
+        "trash_retention_days": { "type": "integer", "minimum": 1 },
+        "file_versioning": { "type": "boolean" },
+        "max_versions": { "type": "integer", "minimum": 1 },
+        "version_retention_days": { "type": "integer", "minimum": 1 },
+        "streaming_reconciliation": { "type": "boolean" }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "sync_root": { "type": "string" },
+          "root_path": { "type": "string" },
+          "pin_patterns": {
+            "type": "object",
+            "properties": {
+              "include": { "type": "array", "items": { "type": "string" } },
+              "exclude": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "conflict_overrides": { "type": "object", "additionalProperties": { "type": "string" } },
+          "exclude_patterns": { "type": "array", "items": { "type": "string" } },
+          "sync_path": {
+            "description": "Remote subtree(s) this profile syncs. Absolute remote paths starting with '/'. Absent means the whole drive. The CLI --sync-path overrides it for one invocation.",
+            "oneOf": [
+              { "type": "string", "pattern": "^/" },
+              { "type": "array", "items": { "type": "string", "pattern": "^/" } }
+            ]
+          },
+          "bucket": { "type": "string" },
+          "region": { "type": "string" },
+          "endpoint": { "type": "string" },
+          "access_key_id": { "type": "string" },
+          "secret_access_key": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "user": { "type": "string" },
+          "remote_path": { "type": "string" },
+          "identity": { "type": "string" },
+          "password": { "type": "string" },
+          "url": { "type": "string" },
+          "client_id": { "type": "string" },
+          "client_secret": { "type": "string" },
+          "authority_url": { "type": "string" },
+          "include_shared": { "type": "boolean" },
+          "webhook": { "type": "boolean" },
+          "webhook_port": { "type": "integer" },
+          "webhook_url": { "type": "string" },
+          "trust_all_certs": { "type": "boolean" },
+          "rclone_remote": { "type": "string" },
+          "rclone_path": { "type": "string" },
+          "rclone_binary": { "type": "string" },
+          "rclone_config": { "type": "string" },
+          "fast_bootstrap": { "type": "boolean" },
+          "keep_overwritten": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

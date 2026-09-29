@@ -552,4 +552,58 @@ class LocalScannerTest {
             "without stored hash, mtime change must fall back to MODIFIED",
         )
     }
+
+    @Test
+    fun `scoped scan neither reports nor records local files outside the scope`() {
+        Files.createDirectories(syncRoot.resolve("_INBOX/sub"))
+        Files.writeString(syncRoot.resolve("_INBOX/sub/in.txt"), "in")
+        Files.createDirectories(syncRoot.resolve("_INBOXX"))
+        Files.writeString(syncRoot.resolve("_INBOXX/out.txt"), "out")
+        Files.writeString(syncRoot.resolve("top.txt"), "top")
+
+        val changes = LocalScanner(syncRoot, db, scope = listOf("/_INBOX")).scan()
+
+        assertEquals(setOf("/_INBOX", "/_INBOX/sub", "/_INBOX/sub/in.txt"), changes.keys)
+        assertNotNull(db.getEntry("/_INBOX/sub/in.txt"))
+        assertNull(db.getEntry("/_INBOXX/out.txt"))
+        assertNull(db.getEntry("/top.txt"))
+    }
+
+    @Test
+    fun `scoped scan enters folders leading to a nested root but skips their other files`() {
+        Files.createDirectories(syncRoot.resolve("a/b"))
+        Files.writeString(syncRoot.resolve("a/b/x.txt"), "x")
+        Files.writeString(syncRoot.resolve("a/other.txt"), "o")
+
+        val changes = LocalScanner(syncRoot, db, scope = listOf("/a/b")).scan()
+
+        assertEquals(setOf("/a", "/a/b", "/a/b/x.txt"), changes.keys)
+        assertNull(db.getEntry("/a/other.txt"))
+    }
+
+    @Test
+    fun `scoped scan does not report unscanned tracked files as deleted`() {
+        Files.createDirectories(syncRoot.resolve("out"))
+        Files.writeString(syncRoot.resolve("out/keep.txt"), "k")
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = "/out/keep.txt",
+                remoteId = "r1",
+                remoteHash = null,
+                remoteSize = 1,
+                remoteModified = null,
+                localMtime = Files.getLastModifiedTime(syncRoot.resolve("out/keep.txt")).toMillis(),
+                localSize = 1,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = java.time.Instant.now(),
+            ),
+        )
+        Files.delete(syncRoot.resolve("out/keep.txt"))
+
+        val changes = LocalScanner(syncRoot, db, scope = listOf("/in")).scan()
+
+        assertFalse("/out/keep.txt" in changes, "a tracked file outside the scope is not this run's business")
+    }
 }

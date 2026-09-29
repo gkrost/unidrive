@@ -4,7 +4,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
 import org.krost.unidrive.internxt.model.FolderContentResponse
@@ -1161,6 +1163,11 @@ class InternxtProvider(
     ): DeltaPage {
         foldersScanned.set(0)
         foldersSkipped.set(0)
+        // A full enumeration of a scoped profile lists only the scope roots. An
+        // incremental delta stays account-wide: it is one cheap updatedAt-filtered
+        // query and the engine drops what falls outside the scope.
+        val scopeRoots = scanContext?.scopeRoots.orEmpty()
+        if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val limit = InternxtConfig.LISTING_PAGE_SIZE
         // drive-desktop parity: fresh full enum (cursor=null) uses sort=uuid
@@ -1379,6 +1386,37 @@ class InternxtProvider(
             hasMore = false,
             complete = skipped == 0 && ancestorDrops == 0,
         )
+    }
+
+    // Cursor = the walk's start time, not the newest in-scope updatedAt: the next
+    // incremental delta then asks for changes since the walk began. The newest
+    // in-scope timestamp can be years old, which would make that first delta list
+    // the whole account. No resume marker is kept; an interrupted walk restarts.
+    private suspend fun scopedFullDelta(
+        scopeRoots: List<String>,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+    ): DeltaPage {
+        val startedAt = Instant.now()
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+        val rootUuid = authService.getValidCredentials().rootFolderId
+        val inventory =
+            collectScopedInventoryImpl(
+                getContents = api::getFolderContents,
+                driveRootUuid = rootUuid,
+                scopeRoots = scopeRoots,
+                scanned = foldersScanned,
+                skipped = foldersSkipped,
+                log = log,
+                onProgress = { items -> heartbeat?.tick(items) },
+            )
+        val skipped = foldersSkipped.get()
+        if (skipped > 0) {
+            log.warn(
+                "Internxt scoped gather skipped {} folder(s) due to 500/503; returning DeltaPage(complete=false).",
+                skipped,
+            )
+        }
+        return scopedDeltaPage(inventory, rootUuid, startedAt.toString(), skipped)
     }
 
     // Coalesces files + folders page arrivals into a single [persistPage] call
@@ -1693,6 +1731,103 @@ class InternxtProvider(
                     )
                 }
             }
+        }
+
+        // Builds the single DeltaPage of a scoped bootstrap from its inventory. Items
+        // whose ancestors cannot be resolved are dropped and make the page incomplete,
+        // the same signal the account-wide gather uses.
+        internal fun scopedDeltaPage(
+            inventory: ScopedInventory,
+            rootUuid: String,
+            cursor: String,
+            skipped: Int,
+        ): DeltaPage {
+            val folderMap = inventory.folders.associateBy { it.uuid }
+            val files =
+                inventory.files.map { f ->
+                    val parent = f.folderUuid?.let { buildFolderPath(it, folderMap, rootUuid) ?: return@map null } ?: ""
+                    fileToDeltaCloudItem(f, parent)
+                }
+            val folders =
+                inventory.folders.map { d ->
+                    val parent = d.parentUuid?.let { buildFolderPath(it, folderMap, rootUuid) ?: return@map null } ?: ""
+                    folderToDeltaCloudItem(d, parent)
+                }
+            val dropped = files.count { it == null } + folders.count { it == null }
+            return DeltaPage(
+                items = files.filterNotNull() + folders.filterNotNull(),
+                cursor = cursor,
+                hasMore = false,
+                complete = skipped == 0 && dropped == 0,
+            )
+        }
+
+        // Enumerates only the given scope roots instead of the whole drive, so the
+        // cost is bounded by the subtree size. Each root is resolved by walking its
+        // path down from [driveRootUuid]; the folders met on the way are emitted so
+        // paths resolve and the engine can track the ancestors. A root that does not
+        // exist fails the gather. A 500/503 inside a subtree is skipped and counted in
+        // [skipped] like the /files fallback does; a failure while resolving a root
+        // propagates. Folders are listed with at most [concurrency] requests in flight.
+        // Children carry no parentUuid and files no folderUuid in this listing, so
+        // both are stamped from the walk.
+        internal suspend fun collectScopedInventoryImpl(
+            getContents: suspend (String) -> FolderContentResponse,
+            driveRootUuid: String,
+            scopeRoots: List<String>,
+            scanned: java.util.concurrent.atomic.AtomicInteger,
+            skipped: java.util.concurrent.atomic.AtomicInteger,
+            log: org.slf4j.Logger,
+            concurrency: Int = 4,
+            onProgress: ((items: Int) -> Unit)? = null,
+        ): ScopedInventory {
+            val files = java.util.Collections.synchronizedList(mutableListOf<InternxtFile>())
+            val folders = java.util.Collections.synchronizedMap(linkedMapOf<String, InternxtFolder>())
+            val permits = kotlinx.coroutines.sync.Semaphore(concurrency)
+
+            fun live(f: InternxtFolder) = f.status == "EXISTS" && !f.removed && !f.deleted
+
+            suspend fun listing(uuid: String): FolderContentResponse = permits.withPermit { getContents(uuid) }
+
+            suspend fun walk(folderUuid: String) {
+                val content =
+                    try {
+                        listing(folderUuid)
+                    } catch (e: InternxtApiException) {
+                        if (e.statusCode in SERVER_UNAVAILABLE_STATUSES) {
+                            log.warn("Skipping folder {} ({})", folderUuid, e.statusCode, e)
+                            skipped.incrementAndGet()
+                            return
+                        }
+                        throw e
+                    }
+                content.files
+                    .filter { it.status == "EXISTS" && !it.removed && !it.deleted }
+                    .mapTo(files) { if (it.folderUuid != null) it else it.copy(folderUuid = folderUuid) }
+                scanned.incrementAndGet()
+                onProgress?.invoke(files.size + folders.size)
+                kotlinx.coroutines.coroutineScope {
+                    for (child in content.children.filter(::live)) {
+                        val stamped = if (child.parentUuid != null) child else child.copy(parentUuid = folderUuid)
+                        folders[stamped.uuid] = stamped
+                        launch { walk(stamped.uuid) }
+                    }
+                }
+            }
+
+            for (root in scopeRoots) {
+                var current = driveRootUuid
+                for (segment in pathSegments(root)) {
+                    val child =
+                        listing(current).children.firstOrNull { live(it) && sanitizeName(it.plainName ?: it.name ?: "") == segment }
+                            ?: throw ProviderException("sync_path '$root' not found on the remote: no folder '$segment'")
+                    val stamped = if (child.parentUuid != null) child else child.copy(parentUuid = current)
+                    folders[stamped.uuid] = stamped
+                    current = stamped.uuid
+                }
+                walk(current)
+            }
+            return ScopedInventory(files.toList(), folders.values.toList())
         }
 
         /**
@@ -2416,3 +2551,10 @@ internal fun pickReconcileCandidate(
 private fun isMissingUploadsError(e: InternxtApiException): Boolean =
     e.statusCode == 409 &&
         e.message?.let { it.contains("MissingUploadsError") || it.contains("Missing uploads") } == true
+
+// Files and folders a scoped bootstrap gathered: the folders leading to each scope
+// root, each root itself, and everything under the roots.
+internal class ScopedInventory(
+    val files: List<InternxtFile>,
+    val folders: List<InternxtFolder>,
+)
