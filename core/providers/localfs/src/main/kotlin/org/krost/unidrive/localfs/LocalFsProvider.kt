@@ -152,6 +152,8 @@ class LocalFsProvider(root: Path) : CloudProvider {
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
+        // #291: a filesystem copy has no optimistic-concurrency token; the param is ignored.
+        ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem =
         withContext(Dispatchers.IO) {
@@ -163,7 +165,7 @@ class LocalFsProvider(root: Path) : CloudProvider {
             toItem(dest)
         }
 
-    override suspend fun delete(remotePath: String) {
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         withContext(Dispatchers.IO) { deleteRecursivelyNoFollow(toLocal(remotePath)) }
     }
 

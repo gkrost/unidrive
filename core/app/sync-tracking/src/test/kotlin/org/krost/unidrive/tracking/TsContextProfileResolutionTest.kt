@@ -61,7 +61,7 @@ class TsContextProfileResolutionTest {
             """
             [providers.my_inxt]
             type = "internxt"
-            sync_root = "${base.resolve("root")}"
+            sync_root = "${base.resolve("root").toString().replace('\\', '/')}"
             """.trimIndent(),
         )
         // User ran `unidrive -p internxt ts sync` (type, not exact profile name).

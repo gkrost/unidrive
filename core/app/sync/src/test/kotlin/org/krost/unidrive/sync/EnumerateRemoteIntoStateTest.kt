@@ -430,13 +430,14 @@ class EnumerateRemoteIntoStateTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem {
             uploadedPaths.add(remotePath)
             error("enumerate path must not upload")
         }
 
-        override suspend fun delete(remotePath: String) {
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {
             deletedPaths.add(remotePath)
         }
 

@@ -1,0 +1,6 @@
+{"verb":"hydration.create","handle_id":"h-2","path":"/docs/new.txt"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/docs/new.txt","handle_id":"h-2"}
+{"verb":"hydration.create","handle_id":"h-2","path":"/missing/new.txt"}
+{"ok":false,"error":"parent_not_found"}
+{"verb":"hydration.create","handle_id":"h-2","path":"/docs/report.txt"}
+{"ok":false,"error":"path_exists"}

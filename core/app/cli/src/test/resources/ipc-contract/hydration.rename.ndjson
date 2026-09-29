@@ -1,0 +1,8 @@
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/docs/renamed.txt"}
+{"ok":true}
+{"verb":"hydration.rename","old_path":"/missing.txt","new_path":"/docs/renamed.txt"}
+{"ok":false,"error":"old_path_not_found"}
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/missing/renamed.txt"}
+{"ok":false,"error":"new_parent_not_found"}
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/docs/sub"}
+{"ok":false,"error":"new_path_exists"}

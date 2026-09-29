@@ -195,10 +195,11 @@ class LsCommandTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("not used")
 
-        override suspend fun delete(remotePath: String) = error("not used")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("not used")
 
         override suspend fun createFolder(path: String): CloudItem = error("not used")
 

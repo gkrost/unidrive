@@ -213,10 +213,11 @@ class LegacyEngine410SelfHealTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("unused in this test")
 
-        override suspend fun delete(remotePath: String) {}
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {}
         override suspend fun createFolder(path: String): CloudItem = error("unused in this test")
         override suspend fun move(fromPath: String, toPath: String): CloudItem = error("unused in this test")
         override suspend fun quota() = QuotaInfo(total = 0, used = 0, remaining = 0)

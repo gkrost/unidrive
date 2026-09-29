@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           # Full history so the existing BuildInfo.kt generator (which calls
           # `git rev-parse --short HEAD` and `git diff HEAD --numstat`) finds
@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
@@ -108,7 +108,7 @@ jobs:
       - name: Create GitHub Release
         # Pin to a SHA -- `v2` is a moving tag. Update the SHA when bumping
         # the action. As of writing, v2.0.8 = 01570a1f39cb168c169c802c3bceb9e93fb10974
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

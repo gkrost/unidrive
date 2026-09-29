@@ -1,0 +1,8 @@
+{"verb":"hydration.open_write_begin","path":"/docs/report.txt","handle_id":"wh-1"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/docs/report.txt"}
+{"verb":"hydration.open_write_begin","path":"/docs/report.txt"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/docs/report.txt"}
+{"verb":"hydration.open_write_begin","path":"/missing.txt"}
+{"ok":false,"error":"unknown_path"}
+{"verb":"hydration.open_write_begin","path":"/docs/sub"}
+{"ok":false,"error":"path_is_folder"}

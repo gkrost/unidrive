@@ -1,0 +1,4 @@
+{"verb":"hydration.mkdir","path":"/docs/newdir"}
+{"ok":true}
+{"verb":"hydration.mkdir","path":"/missing/newdir"}
+{"ok":false,"error":"parent_not_found"}

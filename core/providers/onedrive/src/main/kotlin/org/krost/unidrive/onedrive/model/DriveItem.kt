@@ -29,10 +29,18 @@ data class DriveItem(
 
     val isPersonalVault: Boolean
         get() {
+            // #287: deletion tombstones short-circuit — a hard-deleted zero-byte
+            // file arrives facet-less with size 0, the same shape as the vault
+            // stub, and dropping it means the remote delete never propagates.
+            if (removed != null || deleted != null) return false
             val noFacets = folder == null && file == null
             val zeroSize = size == 0L
             val nameMatches = name != null && VAULT_NAMES.any { it.equals(name, ignoreCase = true) }
-            return nameMatches || (noFacets && zeroSize && !name.isNullOrBlank())
+            // #332: the genuine vault stub always lacks facets and reports size 0.
+            // Requiring that signature even alongside a name match keeps an
+            // ordinary user item that merely shares a vault display name from
+            // being silently dropped.
+            return noFacets && zeroSize && (nameMatches || !name.isNullOrBlank())
         }
 
     companion object {

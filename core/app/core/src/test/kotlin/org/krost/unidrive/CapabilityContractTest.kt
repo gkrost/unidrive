@@ -59,10 +59,11 @@ class CapabilityContractTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ) = throw UnsupportedOperationException()
 
-        override suspend fun delete(remotePath: String) {}
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {}
 
         override suspend fun createFolder(path: String) = throw UnsupportedOperationException()
 

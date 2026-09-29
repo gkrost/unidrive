@@ -37,8 +37,8 @@ class HydrationImplNamespaceTest {
         override suspend fun getMetadata(path: String): CloudItem = throw ProviderException("Item not found: $path")
         override suspend fun download(remotePath: String, destination: Path): Long = 0L
         override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long = 0L
-        override suspend fun upload(localPath: Path, remotePath: String, existingRemoteId: String?, onProgress: ((Long, Long) -> Unit)?): CloudItem = error("not used")
-        override suspend fun delete(remotePath: String) {
+        override suspend fun upload(localPath: Path, remotePath: String, existingRemoteId: String?, ifMatchETag: String?, onProgress: ((Long, Long) -> Unit)?): CloudItem = error("not used")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {
             lastDeletedPath = remotePath
             throwOnDelete?.also { throwOnDelete = null; throw it }
         }

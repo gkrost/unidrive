@@ -75,15 +75,33 @@ interface CloudProvider {
      * `provider.upload(localPath, remotePath) { transferred, total -> … }` keep binding the
      * lambda to `onProgress` (Kotlin trailing-lambda convention — see memory
      * `feedback_kotlin_default_param_ordering`).
+     *
+     * #291: [ifMatchETag], when non-null, is the optimistic-concurrency token the engine
+     * observed at plan time. Providers that support conditional writes (OneDrive's `If-Match`
+     * on the content PUT / upload session) use it to detect a concurrent remote edit landing
+     * between plan and apply — the write fails (Graph 412 Precondition Failed) instead of
+     * blind-overwriting the other editor's change. It likewise precedes `onProgress` so
+     * trailing-lambda call sites are unaffected. Providers without conditional-write semantics
+     * (path-based or filesystem overwrite) ignore it; null means "no guard" (e.g. a NEW upload).
      */
     suspend fun upload(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String? = null,
+        ifMatchETag: String? = null,
         onProgress: ((Long, Long) -> Unit)? = null,
     ): CloudItem
 
-    suspend fun delete(remotePath: String)
+    /**
+     * Delete the remote item at [remotePath].
+     *
+     * #291: [ifMatchETag], when non-null, makes the delete conditional on the caller's view of
+     * the item being current (OneDrive sends it as an `If-Match` header). A concurrent edit
+     * between plan and apply flips the server-side eTag and the delete fails (412) instead of
+     * destroying a version the engine never saw. Providers without conditional-delete semantics
+     * ignore it; null preserves the legacy unconditional delete.
+     */
+    suspend fun delete(remotePath: String, ifMatchETag: String? = null)
 
     suspend fun createFolder(path: String): CloudItem
 

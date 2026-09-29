@@ -315,10 +315,11 @@ private class ThrowingEngine(
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("noop")
 
-        override suspend fun delete(remotePath: String) = error("noop")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("noop")
 
         override suspend fun createFolder(path: String): CloudItem = error("noop")
 

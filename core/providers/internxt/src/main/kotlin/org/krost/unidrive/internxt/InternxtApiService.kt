@@ -26,6 +26,7 @@ import org.krost.unidrive.internxt.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 class InternxtApiService(
@@ -606,22 +607,29 @@ class InternxtApiService(
                     var written = 0L
                     withContext(Dispatchers.IO) {
                         Files.createDirectories(destination.parent)
-                        Files.newOutputStream(destination, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                            val buf = ByteArray(256 * 1024)
-                            while (!channel.isClosedForRead) {
-                                val n = channel.readAvailable(buf)
-                                if (n <= 0) break
-                                val decrypted = cipher.update(buf, 0, n)
-                                if (decrypted != null) {
-                                    out.write(decrypted)
-                                    written += decrypted.size
+                        val tmpPath = destination.parent.resolve("${destination.fileName}.unidrive-tmp")
+                        try {
+                            Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                                val buf = ByteArray(256 * 1024)
+                                while (!channel.isClosedForRead) {
+                                    val n = channel.readAvailable(buf)
+                                    if (n <= 0) break
+                                    val decrypted = cipher.update(buf, 0, n)
+                                    if (decrypted != null) {
+                                        out.write(decrypted)
+                                        written += decrypted.size
+                                    }
+                                }
+                                val finalBlock = cipher.doFinal()
+                                if (finalBlock != null && finalBlock.isNotEmpty()) {
+                                    out.write(finalBlock)
+                                    written += finalBlock.size
                                 }
                             }
-                            val finalBlock = cipher.doFinal()
-                            if (finalBlock != null && finalBlock.isNotEmpty()) {
-                                out.write(finalBlock)
-                                written += finalBlock.size
-                            }
+                            Files.move(tmpPath, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                        } catch (e: Exception) {
+                            Files.deleteIfExists(tmpPath)
+                            throw e
                         }
                     }
                     written

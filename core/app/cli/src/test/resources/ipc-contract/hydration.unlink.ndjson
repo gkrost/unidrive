@@ -1,0 +1,4 @@
+{"verb":"hydration.unlink","path":"/docs/report.txt"}
+{"ok":true}
+{"verb":"hydration.unlink","path":"/docs/sub"}
+{"ok":false,"error":"path_is_folder"}

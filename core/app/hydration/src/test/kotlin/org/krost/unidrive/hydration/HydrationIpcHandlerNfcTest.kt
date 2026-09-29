@@ -59,8 +59,8 @@ class HydrationIpcHandlerNfcTest {
             downloadedPaths += remotePath
             return download(remotePath, destination)
         }
-        override suspend fun upload(localPath: Path, remotePath: String, existingRemoteId: String?, onProgress: ((Long, Long) -> Unit)?): CloudItem = error("not used")
-        override suspend fun delete(remotePath: String) {
+        override suspend fun upload(localPath: Path, remotePath: String, existingRemoteId: String?, ifMatchETag: String?, onProgress: ((Long, Long) -> Unit)?): CloudItem = error("not used")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) {
             lastDeletedPath = remotePath
         }
         override suspend fun createFolder(path: String): CloudItem = error("not used")

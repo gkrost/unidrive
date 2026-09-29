@@ -1,0 +1,4 @@
+{"verb":"hydration.list","prefix":"/docs"}
+{"ok":true,"entries":[{"path":"/docs/report.txt","size":42,"mtime_ms":1234567890123,"hydrated":true,"folder":false},{"path":"/docs/sub","size":0,"mtime_ms":1234567890123,"hydrated":false,"folder":true}]}
+{"verb":"hydration.list","prefix":"/empty"}
+{"ok":true,"entries":[]}

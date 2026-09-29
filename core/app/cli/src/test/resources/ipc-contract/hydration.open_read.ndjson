@@ -1,0 +1,4 @@
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/docs/report.txt"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/docs/report.txt"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/missing.txt"}
+{"ok":false,"error":"unknown_path"}

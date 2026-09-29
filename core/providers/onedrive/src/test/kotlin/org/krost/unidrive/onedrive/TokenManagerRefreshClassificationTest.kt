@@ -63,14 +63,12 @@ class TokenManagerRefreshClassificationTest {
             val engine = MockEngine { throw UnresolvedAddressException() }
             val manager = tokenManagerWith(engine)
 
-            val ex =
-                assertFailsWith<TransientNetworkException> {
-                    manager.getValidToken()
-                }
-            assertTrue(
-                ex !is AuthenticationException,
-                "a transient network blip must NOT surface as an auth-expired latch; got ${ex.javaClass.simpleName}",
-            )
+            // assertFailsWith<TransientNetworkException> pins the classification: a
+            // transient network blip must surface as TransientNetworkException, NOT the
+            // AuthenticationException sibling that latches the session as auth-expired.
+            assertFailsWith<TransientNetworkException> {
+                manager.getValidToken()
+            }
             // The session must not be latched: lastRefreshFailure may record the
             // attempt, but the error class proves it was classified transient,
             // not a permanent expiry.
@@ -98,13 +96,12 @@ class TokenManagerRefreshClassificationTest {
                 assertFailsWith<AuthenticationException> {
                     manager.getValidToken()
                 }
+            // assertFailsWith<AuthenticationException> pins the classification: a real
+            // invalid_grant must surface as AuthenticationException, NOT the
+            // TransientNetworkException sibling.
             assertTrue(
                 ex.message?.contains("re-authenticate", ignoreCase = true) == true,
                 "a real invalid_grant must surface the expired / re-authenticate message; got: ${ex.message}",
-            )
-            assertTrue(
-                ex !is TransientNetworkException,
-                "a real invalid_grant must NOT be classified transient",
             )
         }
 }

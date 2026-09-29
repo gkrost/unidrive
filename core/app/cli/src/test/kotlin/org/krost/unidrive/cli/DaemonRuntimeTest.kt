@@ -273,6 +273,10 @@ class DaemonRuntimeTest {
             channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
             val reply = readUntil(channel, "\"ok\"", timeoutMs = 5_000L)
             assertTrue(reply.contains("\"ok\":true"), "expected ok:true; got: $reply")
+            assertTrue(
+                reply.contains("\"protocol_version\":${DaemonRuntime.IPC_PROTOCOL_VERSION}"),
+                "expected protocol_version handshake field; got: $reply",
+            )
             assertTrue(reply.contains("\"uptime_ms\""), "expected uptime_ms field; got: $reply")
             assertTrue(reply.contains("\"clients_connected\""), "expected clients_connected; got: $reply")
             assertTrue(reply.contains("\"refresh_in_flight\":false"), "expected refresh_in_flight:false; got: $reply")
@@ -339,10 +343,11 @@ class DaemonRuntimeTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("not used in T1")
 
-        override suspend fun delete(remotePath: String) = error("not used in T1")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("not used in T1")
 
         override suspend fun createFolder(path: String): CloudItem = error("not used in T1")
 
@@ -388,10 +393,11 @@ class DaemonRuntimeTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("not used in T4")
 
-        override suspend fun delete(remotePath: String) = error("not used in T4")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("not used in T4")
 
         override suspend fun createFolder(path: String): CloudItem = error("not used in T4")
 
@@ -431,10 +437,11 @@ class DaemonRuntimeTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("not used")
 
-        override suspend fun delete(remotePath: String) = error("not used")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("not used")
 
         override suspend fun createFolder(path: String): CloudItem = error("not used")
 

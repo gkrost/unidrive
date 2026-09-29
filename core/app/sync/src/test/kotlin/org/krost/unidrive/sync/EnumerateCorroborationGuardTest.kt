@@ -181,10 +181,11 @@ class EnumerateCorroborationGuardTest {
             localPath: Path,
             remotePath: String,
             existingRemoteId: String?,
+            ifMatchETag: String?,
             onProgress: ((Long, Long) -> Unit)?,
         ): CloudItem = error("no upload")
 
-        override suspend fun delete(remotePath: String) = error("no delete")
+        override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("no delete")
 
         override suspend fun createFolder(path: String) = error("no createFolder")
 
