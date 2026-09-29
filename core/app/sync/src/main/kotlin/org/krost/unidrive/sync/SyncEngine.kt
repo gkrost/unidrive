@@ -898,8 +898,17 @@ open class SyncEngine(
             }
         }
 
-        trashManager?.purge(trashRetentionDays)
-        versionManager?.pruneByAge(versionRetentionDays)
+        if (dryRun) {
+            trashManager?.expiredCount(trashRetentionDays)?.takeIf { it > 0 }?.let {
+                reporter.onWarning("Dry-run: a real run would purge $it expired trash item(s)")
+            }
+            versionManager?.expiredCount(versionRetentionDays)?.takeIf { it > 0 }?.let {
+                reporter.onWarning("Dry-run: a real run would prune $it expired file version(s)")
+            }
+        } else {
+            trashManager?.purge(trashRetentionDays)
+            versionManager?.pruneByAge(versionRetentionDays)
+        }
 
         // UD-297: empty-local + populated-DB sanity check. Catches the
         // wrong-sync_root case (user pointed at an empty directory while
@@ -952,7 +961,13 @@ open class SyncEngine(
 
         // #137: create sync_root only after the guard — an aborted (guard-fired)
         // run must not leave an empty sync_root dir behind.
-        java.nio.file.Files.createDirectories(syncRoot)
+        if (dryRun) {
+            if (!Files.exists(syncRoot)) {
+                reporter.onWarning("Dry-run: sync_root '$syncRoot' does not exist; a real run would create it")
+            }
+        } else {
+            java.nio.file.Files.createDirectories(syncRoot)
+        }
 
         applyScopeTransition()
 
@@ -1001,7 +1016,9 @@ open class SyncEngine(
         val localChangesForStreaming: Map<String, ChangeState>?
         val streamingActions: List<SyncAction>?
         val allRemoteChanges: Map<String, CloudItem>
-        if (streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply) {
+        // A dry-run always takes the accumulate-then-reconcile path: streaming dispatches transfers from
+        // inside the gather, which a preview must never do.
+        if (streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply && !dryRun) {
             db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
                 reporter.onScanHistoricalHint("local", it)
             }
@@ -1164,7 +1181,7 @@ open class SyncEngine(
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             }
-        logUnhydratedFolderSkips()
+        logUnhydratedFolderSkips(dryRun)
 
         db.batch {
             updateRemoteEntries(allRemoteChanges.filterKeys { isTracked(it) })
@@ -1186,7 +1203,7 @@ open class SyncEngine(
             if (forceDelete) {
                 reconciledActions
             } else {
-                applyTopLevelHydrationGuard(reconciledActions)
+                applyTopLevelHydrationGuard(reconciledActions, dryRun)
             }
 
         var actions =
@@ -3790,11 +3807,15 @@ open class SyncEngine(
     // Cache per (top-level, run) so a wide-blast plan doesn't hammer the DB.
     // DeleteLocal is NOT covered here — the guard's purpose is to refuse
     // *cloud-side* deletes triggered by a partial-local-tree reconciliation.
-    private fun applyTopLevelHydrationGuard(actions: List<SyncAction>): List<SyncAction> {
+    private fun applyTopLevelHydrationGuard(
+        actions: List<SyncAction>,
+        dryRun: Boolean,
+    ): List<SyncAction> {
         if (actions.none { it is SyncAction.DeleteRemote }) return actions
         val hydrationCache = mutableMapOf<String, Boolean>()
         val kept = mutableListOf<SyncAction>()
         var skipped = 0
+        var audited = 0
         for (action in actions) {
             if (action !is SyncAction.DeleteRemote) {
                 kept.add(action)
@@ -3814,7 +3835,8 @@ open class SyncEngine(
             } else {
                 // Log to skipped-ops.jsonl regardless of opt-out — operators
                 // need the audit trail either way.
-                logSkippedOp(action, "top_level_never_hydrated")
+                logSkippedOp(action, "top_level_never_hydrated", dryRun)
+                audited++
                 if (ignoreTopLevelGuard) {
                     // Opt-out: keep the action in the plan (still logged).
                     kept.add(action)
@@ -3827,6 +3849,12 @@ open class SyncEngine(
                     )
                 }
             }
+        }
+        if (dryRun && audited > 0) {
+            reporter.onWarning(
+                "Dry-run: $audited del-remote action(s) hit the never-hydrated top-level guard " +
+                    "(a real run records them in skipped-ops.jsonl)",
+            )
         }
         if (skipped > 0) {
             log.warn(
@@ -3857,11 +3885,17 @@ open class SyncEngine(
         }
     }
 
-    private fun logUnhydratedFolderSkips() {
+    private fun logUnhydratedFolderSkips(dryRun: Boolean) {
         val skipped = reconciler.lastUnhydratedFolderDeletes
         if (skipped.isEmpty()) return
         for (path in skipped) {
-            logSkippedOp(SyncAction.DeleteRemote(path), "unhydrated_folder")
+            logSkippedOp(SyncAction.DeleteRemote(path), "unhydrated_folder", dryRun)
+        }
+        if (dryRun) {
+            reporter.onWarning(
+                "Dry-run: ${skipped.size} del-remote action(s) for unhydrated folder rows would be skipped " +
+                    "(a real run records them in skipped-ops.jsonl)",
+            )
         }
         log.warn(
             "skipped {} del-remote action(s) for unhydrated folder rows (see skipped-ops.jsonl)",
@@ -3886,7 +3920,9 @@ open class SyncEngine(
     private fun logSkippedOp(
         action: SyncAction,
         reason: String,
+        dryRun: Boolean,
     ) {
+        if (dryRun) return // a preview records nothing; the callers report a warning instead
         val path = skippedOpsLogPath ?: return
         val line = formatSkippedOpJson(actionLabel(action), action.path, reason, Instant.now())
         Files.createDirectories(path.parent)

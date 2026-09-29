@@ -175,4 +175,24 @@ class TrashManagerTest {
         // Normalize platform separators before substring match (\ on Windows, / elsewhere).
         assertTrue(items[0].originalPath.replace('\\', '/').contains("deep/nested/dir/file.txt"))
     }
+
+    @Test
+    fun `expiredCount counts what purge would remove and removes nothing`() {
+        val trash = syncRoot.resolve(".unidrive-trash")
+        Files.createDirectories(trash.resolve("20200101T000000Z"))
+        Files.createDirectories(trash.resolve("20200202T000000Z"))
+        val manager = TrashManager(syncRoot)
+        manager.trash("keep.txt") // a fresh entry, which must not be counted
+
+        assertEquals(2, manager.expiredCount(30))
+        assertTrue(Files.exists(trash.resolve("20200101T000000Z")), "expiredCount must not delete")
+
+        manager.purge(30)
+        assertEquals(0, manager.expiredCount(30))
+    }
+
+    @Test
+    fun `expiredCount is zero without a trash directory`() {
+        assertEquals(0, TrashManager(syncRoot).expiredCount(30))
+    }
 }

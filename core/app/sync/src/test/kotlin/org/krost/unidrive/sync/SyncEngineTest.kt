@@ -1341,9 +1341,7 @@ class SyncEngineTest {
 
             val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
             val reporter = RecordingReporter()
-            preview {
-                engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce(dryRun = true)
-            }
+            engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce()
 
             // All deletes were filtered out, so no DeleteRemote events surface.
             assertTrue(
@@ -1471,13 +1469,11 @@ class SyncEngineTest {
 
             val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
             val reporter = RecordingReporter()
-            preview {
-                engineWithGuards(
-                    reporter = reporter,
-                    ignoreTopLevelGuard = true,
-                    skippedOpsLogPath = logPath,
-                ).syncOnce(dryRun = true)
-            }
+            engineWithGuards(
+                reporter = reporter,
+                ignoreTopLevelGuard = true,
+                skippedOpsLogPath = logPath,
+            ).syncOnce()
 
             // Opt-out does NOT keep unhydrated-folder deletes in the plan.
             assertTrue(
@@ -2369,6 +2365,116 @@ class SyncEngineTest {
             assertEquals(1, provider.deltaCalls)
             assertTrue(Files.exists(syncRoot.resolve("enumerated.txt")))
             assertEquals("fallback-cursor", db.getSyncState("delta_cursor"))
+        }
+
+    @Test
+    fun `dry-run reports unhydrated folder skips as a warning and writes no skipped-ops file`() =
+        runTest {
+            seedUnhydratedFolders("/Documents", count = 3)
+            Files.writeString(syncRoot.resolve("placeholder.txt"), "x")
+            provider.deltaItems = emptyList()
+            val logPath = Files.createTempDirectory("unidrive-skipped").resolve("skipped-ops.jsonl")
+            val reporter = RecordingReporter()
+
+            preview { engineWithGuards(reporter = reporter, skippedOpsLogPath = logPath).syncOnce(dryRun = true) }
+
+            assertFalse(Files.exists(logPath), "a dry-run records nothing")
+            assertTrue(
+                reporter.warnings.any { it.contains("unhydrated folder rows would be skipped") },
+                "the preview must still tell the user what would be skipped, got: ${reporter.warnings}",
+            )
+        }
+
+    @Test
+    fun `dry-run reports expired trash and versions but deletes nothing`() =
+        runTest {
+            val trashFile = syncRoot.resolve(".unidrive-trash/20200101T000000Z/old.txt")
+            val versionFile = syncRoot.resolve(".unidrive-versions/doc/20200101T000000Z")
+            Files.createDirectories(trashFile.parent)
+            Files.writeString(trashFile, "expired")
+            Files.createDirectories(versionFile.parent)
+            Files.writeString(versionFile, "old version")
+            provider.deltaItems = emptyList()
+            val reporter = RecordingReporter()
+
+            preview {
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = reporter,
+                    trashManager = TrashManager(syncRoot),
+                    versionManager = VersionManager(syncRoot),
+                ).syncOnce(dryRun = true)
+            }
+
+            assertTrue(Files.exists(trashFile) && Files.exists(versionFile), "a dry-run must not delete retention-managed files")
+            assertTrue(reporter.warnings.any { it.contains("purge 1 expired trash") }, "got: ${reporter.warnings}")
+            assertTrue(reporter.warnings.any { it.contains("prune 1 expired file version") }, "got: ${reporter.warnings}")
+
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+                trashManager = TrashManager(syncRoot),
+                versionManager = VersionManager(syncRoot),
+            ).syncOnce()
+            assertFalse(Files.exists(trashFile), "the real run purges what the preview announced")
+            assertFalse(Files.exists(versionFile), "the real run prunes what the preview announced")
+        }
+
+    @Test
+    fun `dry-run does not create a missing sync_root but still plans the sync`() =
+        runTest {
+            Files.delete(syncRoot)
+            provider.deltaItems = listOf(cloudItem("/a.txt", size = 10))
+            provider.files["/a.txt"] = ByteArray(10)
+            val reporter = RecordingReporter()
+
+            preview { engineWithReporter(reporter).syncOnce(dryRun = true) }
+
+            assertFalse(Files.exists(syncRoot), "a dry-run must not create sync_root")
+            assertTrue(reporter.warnings.any { it.contains("sync_root") && it.contains("would create") }, "got: ${reporter.warnings}")
+            assertTrue(reporter.actions.any { it.path == "/a.txt" }, "the plan must still list the download, got: ${reporter.actions}")
+
+            engineWithReporter(ProgressReporter.Silent).syncOnce()
+            assertTrue(Files.exists(syncRoot.resolve("a.txt")), "the real run creates sync_root and downloads")
+        }
+
+    @Test
+    fun `a streaming dry-run plans the same actions as a non-streaming one and transfers nothing`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/docs", isFolder = true), cloudItem("/docs/a.txt", size = 10), cloudItem("/b.txt", size = 10))
+            listOf("/docs/a.txt", "/b.txt").forEach { provider.files[it] = ByteArray(10) }
+
+            fun plan(streaming: Boolean): Set<Pair<String, String>> {
+                val reporter = RecordingReporter()
+                kotlinx.coroutines.runBlocking {
+                    preview {
+                        SyncEngine(
+                            provider = provider,
+                            db = db,
+                            syncRoot = syncRoot,
+                            conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                            reporter = reporter,
+                            streamingReconciliation = streaming,
+                        ).syncOnce(dryRun = true)
+                    }
+                }
+                return reporter.actions.map { it.label to it.path }.toSet()
+            }
+
+            val plain = plan(streaming = false)
+            val streamed = plan(streaming = true)
+
+            assertTrue(plain.isNotEmpty(), "the scenario must plan something")
+            assertEquals(plain, streamed, "streaming must not change the plan a dry-run shows")
+            assertTrue(provider.downloadByIdCalls.isEmpty() && provider.downloadByPathCalls.isEmpty(), "no download in a dry-run")
+            assertTrue(provider.uploadedPaths.isEmpty(), "no upload in a dry-run")
+            assertFalse(Files.exists(syncRoot.resolve("b.txt")), "nothing may be written to the sync tree")
         }
 
     @Test

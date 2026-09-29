@@ -87,6 +87,13 @@ class TrashManager(
         }
     }
 
+    /** How many trash entries [purge] would remove for [retentionDays], without removing them. */
+    fun expiredCount(retentionDays: Int): Int {
+        if (!trashDir.exists()) return 0
+        val cutoff = Instant.now().minus(retentionDays.toLong(), ChronoUnit.DAYS)
+        return trashDir.listDirectoryEntries().count { it.isDirectory() && decodeTimestamp(it.name)?.isBefore(cutoff) == true }
+    }
+
     fun purgeAll() {
         if (trashDir.exists()) {
             trashDir.toFile().deleteRecursively()

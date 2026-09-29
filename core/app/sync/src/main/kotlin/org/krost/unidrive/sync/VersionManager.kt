@@ -110,6 +110,13 @@ class VersionManager(
         cleanEmptyDirsRecursive(versionsDir)
     }
 
+    /** How many version files [pruneByAge] would remove for [retentionDays], without removing them. */
+    fun expiredCount(retentionDays: Int): Int {
+        if (!versionsDir.exists()) return 0
+        val cutoff = Instant.now().minus(retentionDays.toLong(), ChronoUnit.DAYS)
+        return versionsDir.toFile().walkTopDown().filter { it.isFile }.count { decodeTimestamp(it.name)?.isBefore(cutoff) == true }
+    }
+
     fun pruneAll() {
         if (versionsDir.exists()) {
             versionsDir.toFile().deleteRecursively()
