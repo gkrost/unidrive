@@ -184,6 +184,34 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#419 re-delivered remote delete of a trashed and locally gone row is not planned again`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/will-delete.txt", size = 100))
+            engine.syncOnce()
+            assertTrue(Files.exists(syncRoot.resolve("will-delete.txt")))
+
+            // Run 1 sees the deletion: file removed locally, row becomes a TRASHED tombstone.
+            provider.deltaItems = listOf(cloudItem("/will-delete.txt", deleted = true))
+            provider.deltaCursor = "cursor-2"
+            engine.syncOnce()
+            assertFalse(Files.exists(syncRoot.resolve("will-delete.txt")))
+            assertEquals(1, db.recovery.trashedEntries().size, "the deleted row is a TRASHED tombstone")
+
+            // The rewound Internxt cursor re-delivers the same deleted item on the next run. A
+            // dry-run must not claim there is anything left to delete locally.
+            val reporter = RecordingReporter()
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            }
+
+            assertTrue(
+                reporter.actions.none { it.label == "del-local" },
+                "no del-local for a trashed, gone row; got ${reporter.actions}",
+            )
+            assertEquals(1, db.recovery.trashedEntries().size, "the tombstone is untouched")
+        }
+
+    @Test
     fun `sync deletes remote file when local deleted`() =
         runTest {
             provider.deltaItems = listOf(cloudItem("/to-remove.txt", size = 100))
