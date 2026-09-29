@@ -773,12 +773,13 @@ class InternxtProvider(
                 finalItem = created.toCloudItem(parentPath)
             } else {
                 val replaced =
-                    api.replaceFile(
-                        uuid = existingRemoteId,
-                        size = fileSize,
-                        fileId = bucketEntry.id,
-                        modificationTime = localMtime,
-                    )
+                    api
+                        .replaceFile(
+                            uuid = existingRemoteId,
+                            size = fileSize,
+                            fileId = bucketEntry.id,
+                            modificationTime = localMtime,
+                        ).withServerModified()
                 finalItem = replaced.toCloudItem(parentPath)
             }
         } else {
@@ -843,12 +844,13 @@ class InternxtProvider(
                             "UD-366: remote {} has identical content (fileId={}, size={}) — adopting via replaceFile",
                             remotePath, bucketEntry.id, fileSize,
                         )
-                        api.replaceFile(
-                            uuid = remoteFile.uuid,
-                            size = fileSize,
-                            fileId = bucketEntry.id,
-                            modificationTime = localMtime,
-                        )
+                        api
+                            .replaceFile(
+                                uuid = remoteFile.uuid,
+                                size = fileSize,
+                                fileId = bucketEntry.id,
+                                modificationTime = localMtime,
+                            ).withServerModified()
                     } else {
                         // KEEP BOTH: leave remote untouched; land local under a conflict name.
                         val today =
@@ -1097,12 +1099,15 @@ class InternxtProvider(
         // avoiding the engine's worst-case download → re-encrypt → re-upload → delete-old
         // cycle for what is metadata-only on the wire. Cross-parent moves keep PATCH; mixed
         // (different parent AND different name) does both in sequence.
+        // #417: every leg below stamps a new modificationTime server-side but answers with the
+        // pre-update one; the result is re-read once at the end (withServerModified).
         if (sameParent) {
             return if (metadata.isFolder) {
-                api.renameFolder(metadata.id, toName).toCloudItem(toParentPath)
+                api.renameFolder(metadata.id, toName).withServerModified().toCloudItem(toParentPath)
             } else {
                 val newType = newFileType(toName)
                 api.renameFile(metadata.id, plainName = stripExtension(toName), type = newType)
+                    .withServerModified()
                     .toCloudItem(toParentPath)
             }
         }
@@ -1111,21 +1116,64 @@ class InternxtProvider(
         if (metadata.isFolder) {
             val moved = api.moveFolder(metadata.id, destFolderUuid)
             return if (sameName) {
-                moved.toCloudItem(toParentPath)
+                moved.withServerModified().toCloudItem(toParentPath)
             } else {
-                api.renameFolder(moved.uuid, toName).toCloudItem(toParentPath)
+                api.renameFolder(moved.uuid, toName).withServerModified().toCloudItem(toParentPath)
             }
         } else {
             val moved = api.moveFile(metadata.id, destFolderUuid)
             return if (sameName) {
-                moved.toCloudItem(toParentPath)
+                moved.withServerModified().toCloudItem(toParentPath)
             } else {
                 val newType = newFileType(toName)
                 api.renameFile(moved.uuid, plainName = stripExtension(toName), type = newType)
+                    .withServerModified()
                     .toCloudItem(toParentPath)
             }
         }
     }
+
+    // #417: PUT /files/{uuid} answers with the entity as it was BEFORE the server stamped its new
+    // modificationTime (observed live: size/fileId in the same body already updated, timestamp
+    // not); a rename/move changes the server's modified time too, and its PUT .../meta / PATCH
+    // responses are treated the same way. The engine stores that value in state.db; the next
+    // delta lists the item with the real one, the Reconciler compares the two for equality and
+    // plans a download of the very file we just uploaded (or renamed). POST /files (create) is
+    // unaffected: the server stamps the row at insert and returns it.
+    // Overlay only the timestamp from a fresh GET .../meta (the same read the download path
+    // uses): it returns what the listing/delta will report, so no server-side rounding of a time
+    // we sent has to be replicated here, and a rename/move sends no time at all (the server
+    // stamps its own clock), so it could not be computed anyway. One extra call per
+    // replace/move. Best effort: the write has already landed and a move cannot be retried
+    // (its source path is gone), so a failed read degrades to the write response (the pre-#417
+    // behaviour, one redundant download) instead of failing the operation.
+    private suspend fun InternxtFile.withServerModified(): InternxtFile =
+        try {
+            copy(modificationTime = api.getFileMeta(uuid).modificationTime ?: modificationTime)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            log.warn(
+                "#417: re-reading file {} after write failed ({}); keeping the write response's modified time",
+                uuid,
+                e.message ?: e.javaClass.simpleName,
+            )
+            this
+        }
+
+    private suspend fun InternxtFolder.withServerModified(): InternxtFolder =
+        try {
+            copy(modificationTime = api.getFolderMeta(uuid).modificationTime ?: modificationTime)
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            log.warn(
+                "#417: re-reading folder {} after write failed ({}); keeping the write response's modified time",
+                uuid,
+                e.message ?: e.javaClass.simpleName,
+            )
+            this
+        }
 
 
     /**
