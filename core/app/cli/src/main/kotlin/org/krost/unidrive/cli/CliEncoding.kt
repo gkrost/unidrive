@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import java.io.FileDescriptor
 import java.io.FileOutputStream
 import java.io.PrintStream
+import java.lang.management.ManagementFactory
 import java.nio.charset.Charset
 
 /**
@@ -24,12 +25,13 @@ import java.nio.charset.Charset
  */
 object CliEncoding {
     /**
-     * The charset [current] should be: an explicitly configured property wins
+     * The charset [current] should be: an explicitly configured flag wins
      * (the JVM already applied it at stream creation, so callers rebind only
-     * when this differs); attached to a real console the JVM default is that
-     * console's code page and rebinding would mangle screen output — keep it
-     * (JDK 22+ could refine via `System.console().charset()`; the toolchain
-     * is 21). Redirected or piped — the case scripts see — is UTF-8.
+     * when this differs; a value the JVM rejected falls back to [current]
+     * rather than failing startup); attached to a real console the JVM default
+     * is that console's code page and rebinding would mangle screen output —
+     * keep it (JDK 22+ could refine via `System.console().charset()`; the
+     * toolchain is 21). Redirected or piped — the case scripts see — is UTF-8.
      */
     fun charsetFor(
         attachedToConsole: Boolean,
@@ -37,9 +39,25 @@ object CliEncoding {
         current: Charset,
     ): Charset {
         if (configured != null) {
-            return Charset.forName(configured)
+            return runCatching { Charset.forName(configured) }.getOrElse { current }
         }
         return if (attachedToConsole) current else Charsets.UTF_8
+    }
+
+    /**
+     * The value of `-D<name>=…` as passed to THIS JVM, or null. The property
+     * map alone cannot answer whether a charset was requested:
+     * `System.getProperty("stdout.encoding")` is defined by the JVM itself on
+     * every start (JDK 19+) — on Windows with redirected output it reads
+     * "Cp1252" with no flag anywhere — so honoring the property unconditionally
+     * pins the #391 mangling in place. Only a flag on the actual command line
+     * counts as a request (launcher invocations, explicit user override).
+     */
+    internal fun explicitProperty(name: String): String? {
+        val flag = "-D$name="
+        return ManagementFactory.getRuntimeMXBean().inputArguments
+            .firstOrNull { it.startsWith(flag) }
+            ?.substring(flag.length)
     }
 
     /**
@@ -49,11 +67,11 @@ object CliEncoding {
      */
     fun apply() {
         val attached = System.console() != null
-        val out = charsetFor(attached, System.getProperty("stdout.encoding"), System.out.charset())
+        val out = charsetFor(attached, explicitProperty("stdout.encoding"), System.out.charset())
         if (out != System.out.charset()) {
             System.setOut(PrintStream(FileOutputStream(FileDescriptor.out), true, out))
         }
-        val err = charsetFor(attached, System.getProperty("stderr.encoding"), System.err.charset())
+        val err = charsetFor(attached, explicitProperty("stderr.encoding"), System.err.charset())
         if (err != System.err.charset()) {
             System.setErr(PrintStream(FileOutputStream(FileDescriptor.err), true, err))
         }

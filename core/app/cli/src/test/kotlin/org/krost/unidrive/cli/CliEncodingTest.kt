@@ -6,6 +6,7 @@ import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CliEncodingTest {
@@ -36,6 +37,46 @@ class CliEncodingTest {
             StandardCharsets.UTF_8,
             CliEncoding.charsetFor(attachedToConsole = true, configured = "UTF-8", current = Charset.defaultCharset()),
         )
+    }
+
+    @Test
+    fun `a configured value the JVM rejected falls back to the current charset`() {
+        val current = Charset.forName("windows-1252")
+        // Space makes this an illegal charset NAME (IllegalCharsetNameException,
+        // before UnsupportedCharsetException even gets a chance).
+        assertEquals(current, CliEncoding.charsetFor(attachedToConsole = false, configured = "NOT A CHARSET", current))
+    }
+
+    @Test
+    fun `a flag the JVM was not started with is not reported as explicit`() {
+        // The property map defines stdout.encoding on every JVM (JDK 19+), so
+        // only the command-line check can tell "user asked" from "JVM guessed";
+        // this test worker is not started with such a flag.
+        assertNull(CliEncoding.explicitProperty("stdout.encoding.explicitly.unset"))
+    }
+
+    /**
+     * The bare `java -jar` shape from #391: the test JVM's output is redirected
+     * and no encoding flag was passed, yet the JVM still defines
+     * stdout.encoding itself (Cp1252 on Windows). [CliEncoding.apply] must
+     * ignore that JVM-guessed value and rebind to UTF-8.
+     */
+    @Test
+    fun `apply rebinds redirected output to UTF-8 even though the JVM predefines the property`() {
+        // Guard the premise: if the test JVM ever starts carrying an explicit
+        // encoding flag, this test no longer exercises the bare `java -jar`
+        // shape and must say so instead of passing vacuously.
+        assertNull(CliEncoding.explicitProperty("stdout.encoding"))
+        val originalOut = System.out
+        val originalErr = System.err
+        try {
+            CliEncoding.apply()
+            assertEquals(StandardCharsets.UTF_8, System.out.charset())
+            assertEquals(StandardCharsets.UTF_8, System.err.charset())
+        } finally {
+            System.setOut(originalOut)
+            System.setErr(originalErr)
+        }
     }
 
     /**
