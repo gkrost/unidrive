@@ -1416,6 +1416,9 @@ open class SyncEngine(
         // (mkdir/move/delete/conflict). Combined with `transferFailures`
         // below for the headline `failed` count in onSyncComplete.
         val passOneFailures = AtomicInteger(0)
+        // #419: paths this pass has already deleted on the remote, so the empty-directory
+        // reaper below leaves them alone instead of re-probing a folder it just trashed.
+        val remoteDeletedPaths = mutableSetOf<String>()
 
         // Batched into one SQLite transaction — avoids one fsync per action.
         // Wrap in Priority.Foreground so the provider's throttle coordinator
@@ -1494,7 +1497,10 @@ open class SyncEngine(
                             is SyncAction.MoveRemote -> applyMoveRemote(action)
                             is SyncAction.MoveLocal -> applyMoveLocal(action)
                             is SyncAction.DeleteLocal -> applyDeleteLocal(action)
-                            is SyncAction.DeleteRemote -> applyDeleteRemote(action)
+                            is SyncAction.DeleteRemote -> {
+                                applyDeleteRemote(action)
+                                remoteDeletedPaths += action.path
+                            }
                             is SyncAction.Conflict -> {
                                 applyConflict(action)
                                 conflicts.incrementAndGet()
@@ -1761,7 +1767,7 @@ open class SyncEngine(
         // guard, so an emptied remote directory is otherwise left behind. This
         // deletes only directories verified empty via listChildren, so it never
         // removes content the guard exists to protect.
-        reapEmptyRemoteDirs(actions)
+        reapEmptyRemoteDirs(actions, remoteDeletedPaths)
 
         val duration = System.currentTimeMillis() - startTime
         reporter.onSyncComplete(
@@ -1795,8 +1801,15 @@ open class SyncEngine(
      *  - **Deepest-first**, so a nested empty tree collapses bottom-up.
      *  - **Best-effort.** A provider error on one directory is logged and
      *    skipped; it never fails the pass.
+     *  - **Already gone is not a failure (#419).** A directory this pass's own
+     *    DeleteRemote already removed ([alreadyDeleted]) is not a candidate, and
+     *    a not-found from the listing or the delete (trashed meanwhile, e.g. by
+     *    an ancestor's delete) means the goal is met — debug, not WARN.
      */
-    private suspend fun reapEmptyRemoteDirs(actions: List<SyncAction>) {
+    private suspend fun reapEmptyRemoteDirs(
+        actions: List<SyncAction>,
+        alreadyDeleted: Set<String>,
+    ) {
         val deletedRemoteFiles =
             actions.filterIsInstance<SyncAction.DeleteRemote>().map { it.path }
         if (deletedRemoteFiles.isEmpty()) return
@@ -1804,6 +1817,7 @@ open class SyncEngine(
             deletedRemoteFiles
                 .flatMap { ancestorDirsToSyncRoot(it) }
                 .distinct()
+                .filterNot { it in alreadyDeleted }
                 .sortedByDescending { it.count { ch -> ch == '/' } }
         for (dir in candidates) {
             try {
@@ -1813,10 +1827,19 @@ open class SyncEngine(
                 db.getEntry(dir)?.let { db.deleteEntry(dir) }
                 log.debug("Reaped empty remote directory: {}", dir)
             } catch (e: Exception) {
-                log.warn("Failed to reap empty remote directory {}: {}", dir, e.message)
+                if (isRemoteNotFound(e)) {
+                    log.debug("Remote directory already gone, nothing to reap: {}", dir)
+                } else {
+                    log.warn("Failed to reap empty remote directory {}: {}", dir, e.message)
+                }
             }
         }
     }
+
+    // #419: the provider says the path does not exist — the typed Internxt "not found"
+    // shapes, or an HTTP 404 carried on the exception (same probe as remoteItemOrNull).
+    private fun isRemoteNotFound(e: Throwable): Boolean =
+        isAlreadyGone(e) || statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)
 
     /**
      * Ancestor directories of [filePath], immediate parent up to — but not
