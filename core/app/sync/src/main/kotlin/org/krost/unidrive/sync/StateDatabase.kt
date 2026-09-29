@@ -1334,8 +1334,15 @@ class StateDatabase(
                                 "(${size / 1_048_576} MB needed). Free some space, or use --reset --dry-run for a blank preview.",
                         )
                     }
-                    val uri = "jdbc:sqlite:file:${source.toAbsolutePath().toString().replace('\\', '/')}?mode=ro"
-                    DriverManager.getConnection(uri).use { c ->
+                    // Build the source URI from Path.toUri() (percent-encoded):
+                    // a raw file: URI truncated at characters like space or '#'
+                    // silently opened an EMPTY phantom database instead of the
+                    // source. mode=ro is parsed from the query and becomes the
+                    // OPEN_READONLY flag; busy_timeout waits out a daemon that
+                    // is mid-commit instead of failing the dry-run with
+                    // SQLITE_BUSY.
+                    val srcUri = "jdbc:sqlite:${source.toAbsolutePath().toUri()}?mode=ro&busy_timeout=5000"
+                    DriverManager.getConnection(srcUri).use { c ->
                         readSchemaVersionOf(c)?.let { recorded ->
                             check(recorded <= SCHEMA_VERSION) {
                                 "state.db was written by a newer unidrive (schema $recorded, this build supports $SCHEMA_VERSION)."

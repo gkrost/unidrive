@@ -104,6 +104,26 @@ class StateDatabaseSnapshotTest {
     }
 
     @Test
+    fun `a source path with spaces or a hash is read, not silently truncated`() {
+        // A file: URI truncated at these characters used to open an EMPTY
+        // phantom database, so the dry-run previewed nothing. The plain-path
+        // open must see the real rows.
+        val spaced = Files.createDirectories(dir.resolve("with space #and hash"))
+        val src = spaced.resolve("state.db")
+        val db = StateDatabase(src)
+        db.initialize()
+        db.upsertEntry(entry("/a.txt"))
+        db.close()
+
+        val snap = StateDatabase.snapshotOf(src, tmp)
+        try {
+            assertEquals(setOf("/a.txt"), snap.getAllEntries().map { it.path }.toSet())
+        } finally {
+            snap.close()
+        }
+    }
+
+    @Test
     fun `a real database is not disposable and an in-memory one is`() {
         val real = StateDatabase(dir.resolve("real.db"))
         real.initialize()
