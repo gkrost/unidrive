@@ -1227,11 +1227,15 @@ class Reconciler(
 
     // #419: true only when [path] is provably absent on disk (a dangling symlink still counts as
     // present). A path that cannot be resolved inside sync_root is not "absent": the caller keeps
-    // its action and the apply step rejects it as it always did.
+    // its action and the apply step rejects it as it always did. resolveLocal throws
+    // InvalidPathException (not only SecurityException) for a remote name a Windows path cannot
+    // represent (the #230 quarantine class) — that is "cannot resolve", not "absent".
     private fun isAbsentLocally(path: String): Boolean =
         try {
             !Files.exists(resolveLocal(path), java.nio.file.LinkOption.NOFOLLOW_LINKS)
         } catch (_: SecurityException) {
+            false
+        } catch (_: java.nio.file.InvalidPathException) {
             false
         }
 
