@@ -249,6 +249,23 @@ class SyncCommandTest {
         )
     }
 
+    // `sync --watch --dry-run` used to run real syncs (the watch loop dropped the flag). Point the command
+    // at an empty config dir so that, should the pair ever be accepted again, this test fails on a missing
+    // profile instead of syncing whatever profile the developer has.
+    @Test
+    fun `dry-run and watch are mutually exclusive at parse time`() {
+        val emptyConfigDir = java.nio.file.Files.createTempDirectory("ud-398-config")
+        val cli = CommandLine(Main())
+        val errBuf = java.io.StringWriter()
+        cli.err = java.io.PrintWriter(errBuf)
+        val exit = cli.execute("-c", emptyConfigDir.toString(), "sync", "--dry-run", "--watch")
+        assertEquals(2, exit, "expected a parameter error, stderr=$errBuf")
+        assertTrue(
+            errBuf.toString().contains("--dry-run") && errBuf.toString().contains("--watch"),
+            "error should mention both flags, got: $errBuf",
+        )
+    }
+
     // UD-738: --reset --dry-run is no longer rejected at parse time; it now
     // means "plan against an in-memory shadow DB; leave state.db untouched."
     // The combination must parse cleanly without a picocli ParameterException
