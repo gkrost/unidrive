@@ -3577,6 +3577,11 @@ class SyncEngineTest {
         // tests can exercise the engine's partial-gather suppression path.
         var deltaComplete = true
 
+        // #422: stands in for a provider whose delta() lists the whole tree on every call and
+        // never sends tombstones (localfs).
+        var deltaFullListing = false
+        override val deltaIsFullListing: Boolean get() = deltaFullListing
+
         // Resumable-scan instrumentation: captures the ScanContext the engine
         // passed in (resume_marker, # of resumedItems) so tests can verify
         // start-from-scratch vs resume behavior.

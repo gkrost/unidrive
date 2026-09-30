@@ -153,6 +153,15 @@ interface CloudProvider {
     ): DeltaPage
 
     /**
+     * True when every [delta] call lists the WHOLE remote tree whatever cursor it is given and
+     * reports deletions only by omission (localfs: a directory walk). The engine then runs the
+     * absence sweep on every gather, as it does for a null cursor; without that, an item removed
+     * remotely after the first sync would never be removed here, because no tombstone ever
+     * arrives. Providers that return only changes since the cursor leave the default.
+     */
+    val deltaIsFullListing: Boolean get() = false
+
+    /**
      * Delta that includes shared items. Providers that declare
      * [Capability.DeltaShared] must override. Default returns
      * [CapabilityResult.Unsupported] so callers fall back to [delta] explicitly.

@@ -212,6 +212,8 @@ class LocalFsProvider(root: Path) : CloudProvider {
      * ignored on the next call. Folders are emitted before/with their children
      * via the natural pre-order walk.
      */
+    override val deltaIsFullListing: Boolean get() = true
+
     override suspend fun delta(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,

@@ -1069,7 +1069,7 @@ open class SyncEngine(
         // actual verdict — which a 410 cursor-expiry recovery can upgrade inside
         // the gather — is read back after the gather below.
         val preGatherTrackedRows = db.getEntryCount()
-        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty()
+        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty() || provider.deltaIsFullListing
         // A full enumeration against an established baseline must run NON-streaming
         // so the remote-shrink guard can abort before any transfer is dispatched —
         // the streaming gather dispatches safe-now uploads/downloads mid-scan, which
@@ -1939,7 +1939,7 @@ open class SyncEngine(
     private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
-        var isFullSync = cursor == null
+        var isFullSync = cursor == null || provider.deltaIsFullListing
         var changes = mutableMapOf<String, CloudItem>()
 
         // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
@@ -1948,7 +1948,7 @@ open class SyncEngine(
         // deletion sweep (detectMissingAfterFullSync) is skipped — no enumeration
         // means no authoritative item set to diff against, so we must NOT treat
         // absence as deletion.
-        if (fastBootstrap && isFullSync) {
+        if (fastBootstrap && cursor == null) {
             if (Capability.FastBootstrap in provider.capabilities()) {
                 when (val result = provider.deltaFromLatest()) {
                     is CapabilityResult.Success -> {
@@ -2351,7 +2351,7 @@ open class SyncEngine(
     ): Pair<Map<String, CloudItem>, List<SyncAction>> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
-        val isFullSync = cursor == null
+        val isFullSync = cursor == null || provider.deltaIsFullListing
         val changes = mutableMapOf<String, CloudItem>()
         val buffer = StreamingReconcileBuffer()
         val safeAccumulator = mutableListOf<SyncAction>()
@@ -2371,7 +2371,7 @@ open class SyncEngine(
         // UD-223 fast-bootstrap mirror: bootstrap adopts the cursor with
         // zero enumeration, so there's nothing to stream — fall through
         // to the same map-only path as the non-streaming gather.
-        if (fastBootstrap && isFullSync && Capability.FastBootstrap in provider.capabilities()) {
+        if (fastBootstrap && cursor == null && Capability.FastBootstrap in provider.capabilities()) {
             when (val result = provider.deltaFromLatest()) {
                 is CapabilityResult.Success -> {
                     val page = result.value
