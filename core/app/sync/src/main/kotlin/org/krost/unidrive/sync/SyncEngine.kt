@@ -3841,7 +3841,9 @@ open class SyncEngine(
     // Same guard for a copy of the bytes that is not the sync-root file — the cache copy a
     // hydration downloaded or a write-back was uploaded from. The row records that copy's
     // stats, so the hash must describe that copy and be dropped if it changes mid-hash.
-    private fun withLocalHash(
+    // The callers pass a row that already carries the new mtime/size but may still hold the
+    // hash of the previous contents, so a failed hash clears it rather than keeping it.
+    internal fun withLocalHash(
         entry: SyncEntry,
         local: Path,
         mtime: Long,
@@ -3853,11 +3855,11 @@ open class SyncEngine(
             if (Files.getLastModifiedTime(local).toMillis() == mtime && Files.size(local) == size) {
                 entry.copy(localHash = hash)
             } else {
-                entry
+                entry.copy(localHash = null)
             }
         } catch (e: java.io.IOException) {
             log.debug("#396: cannot hash {} for the local-hash column: {}", entry.path, e.message)
-            entry
+            entry.copy(localHash = null)
         }
     }
 

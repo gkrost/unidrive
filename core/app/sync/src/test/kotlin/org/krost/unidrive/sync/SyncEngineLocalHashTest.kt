@@ -3,6 +3,7 @@ package org.krost.unidrive.sync
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.model.ConflictPolicy
+import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
@@ -194,6 +195,50 @@ class SyncEngineLocalHashTest {
             assertEquals(sha256(cachePath), row.localHash)
             assertNotEquals(staleHash, row.localHash)
         }
+
+    // The callers hand in a row that already carries the new mtime/size; if hashing then fails,
+    // keeping the previous contents' hash would pair stale bytes with fresh stats and let a
+    // later touch of a changed file be absorbed as unchanged.
+
+    private fun rowWithStaleHash(file: Path) =
+        SyncEntry(
+            path = "/stale.bin",
+            remoteId = "id-/stale.bin",
+            remoteHash = null,
+            remoteSize = Files.size(file),
+            remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+            localMtime = Files.getLastModifiedTime(file).toMillis(),
+            localSize = Files.size(file),
+            isFolder = false,
+            isPinned = false,
+            isHydrated = true,
+            lastSynced = Instant.now(),
+            localHash = "hash-of-the-previous-contents",
+        )
+
+    @Test
+    fun `a local hash that cannot be read drops the previous contents' hash`() {
+        val file = Files.createTempDirectory("ud-396-fail").resolve("stale.bin")
+        Files.write(file, "new bytes".toByteArray())
+        val row = rowWithStaleHash(file)
+        Files.delete(file)
+
+        val result = engine().withLocalHash(row, file, row.localMtime!!, row.localSize!!)
+
+        assertNull(result.localHash)
+    }
+
+    @Test
+    fun `a file that changes while it is hashed drops the previous contents' hash`() {
+        val file = Files.createTempDirectory("ud-396-race").resolve("stale.bin")
+        Files.write(file, "new bytes".toByteArray())
+        val row = rowWithStaleHash(file)
+
+        // The recorded mtime no longer matches the file: a writer landed during the hash.
+        val result = engine().withLocalHash(row, file, row.localMtime!! - 1_000L, row.localSize!!)
+
+        assertNull(result.localHash)
+    }
 
     @Test
     fun `a provider with a remote hash algorithm never gets a local hash`() =
