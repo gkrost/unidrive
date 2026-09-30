@@ -1,6 +1,6 @@
 # Hydration Namespace Verbs — Design
 
-**Status:** Proposed — design doc, not yet implemented.
+**Status:** Implemented. The hydration IPC handler serves `hydration.mkdir`, `hydration.unlink`, `hydration.rmdir`, `hydration.create` and `hydration.rename` (see the verb table in `HydrationIpcHandler.kt`). The text below is the original design and is kept for its rationale.
 **Origin:** High-tier BACKLOG entries in `unidrive-mount-linux/BACKLOG.md` (committed in sibling repo's `7209c21`): "FUSE `mkdir` not implemented — returns ENOSYS" and "FUSE `unlink` / `rmdir` not implemented — returns ENOSYS".
 **Prerequisite:** `docs/dev/specs/mount-sync-mode-mutex-design.md` MUST land first. Without the mode mutex, every successful `mkdir`/`unlink`/`rmdir` through the mount would be racing the legacy `SyncEngine`'s next `--watch` cycle.
 **Touches:**

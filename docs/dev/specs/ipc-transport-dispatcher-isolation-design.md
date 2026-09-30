@@ -1,6 +1,6 @@
 # IPC Transport Dispatcher Isolation — Design
 
-**Status:** Proposed — design doc, not yet implemented
+**Status:** Implemented. `IpcServer` writes on a dedicated transport pool (`transportDispatcher`) separate from the handler dispatcher. The text below is the original design and is kept for its rationale.
 **Origin:** Phase 2 smoke-test finding, BACKLOG entry committed in `da193f7`
 **Touches:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt` (single file)
 

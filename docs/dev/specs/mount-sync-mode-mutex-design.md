@@ -1,6 +1,6 @@
 # Mount/Sync Mode Mutex — Design
 
-**Status:** Proposed — design doc, not yet implemented.
+**Status:** Implemented in part. The lock body carries the holder mode (`ProcessLock.Mode`: `SYNC` or `DAEMON`) and `sync` and `daemon run` are mutually exclusive through it. The mount deliberately takes no lock of its own: it is a client of the daemon, which holds the profile lock (see `unidrive-daemon-design.md`). The text below is the original proposal and is kept for its rationale.
 **Origin:** Critical-tier BACKLOG entry "Mount-write clobbered by legacy SyncEngine on next `--watch` cycle (data loss class)" committed in `976ca75`.
 **Touches:**
 - `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt` (extend lock body with mode metadata).

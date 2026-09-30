@@ -79,3 +79,47 @@ Things that were done before this branch started. Append new entries when items 
 - OneDrive delta-endpoint 410-Gone self-heals into full re-enumeration in tracking engine
 - `ts` CLI never authenticated provider — fixed by adding `authenticateAndLog()` to sync/claim commands
 - Tracking-set Internxt trash→reap live-verify — trashing bumps `updatedAt`; flat `/files` listing lags ≥60 min
+
+## Drained from BACKLOG (issue closed as completed)
+
+- OneDrive chunked-upload resume corrupts a file changed between attempts — session keyed on path only (silent data-loss)
+- Hydration open-set is a non-thread-safe map iterated across connections — dehydrate races an open writer (data-loss + CME)
+- OneDrive download returns 404 itemNotFound for a file present in the listing → mount hydrate-on-read EIO (cloud-only files unreadable)
+- `applyDeleteRemote` swallows ALL provider errors and marks the row TRASHED anyway — stranded remote + delete never retried
+- OneDrive delta conflates a soft `removed` (permission revocation) with a hard delete → reaps a still-valid local copy (data-risk)
+- Tracking-set adopt-on-content-match silently degrades to size-only for Internxt (null hash) — different-content same-size files adopted as identical
+- Mount doesn't survive daemon restart — operations return EIO until mount is manually remounted
+- FUSE mount: `create`/`mknod`/`fsync` not implemented — all file-creation paths fail with ENOSYS
+- Legacy SyncEngine trips the deletion safeguard on the internxt_gernot_krost_posteo profile, daemon stays failed
+- OneDrive 410 Gone resync handling
+- OneDrive `file.hashes` in local change detector
+- OneDrive `If-Match` precondition on `createUploadSession`
+- OneDrive refresh `downloadUrl` on `assertNotHtml`
+- XDG-user-dir locale aliasing across `Pictures`/`Bilder`/`Imágenes`/`Images`/…
+- `status` and `status --all` enumerate different profile sources (orphan-profile-dir divergence)
+- `status` / `status --all` don't reflect the tracking-set engine
+- OneDrive delta loses sight of a path the engine itself just wrote ("not in delta, marking deleted" loop)
+- `IpcServer` broadcast channel (capacity 256) silently drops sync/progress events when a subscriber lags
+- Hydration `unknown path` maps to two different errnos depending on the verb (EIO vs ENOENT)
+- Bulk directory creation issues one synchronous remote round-trip per directory — large-tree copies into the mount are slow and abort wholesale on any failure
+- Tracking-set live-test runtime is impractical for routine CI
+- Tracking-set engine: migration / coexistence with legacy `state.db`
+- Pre-reconcile empty-sync_root guard must differentiate "rehydrate intent" from "wrong sync_root"
+- Typed `FolderNotEmpty` provider exception for `HydrationImpl.rmdir` (namespace-verbs R2)
+- `mkdir` parent-missing maps to ENOENT instead of EIO (namespace-verbs R3)
+- Cache-file eviction on `unlink` / `rmdir` (namespace-verbs R5)
+- `unidrive daemon status` should refuse / warn when lock-holder mode is not `daemon`
+- Daemon doesn't auto-poll for remote changes — mount view stays stale until operator runs `refresh`
+- `unidrive ls` (live query) and the FUSE mount (state.db) disagree during the stale window
+- `unidrive status` no-default-profile fallback shows misleading "Local Filesystem" row
+- Build-time test that `logback.xml` is XML-well-formed
+- Build-time test that `BuildInfo.DIRTY` correctly handles mode-only diffs
+- Hydrated-but-locally-missing rows in `--download-only` mode should re-download, not silently loop
+- Tracking-set live test: JWT/OAuth-refresh path not structurally exercised
+- Tracking-set live test: throttling / 429-storm handling path not exercised
+- `RefreshRpcHandler` exception-message JSON escape covers quotes only
+- `unidrive ts <sub>` ignores the global `-p` option
+- Stale `EXPERIMENTAL — not yet verified against real Internxt/OneDrive` warning in `ts`
+- Suggested-command output uses `<path>` placeholders instead of real values (not copy-pasteable)
+- Path normalization (NFC) across sync
+- Provider SPI hardening with two providers

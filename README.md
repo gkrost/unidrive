@@ -11,7 +11,8 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 │   │   ├── cli/            # CLI entry point and subcommand mapping
 │   │   ├── core/           # Engine, crypto, model sets
 │   │   ├── hydration/      # De/hydration pipeline
-│   │   └── sync-tracking/  # State reconciler and tracking-set engines
+│   │   ├── sync/           # Sync engine (ships the MVP), state.db, IPC server
+│   │   └── sync-tracking/  # Frozen tracking-set engine (`unidrive ts`)
 │   └── providers/
 │       ├── internxt/       # Zero-knowledge encrypted client
 │       └── onedrive/       # Microsoft Graph API client
@@ -44,6 +45,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now unidrive.service
 ```
 
+The installed unit runs `unidrive sync --watch`. That process serves the hydration verbs and `sync.subscribe` only; `refresh`, the mount and the Windows client also need the daemon verbs (`refresh.run`, `sync.enumerate`, `daemon.status`), which only `unidrive daemon run` serves. Run `daemon run` instead of `sync --watch` when one of those clients is in use.
+
 Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/log-watch.sh --summary`.
 
 ## Commands
@@ -56,7 +59,7 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 - `logout` — destroy session, invalidate credentials
 
 ### Sync
-- `sync` — run tracking-set delta engine
+- `sync` — run the sync engine (`SyncEngine`, the engine the MVP ships); the frozen tracking-set engine is reachable only as `ts`
 - `status` — show alignment, transfers, exceptions
 - `conflicts` — convergence paths for conflicting hashes
 
@@ -69,5 +72,6 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 ## Key source files
 
 - `ProviderFactory.kt` — SPI provider registration framework
-- `TrackingEngine.kt` — tracking-set delta calculator
+- `SyncEngine.kt` — the sync engine behind `sync` and the daemon
+- `TrackingEngine.kt` — the frozen tracking-set engine, reachable only as `unidrive ts ...`
 - `HydrationImpl.kt` — physical payload de/reconstruction lifecycle

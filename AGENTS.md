@@ -22,7 +22,7 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 
 ## What lives where
 - `core/providers/{internxt,onedrive}/` — cloud clients
-- `core/app/{core,sync,sync-tracking,cli,config}/` — engine modules
+- `core/app/{core,sync,sync-tracking,hydration,cli}/` — engine modules
 - `docs/audits/` — Internxt notes
 - `docs/adr/` — architectural decisions
 
