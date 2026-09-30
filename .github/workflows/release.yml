@@ -40,6 +40,13 @@ jobs:
       - name: Set up Gradle dependency cache
         uses: gradle/actions/setup-gradle@v4
 
+      # The gate runs on the tagged commit itself, before anything is built,
+      # signed or published. A failing check stops the job here, so an
+      # untested tag never yields a signed release.
+      - name: Gradle check
+        working-directory: core
+        run: ./gradlew check --no-daemon
+
       - name: Build shadowJar
         working-directory: core
         run: ./gradlew :app:cli:shadowJar --no-daemon -q
