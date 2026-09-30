@@ -168,6 +168,53 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    fun `shutdownAndWait returns only after cleanup has released the socket and the lock`() = runBlocking {
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+        // Dispatchers.IO: shutdownAndWait blocks its caller, so start() must not share runBlocking's thread.
+        val daemonJob = launch(kotlinx.coroutines.Dispatchers.IO) { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
+        assertTrue(Files.exists(pidFile), "daemon must hold the lock before shutdown")
+
+        // What the JVM shutdown hook does: the hook thread must not return (letting the JVM halt)
+        // before the main thread's cleanup has finished.
+        val clean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            runtime.shutdownAndWait(DaemonRuntime.SHUTDOWN_DEADLINE_MS)
+        }
+
+        assertTrue(clean, "shutdownAndWait must report that cleanup completed within the deadline")
+        assertFalse(Files.exists(socketPath), "socket file must be gone when shutdownAndWait returns")
+        assertFalse(Files.exists(pidFile), ".lock.pid must be gone when shutdownAndWait returns")
+        daemonJob.join()
+    }
+
+    @Test
+    fun `shutdownAndWait on a runtime that never started does not block`() {
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+        val t0 = System.nanoTime()
+        assertTrue(runtime.shutdownAndWait(10_000))
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < 2_000, "must return immediately when nothing was started")
+    }
+
+    @Test
     fun refresh_run_emits_terminal_event_after_completing_enumeration() = runBlocking {
         // Spec T5: subscribe -> refresh.run -> await refresh.done terminal event.
         // Then re-issue refresh.run; must succeed (not stuck in 'busy').

@@ -57,6 +57,13 @@ class DaemonRuntime(
     private var db: StateDatabase? = null
     private var ipcServer: IpcServer? = null
     private val closeSignal = CompletableDeferred<Unit>()
+
+    // Counted down once cleanup() has run. Only armed after the lock is held: a start() that lost
+    // the lock race (or never ran) has nothing to wait for, and a shutdown hook must not stall the
+    // System.exit that path triggers.
+    private val cleanupDone = java.util.concurrent.CountDownLatch(1)
+
+    @Volatile private var lifecycleActive = false
     private var startedAtMs: Long = 0
 
     suspend fun start() {
@@ -67,6 +74,7 @@ class DaemonRuntime(
             return
         }
         lock = acquiredLock
+        lifecycleActive = true
 
         try {
             // 2. Stale-mount warn (spec §3.3) — best-effort, never aborts.
@@ -261,11 +269,31 @@ class DaemonRuntime(
             throw e
         } finally {
             cleanup()
+            cleanupDone.countDown()
         }
     }
 
     fun close() {
         closeSignal.complete(Unit)
+    }
+
+    /**
+     * Request shutdown and block until [start]'s cleanup (IpcServer close, StateDatabase close,
+     * lock release) has finished, bounded by [timeoutMs] (spec I7). For the JVM shutdown hook:
+     * the JVM halts as soon as every hook returns, so a hook that only called [close] raced the
+     * main thread's cleanup and could leave a stale `.lock.pid` and socket behind.
+     *
+     * Returns true when cleanup completed (or there was nothing to clean up), false on timeout.
+     */
+    fun shutdownAndWait(timeoutMs: Long = SHUTDOWN_DEADLINE_MS): Boolean {
+        close()
+        if (!lifecycleActive) return true
+        return try {
+            cleanupDone.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private fun renderLockContentionAndExit(lock: ProcessLock) {

@@ -74,9 +74,10 @@ class DaemonRunCommand : Runnable {
             pollIntervalMs = pollIntervalMs,
         )
 
-        // Install SIGTERM handler that signals graceful shutdown.
+        // Install SIGTERM handler that signals graceful shutdown. It must wait for the main
+        // thread's cleanup: the JVM halts once all hooks return.
         Runtime.getRuntime().addShutdownHook(Thread {
-            runtime.close()
+            runtime.shutdownAndWait()
         })
 
         runBlocking { runtime.start() }
