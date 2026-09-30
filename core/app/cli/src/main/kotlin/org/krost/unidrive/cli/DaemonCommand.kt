@@ -175,7 +175,7 @@ class DaemonStatusCommand : Runnable {
 
 // ── daemon stop ──────────────────────────────────────────────────────────────
 
-@Command(name = "stop", description = ["Send SIGTERM to the running daemon and wait for it to exit"], mixinStandardHelpOptions = true)
+@Command(name = "stop", description = ["Ask the running daemon to shut down over IPC (falling back to terminating it) and wait for it to exit"], mixinStandardHelpOptions = true)
 class DaemonStopCommand : Runnable {
     @ParentCommand
     lateinit var daemonCmd: DaemonCommand
@@ -199,6 +199,7 @@ class DaemonStopCommand : Runnable {
 
     companion object {
         const val STOP_DEADLINE_MS: Long = 12_000  // 10s graceful + 2s buffer
+        const val FORCED_STOP_DEADLINE_MS: Long = 5_000  // wait after destroy() before giving up
     }
 
     // #419: a daemon that was hard-killed never runs its shutdown code (`Process.destroy()` is
@@ -269,20 +270,119 @@ class DaemonStopCommand : Runnable {
             }
         }
 
-        // Send SIGTERM via ProcessHandle.
-        handle.destroy()  // SIGTERM
-        handle.onExit().orTimeout(STOP_DEADLINE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-            .handle { _, _ -> true }.get()
-        if (!handle.isAlive) {
-            removeLeftoverSocket(profile.name)
-            println("daemon for profile '${profile.name}' stopped")
-        } else {
-            System.err.println(
-                "daemon for profile '${profile.name}' did not exit within ${STOP_DEADLINE_MS}ms; " +
-                    "send SIGKILL manually if needed (`kill -9 $pid`).",
-            )
-            System.exit(1)
+        // Ask the daemon to stop over IPC first (signal-free, runs the clean shutdown path on every
+        // OS); Process.destroy() is only the fallback. On Windows destroy() is TerminateProcess,
+        // which skips the shutdown hooks and leaves a stale socket and lock.
+        val socketPath = IpcServer.defaultSocketPath(profile.name)
+        val outcome = stopDaemonProcess(
+            requestShutdown = { requestDaemonShutdown(socketPath) },
+            awaitExit = { timeoutMs -> awaitProcessExit(handle, timeoutMs) },
+            destroy = { handle.destroy() },
+            gracefulDeadlineMs = STOP_DEADLINE_MS,
+            forcedDeadlineMs = FORCED_STOP_DEADLINE_MS,
+        )
+        when (outcome) {
+            DaemonStopOutcome.GRACEFUL -> {
+                removeLeftoverSocket(profile.name)
+                println("daemon for profile '${profile.name}' stopped")
+            }
+            DaemonStopOutcome.FORCED -> {
+                removeLeftoverSocket(profile.name)
+                println(
+                    "daemon for profile '${profile.name}' did not stop gracefully; terminated it " +
+                        "(its shutdown hooks may not have run)",
+                )
+            }
+            DaemonStopOutcome.FAILED -> {
+                System.err.println(
+                    "daemon for profile '${profile.name}' did not exit within " +
+                        "${STOP_DEADLINE_MS + FORCED_STOP_DEADLINE_MS}ms; " +
+                        "send SIGKILL manually if needed (`kill -9 $pid`).",
+                )
+                System.exit(1)
+            }
         }
+    }
+}
+
+// ── daemon stop: graceful-first stop ─────────────────────────────────────────
+
+internal enum class DaemonStopOutcome {
+    /** The daemon accepted daemon.shutdown and exited on its own. */
+    GRACEFUL,
+
+    /** The daemon had to be destroyed (socket unreachable, or it did not exit in time). */
+    FORCED,
+
+    /** The daemon is still running after destroy. */
+    FAILED,
+}
+
+/**
+ * Stop a daemon: ask it to exit over IPC ([requestShutdown] returns true once the daemon acked
+ * daemon.shutdown) and wait [gracefulDeadlineMs] for the process to go; only when the verb is not
+ * accepted or the process outlives the deadline is it [destroy]ed and waited on for
+ * [forcedDeadlineMs]. [awaitExit] returns true when the process has exited.
+ */
+internal fun stopDaemonProcess(
+    requestShutdown: () -> Boolean,
+    awaitExit: (timeoutMs: Long) -> Boolean,
+    destroy: () -> Unit,
+    gracefulDeadlineMs: Long,
+    forcedDeadlineMs: Long,
+): DaemonStopOutcome {
+    if (requestShutdown() && awaitExit(gracefulDeadlineMs)) return DaemonStopOutcome.GRACEFUL
+    destroy()
+    return if (awaitExit(forcedDeadlineMs)) DaemonStopOutcome.FORCED else DaemonStopOutcome.FAILED
+}
+
+private fun awaitProcessExit(handle: ProcessHandle, timeoutMs: Long): Boolean {
+    handle.onExit().orTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        .handle { _, _ -> true }.get()
+    return !handle.isAlive
+}
+
+/**
+ * Send `daemon.shutdown` to the daemon listening on [socketPath] and wait for its ack. Returns true
+ * when the daemon has accepted the request: it replied ok, or it dropped the connection after the
+ * request was written (a daemon already closing its sockets can reset the connection before the
+ * ack is read, notably on Windows; the caller still verifies the process exits and falls back to
+ * destroy()). Returns false when the socket is absent or unreachable, the request could not be
+ * written, or the reply is negative or missing. Never throws.
+ */
+internal fun requestDaemonShutdown(socketPath: java.nio.file.Path, timeoutMs: Long = 3_000): Boolean {
+    if (!Files.exists(socketPath)) return false
+    var written = false
+    return try {
+        java.nio.channels.SocketChannel.open(java.net.UnixDomainSocketAddress.of(socketPath)).use { channel ->
+            channel.configureBlocking(false)
+            val request = """{"verb":"daemon.shutdown"}""" + "\n"
+            val out = java.nio.ByteBuffer.wrap(request.toByteArray())
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (out.hasRemaining()) {
+                channel.write(out)
+                if (out.hasRemaining()) {
+                    if (System.currentTimeMillis() >= deadline) return false
+                    Thread.sleep(10)
+                }
+            }
+            written = true
+            val collected = StringBuilder()
+            while (System.currentTimeMillis() < deadline && !collected.contains('\n')) {
+                val buf = java.nio.ByteBuffer.allocate(1024)
+                val n = channel.read(buf)
+                if (n < 0) return true
+                if (n > 0) {
+                    buf.flip()
+                    collected.append(String(buf.array(), 0, buf.limit()))
+                } else {
+                    Thread.sleep(10)
+                }
+            }
+            collected.toString().substringBefore('\n').contains("\"ok\":true")
+        }
+    } catch (_: java.io.IOException) {
+        written
     }
 }
 
