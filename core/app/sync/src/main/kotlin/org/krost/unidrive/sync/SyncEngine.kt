@@ -359,12 +359,13 @@ open class SyncEngine(
 
     // #418: true when [entry] is about the regular file in the sync root rather than about the
     // cache copy. Two cases:
-    //  - a NOT hydrated row with a file there: that file is a placeholder (`unidrive free`,
-    //    an interrupted download). Its mtime is not the row's baseline (dehydrate stamps the
-    //    remote modified time on it) and it holds no real bytes, so it must stay flagged as
-    //    such until a sync fills it;
+    //  - a NOT hydrated row with a file there that has a placeholder shape (see
+    //    [looksLikePlaceholder]): it holds no real bytes and must stay flagged as such until
+    //    a sync fills it;
     //  - a hydrated row whose baseline still matches the file (same mtime and size).
-    // No file, a hydrated row whose file changed, or an unresolvable name answer false and keep
+    // No file, a hydrated row whose file changed, a not-hydrated row whose file does NOT look
+    // like a placeholder (real user content: treat it as an edit, not as a placeholder — the
+    // recovery download must never overwrite it), or an unresolvable name answer false and keep
     // the cache-as-local-file behaviour (mount mode).
     private fun rowDescribesSyncRootFile(
         entry: SyncEntry,
@@ -374,12 +375,61 @@ open class SyncEngine(
             val local = placeholder.resolveLocal(path)
             when {
                 !Files.isRegularFile(local) -> false
-                !entry.isHydrated -> true
+                !entry.isHydrated -> looksLikePlaceholder(local, entry)
                 else ->
                     entry.localMtime != null &&
                         entry.localSize != null &&
                         Files.getLastModifiedTime(local).toMillis() == entry.localMtime &&
                         Files.size(local) == entry.localSize
+            }
+        }.getOrDefault(false)
+
+    // The shapes a placeholder or download artifact in the sync root can have — anything else
+    // is real user content, which the recovery download must never overwrite:
+    //  - a fresh placeholder / interrupted-before-first-byte download: a 0-byte stub
+    //    (createPlaceholder, or applyDownload killed before writing);
+    //  - a partial download: applyDownload writes the sync-root path directly, so a kill
+    //    mid-download leaves a prefix of the remote bytes; recovery finishing it is what
+    //    main's UD-225 loop already does, and uploading the prefix would truncate the remote;
+    //  - a freed placeholder: a sparse remoteSize of zeros stamped with the remote modified
+    //    time (dehydrate). A tool that touches the mtime afterwards (the touch-happy
+    //    property handlers from #396) must not turn it back into an upload of the stub, so
+    //    the zeros themselves are checked.
+    private fun looksLikePlaceholder(
+        local: Path,
+        entry: SyncEntry,
+    ): Boolean {
+        val size = Files.size(local)
+        if (size == 0L) return true
+        if (size < entry.remoteSize) return true
+        if (size == entry.remoteSize && entry.remoteSize > 0L) {
+            val remoteModified = entry.remoteModified
+            if (remoteModified != null &&
+                Files.getLastModifiedTime(local).toMillis() == remoteModified.toEpochMilli()
+            ) {
+                return true
+            }
+            return isAllZero(local)
+        }
+        return false
+    }
+
+    private fun isAllZero(path: Path): Boolean =
+        runCatching {
+            Files.newInputStream(path).use { input ->
+                val buf = ByteArray(64 * 1024)
+                var allZero = true
+                while (allZero) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    for (i in 0 until n) {
+                        if (buf[i] != 0.toByte()) {
+                            allZero = false
+                            break
+                        }
+                    }
+                }
+                allZero
             }
         }.getOrDefault(false)
 
@@ -453,30 +503,49 @@ open class SyncEngine(
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
-        db.upsertEntry(
-            existing?.copy(
-                remoteId = result.id,
-                remoteHash = result.hash,
-                remoteSize = result.size,
-                remoteModified = result.modified,
-                localMtime = mtime,
-                localSize = size,
-                isHydrated = true,
-                lastSynced = Instant.now(),
-            ) ?: SyncEntry(
-                path = path,
-                remoteId = result.id,
-                remoteHash = result.hash,
-                remoteSize = result.size,
-                remoteModified = result.modified,
-                localMtime = mtime,
-                localSize = size,
-                isFolder = false,
-                isPinned = false,
-                isHydrated = true,
-                lastSynced = Instant.now(),
-            ),
-        )
+        if (existing != null && rowDescribesSyncRootFile(existing, path)) {
+            // The row describes the file in the sync root, not this cache copy (an open_read
+            // hydrated the cache and the crash-recovery scanner replayed it as an open_write).
+            // The upload already landed remotely, so refresh the remote fields only and leave
+            // the sync-root baseline and hydration flag alone: rebaselining from the cache here
+            // makes the next scan read the untouched sync-root file (a freed placeholder
+            // included) as modified and upload it. The recovery loop fills the sync-root file
+            // from the now-current remote on a later pass.
+            db.upsertEntry(
+                existing.copy(
+                    remoteId = result.id,
+                    remoteHash = result.hash,
+                    remoteSize = result.size,
+                    remoteModified = result.modified,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        } else {
+            db.upsertEntry(
+                existing?.copy(
+                    remoteId = result.id,
+                    remoteHash = result.hash,
+                    remoteSize = result.size,
+                    remoteModified = result.modified,
+                    localMtime = mtime,
+                    localSize = size,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ) ?: SyncEntry(
+                    path = path,
+                    remoteId = result.id,
+                    remoteHash = result.hash,
+                    remoteSize = result.size,
+                    remoteModified = result.modified,
+                    localMtime = mtime,
+                    localSize = size,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
         auditLog?.emit(
             action = "Upload",
             path = path,
