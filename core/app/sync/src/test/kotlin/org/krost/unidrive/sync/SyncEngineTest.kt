@@ -165,6 +165,61 @@ class SyncEngineTest {
             assertEquals(firstRemoteId, provider.lastUploadExistingRemoteId)
         }
 
+    /**
+     * #417 (engine half): the Reconciler compares a delta item's modified time to the row for
+     * equality, so the engine must store exactly what the provider returned for the write and a
+     * delta that echoes it must plan nothing. If a provider returns a stale timestamp here the
+     * next sync downloads the file it just uploaded (fixed provider-side in InternxtProvider).
+     */
+    @Test
+    fun `#417 delta echoing the modified time of an in-place replace plans nothing for that path`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+            Files.writeString(syncRoot.resolve("mod.txt"), "v1")
+            engine.syncOnce()
+            val firstRemoteId = db.getEntry("/mod.txt")?.remoteId
+            assertNotNull(firstRemoteId)
+
+            Thread.sleep(20) // ensure mtime advances on filesystems with second-level resolution
+            Files.writeString(syncRoot.resolve("mod.txt"), "v2-longer-content-to-bump-size")
+            // The server stamped the replace with its own time; the provider reports exactly that.
+            val serverModified = Instant.parse("2026-05-03T16:36:29Z")
+            provider.uploadModified = serverModified
+            engine.syncOnce()
+            assertEquals(firstRemoteId, provider.lastUploadExistingRemoteId, "the edit must go through replace-in-place")
+            val row = db.getEntry("/mod.txt")
+            assertNotNull(row)
+            assertEquals(serverModified, row.remoteModified, "the row must carry the provider-reported modified time")
+
+            // Next sync: the delta re-reports the item exactly as the server now lists it.
+            val capturing = CapturingActionCountReporter()
+            val engine2 =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = capturing,
+                )
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/mod.txt", size = row.remoteSize)
+                        .copy(id = row.remoteId!!, hash = row.remoteHash, modified = serverModified),
+                )
+            val uploadsBefore = provider.uploadedPaths.size
+            val downloadsBefore = provider.downloadByIdCalls.size + provider.downloadByPathCalls.size
+            engine2.syncOnce()
+
+            assertEquals(0, capturing.lastPreFilterTotal, "an echo of our own replace must plan zero actions")
+            assertEquals(uploadsBefore, provider.uploadedPaths.size, "no re-upload")
+            assertEquals(
+                downloadsBefore,
+                provider.downloadByIdCalls.size + provider.downloadByPathCalls.size,
+                "no download of the file we just uploaded",
+            )
+        }
+
     @Test
     fun `sync deletes local file when remote deleted`() =
         runTest {
@@ -3277,6 +3332,10 @@ class SyncEngineTest {
         var lastUploadExistingRemoteId: String? = null
             private set
 
+        // #417: when set, upload() reports this as the item's modified time (what a real
+        // provider returns for the write: the time the server will list next).
+        var uploadModified: Instant? = null
+
         override suspend fun upload(
             localPath: Path,
             remotePath: String,
@@ -3298,7 +3357,7 @@ class SyncEngineTest {
                 path = remotePath,
                 size = content.size.toLong(),
                 isFolder = false,
-                modified = Instant.now(),
+                modified = uploadModified ?: Instant.now(),
                 created = Instant.now(),
                 hash = "uploaded",
                 mimeType = null,
