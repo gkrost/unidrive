@@ -273,10 +273,16 @@ class FolderRenameOrderTest {
 
         /** Paths whose move must fail once with a transient error (then work again). */
         val failMoveFrom: MutableSet<String> = mutableSetOf()
+
+        /** Paths whose move applies on the remote and THEN fails (a later leg / bookkeeping step). */
+        val failMoveAfterApplyFrom: MutableSet<String> = mutableSetOf()
         val calls = mutableListOf<String>()
 
         /** Live (not trashed) remote paths. */
         fun live(): Set<String> = nodes.keys.toSet()
+
+        /** The delta items a live drive would report for [path] after another device moved it there. */
+        fun deltaItemAt(path: String): List<CloudItem> = listOf(item(path, nodes.getValue(path)))
 
         fun content(path: String): String? = nodes[path]?.content?.toString(Charsets.UTF_8)
 
@@ -368,6 +374,10 @@ class FolderRenameOrderTest {
             val moved = nodes.keys.filter { it == fromPath || it.startsWith("$fromPath/") }
             val entries = moved.map { it to nodes.remove(it)!! }
             for ((p, n) in entries) nodes[toPath + p.removePrefix(fromPath)] = n
+            if (fromPath in failMoveAfterApplyFrom) {
+                failMoveAfterApplyFrom.remove(fromPath)
+                throw ProviderException("Simulated post-apply failure moving $fromPath")
+            }
             return item(toPath, node)
         }
 
@@ -587,6 +597,48 @@ class FolderRenameOrderTest {
                 "calls: ${provider.calls}",
             )
 
+            reporter.reset()
+            engine.syncOnce()
+            assertEquals(0, reporter.planned, "converged; applied: ${reporter.applied}")
+        }
+
+    @Test
+    fun `a move that failed after the remote applied it does not block the folder delete forever`() =
+        runTest {
+            val provider = TreeProvider()
+            val reporter = PlanReporter()
+            val engine = syncD1Tree(provider, reporter)
+
+            Files.move(syncRoot.resolve("d1"), syncRoot.resolve("d2"))
+            provider.failMoveAfterApplyFrom += "/d1/x.txt"
+            reporter.reset()
+            engine.syncOnce()
+
+            // The move of x.txt threw after the remote had already applied it, so the source is
+            // gone. The delete of /d1 must not be guarded by that move: the guard would meet the
+            // same "Item not found" on every later pass and keep the folder undeletable forever.
+            assertEquals(1, reporter.failed, "the failed move is the one failure; warnings: ${reporter.warnings}")
+            assertEquals(
+                setOf("/d2", "/d2/sub", "/d2/x.txt", "/d2/sub/y.txt"),
+                provider.live(),
+                "calls: ${provider.calls}",
+            )
+            assertEquals("content-of-x", provider.content("/d2/x.txt"))
+            assertEquals("content-of-x", Files.readString(syncRoot.resolve("d2/x.txt")))
+
+            // The delta re-reports the moved file by id; the engine adopts it and converges.
+            provider.deltaItems = provider.deltaItemAt("/d2/x.txt")
+            reporter.reset()
+            engine.syncOnce()
+            assertEquals(0, reporter.failed, "warnings: ${reporter.warnings}")
+
+            // Settling: at most the one recovery download that restores hydration of the
+            // adopted row (same bytes), then nothing.
+            reporter.reset()
+            engine.syncOnce()
+            assertTrue(reporter.planned <= 1, "at most the one recovery download, got: ${reporter.applied}")
+            assertEquals("content-of-x", Files.readString(syncRoot.resolve("d2/x.txt")))
+            assertEquals("content-of-x", provider.content("/d2/x.txt"))
             reporter.reset()
             engine.syncOnce()
             assertEquals(0, reporter.planned, "converged; applied: ${reporter.applied}")

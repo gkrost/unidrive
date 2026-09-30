@@ -1638,7 +1638,9 @@ open class SyncEngine(
                     } catch (e: Exception) {
                         consecutiveFailures++
                         passOneFailures.incrementAndGet()
-                        if (action is SyncAction.MoveRemote) failedMoveSources.add(action.fromPath)
+                        if (action is SyncAction.MoveRemote && moveSourceStillRemote(action.fromPath)) {
+                            failedMoveSources.add(action.fromPath)
+                        }
                         // UD-253: class name + throwable (SLF4J renders stack trace when the
                         // last arg is a Throwable) so WARNs are self-diagnosing in the log.
                         // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
@@ -3297,6 +3299,28 @@ open class SyncEngine(
             db.deleteEntry(action.path)
         }
     }
+
+    /**
+     * #421: true while the remote still has [fromPath], so a delete of a folder a move failed to
+     * take something out of stays guarded. A move that failed AFTER the provider applied it (a
+     * multi-leg move, the state.db writes) leaves the source gone: re-planning that move then
+     * fails with "Item not found" every pass, and guarding the delete on it would keep the
+     * folder undeletable forever — the exact non-convergence this guard was added to prevent.
+     * With the source gone the move is effectively applied: the delete runs (itself a no-op
+     * against the live remote), the rows tombstone, and the reconciler adopts the moved items
+     * by id on the next pass.
+     */
+    private suspend fun moveSourceStillRemote(fromPath: String): Boolean =
+        try {
+            remoteItemOrNull(fromPath) != null
+        } catch (e: Exception) {
+            log.debug(
+                "#421: probing the move source {} failed ({}); guarding the delete anyway",
+                fromPath,
+                e.message ?: e.javaClass.simpleName,
+            )
+            true
+        }
 
     /**
      * #421: true when [action] deletes a folder that a remote move failed to take something out
