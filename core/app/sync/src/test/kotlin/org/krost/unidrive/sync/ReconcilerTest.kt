@@ -1692,6 +1692,88 @@ class ReconcilerTest {
         assertIs<SyncAction.DeleteLocal>(actions[0])
     }
 
+    // ── #419: a re-delivered delete for an already-trashed, already-gone row ─
+    //
+    // The Internxt delta cursor rewinds by two minutes, so a run that only sees old
+    // deletions re-reads the same deleted items. A TRASHED tombstone that is also absent
+    // on disk has nothing left to delete: planning DeleteLocal is a no-op that shows up
+    // as "N del-local" in every dry-run.
+
+    @Test
+    fun `#419 remote delete of a TRASHED row whose local path is absent plans nothing`() {
+        db.upsertEntry(dbEntry("/gone.txt", isHydrated = true))
+        assertTrue(db.setStatusTrashed("id-/gone.txt"))
+        assertFalse(Files.exists(syncRoot.resolve("gone.txt")))
+
+        val remoteChanges = mapOf("/gone.txt" to cloudItem("/gone.txt", deleted = true))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        assertTrue(actions.isEmpty(), "already-trashed and gone locally: nothing to delete; got $actions")
+        assertEquals(1, db.recovery.trashedEntries().size, "the tombstone itself is left untouched")
+    }
+
+    @Test
+    fun `#419 remote delete of a TRASHED folder whose local path is absent plans nothing`() {
+        db.upsertEntry(dbEntry("/photos", isHydrated = true).copy(isFolder = true, remoteHash = null))
+        assertTrue(db.setStatusTrashed("id-/photos"))
+
+        val remoteChanges = mapOf("/photos" to cloudItem("/photos", isFolder = true, deleted = true, hash = null))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        assertTrue(actions.isEmpty(), "already-trashed folder, gone locally: nothing to delete; got $actions")
+    }
+
+    @Test
+    fun `#419 remote delete of an untracked path whose local path is absent plans nothing`() {
+        val remoteChanges = mapOf("/never-seen.txt" to cloudItem("/never-seen.txt", deleted = true))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        assertTrue(actions.isEmpty(), "no row and nothing on disk: nothing to delete; got $actions")
+    }
+
+    @Test
+    fun `#419 remote delete of a TRASHED row whose local path still exists keeps DeleteLocal`() {
+        db.upsertEntry(dbEntry("/still-here.txt", isHydrated = true))
+        assertTrue(db.setStatusTrashed("id-/still-here.txt"))
+        Files.write(syncRoot.resolve("still-here.txt"), ByteArray(100))
+
+        val remoteChanges = mapOf("/still-here.txt" to cloudItem("/still-here.txt", deleted = true))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        assertEquals(1, actions.size, "a file that is still on disk must still be deleted; got $actions")
+        assertIs<SyncAction.DeleteLocal>(actions[0])
+        assertEquals("/still-here.txt", actions[0].path)
+    }
+
+    @Test
+    fun `#419 remote delete of an alive row still emits DeleteLocal when the local path is absent`() {
+        db.upsertEntry(dbEntry("/alive.txt", isHydrated = true))
+        assertFalse(Files.exists(syncRoot.resolve("alive.txt")))
+
+        val remoteChanges = mapOf("/alive.txt" to cloudItem("/alive.txt", deleted = true))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+
+        assertEquals(1, actions.size, "alive rows keep their behaviour; got $actions")
+        assertIs<SyncAction.DeleteLocal>(actions[0])
+    }
+
+    @Test
+    fun `#419 streaming slice plans nothing for a TRASHED row gone locally and keeps DeleteLocal for an alive row`() {
+        db.upsertEntry(dbEntry("/trashed.txt", isHydrated = true))
+        assertTrue(db.setStatusTrashed("id-/trashed.txt"))
+        db.upsertEntry(dbEntry("/alive.txt", isHydrated = true))
+
+        val page =
+            mapOf(
+                "/trashed.txt" to cloudItem("/trashed.txt", deleted = true),
+                "/alive.txt" to cloudItem("/alive.txt", deleted = true),
+            )
+        val actions = reconciler.resolveSlice(page, emptyMap())
+
+        assertEquals(listOf("/alive.txt"), actions.map { it.path }, "slice actions: $actions")
+        assertIs<SyncAction.DeleteLocal>(actions[0])
+    }
+
     // ---- StreamingReconcileBuffer ----
     //
     // The buffer is an engine-internal layer that splits per-page reconciler

@@ -1,9 +1,12 @@
 package org.krost.unidrive.sync
 
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -233,6 +236,34 @@ class SyncEngineTest {
 
             assertFalse(Files.exists(syncRoot.resolve("will-delete.txt")))
             assertNull(db.getEntry("/will-delete.txt"))
+        }
+
+    @Test
+    fun `#419 re-delivered remote delete of a trashed and locally gone row is not planned again`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/will-delete.txt", size = 100))
+            engine.syncOnce()
+            assertTrue(Files.exists(syncRoot.resolve("will-delete.txt")))
+
+            // Run 1 sees the deletion: file removed locally, row becomes a TRASHED tombstone.
+            provider.deltaItems = listOf(cloudItem("/will-delete.txt", deleted = true))
+            provider.deltaCursor = "cursor-2"
+            engine.syncOnce()
+            assertFalse(Files.exists(syncRoot.resolve("will-delete.txt")))
+            assertEquals(1, db.recovery.trashedEntries().size, "the deleted row is a TRASHED tombstone")
+
+            // The rewound Internxt cursor re-delivers the same deleted item on the next run. A
+            // dry-run must not claim there is anything left to delete locally.
+            val reporter = RecordingReporter()
+            preview {
+                engineWithReporter(reporter).syncOnce(dryRun = true)
+            }
+
+            assertTrue(
+                reporter.actions.none { it.label == "del-local" },
+                "no del-local for a trashed, gone row; got ${reporter.actions}",
+            )
+            assertEquals(1, db.recovery.trashedEntries().size, "the tombstone is untouched")
         }
 
     @Test
@@ -1104,6 +1135,120 @@ class SyncEngineTest {
             assertFalse(
                 provider.deletedPaths.contains("/dir"),
                 "a directory with a surviving child must NOT be reaped; deleted=${provider.deletedPaths}",
+            )
+        }
+
+    // -- #419: reaper vs. a folder the same run already deleted --
+
+    /** A `provider.listChildren`/`delete` failure that carries an HTTP status, like InternxtApiException. */
+    private class StatusProviderException(
+        message: String,
+        val statusCode: Int,
+    ) : ProviderException(message)
+
+    private fun trackedRow(
+        path: String,
+        isFolder: Boolean,
+    ): org.krost.unidrive.sync.model.SyncEntry {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        return org.krost.unidrive.sync.model.SyncEntry(
+            path = path,
+            remoteId = "id-$path",
+            remoteHash = if (isFolder) null else "h",
+            remoteSize = if (isFolder) 0 else 10,
+            remoteModified = now,
+            localMtime = now.toEpochMilli(),
+            localSize = if (isFolder) 0 else 10,
+            isFolder = isFolder,
+            isPinned = false,
+            isHydrated = true,
+            lastSynced = now,
+        )
+    }
+
+    /** Runs [block] with a capture appender on the SyncEngine logger and returns the WARN lines it saw. */
+    private suspend fun engineWarnsDuring(block: suspend () -> Unit): List<String> {
+        val logger = LoggerFactory.getLogger(SyncEngine::class.java) as ch.qos.logback.classic.Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
+        try {
+            block()
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
+        return appender.list.filter { it.level.levelStr == "WARN" }.map { it.formattedMessage }
+    }
+
+    @Test
+    fun `#419 reaper does not touch a folder this run already deleted`() =
+        runTest {
+            // Deleting a local folder plans DeleteRemote for its files AND for the folder itself.
+            // The folder is trashed by that DeleteRemote, so the empty-directory reaper (whose
+            // candidates are the ancestors of the deleted files) must not list or delete it again.
+            db.upsertEntry(trackedRow("/dir", isFolder = true))
+            db.upsertEntry(trackedRow("/dir/only.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            // Once trashed, the folder no longer lists: the live 404 the reaper used to WARN about.
+            provider.listChildrenThrow["/dir"] = StatusProviderException("API error: 404 Not Found - {}", 404)
+            Files.writeString(syncRoot.resolve("other.txt"), "keep") // satisfy empty-root guard
+
+            val warns = engineWarnsDuring { engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false) }
+
+            assertEquals(1, provider.deletedPaths.count { it == "/dir" }, "folder deleted exactly once; deleted=${provider.deletedPaths}")
+            assertTrue(provider.deletedPaths.contains("/dir/only.txt"), "the file must be deleted; deleted=${provider.deletedPaths}")
+            assertFalse("/dir" in provider.listChildrenCalls, "reaper must not probe a folder this run deleted; calls=${provider.listChildrenCalls}")
+            assertTrue(warns.none { it.contains("reap") }, "no reap WARN expected; got $warns")
+        }
+
+    @Test
+    fun `#419 reaper treats a 404 from listChildren as already gone`() =
+        runTest {
+            // The folder is NOT in this run's plan, but vanished remotely (trashed elsewhere): the
+            // listing 404s. End state is what the reaper wanted, so it is not a warning.
+            db.upsertEntry(trackedRow("/dir/gone.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            provider.listChildrenThrow["/dir"] = StatusProviderException("API error: 404 Not Found - {}", 404)
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+
+            val warns = engineWarnsDuring { engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false) }
+
+            assertTrue("/dir" in provider.listChildrenCalls, "reaper must still probe /dir; calls=${provider.listChildrenCalls}")
+            assertTrue(warns.none { it.contains("reap") }, "a 404 while reaping means already gone, not WARN; got $warns")
+        }
+
+    @Test
+    fun `#419 reaper treats a 404 from delete as already gone`() =
+        runTest {
+            db.upsertEntry(trackedRow("/dir/gone.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            provider.childrenByParent["/dir"] = emptyList() // empty, so the reaper tries to delete it
+            provider.deleteThrowByPath["/dir"] = StatusProviderException("API error: 404 Not Found - {}", 404)
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+
+            val warns = engineWarnsDuring { engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false) }
+
+            assertTrue(provider.deletedPaths.contains("/dir/gone.txt"), "the file must be deleted; deleted=${provider.deletedPaths}")
+            assertTrue(warns.none { it.contains("reap") }, "a 404 while reaping means already gone, not WARN; got $warns")
+        }
+
+    @Test
+    fun `#419 reaper still warns on a real listing failure`() =
+        runTest {
+            db.upsertEntry(trackedRow("/dir/gone.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            provider.listChildrenThrow["/dir"] = StatusProviderException("API error: 503 Service Unavailable - {}", 503)
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+
+            val warns = engineWarnsDuring { engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false) }
+
+            assertTrue(
+                warns.any { it.startsWith("Failed to reap empty remote directory /dir") },
+                "a genuine failure must still be a WARN; got $warns",
             )
         }
 
@@ -3258,7 +3403,16 @@ class SyncEngineTest {
         // test can stage top-level folders that already exist on the cloud.
         val childrenByParent = mutableMapOf<String, List<CloudItem>>()
 
-        override suspend fun listChildren(path: String) = childrenByParent[path] ?: emptyList<CloudItem>()
+        // #419: every listChildren() path, and per-path exceptions to throw from it, so a
+        // reaper test can prove which directories were probed and simulate a 404 on one.
+        val listChildrenCalls = mutableListOf<String>()
+        val listChildrenThrow = mutableMapOf<String, Throwable>()
+
+        override suspend fun listChildren(path: String): List<CloudItem> {
+            listChildrenCalls.add(path)
+            listChildrenThrow[path]?.let { throw it }
+            return childrenByParent[path] ?: emptyList()
+        }
 
         override suspend fun getMetadata(path: String) = deltaItems.first { it.path == path }
 
@@ -3367,7 +3521,11 @@ class SyncEngineTest {
         // When non-null, the NEXT delete() call throws this exception (single-use, cleared after throw).
         var deleteThrow: Throwable? = null
 
+        // #419: per-path variant of deleteThrow (not single-use), for failing one specific delete.
+        val deleteThrowByPath = mutableMapOf<String, Throwable>()
+
         override suspend fun delete(remotePath: String, ifMatchETag: String?) {
+            deleteThrowByPath[remotePath]?.let { throw it }
             deleteThrow?.also { deleteThrow = null; throw it }
             if (deleteFailCount > 0) {
                 deleteFailCount--

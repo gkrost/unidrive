@@ -16,6 +16,7 @@ import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -134,6 +135,36 @@ class DaemonRuntimeTest {
 
         runtime.close()
         daemonJob.join()
+    }
+
+    @Test
+    fun `#419 graceful shutdown removes the socket file and its meta sibling`() = runBlocking {
+        // IpcServer.defaultSocketPath writes this `.meta` next to a hashed socket name so a UI can
+        // recover the profile name; a stopped daemon must not leave it (or the socket) behind.
+        val metaPath = socketPath.resolveSibling("${socketPath.fileName}.meta")
+        Files.writeString(metaPath, "test_profile\n")
+
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+
+        runtime.close()
+        daemonJob.join()
+
+        assertFalse(Files.exists(socketPath), "socket file must be gone after the daemon stopped")
+        assertFalse(Files.exists(metaPath), "meta file must be gone after the daemon stopped")
     }
 
     @Test

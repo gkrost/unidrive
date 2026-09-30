@@ -803,7 +803,12 @@ class Reconciler(
                     SyncAction.DownloadContent(path, remoteItem)
                 }
             localState == ChangeState.UNCHANGED && remoteState == ChangeState.DELETED ->
-                SyncAction.DeleteLocal(path)
+                // #419: `entry` comes from the alive view, so null means the row is already a
+                // TRASHED tombstone (or was never tracked). With nothing on disk either there is
+                // nothing left to delete — applyDeleteLocal would be a pure no-op that only
+                // pollutes the preview ("N del-local") every time a rewound delta cursor
+                // re-delivers the same deletion. Alive rows and files still on disk keep the action.
+                if (entry == null && isAbsentLocally(path)) null else SyncAction.DeleteLocal(path)
 
             // Local only changes
             localState == ChangeState.NEW && remoteState == ChangeState.UNCHANGED -> {
@@ -1219,6 +1224,20 @@ class Reconciler(
         }
 
     private fun resolveLocal(remotePath: String): java.nio.file.Path = safeResolveLocal(syncRoot, remotePath)
+
+    // #419: true only when [path] is provably absent on disk (a dangling symlink still counts as
+    // present). A path that cannot be resolved inside sync_root is not "absent": the caller keeps
+    // its action and the apply step rejects it as it always did. resolveLocal throws
+    // InvalidPathException (not only SecurityException) for a remote name a Windows path cannot
+    // represent (the #230 quarantine class) — that is "cannot resolve", not "absent".
+    private fun isAbsentLocally(path: String): Boolean =
+        try {
+            !Files.exists(resolveLocal(path), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        } catch (_: SecurityException) {
+            false
+        } catch (_: java.nio.file.InvalidPathException) {
+            false
+        }
 
     companion object {
         /**
