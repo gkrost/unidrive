@@ -240,6 +240,55 @@ class SyncEngineLocalHashTest {
         assertNull(result.localHash)
     }
 
+    // #337: an upload row takes the file's stats after the transfer, so an edit that lands
+    // mid-upload is already in the baseline. Its hash must not be recorded too, or a later
+    // touch would be absorbed as unchanged and the edit would never reach the remote.
+
+    private fun editDuringUpload(edited: ByteArray) {
+        provider.duringUpload = { path ->
+            Files.write(path, edited)
+            Files.setLastModifiedTime(path, FileTime.fromMillis(Files.getLastModifiedTime(path).toMillis() + 60_000L))
+            provider.duringUpload = null
+        }
+    }
+
+    @Test
+    fun `an edit that lands during an upload is sent once the file is touched`() =
+        runTest {
+            val eng = engine()
+            provider.deltaItems = emptyList()
+            eng.syncOnce()
+            val file = syncRoot.resolve("draft.txt")
+            Files.writeString(file, "first version")
+            val edited = "edited version".toByteArray() // same size as the first
+            editDuringUpload(edited)
+            eng.syncOnce()
+            assertNull(db.getEntry("/draft.txt")?.localHash, "the uploaded bytes are not the ones on disk")
+
+            quietRemote("cursor-2")
+            Files.setLastModifiedTime(file, FileTime.fromMillis(Files.getLastModifiedTime(file).toMillis() + 60_000L))
+            eng.syncOnce()
+
+            assertContentEquals(edited, provider.files["/draft.txt"], "the touch must upload the edit")
+        }
+
+    @Test
+    fun `a write-back whose cache copy changes during the upload records no hash`() =
+        runTest {
+            val eng = engine()
+            provider.deltaItems = emptyList()
+            eng.syncOnce()
+            val cacheCopy = Files.createTempDirectory("ud-396-wb-race").resolve("local.txt")
+            Files.writeString(cacheCopy, "first version")
+            editDuringUpload("edited version".toByteArray())
+
+            eng.uploadFromCache("/local.txt", cacheCopy)
+
+            val row = assertNotNull(db.getEntry("/local.txt"))
+            assertNotNull(row.remoteId, "the write-back was uploaded")
+            assertNull(row.localHash)
+        }
+
     @Test
     fun `a provider with a remote hash algorithm never gets a local hash`() =
         runTest {

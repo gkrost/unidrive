@@ -489,6 +489,7 @@ open class SyncEngine(
         // upload at `path`, byte-identical to pre-#115.
         val remotePath = existingEntry?.remotePath ?: path
         val sizeForLog = Files.size(cachePath)
+        val sent = statBeforeUpload(cachePath)
         val result =
             try {
                 provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId) { transferred, total ->
@@ -554,7 +555,7 @@ open class SyncEngine(
             // The row just adopted the cache copy's stats, and these are exactly the bytes the
             // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)
             // so the touch shield covers mount-edited files too.
-            db.upsertEntry(withLocalHash(uploaded, cachePath, mtime, size))
+            db.upsertEntry(withSentHash(uploaded, cachePath, sent))
         }
         auditLog?.emit(
             action = "Upload",
@@ -3127,6 +3128,7 @@ open class SyncEngine(
         // UD-113: capture pre-action remote hash so the audit entry's oldHash reflects
         // the version we replaced (or null for a fresh upload).
         val prevHash = db.getEntry(action.path)?.remoteHash
+        val sent = statBeforeUpload(localPath)
         val result =
             try {
                 // UD-366: action.remoteId carries the existing remote UUID for MODIFIED uploads;
@@ -3168,7 +3170,7 @@ open class SyncEngine(
                 isPinned = false,
                 isHydrated = true,
                 lastSynced = Instant.now(),
-            ).let { withLocalHash(it) }, // #396: hashless providers get the SHA-256 of the bytes just sent
+            ).let { withSentHash(it, localPath, sent) }, // #396: hashless providers get the SHA-256 of the bytes just sent
         )
         // UD-113: success path. Failure path emits inside the try/catch above.
         auditLog?.emit(
@@ -3745,6 +3747,7 @@ open class SyncEngine(
                 SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
             )
         } else if (action.remoteState == ChangeState.DELETED && Files.exists(localPath)) {
+            val sent = statBeforeUpload(localPath)
             val result =
                 provider.upload(localPath, action.path) { transferred, total ->
                     reporter.onTransferProgress(action.path, transferred, total)
@@ -3763,7 +3766,7 @@ open class SyncEngine(
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = Instant.now(),
-                ).let { withLocalHash(it) },
+                ).let { withSentHash(it, localPath, sent) },
             )
         }
     }
@@ -3861,6 +3864,28 @@ open class SyncEngine(
             log.debug("#396: cannot hash {} for the local-hash column: {}", entry.path, e.message)
             entry.copy(localHash = null)
         }
+    }
+
+    // mtime and size of a file about to be uploaded, or null when it cannot be read.
+    private fun statBeforeUpload(local: Path): Pair<Long, Long>? =
+        try {
+            Files.getLastModifiedTime(local).toMillis() to Files.size(local)
+        } catch (e: java.io.IOException) {
+            null
+        }
+
+    // An upload row records the file's stats as read after the transfer, so an edit that
+    // lands during a long upload is already part of that baseline (#337). Hashing those
+    // bytes would also let every later touch be absorbed as unchanged, and the edit would
+    // never be sent. Guard the hash with the stats taken before the upload instead: if the
+    // file changed while it was being sent, it gets no hash.
+    private fun withSentHash(
+        entry: SyncEntry,
+        local: Path,
+        sent: Pair<Long, Long>?,
+    ): SyncEntry {
+        if (sent == null) return entry.copy(localHash = null)
+        return withLocalHash(entry, local, sent.first, sent.second)
     }
 
     private fun buildCanonicalToLocalTopMap(remoteChanges: Map<String, CloudItem>): Map<String, String> {

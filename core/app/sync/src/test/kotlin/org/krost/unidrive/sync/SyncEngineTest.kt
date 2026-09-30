@@ -3496,6 +3496,10 @@ class SyncEngineTest {
         // provider returns for the write: the time the server will list next).
         var uploadModified: Instant? = null
 
+        // Runs after upload() has read the bytes it sends, to model a local edit that lands
+        // while a long upload is still in flight.
+        var duringUpload: ((Path) -> Unit)? = null
+
         override suspend fun upload(
             localPath: Path,
             remotePath: String,
@@ -3511,6 +3515,7 @@ class SyncEngineTest {
             uploadedPaths.add(remotePath)
             val content = Files.readAllBytes(localPath)
             files[remotePath] = content
+            duringUpload?.invoke(localPath)
             return CloudItem(
                 id = "id-$remotePath",
                 name = remotePath.substringAfterLast("/"),
