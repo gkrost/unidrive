@@ -1537,6 +1537,10 @@ open class SyncEngine(
         // #419: paths this pass has already deleted on the remote, so the empty-directory
         // reaper below leaves them alone instead of re-probing a folder it just trashed.
         val remoteDeletedPaths = mutableSetOf<String>()
+        // #421: source paths of remote moves that failed this pass. The reconciler orders every
+        // folder delete after the moves out of that folder; a remote delete must also not run when
+        // such a move failed, or it would trash the folder together with the file the move left in it.
+        val failedMoveSources = mutableListOf<String>()
 
         // Batched into one SQLite transaction — avoids one fsync per action.
         // Wrap in Priority.Foreground so the provider's throttle coordinator
@@ -1615,10 +1619,11 @@ open class SyncEngine(
                             is SyncAction.MoveRemote -> applyMoveRemote(action)
                             is SyncAction.MoveLocal -> applyMoveLocal(action)
                             is SyncAction.DeleteLocal -> applyDeleteLocal(action)
-                            is SyncAction.DeleteRemote -> {
-                                applyDeleteRemote(action)
-                                remoteDeletedPaths += action.path
-                            }
+                            is SyncAction.DeleteRemote ->
+                                if (!deleteBlockedByFailedMove(action, failedMoveSources)) {
+                                    applyDeleteRemote(action)
+                                    remoteDeletedPaths += action.path
+                                }
                             is SyncAction.Conflict -> {
                                 applyConflict(action)
                                 conflicts.incrementAndGet()
@@ -1643,6 +1648,9 @@ open class SyncEngine(
                     } catch (e: Exception) {
                         consecutiveFailures++
                         passOneFailures.incrementAndGet()
+                        if (action is SyncAction.MoveRemote && moveSourceStillRemote(action.fromPath)) {
+                            failedMoveSources.add(action.fromPath)
+                        }
                         // UD-253: class name + throwable (SLF4J renders stack trace when the
                         // last arg is a Throwable) so WARNs are self-diagnosing in the log.
                         // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
@@ -3309,6 +3317,46 @@ open class SyncEngine(
         } else {
             db.deleteEntry(action.path)
         }
+    }
+
+    /**
+     * #421: true while the remote still has [fromPath], so a delete of a folder a move failed to
+     * take something out of stays guarded. A move that failed AFTER the provider applied it (a
+     * multi-leg move, the state.db writes) leaves the source gone: re-planning that move then
+     * fails with "Item not found" every pass, and guarding the delete on it would keep the
+     * folder undeletable forever — the exact non-convergence this guard was added to prevent.
+     * With the source gone the move is effectively applied: the delete runs (itself a no-op
+     * against the live remote), the rows tombstone, and the reconciler adopts the moved items
+     * by id on the next pass.
+     */
+    private suspend fun moveSourceStillRemote(fromPath: String): Boolean =
+        try {
+            remoteItemOrNull(fromPath) != null
+        } catch (e: Exception) {
+            log.debug(
+                "#421: probing the move source {} failed ({}); guarding the delete anyway",
+                fromPath,
+                e.message ?: e.javaClass.simpleName,
+            )
+            true
+        }
+
+    /**
+     * #421: true when [action] deletes a folder that a remote move failed to take something out
+     * of earlier in this pass. Deleting it now would trash whatever the move left behind (the
+     * provider's delete takes the folder's whole subtree with it); the delete and the failed move
+     * both re-plan on the next sync instead.
+     */
+    private fun deleteBlockedByFailedMove(
+        action: SyncAction.DeleteRemote,
+        failedMoveSources: List<String>,
+    ): Boolean {
+        val blockedBy =
+            failedMoveSources.firstOrNull { it == action.path || it.startsWith(action.path + "/") }
+                ?: return false
+        log.warn("Not deleting {}: the move of {} out of it failed; both are retried on the next sync", action.path, blockedBy)
+        reporter.onWarning("Skipped delete of ${action.path}: moving $blockedBy out of it failed")
+        return true
     }
 
     private suspend fun applyDeleteRemote(action: SyncAction.DeleteRemote) {
