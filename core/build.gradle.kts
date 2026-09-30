@@ -26,6 +26,14 @@ allprojects {
     version = "0.0.1"
 
     repositories {
+        // Mirrors before mavenCentral — see the long comment in settings.gradle.kts.
+        // Gradle never falls through to the next repository on an HTTP error, only on
+        // a 404, so Central must be reachable only via mirror misses to keep the
+        // shared-CI-runner 429s out of the resolution path.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/")
+        maven("https://maven.aliyun.com/repository/public")
+        maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
+        maven("https://repo.huaweicloud.com/repository/maven/")
         mavenCentral()
     }
 

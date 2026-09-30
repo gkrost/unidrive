@@ -35,6 +35,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # Cache ~/.gradle (same 429 rationale as build.yml; see
+      # core/settings.gradle.kts for the mirror set).
+      - name: Set up Gradle dependency cache
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Build shadowJar
         working-directory: core
         run: ./gradlew :app:cli:shadowJar --no-daemon -q
