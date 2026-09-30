@@ -34,6 +34,33 @@ jobs:
         working-directory: core
         run: ./gradlew check --no-daemon
 
+  # The packaged distribution ships a jlink runtime image jlinked from the
+  # bundled runtime JDK — the current JDK release train, not the compile
+  # toolchain (see :app:cli:runtimeImage). This leg runs the gate with the
+  # engine and its tests executing on that runtime JDK (-PunidriveTestJvm
+  # switches only the test JVMs; bytecode stays at the toolchain level), so
+  # a runtime regression surfaces here and not in a packaged build. Gradle
+  # itself runs on the runtime JDK; the compile toolchain resolves from the
+  # runner's pre-installed JDK.
+  check-runtime-jdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Cache ~/.gradle (see the comment in the check job).
+      - name: Set up Gradle dependency cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up runtime JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: '27'
+
+      - name: Gradle check (runtime JDK)
+        working-directory: core
+        run: ./gradlew check --no-daemon -PunidriveTestJvm=27
+
   check-windows:
     runs-on: windows-latest
     continue-on-error: true

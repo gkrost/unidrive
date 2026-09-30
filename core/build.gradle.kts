@@ -12,9 +12,13 @@ plugins {
 // Pin the JaCoCo tool version explicitly so it does not float with the Gradle
 // default. Dependabot regenerates the dependency lockfiles with its own Gradle
 // toolchain, which resolved a different default (0.8.13) than the project
-// wrapper (0.8.14) and produced a strict-lock conflict on every gradle bump PR.
+// wrapper and produced a strict-lock conflict on every gradle bump PR.
 // Pinning here makes the resolved version deterministic regardless of toolchain.
-val jacocoToolVersion = "0.8.14"
+// The version must also keep up with the newest JDK any gate leg runs tests on:
+// the runtime-JDK leg executes on the bundled runtime JDK, whose class files
+// need an ASM that can read them (an older JaCoCo agent spills
+// IllegalClassFormatException stacks into test stderr and breaks coverage).
+val jacocoToolVersion = "0.8.15"
 
 configure<JacocoPluginExtension> {
     toolVersion = jacocoToolVersion
@@ -116,6 +120,29 @@ subprojects {
     tasks.withType<Test>().configureEach {
         jvmArgs("--enable-native-access=ALL-UNNAMED")
         finalizedBy(tasks.withType<JacocoReport>())
+    }
+}
+
+// CI's second gate leg runs the engine and its tests on the bundled runtime
+// JDK (`-PunidriveTestJvm=<version>`): bytecode stays at the toolchain level
+// pinned above, but the test JVMs become the JDK a packaged runtime image
+// ships, so a runtime regression surfaces in `check` instead of in a
+// packaged build. Unset — the default — keeps every test JVM on the compile
+// toolchain.
+providers.gradleProperty("unidriveTestJvm").orNull?.let { jvmVersion ->
+    val runtimeJvm = org.gradle.jvm.toolchain.JavaLanguageVersion.of(jvmVersion)
+    subprojects {
+        // Container projects (no java plugin) have no test tasks and no
+        // toolchain service — only query where tests can exist.
+        pluginManager.withPlugin("java") {
+            val runtimeLauncher =
+                the<org.gradle.jvm.toolchain.JavaToolchainService>().launcherFor {
+                    languageVersion = runtimeJvm
+                }
+            tasks.withType<Test>().configureEach {
+                javaLauncher.set(runtimeLauncher)
+            }
+        }
     }
 }
 
