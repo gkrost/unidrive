@@ -339,19 +339,25 @@ open class SyncEngine(
             // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
             // start claiming it does). Rewriting them from the cache copy made the next scan read an
             // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
+            // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
+            // describes them.
             db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
         } else {
             // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
             // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
             // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
+            val rebaselined = current.copy(
+                isHydrated = true,
+                remoteSize = downloadedSize,
+                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                localSize = Files.size(cachePath),
+                lastSynced = Instant.now(),
+            )
+            // The row just adopted the cache copy's stats, so the hash must describe the cache
+            // copy's bytes: keeping a hash recorded for the previous contents would pair stale
+            // bytes with a fresh mtime/size and let a later touch be absorbed as unchanged.
             db.upsertEntry(
-                current.copy(
-                    isHydrated = true,
-                    remoteSize = downloadedSize,
-                    localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
-                    localSize = Files.size(cachePath),
-                    lastSynced = Instant.now(),
-                ),
+                withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
             )
         }
         return cachePath
@@ -456,6 +462,8 @@ open class SyncEngine(
                     localMtime = mtime,
                     localSize = size,
                     isHydrated = true,
+                    // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
+                    localHash = null,
                 ) ?: SyncEntry(
                     path = path,
                     remoteId = null,
@@ -521,30 +529,32 @@ open class SyncEngine(
                 ),
             )
         } else {
-            db.upsertEntry(
-                existing?.copy(
-                    remoteId = result.id,
-                    remoteHash = result.hash,
-                    remoteSize = result.size,
-                    remoteModified = result.modified,
-                    localMtime = mtime,
-                    localSize = size,
-                    isHydrated = true,
-                    lastSynced = Instant.now(),
-                ) ?: SyncEntry(
-                    path = path,
-                    remoteId = result.id,
-                    remoteHash = result.hash,
-                    remoteSize = result.size,
-                    remoteModified = result.modified,
-                    localMtime = mtime,
-                    localSize = size,
-                    isFolder = false,
-                    isPinned = false,
-                    isHydrated = true,
-                    lastSynced = Instant.now(),
-                ),
+            val uploaded = existing?.copy(
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ) ?: SyncEntry(
+                path = path,
+                remoteId = result.id,
+                remoteHash = result.hash,
+                remoteSize = result.size,
+                remoteModified = result.modified,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
             )
+            // The row just adopted the cache copy's stats, and these are exactly the bytes the
+            // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)
+            // so the touch shield covers mount-edited files too.
+            db.upsertEntry(withLocalHash(uploaded, cachePath, mtime, size))
         }
         auditLog?.emit(
             action = "Upload",
@@ -2994,7 +3004,9 @@ open class SyncEngine(
         }
 
         val isHydrated = hasRealContent || item.size == 0L || shouldDownload
-        db.upsertEntry(entryFromCloudItem(item, action.path, isHydrated))
+        val entry = entryFromCloudItem(item, action.path, isHydrated)
+        // #396: only bytes the engine just wrote get a local hash; an adopted file is not re-read.
+        db.upsertEntry(if (shouldDownload) withLocalHash(entry) else entry)
     }
 
     private suspend fun applyUpdatePlaceholder(action: SyncAction.UpdatePlaceholder) {
@@ -3022,7 +3034,9 @@ open class SyncEngine(
             }
         }
 
-        db.upsertEntry(entryFromCloudItem(item, action.path, action.wasHydrated))
+        val entry = entryFromCloudItem(item, action.path, action.wasHydrated)
+        // #396: the hydrated branch above re-downloaded real bytes; metadata-only updates did not.
+        db.upsertEntry(if (action.wasHydrated && !item.isFolder) withLocalHash(entry) else entry)
     }
 
     internal suspend fun downloadByIdOrPath(
@@ -3071,7 +3085,7 @@ open class SyncEngine(
                 }
             }
 
-            db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true))
+            db.upsertEntry(withLocalHash(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true)))
             auditLog?.emit(
                 action = "Download",
                 path = action.path,
@@ -3146,7 +3160,7 @@ open class SyncEngine(
                 isPinned = false,
                 isHydrated = true,
                 lastSynced = Instant.now(),
-            ),
+            ).let { withLocalHash(it) }, // #396: hashless providers get the SHA-256 of the bytes just sent
         )
         // UD-113: success path. Failure path emits inside the try/catch above.
         auditLog?.emit(
@@ -3225,6 +3239,8 @@ open class SyncEngine(
                 isPinned = false,
                 isHydrated = oldEntry?.isHydrated ?: true,
                 lastSynced = Instant.now(),
+                // #396: a rename does not touch the bytes, so the recorded local hash stays valid.
+                localHash = oldEntry?.localHash,
             ),
         )
         // UD-113: success path for the remote-side rename/move.
@@ -3266,7 +3282,10 @@ open class SyncEngine(
         if (isFolder) {
             db.renamePrefix(action.fromPath, action.path)
         }
-        db.upsertEntry(entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false))
+        db.upsertEntry(
+            entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false)
+                .copy(localHash = oldEntry?.localHash),
+        )
     }
 
     private fun applyDeleteLocal(action: SyncAction.DeleteLocal) {
@@ -3696,7 +3715,7 @@ open class SyncEngine(
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = Instant.now(),
-                ),
+                ).let { withLocalHash(it) },
             )
         }
     }
@@ -3754,6 +3773,45 @@ open class SyncEngine(
         isHydrated = isHydrated,
         lastSynced = Instant.now(),
     )
+
+    // #396: for a provider with no remote content hash (Internxt), record the SHA-256 of the
+    // bytes the engine itself just wrote (download) or sent (upload). LocalScanner uses it to
+    // recognise a file whose mtime was bumped by something else (shell handler, indexer,
+    // antivirus) as unchanged instead of planning a redundant re-upload. Hash-capable
+    // providers are left alone: the scanner already compares against the remote hash there.
+    //
+    // The hash is kept only if the file still has the mtime and size the row records, so a
+    // write that lands while we are hashing cannot turn the new bytes into the tracked
+    // baseline. Any read failure just leaves the hash null (today's mtime+size behaviour).
+    private fun withLocalHash(entry: SyncEntry): SyncEntry {
+        if (provider.hashAlgorithm() != null || entry.isFolder) return entry
+        val mtime = entry.localMtime ?: return entry
+        val size = entry.localSize ?: return entry
+        return withLocalHash(entry, placeholder.resolveLocal(entry.path), mtime, size)
+    }
+
+    // Same guard for a copy of the bytes that is not the sync-root file — the cache copy a
+    // hydration downloaded or a write-back was uploaded from. The row records that copy's
+    // stats, so the hash must describe that copy and be dropped if it changes mid-hash.
+    private fun withLocalHash(
+        entry: SyncEntry,
+        local: Path,
+        mtime: Long,
+        size: Long,
+    ): SyncEntry {
+        if (provider.hashAlgorithm() != null || entry.isFolder) return entry
+        return try {
+            val hash = HashVerifier.computeSha256Hex(local)
+            if (Files.getLastModifiedTime(local).toMillis() == mtime && Files.size(local) == size) {
+                entry.copy(localHash = hash)
+            } else {
+                entry
+            }
+        } catch (e: java.io.IOException) {
+            log.debug("#396: cannot hash {} for the local-hash column: {}", entry.path, e.message)
+            entry
+        }
+    }
 
     private fun buildCanonicalToLocalTopMap(remoteChanges: Map<String, CloudItem>): Map<String, String> {
         val topLevelNames = remoteChanges.keys

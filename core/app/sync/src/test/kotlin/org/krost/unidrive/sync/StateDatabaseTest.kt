@@ -1222,6 +1222,110 @@ class StateDatabaseTest {
     }
 
     @Test
+    fun `migration — local_hash column is added in-place to an existing DB and existing rows read it as null`() {
+        // #396: the shipped shape BEFORE local_hash — includes remote_path and the quarantine
+        // columns but not local_hash. The next initialize() must ADD the column without
+        // dropping rows or bumping schema_version; existing rows read localHash = null
+        // ("unknown"), which keeps today's mtime+size behaviour for them.
+        val tmpDir = Files.createTempDirectory("unidrive-localhash-migration")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        remote_id            TEXT PRIMARY KEY,
+                        parent_uuid          TEXT,
+                        path                 TEXT NOT NULL,
+                        remote_path          TEXT,
+                        remote_hash          TEXT,
+                        remote_size          INTEGER NOT NULL DEFAULT 0,
+                        remote_modified      TEXT,
+                        local_mtime          INTEGER,
+                        local_size           INTEGER,
+                        is_folder            INTEGER NOT NULL DEFAULT 0,
+                        is_pinned            INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated          INTEGER NOT NULL DEFAULT 0,
+                        last_synced          TEXT NOT NULL,
+                        status               TEXT NOT NULL DEFAULT 'EXISTS'
+                                             CHECK (status IN ('EXISTS','TRASHED','DELETED')),
+                        download_quarantined INTEGER NOT NULL DEFAULT 0,
+                        last_error_at        TEXT
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "CREATE VIEW alive_entries AS SELECT * FROM sync_entries WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state VALUES ('${StateDatabase.SCHEMA_VERSION_KEY}', " +
+                        "'${StateDatabase.SCHEMA_VERSION}')",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_entries (remote_id, path, remote_hash, local_mtime, local_size, is_hydrated, last_synced) " +
+                        "VALUES ('u-existing', '/Docs/report.pdf', 'h1', 1711627200000, 42, 1, '2026-01-01T00:00:00Z')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            val row = upgraded.getEntry("/Docs/report.pdf")
+            assertNotNull(row, "pre-#396 row must survive the additive migration")
+            assertNull(row.localHash, "an existing row has no local_hash -> reads as null (unknown)")
+            assertEquals(1711627200000L, row.localMtime)
+            assertEquals(42L, row.localSize)
+            assertEquals(
+                StateDatabase.SCHEMA_VERSION.toString(),
+                upgraded.getSyncState(StateDatabase.SCHEMA_VERSION_KEY),
+                "additive column: no schema_version bump",
+            )
+            // The column is writable and reads back on the migrated DB.
+            upgraded.upsertEntry(row.copy(localHash = "abc123"))
+            assertEquals("abc123", upgraded.getEntry("/Docs/report.pdf")?.localHash)
+            // Second initialize() is idempotent (column already present) and keeps the value.
+            upgraded.initialize()
+            assertEquals("abc123", upgraded.getEntry("/Docs/report.pdf")?.localHash)
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    @Test
+    fun `local_hash round-trips through upsert and survives renamePrefix and touch-style copies`() {
+        assertNull(entry("/plain.txt").localHash)
+        db.upsertEntry(entry("/dir", isFolder = true))
+        db.upsertEntry(entry("/dir/a.txt").copy(isHydrated = true, localHash = "sha-a"))
+        assertEquals("sha-a", db.getEntry("/dir/a.txt")?.localHash)
+
+        // A scanner-style refresh (.copy of the row) keeps the hash.
+        db.upsertEntry(db.getEntry("/dir/a.txt")!!.copy(localMtime = 1711627999000))
+        assertEquals("sha-a", db.getEntry("/dir/a.txt")?.localHash)
+
+        // Renaming the folder moves the rows in place; the bytes are unchanged so the hash is kept.
+        db.renamePrefix("/dir", "/moved")
+        assertEquals("sha-a", db.getEntry("/moved/a.txt")?.localHash)
+    }
+
+    @Test
+    fun `local_hash is dropped when a row is written as not hydrated`() {
+        // A freed file / placeholder has no local bytes for a hash to describe, and a later
+        // re-hydrate through any path must not inherit a hash of bytes that are gone.
+        db.upsertEntry(entry("/freed.txt").copy(isHydrated = true, localHash = "sha-freed"))
+        assertEquals("sha-freed", db.getEntry("/freed.txt")?.localHash)
+
+        db.upsertEntry(db.getEntry("/freed.txt")!!.copy(isHydrated = false))
+        assertNull(db.getEntry("/freed.txt")?.localHash, "dehydrating a row clears its local hash")
+
+        db.upsertEntry(db.getEntry("/freed.txt")!!.copy(isHydrated = true))
+        assertNull(db.getEntry("/freed.txt")?.localHash, "re-hydrating without a fresh hash leaves it unknown")
+    }
+
+    @Test
     fun `staging — scan_staging is added in-place to an existing v2 DB without disturbing rows`() {
         // Simulate a v2 DB created before the resumable-scan slice landed:
         // sync_entries + alive_entries + indexes are present, schema_version

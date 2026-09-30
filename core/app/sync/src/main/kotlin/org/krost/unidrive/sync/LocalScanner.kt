@@ -123,11 +123,40 @@ class LocalScanner(
                                     currentSize == entry.localSize &&
                                     hashAlgorithm != null &&
                                     !entry.remoteHash.isNullOrEmpty()
+                            // #396: no comparable remote hash (Internxt: hashAlgorithm() is null) —
+                            // fall back to the SHA-256 the engine recorded when it wrote or sent
+                            // these bytes. Rows without one behave exactly as before.
+                            val isLocalHashTouchOnly =
+                                !isTouchOnly &&
+                                    currentMtime != entry.localMtime &&
+                                    currentSize == entry.localSize &&
+                                    entry.localHash != null
                             if (isTouchOnly) {
                                 val localHash = HashVerifier.computeHash(file, hashAlgorithm)
                                 if (localHash == entry.remoteHash) {
                                     // Content unchanged — refresh tracked mtime so this file
                                     // isn't re-hashed on every subsequent scan.
+                                    db.upsertEntry(entry.copy(localMtime = currentMtime))
+                                } else {
+                                    changes[relativePath] = ChangeState.MODIFIED
+                                }
+                            } else if (isLocalHashTouchOnly) {
+                                // An unreadable file (locked by another process) can't be verified:
+                                // treat it as changed, as before, rather than abort the walk.
+                                val unchanged =
+                                    try {
+                                        HashVerifier.computeSha256Hex(file) == entry.localHash
+                                    } catch (e: IOException) {
+                                        log.debug("#396: cannot hash {} to check a touch-only change: {}", file, e.message)
+                                        false
+                                    }
+                                if (unchanged) {
+                                    log.debug(
+                                        "#396: {} mtime {} -> {} with identical content; treating as touch-only",
+                                        relativePath,
+                                        entry.localMtime,
+                                        currentMtime,
+                                    )
                                     db.upsertEntry(entry.copy(localMtime = currentMtime))
                                 } else {
                                     changes[relativePath] = ChangeState.MODIFIED
