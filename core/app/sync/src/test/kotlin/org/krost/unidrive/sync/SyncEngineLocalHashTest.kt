@@ -3,6 +3,7 @@ package org.krost.unidrive.sync
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.model.ConflictPolicy
+import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
@@ -193,6 +194,99 @@ class SyncEngineLocalHashTest {
             val row = assertNotNull(db.getEntry("/doc.bin"))
             assertEquals(sha256(cachePath), row.localHash)
             assertNotEquals(staleHash, row.localHash)
+        }
+
+    // The callers hand in a row that already carries the new mtime/size; if hashing then fails,
+    // keeping the previous contents' hash would pair stale bytes with fresh stats and let a
+    // later touch of a changed file be absorbed as unchanged.
+
+    private fun rowWithStaleHash(file: Path) =
+        SyncEntry(
+            path = "/stale.bin",
+            remoteId = "id-/stale.bin",
+            remoteHash = null,
+            remoteSize = Files.size(file),
+            remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+            localMtime = Files.getLastModifiedTime(file).toMillis(),
+            localSize = Files.size(file),
+            isFolder = false,
+            isPinned = false,
+            isHydrated = true,
+            lastSynced = Instant.now(),
+            localHash = "hash-of-the-previous-contents",
+        )
+
+    @Test
+    fun `a local hash that cannot be read drops the previous contents' hash`() {
+        val file = Files.createTempDirectory("ud-396-fail").resolve("stale.bin")
+        Files.write(file, "new bytes".toByteArray())
+        val row = rowWithStaleHash(file)
+        Files.delete(file)
+
+        val result = engine().withLocalHash(row, file, row.localMtime!!, row.localSize!!)
+
+        assertNull(result.localHash)
+    }
+
+    @Test
+    fun `a file that changes while it is hashed drops the previous contents' hash`() {
+        val file = Files.createTempDirectory("ud-396-race").resolve("stale.bin")
+        Files.write(file, "new bytes".toByteArray())
+        val row = rowWithStaleHash(file)
+
+        // The recorded mtime no longer matches the file: a writer landed during the hash.
+        val result = engine().withLocalHash(row, file, row.localMtime!! - 1_000L, row.localSize!!)
+
+        assertNull(result.localHash)
+    }
+
+    // #337: an upload row takes the file's stats after the transfer, so an edit that lands
+    // mid-upload is already in the baseline. Its hash must not be recorded too, or a later
+    // touch would be absorbed as unchanged and the edit would never reach the remote.
+
+    private fun editDuringUpload(edited: ByteArray) {
+        provider.duringUpload = { path ->
+            Files.write(path, edited)
+            Files.setLastModifiedTime(path, FileTime.fromMillis(Files.getLastModifiedTime(path).toMillis() + 60_000L))
+            provider.duringUpload = null
+        }
+    }
+
+    @Test
+    fun `an edit that lands during an upload is sent once the file is touched`() =
+        runTest {
+            val eng = engine()
+            provider.deltaItems = emptyList()
+            eng.syncOnce()
+            val file = syncRoot.resolve("draft.txt")
+            Files.writeString(file, "first version")
+            val edited = "edited version".toByteArray() // same size as the first
+            editDuringUpload(edited)
+            eng.syncOnce()
+            assertNull(db.getEntry("/draft.txt")?.localHash, "the uploaded bytes are not the ones on disk")
+
+            quietRemote("cursor-2")
+            Files.setLastModifiedTime(file, FileTime.fromMillis(Files.getLastModifiedTime(file).toMillis() + 60_000L))
+            eng.syncOnce()
+
+            assertContentEquals(edited, provider.files["/draft.txt"], "the touch must upload the edit")
+        }
+
+    @Test
+    fun `a write-back whose cache copy changes during the upload records no hash`() =
+        runTest {
+            val eng = engine()
+            provider.deltaItems = emptyList()
+            eng.syncOnce()
+            val cacheCopy = Files.createTempDirectory("ud-396-wb-race").resolve("local.txt")
+            Files.writeString(cacheCopy, "first version")
+            editDuringUpload("edited version".toByteArray())
+
+            eng.uploadFromCache("/local.txt", cacheCopy)
+
+            val row = assertNotNull(db.getEntry("/local.txt"))
+            assertNotNull(row.remoteId, "the write-back was uploaded")
+            assertNull(row.localHash)
         }
 
     @Test
