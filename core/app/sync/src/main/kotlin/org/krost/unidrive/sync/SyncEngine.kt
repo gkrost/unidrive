@@ -1139,7 +1139,7 @@ open class SyncEngine(
                     log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
                     emptyMap()
                 } else {
-                    gatherRemoteChanges()
+                    gatherRemoteChanges(readOnly = dryRun)
                 }
         }
 
@@ -1936,7 +1936,8 @@ open class SyncEngine(
         return out
     }
 
-    private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
+    // [readOnly]: a dry-run preview, told to the provider through ScanContext.readOnly so it persists nothing.
+    private suspend fun gatherRemoteChanges(readOnly: Boolean = false): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         var isFullSync = cursor == null || provider.deltaIsFullListing
@@ -2062,6 +2063,7 @@ open class SyncEngine(
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
                 scopeRoots = trackScope,
+                readOnly = readOnly,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -2152,6 +2154,7 @@ open class SyncEngine(
                     resumedItems = emptyList(),
                     persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
                     scopeRoots = trackScope,
+                    readOnly = readOnly,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =

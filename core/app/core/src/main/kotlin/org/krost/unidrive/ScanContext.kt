@@ -29,6 +29,11 @@ package org.krost.unidrive
  * which bounds its cost by the subtree size. Providers that cannot enumerate a
  * subtree ignore it and the engine filters the result.
  *
+ * [readOnly] is true when the pass is a preview (a dry-run). The provider must then leave
+ * every persistent side effect of a delta call undone: it may read the remote and use its
+ * credentials, but must not record "delta seen" markers or other state that a real pass would
+ * write. The engine's own state.db writes already go to a throwaway copy.
+ *
  * Providers that don't have a resume story (snapshot-once APIs, all-in-one
  * recursive listings) leave [ScanContext] unset on `delta()` and continue
  * accumulating in memory as before.
@@ -38,4 +43,5 @@ data class ScanContext(
     val resumedItems: List<CloudItem>,
     val persistPage: suspend (items: List<CloudItem>, marker: String) -> Unit,
     val scopeRoots: List<String> = emptyList(),
+    val readOnly: Boolean = false,
 )

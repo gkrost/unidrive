@@ -227,9 +227,12 @@ class OneDriveProvider(
     // 410 Gone on any delta call = cursor aged out / drive re-keyed.  Convert to a
     // typed DeltaCursorExpiredException so callers can self-heal with a full
     // re-enumeration.  Any other status propagates unchanged.
-    private suspend fun getDeltaConverting410(cursor: String?) =
+    private suspend fun getDeltaConverting410(
+        cursor: String?,
+        readOnly: Boolean = false,
+    ) =
         try {
-            graphApi.getDelta(cursor)
+            graphApi.getDelta(cursor, readOnly = readOnly)
         } catch (e: GraphApiException) {
             if (e.statusCode == 410) {
                 throw DeltaCursorExpiredException(e.message ?: "Delta cursor expired (410 Gone)", e, e.requestId)
@@ -244,10 +247,10 @@ class OneDriveProvider(
     ): DeltaPage {
         // OneDrive's Graph delta endpoint pages via opaque @odata.nextLink
         // tokens that already encode a resumable cursor; the engine-side
-        // staging slice is therefore redundant here and the parameter is
-        // intentionally unused. Left in the signature so the SPI shape is
-        // uniform across providers — see CloudProvider.kt for the contract.
-        val result = getDeltaConverting410(cursor)
+        // staging slice is therefore redundant here; only ScanContext.readOnly is
+        // honoured (a preview must not stamp delta_last_seen). See CloudProvider.kt
+        // for the contract.
+        val result = getDeltaConverting410(cursor, readOnly = scanContext?.readOnly == true)
         val visibleItems =
             result.items
                 .filterNot { it.isRootItem() }
