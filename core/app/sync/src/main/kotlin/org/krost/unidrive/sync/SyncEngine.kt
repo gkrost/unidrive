@@ -390,55 +390,6 @@ open class SyncEngine(
             }
         }.getOrDefault(false)
 
-    // The shapes a placeholder or download artifact in the sync root can have — anything else
-    // is real user content, which the recovery download must never overwrite:
-    //  - a fresh placeholder / interrupted-before-first-byte download: a 0-byte stub
-    //    (createPlaceholder, or applyDownload killed before writing);
-    //  - a partial download: applyDownload writes the sync-root path directly, so a kill
-    //    mid-download leaves a prefix of the remote bytes; recovery finishing it is what
-    //    main's UD-225 loop already does, and uploading the prefix would truncate the remote;
-    //  - a freed placeholder: a sparse remoteSize of zeros stamped with the remote modified
-    //    time (dehydrate). A tool that touches the mtime afterwards (the touch-happy
-    //    property handlers from #396) must not turn it back into an upload of the stub, so
-    //    the zeros themselves are checked.
-    private fun looksLikePlaceholder(
-        local: Path,
-        entry: SyncEntry,
-    ): Boolean {
-        val size = Files.size(local)
-        if (size == 0L) return true
-        if (size < entry.remoteSize) return true
-        if (size == entry.remoteSize && entry.remoteSize > 0L) {
-            val remoteModified = entry.remoteModified
-            if (remoteModified != null &&
-                Files.getLastModifiedTime(local).toMillis() == remoteModified.toEpochMilli()
-            ) {
-                return true
-            }
-            return isAllZero(local)
-        }
-        return false
-    }
-
-    private fun isAllZero(path: Path): Boolean =
-        runCatching {
-            Files.newInputStream(path).use { input ->
-                val buf = ByteArray(64 * 1024)
-                var allZero = true
-                while (allZero) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    for (i in 0 until n) {
-                        if (buf[i] != 0.toByte()) {
-                            allZero = false
-                            break
-                        }
-                    }
-                }
-                allZero
-            }
-        }.getOrDefault(false)
-
     private fun isExcluded(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
 

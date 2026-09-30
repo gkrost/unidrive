@@ -10,6 +10,7 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.time.Instant
+import org.krost.unidrive.sync.model.SyncEntry
 
 /**
  * Resolves a remote path (as received from cloud providers) against the sync root,
@@ -99,6 +100,60 @@ internal fun localNameIssue(
     }
     return null
 }
+
+// The shapes a placeholder or download artifact in the sync root can have — anything else
+// is real user content, which the recovery download must never overwrite:
+//  - a fresh placeholder / interrupted-before-first-byte download: a 0-byte stub
+//    (createPlaceholder, or applyDownload killed before writing);
+//  - a partial download: applyDownload writes the sync-root path directly, so a kill
+//    mid-download leaves a prefix of the remote bytes; recovery finishing it is what
+//    main's UD-225 loop already does, and uploading the prefix would truncate the remote;
+//  - a freed placeholder: a sparse remoteSize of zeros stamped with the remote modified
+//    time (dehydrate). A tool that touches the mtime afterwards (the touch-happy
+//    property handlers from #396) must not turn it back into an upload of the stub, so
+//    the zeros themselves are checked.
+// [shorterIsPartialDownload] says whether a file shorter than the remote size counts as that
+// partial download. LocalScanner passes false: every provider downloads to a temp name and renames
+// it, so a short file at the real path is far more likely a user's short edit than a kill-truncated
+// download, and keeping a stray prefix as a conflict copy loses nothing while overwriting an edit does.
+internal fun looksLikePlaceholder(
+    local: Path,
+    entry: SyncEntry,
+    shorterIsPartialDownload: Boolean = true,
+): Boolean {
+    val size = Files.size(local)
+    if (size == 0L) return true
+    if (shorterIsPartialDownload && size < entry.remoteSize) return true
+    if (size == entry.remoteSize && entry.remoteSize > 0L) {
+        val remoteModified = entry.remoteModified
+        if (remoteModified != null &&
+            Files.getLastModifiedTime(local).toMillis() == remoteModified.toEpochMilli()
+        ) {
+            return true
+        }
+        return isAllZero(local)
+    }
+    return false
+}
+
+internal fun isAllZero(path: Path): Boolean =
+    runCatching {
+        Files.newInputStream(path).use { input ->
+            val buf = ByteArray(64 * 1024)
+            var allZero = true
+            while (allZero) {
+                val n = input.read(buf)
+                if (n < 0) break
+                for (i in 0 until n) {
+                    if (buf[i] != 0.toByte()) {
+                        allZero = false
+                        break
+                    }
+                }
+            }
+            allZero
+        }
+    }.getOrDefault(false)
 
 open class PlaceholderManager(
     protected val syncRoot: Path,

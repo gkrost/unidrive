@@ -829,6 +829,28 @@ class Reconciler(
                     SyncAction.Upload(path, remoteTarget = aliasTarget(alias, path))
                 }
             }
+            // A row that was never hydrated has no local version the user's bytes could be an edit OF:
+            // their content replaced a placeholder stub, and the remote bytes were never seen here.
+            // Uploading would overwrite those, downloading would overwrite the user's: keep both.
+            localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED &&
+                entry != null && !entry.isHydrated && !entry.isFolder && entry.remoteId != null ->
+                SyncAction.Conflict(
+                    path,
+                    localState,
+                    remoteState,
+                    remoteItem ?: CloudItem(
+                        id = entry.remoteId,
+                        name = path.substringAfterLast('/'),
+                        path = entry.remotePath ?: path,
+                        size = entry.remoteSize,
+                        isFolder = false,
+                        modified = entry.remoteModified,
+                        created = null,
+                        hash = entry.remoteHash,
+                        mimeType = null,
+                    ),
+                    policyForPath(path),
+                )
             localState == ChangeState.MODIFIED && remoteState == ChangeState.UNCHANGED ->
                 // UD-366: pass the existing remote UUID so the provider can route through
                 // PUT /files/{uuid} (replace-in-place) rather than POSTing a duplicate that

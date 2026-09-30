@@ -121,12 +121,23 @@ class LocalScannerTest {
 
     @Test
     fun `skips dehydrated files for modification check`() {
+        // A placeholder stub is a zero-byte file (or zeros of the remote size) with a synthetic mtime.
+        val file = syncRoot.resolve("placeholder.txt")
+        Files.createFile(file)
+        db.upsertEntry(entry("/placeholder.txt", mtime = 0, size = 100, isHydrated = false))
+
+        val changes = scanner.scan()
+        assertNull(changes["/placeholder.txt"])
+    }
+
+    @Test
+    fun `reports real content saved into a dehydrated row as modified`() {
         val file = syncRoot.resolve("placeholder.txt")
         Files.writeString(file, "x")
         db.upsertEntry(entry("/placeholder.txt", mtime = 0, size = 100, isHydrated = false))
 
         val changes = scanner.scan()
-        assertNull(changes["/placeholder.txt"])
+        assertEquals(ChangeState.MODIFIED, changes["/placeholder.txt"])
     }
 
     @Test

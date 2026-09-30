@@ -165,8 +165,16 @@ class LocalScanner(
                                 changes[relativePath] = ChangeState.MODIFIED
                             }
                         }
+                    } else if (entry.remoteId != null &&
+                        !entry.isFolder &&
+                        !looksLikePlaceholder(file, entry, shorterIsPartialDownload = false)
+                    ) {
+                        // Not hydrated, yet the file holds real bytes: the user saved into the
+                        // placeholder stub. Report the edit so the recovery download cannot replace
+                        // it. A stub (zero bytes, or zeros of the remote size) is skipped: its mtime
+                        // is synthetic and the recovery download is what fills it.
+                        changes[relativePath] = ChangeState.MODIFIED
                     }
-                    // Skip dehydrated files for modification check (mtime is synthetic)
 
                     heartbeat?.tick(visited)
                     return FileVisitResult.CONTINUE

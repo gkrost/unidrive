@@ -471,7 +471,7 @@ class ReconcilerTest {
         val sameHash = "h-stable"
         val sameModified = java.time.Instant.parse("2026-03-28T12:00:00Z")
         db.upsertEntry(
-            dbEntry("/same.txt", remoteHash = sameHash).copy(remoteModified = sameModified),
+            dbEntry("/same.txt", remoteHash = sameHash, isHydrated = true).copy(remoteModified = sameModified),
         )
         val remoteChanges =
             mapOf(
