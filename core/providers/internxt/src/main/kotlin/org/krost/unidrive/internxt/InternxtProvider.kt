@@ -1153,19 +1153,28 @@ class InternxtProvider(
     //
     // The meta read itself can lag the write (seen live: an intermittent echo right after a
     // rename). So a value that is provably still the pre-write one is re-read up to
-    // [modifiedRereadDelaysMs].size more times, waiting the listed delays in between (1.9 s at
-    // most by default), and the first value that is not lagging wins. If it never moves, the last
-    // value read is kept and logged at debug: the write is not undone by a slow read.
+    // [modifiedRereadDelaysMs].size more times, waiting the listed delays in between (1.9 s of
+    // deliberate waits by default; a flaky meta endpoint adds its own transient-retry ladder on
+    // top, since each read goes through authenticatedGet), and the first value that is not
+    // lagging wins. If it never moves, the last value read is kept and logged at debug: the
+    // write is not undone by a slow read.
     //   - replace: lagging = older than the modified time we SENT (truncated to whole seconds, so
-    //     neither a rounding nor a truncating server trips it). A value equal to or newer than
-    //     what we sent is final, which also covers a replace with an unchanged mtime (no retry).
+    //     neither a rounding nor a truncating server trips it), or equal to the write response's
+    //     own value when that differs from what we sent. The second clause covers an upload that
+    //     restores an OLDER copy: the sent time is then older than the item's pre-write stamp,
+    //     and the lagging read reports that newer pre-write value, which the older-than-sent
+    //     check alone would mistake for a fresh one. A replace with an unchanged mtime
+    //     (response == sent) keeps its single read.
     //   - rename/move: lagging = equal to the time the item had before (the entity we started
     //     from, or the write response), because the server always stamps a new time there.
     internal var modifiedRereadDelaysMs: List<Long> = listOf(300L, 600L, 1_000L)
 
     private suspend fun InternxtFile.afterReplace(sent: Instant): InternxtFile {
         val sentSecond = sent.truncatedTo(ChronoUnit.SECONDS)
-        return withServerModified { it < sentSecond }
+        val responseSecond = modificationInstant?.truncatedTo(ChronoUnit.SECONDS)
+        return withServerModified {
+            it < sentSecond || (responseSecond != null && responseSecond != sentSecond && it == responseSecond)
+        }
     }
 
     private suspend fun InternxtFile.afterMove(startedFrom: Instant?): InternxtFile =
@@ -1203,7 +1212,9 @@ class InternxtProvider(
             latest = read() ?: return fallback
             for (delayMs in modifiedRereadDelaysMs) {
                 val instant = tryParseInternxtInstant(latest)
-                if (instant == null || !isLagging(instant)) return latest
+                // An unparseable value is treated like a lagging one: re-read rather than
+                // accept, and the last value read still wins if nothing parseable shows up.
+                if (instant != null && !isLagging(instant)) return latest
                 kotlinx.coroutines.delay(delayMs)
                 latest = read() ?: return latest
             }

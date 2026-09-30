@@ -174,9 +174,12 @@ class InternxtStaleModifiedAfterWriteTest {
             }
     }
 
-    private suspend fun replaceOnce(engine: MockEngine): org.krost.unidrive.CloudItem {
+    private suspend fun replaceOnce(
+        engine: MockEngine,
+        mtime: Instant = sentMtime,
+    ): org.krost.unidrive.CloudItem {
         var result: org.krost.unidrive.CloudItem? = null
-        withTempFile("a.txt", 510) { tmp, local ->
+        withTempFile("a.txt", 510, mtime = mtime) { tmp, local ->
             val provider = newProviderRooted(tmp)
             try {
                 installMockClientOnProvider(provider, engine)
@@ -216,6 +219,72 @@ class InternxtStaleModifiedAfterWriteTest {
 
             assertEquals(Instant.parse(post), result.modified)
             assertEquals(3, clock.reads.get(), "two lagging reads plus the one that finally differs")
+        }
+
+    @Test
+    fun `replace upload restoring an older mtime re-reads until the meta read stops echoing the newer pre-write stamp`() =
+        runTest {
+            // An upload that restores an OLDER copy sends an mtime older than the item's
+            // pre-write stamp. The lagging meta read then reports that NEWER pre-write value,
+            // which the older-than-what-we-sent check alone accepts as final — the stale value
+            // re-arms a download of the very file we just uploaded. The write response's own
+            // stamp (which differs from what we sent) must be treated as lagging too.
+            val restoreStamp = "2026-05-03T16:00:00Z"
+            val clock = ServerClock(staleReads = 1)
+            val engine = MockEngine { request ->
+                val url = request.url.toString()
+                val path = request.url.encodedPath
+                uploadPreamble(url)
+                    ?: when {
+                        path == "/drive/files/file-uuid" && request.method == HttpMethod.Put -> {
+                            clock.wrote()
+                            // The write response still carries the item's pre-write stamp,
+                            // which is NEWER than the mtime this replace sends.
+                            json(fileJson("file-uuid", "a", 510, post, fileId = bridgeFileId))
+                        }
+                        path == "/drive/files/file-uuid/meta" && request.method == HttpMethod.Get ->
+                            json(
+                                fileJson(
+                                    "file-uuid", "a", 510,
+                                    clock.modified(pre = post, post = restoreStamp),
+                                    fileId = bridgeFileId,
+                                ),
+                            )
+                        else -> error("unexpected URL in restore-older test: $url (${request.method})")
+                    }
+            }
+
+            val result = replaceOnce(engine, mtime = Instant.parse("2026-05-03T16:00:00.700Z"))
+
+            assertEquals(
+                Instant.parse(restoreStamp),
+                result.modified,
+                "the row must carry the stamp for the restored copy, not the newer pre-write echo",
+            )
+            assertEquals(2, clock.reads.get(), "the echoing read plus the one with the fresh stamp")
+        }
+
+    @Test
+    fun `replace upload re-reads when the meta read returns an unparseable modified time`() =
+        runTest {
+            // A garbage timestamp cannot be evaluated against either staleness clause; accepting
+            // it would store an unparseable value and the next listing would not match it.
+            val clock = ServerClock(staleReads = 0)
+            var garbageServed = 0
+            val engine = replaceEngine(clock, metaModified = { c ->
+                // Count the garbage read on the clock too, so the read-count assertion sees it.
+                if (c.hasWritten() && garbageServed++ == 0) {
+                    c.reads.incrementAndGet()
+                    "not-a-timestamp"
+                } else {
+                    c.modified(pre, post)
+                }
+            })
+
+            val result = replaceOnce(engine)
+
+            assertEquals(Instant.parse(post), result.modified)
+            assertEquals(2, clock.reads.get(), "the garbage read plus the one with a parseable stamp")
         }
 
     @Test
