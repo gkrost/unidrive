@@ -41,13 +41,14 @@ class SyncEngineLocalHashTest {
 
     // The scanner captures provider.hashAlgorithm() at construction, so build the engine
     // only after a test has finished configuring the provider.
-    private fun engine() =
+    private fun engine(cacheRoot: Path? = null) =
         SyncEngine(
             provider = provider,
             db = db,
             syncRoot = syncRoot,
             conflictPolicy = ConflictPolicy.KEEP_BOTH,
             reporter = ProgressReporter.Silent,
+            cacheRoot = cacheRoot,
         )
 
     private fun remoteFile(
@@ -142,6 +143,56 @@ class SyncEngineLocalHashTest {
             assertNotNull(row)
             assertNotEquals(firstHash, row.localHash)
             assertEquals(sha256(file), row.localHash)
+        }
+
+    @Test
+    fun `a write-back through the cache records the hash of the bytes it just uploaded`() =
+        runTest {
+            // uploadFromCache is the FUSE write-back path: the bytes live in the daemon's
+            // cache copy, and the row records exactly that copy's stats, so its hash must be
+            // those bytes' hash. Leaving it null (or keeping a stale one) would strip the
+            // touch shield from every mount-edited file.
+            val eng = engine()
+            provider.deltaItems = emptyList()
+            eng.syncOnce()
+            val cacheCopy = Files.createTempDirectory("ud-396-wb").resolve("local.txt")
+            val bytes = "written through the mount".toByteArray()
+            Files.write(cacheCopy, bytes)
+
+            eng.uploadFromCache("/local.txt", cacheCopy)
+
+            val row = db.getEntry("/local.txt")
+            assertNotNull(row?.remoteId, "the write-back was uploaded")
+            assertEquals(sha256(cacheCopy), row.localHash)
+        }
+
+    @Test
+    fun `a mount-mode re-download records the hash of the downloaded bytes instead of keeping the stale one`() =
+        runTest {
+            // ensureHydrated rewrites the row's local stats from the freshly downloaded cache
+            // copy; keeping a hash recorded for the previous contents would pair stale bytes
+            // with a fresh mtime/size — the stale-hash shape the touch check must never see.
+            val cacheRoot = Files.createTempDirectory("ud-396-hyd-cache")
+            val eng = engine(cacheRoot)
+            val first = ByteArray(1024) { ((it * 3) and 0xff).toByte() }
+            downloadFile(eng, "doc.bin", first)
+            // Mount mode: the row is served from the daemon cache and nothing is in the sync
+            // root (a row describing a sync-root file keeps its hash in ensureHydrated — the
+            // sync-root bytes are unchanged, so the recorded hash still describes them).
+            db.upsertEntry(assertNotNull(db.getEntry("/doc.bin")).copy(localMtime = null, localSize = null))
+            Files.deleteIfExists(syncRoot.resolve("doc.bin"))
+            val staleHash = assertNotNull(db.getEntry("/doc.bin")).localHash
+            assertNotNull(staleHash)
+
+            val second = "fresh remote bytes for the re-download".toByteArray()
+            provider.files["/doc.bin"] = second
+            val cachePath = eng.resolveCachePath("/doc.bin")
+            Files.deleteIfExists(cachePath)
+            eng.ensureHydrated("/doc.bin")
+
+            val row = assertNotNull(db.getEntry("/doc.bin"))
+            assertEquals(sha256(cachePath), row.localHash)
+            assertNotEquals(staleHash, row.localHash)
         }
 
     @Test
