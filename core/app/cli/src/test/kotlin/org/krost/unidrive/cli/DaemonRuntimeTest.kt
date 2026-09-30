@@ -16,6 +16,7 @@ import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -212,6 +213,88 @@ class DaemonRuntimeTest {
         val t0 = System.nanoTime()
         assertTrue(runtime.shutdownAndWait(10_000))
         assertTrue((System.nanoTime() - t0) / 1_000_000 < 2_000, "must return immediately when nothing was started")
+    }
+
+    @Test
+    fun `daemon_shutdown verb acks then runs the clean shutdown path`() = runBlocking {
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
+        assertTrue(Files.exists(pidFile), "daemon must hold the lock before shutdown")
+
+        val reply = sendOneRequest("""{"verb":"daemon.shutdown"}""")
+        assertTrue(reply.contains("\"ok\":true"), "daemon.shutdown must ack before stopping; got: $reply")
+
+        // start() returning means the serve scope was cancelled and cleanup() ran.
+        kotlinx.coroutines.withTimeout(10_000) { daemonJob.join() }
+        assertFalse(Files.exists(socketPath), "socket file must be gone after daemon.shutdown")
+        assertFalse(Files.exists(pidFile), ".lock.pid must be gone after daemon.shutdown")
+    }
+
+    @Test
+    fun `daemon_status reports the effective scope`() = runBlocking {
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+            syncPaths = listOf("/_INBOX", "/Docs \"x\""),
+        )
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        try {
+            val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+            val scope = kotlinx.serialization.json.Json.parseToJsonElement(reply)
+                .let { it as kotlinx.serialization.json.JsonObject }["sync_paths"]
+                .let { it as kotlinx.serialization.json.JsonArray }
+                .map { (it as kotlinx.serialization.json.JsonPrimitive).content }
+            assertEquals(listOf("/_INBOX", "/Docs \"x\""), scope, "daemon.status must list the scope as sync_paths; got: $reply")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    private fun sendOneRequest(request: String): String {
+        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        try {
+            channel.configureBlocking(false)
+            channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
+            val collected = StringBuilder()
+            val deadline = System.currentTimeMillis() + 5_000
+            while (System.currentTimeMillis() < deadline && !collected.contains('\n')) {
+                val buf = ByteBuffer.allocate(4096)
+                val n = channel.read(buf)
+                if (n > 0) {
+                    buf.flip()
+                    collected.append(String(buf.array(), 0, buf.limit()))
+                } else {
+                    Thread.sleep(20)
+                }
+            }
+            check(collected.contains('\n')) { "no reply line within 5s; collected: $collected" }
+            return collected.toString().substringBefore('\n')
+        } finally {
+            channel.close()
+        }
     }
 
     @Test

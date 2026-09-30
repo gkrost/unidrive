@@ -248,7 +248,23 @@ class DaemonRuntime(
                     val refreshInFlight = refreshHandler.isInFlight()
                     val refreshJobId = refreshHandler.inFlightJobId()
                     val jobIdJson = if (refreshJobId != null) "\"$refreshJobId\"" else "null"
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson}"""
+                    // sync_paths: the effective scope (sync_path entries the daemon was started
+                    // with; empty = whole drive). Additive field, read-only over IPC.
+                    val scopeJson = kotlinx.serialization.json.JsonArray(
+                        syncPaths.map { kotlinx.serialization.json.JsonPrimitive(it) },
+                    ).toString()
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$scopeJson}"""
+                }
+
+                // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every
+                // OS (Windows has no SIGTERM; Process.destroy() there is TerminateProcess, which
+                // skips the shutdown path entirely). Acks first, then runs the same path as a
+                // clean exit: the serve scope is cancelled, then cleanup() closes the IPC server,
+                // the state database and the process lock. The ack means "accepted"; completion
+                // is observable as the connection closing and, finally, the process exiting.
+                server.registerHandler("daemon.shutdown") { connId, _ ->
+                    server.scheduleAfterReply(connId) { close() }
+                    """{"ok":true}"""
                 }
 
                 System.err.println(

@@ -57,11 +57,12 @@ import kotlin.test.assertTrue
  * representative and the assertion pins presence + JSON type only.
  */
 class IpcContractCorpusTest {
-    // The four non-hydration verbs DaemonRuntime registers inline (see the
+    // The non-hydration verbs DaemonRuntime registers inline (see the
     // server.registerHandler calls in DaemonRuntime.start). daemon.status is
     // listed first so its refresh_in_flight:false expectation is checked
-    // before this test launches a refresh job.
-    private val daemonVerbs = listOf("daemon.status", "sync.subscribe", "refresh.run", "sync.enumerate")
+    // before this test launches a refresh job; daemon.shutdown is listed last
+    // because it stops the daemon the other verbs are replayed against.
+    private val daemonVerbs = listOf("daemon.status", "sync.subscribe", "refresh.run", "sync.enumerate", "daemon.shutdown")
 
     @Test
     fun corpus_covers_every_daemon_ipc_verb() {
