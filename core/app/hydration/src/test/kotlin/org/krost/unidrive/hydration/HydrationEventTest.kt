@@ -67,6 +67,27 @@ class HydrationEventTest {
         )
     }
 
+    // A failed upload carries the provider's message, which routinely spans lines (an HTTP
+    // error body). One raw newline would split the NDJSON line, and a raw control character
+    // is not valid inside a JSON string: the reader's parser throws and its stream resets.
+    @Test
+    fun `completed failure escapes control characters in the error message`() {
+        val bell = 1.toChar()
+        val e = HydrationEvent.Completed(
+            "/a.txt", "h1", HydrationEvent.Completed.Direction.UPLOAD, ok = false,
+            error = HydrationError.Generic("HTTP 500\n{\"detail\":\"boom\"}\r\tend" + bell),
+        )
+        val json = serialiseHydrationEvent(e)
+        assertTrue(json.none { it < ' ' }, "no raw control character may reach the wire: $json")
+        val backslash = '\\'.toString()
+        assertEquals(
+            """{"event":"completed","path":"/a.txt","handle_id":"h1","direction":"upload","ok":false,"error":"HTTP 500""" +
+                backslash + "n{" + backslash + "\"detail" + backslash + "\":" + backslash + "\"boom" + backslash + "\"}" +
+                backslash + "r" + backslash + "tend" + backslash + "u0001" + "\"}",
+            json,
+        )
+    }
+
     @Test
     fun `view_invalidated serialises as paths array when under the cap`() {
         val e = HydrationEvent.ViewInvalidated(paths = listOf("/a", "/b/c"))

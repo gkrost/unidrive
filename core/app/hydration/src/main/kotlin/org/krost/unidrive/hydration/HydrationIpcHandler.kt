@@ -546,4 +546,21 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     }
 }
 
-private fun jsonEsc(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+// JSON string literal for [s]. Quote and backslash AND control characters are escaped: a
+// provider's error message (an HTTP error body, say) routinely carries a newline, and one raw
+// newline in a reply or event line splits the NDJSON framing for the reader.
+private fun jsonEsc(s: String): String {
+    val sb = StringBuilder(s.length + 2).append('"')
+    for (c in s) {
+        when {
+            c == '\\' -> sb.append('\\').append('\\')
+            c == '"' -> sb.append('\\').append('"')
+            c == '\n' -> sb.append('\\').append('n')
+            c == '\r' -> sb.append('\\').append('r')
+            c == '\t' -> sb.append('\\').append('t')
+            c < ' ' -> sb.append('\\').append('u').append("%04x".format(c.code))
+            else -> sb.append(c)
+        }
+    }
+    return sb.append('"').toString()
+}
