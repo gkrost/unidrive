@@ -7,6 +7,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
+import org.krost.unidrive.TransientNetworkException
 import org.krost.unidrive.UnidriveJson
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.JwtExtractor
@@ -21,9 +22,6 @@ import kotlinx.serialization.json.buildJsonObject
 open class AuthService(
     private val config: InternxtConfig,
     private val crypto: InternxtCrypto = InternxtCrypto(),
-) : AutoCloseable {
-    private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
-    private val json = UnidriveJson
     // UD-204: install HttpTimeout so a slow-loris auth endpoint (the named
     // vector from the source ticket — internxt/sdk axios setup omits the
     // timeout) can't hang the whole sync indefinitely. Uses the same
@@ -31,14 +29,22 @@ open class AuthService(
     // four-class metadata/upload/download/auth matrix proposed in the
     // ticket body is deferred to a follow-up that touches all providers
     // together.
-    private val httpClient = HttpClient {
-        expectSuccess = false
-        install(HttpTimeout) {
-            connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
-            socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
-            requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
-        }
-    }
+    //
+    // A default-valued constructor arg so tests can pass a MockEngine-backed
+    // HttpClient (same seam as OneDrive's OAuthService). Production uses the
+    // default.
+    private val httpClient: HttpClient =
+        HttpClient {
+            expectSuccess = false
+            install(HttpTimeout) {
+                connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
+                socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+                requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
+            }
+        },
+) : AutoCloseable {
+    private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
+    private val json = UnidriveJson
     private var credentials: InternxtCredentials? = null
 
     // UD-338: shared mutex + NonCancellable wrap lifted to :app:core/auth.
@@ -55,6 +61,14 @@ open class AuthService(
         // refresh path is reactive-401 today (no automatic replay), so a
         // missed pre-expiry refresh would surface as a hard failure mid-sync.
         const val JWT_REFRESH_MARGIN_MS: Long = 24L * 60 * 60 * 1000
+
+        // A refresh error body is quoted at most this far; a Cloudflare error page
+        // is tens of KB of HTML and the whole thing used to land in the log.
+        private const val REFRESH_ERROR_BODY_CHARS = 200
+
+        // `"retry_after": <seconds>` in Cloudflare / Internxt JSON error bodies.
+        private val RETRY_AFTER_FIELD = Regex(""""retry_after"\s*:\s*(\d+)""")
+        private val WHITESPACE_RUN = Regex("\\s+")
     }
 
     val isAuthenticated: Boolean get() = credentials != null
@@ -321,7 +335,26 @@ open class AuthService(
                 applyInternxtHeaders(config)
             }
         if (!response.status.isSuccess()) {
-            throw AuthenticationException("Token refresh failed: ${response.bodyAsText()}")
+            val status = response.status.value
+            val body = response.bodyAsText()
+            val requestId = response.headers["x-request-id"]
+            val retryHint =
+                response.headers[HttpHeaders.RetryAfter]?.trim()?.takeIf { it.isNotEmpty() }?.let { "Retry-After: $it" }
+                    ?: RETRY_AFTER_FIELD.find(body)?.let { "retry_after: ${it.groupValues[1]}" }
+            val detail =
+                "Token refresh failed (HTTP $status)" +
+                    (retryHint?.let { ", $it" } ?: "") +
+                    ": " + body.take(REFRESH_ERROR_BODY_CHARS).replace(WHITESPACE_RUN, " ").trim()
+            // 408 / 429 / 5xx say nothing about the token: a gateway hiccup (live: a
+            // Cloudflare 502 `retryable:true, retry_after:60`) must not read as
+            // "expired, re-authenticate" — callers treat AuthenticationException as
+            // fatal and a watch daemon would stop. 401/403 (and any other 4xx) really
+            // are a rejected token. The retry hint is information only; the caller's
+            // own backoff decides when to try again.
+            if (status == 408 || status == 429 || status in 500..599) {
+                throw TransientNetworkException(detail, requestId = requestId)
+            }
+            throw AuthenticationException(detail, requestId = requestId)
         }
         return json.decodeFromString<TokenRefreshResponse>(response.bodyAsText()).newToken
     }
