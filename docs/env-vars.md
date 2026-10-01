@@ -46,6 +46,27 @@ for the chosen port. Matching of a `localhost` redirect is documented to ignore
 the port, but a non-default port has not been tried against this app
 registration. `unidrive auth --device-code` needs no port at all.
 
+## Internxt
+
+### `INTERNXT_NOTIFICATIONS`
+
+Switch for the socket.io wake-signal client (the connection to Internxt's
+change feed that lets a watching daemon sync early instead of waiting for the
+next poll).
+
+- **Default:** on (unset)
+- **Values:** `off`, `0` or `false` (any case) skip starting the client and log
+  one INFO line (`Internxt notifications disabled by INTERNXT_NOTIFICATIONS; sync
+  polls only`). Any other value leaves it on.
+- **Code:** `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtConfig.kt`,
+  `InternxtProvider.ensureNotificationsClient`.
+
+The feed is only a latency optimisation; polling alone is always correct. If
+the host (`INTERNXT_NOTIFICATIONS_URL`, default `https://notifications.internxt.com`)
+does not accept connections, the client logs one WARN per outage and keeps
+reconnecting in the background with socket.io's own backoff (1 s up to 60 s);
+set this to `off` to stop even that.
+
 ## Other env vars in use (not yet documented in this file)
 
 The following production env vars are read by the daemon but their
