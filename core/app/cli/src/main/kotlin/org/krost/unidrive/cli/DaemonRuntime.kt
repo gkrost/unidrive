@@ -57,6 +57,13 @@ class DaemonRuntime(
     private var db: StateDatabase? = null
     private var ipcServer: IpcServer? = null
     private val closeSignal = CompletableDeferred<Unit>()
+
+    // Counted down once cleanup() has run. Only armed after the lock is held: a start() that lost
+    // the lock race (or never ran) has nothing to wait for, and a shutdown hook must not stall the
+    // System.exit that path triggers.
+    private val cleanupDone = java.util.concurrent.CountDownLatch(1)
+
+    @Volatile private var lifecycleActive = false
     private var startedAtMs: Long = 0
 
     suspend fun start() {
@@ -67,6 +74,7 @@ class DaemonRuntime(
             return
         }
         lock = acquiredLock
+        lifecycleActive = true
 
         try {
             // 2. Stale-mount warn (spec §3.3) — best-effort, never aborts.
@@ -240,7 +248,23 @@ class DaemonRuntime(
                     val refreshInFlight = refreshHandler.isInFlight()
                     val refreshJobId = refreshHandler.inFlightJobId()
                     val jobIdJson = if (refreshJobId != null) "\"$refreshJobId\"" else "null"
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson}"""
+                    // sync_paths: the effective scope (sync_path entries the daemon was started
+                    // with; empty = whole drive). Additive field, read-only over IPC.
+                    val scopeJson = kotlinx.serialization.json.JsonArray(
+                        syncPaths.map { kotlinx.serialization.json.JsonPrimitive(it) },
+                    ).toString()
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$scopeJson}"""
+                }
+
+                // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every
+                // OS (Windows has no SIGTERM; Process.destroy() there is TerminateProcess, which
+                // skips the shutdown path entirely). Acks first, then runs the same path as a
+                // clean exit: the serve scope is cancelled, then cleanup() closes the IPC server,
+                // the state database and the process lock. The ack means "accepted"; completion
+                // is observable as the connection closing and, finally, the process exiting.
+                server.registerHandler("daemon.shutdown") { connId, _ ->
+                    server.scheduleAfterReply(connId) { close() }
+                    """{"ok":true}"""
                 }
 
                 System.err.println(
@@ -261,11 +285,31 @@ class DaemonRuntime(
             throw e
         } finally {
             cleanup()
+            cleanupDone.countDown()
         }
     }
 
     fun close() {
         closeSignal.complete(Unit)
+    }
+
+    /**
+     * Request shutdown and block until [start]'s cleanup (IpcServer close, StateDatabase close,
+     * lock release) has finished, bounded by [timeoutMs] (spec I7). For the JVM shutdown hook:
+     * the JVM halts as soon as every hook returns, so a hook that only called [close] raced the
+     * main thread's cleanup and could leave a stale `.lock.pid` and socket behind.
+     *
+     * Returns true when cleanup completed (or there was nothing to clean up), false on timeout.
+     */
+    fun shutdownAndWait(timeoutMs: Long = SHUTDOWN_DEADLINE_MS): Boolean {
+        close()
+        if (!lifecycleActive) return true
+        return try {
+            cleanupDone.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private fun renderLockContentionAndExit(lock: ProcessLock) {
