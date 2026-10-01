@@ -119,12 +119,15 @@ open class SyncEngine(
     // pre-existing layout; the CLI sync/daemon paths pass profile.name.
     private val cacheKey: String = providerId,
     // Called once after enumerateRemoteIntoState mutates state.db with the set of
-    // changed paths (upserted + reaped). No-op default keeps callers that don't
-    // need the signal unaffected. Only invoked when something actually changed
-    // (upserted > 0 || reaped > 0). app:hydration is the intended wiring site;
-    // keeping this as a plain lambda avoids a circular import (HydrationEvent lives
-    // in app:hydration which depends on app:sync, not the other way around).
-    private val viewInvalidationSink: (changedPaths: Set<String>) -> Unit = {},
+    // changed paths (upserted + reaped; full=false), and once after
+    // applyScopeTransition reshapes the tracked set (full=true — narrowing untracks
+    // rows a mount may still cache and widening re-enumerates from scratch, so the
+    // shrink/growth is not expressible as a per-path delta and the whole view must
+    // be invalidated). No-op default keeps callers that don't need the signal
+    // unaffected. app:hydration is the intended wiring site; keeping this as a
+    // plain lambda avoids a circular import (HydrationEvent lives in app:hydration
+    // which depends on app:sync, not the other way around).
+    private val viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -757,7 +760,7 @@ open class SyncEngine(
         // import (app:hydration depends on app:sync, not vice versa).
         if (upserted > 0 || reaped > 0) {
             val changedPaths: Set<String> = upsertedViewPaths + reapedViewPaths
-            viewInvalidationSink(changedPaths)
+            viewInvalidationSink(changedPaths, false)
         }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }
@@ -2827,6 +2830,11 @@ open class SyncEngine(
             }
             db.setSyncState("tracked_scope", trackScope.joinToString("\t"))
         }
+        // The tracked set just reshaped: narrowing untracked rows the mount may
+        // still hold in cache (no reap event fires for them — they were deleted,
+        // not reaped), and widening re-enumerates from scratch. Neither is
+        // expressible as a per-path delta, so invalidate the whole view.
+        viewInvalidationSink(emptySet(), true)
     }
 
     private fun promotePendingCursor() {

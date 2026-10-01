@@ -3669,6 +3669,7 @@ class SyncEngineTest {
         allowFullTreeReconciliation: Boolean = false,
         syncPaths: List<String> = listOfNotNull(syncPath),
         standingScope: List<String> = emptyList(),
+        viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
     ) = SyncEngine(
         provider = provider,
         db = db,
@@ -3679,6 +3680,7 @@ class SyncEngineTest {
         standingScope = standingScope,
         syncDirection = syncDirection,
         allowFullTreeReconciliation = allowFullTreeReconciliation,
+        viewInvalidationSink = viewInvalidationSink,
     )
 
     @Test
@@ -3845,6 +3847,49 @@ class SyncEngineTest {
             assertNotNull(db.getEntry("/a/f0.txt"))
             assertNull(db.getEntry("/b/f0.txt"))
             assertNull(db.getEntry("/b"))
+        }
+
+    // A scope transition untracks rows (narrowing) or re-enumerates from scratch
+    // (widening) — neither is expressible as a per-path delta, so the mount must
+    // be told the WHOLE view is invalidated, not just changed paths.
+    @Test
+    fun `a scope transition invalidates the whole view`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 2)
+            engineForScope().syncOnce()
+
+            val invalidations = mutableListOf<Pair<Set<String>, Boolean>>()
+            val result =
+                engineForScope(
+                    syncPaths = listOf("/a"),
+                    standingScope = listOf("/a"),
+                    viewInvalidationSink = { paths, full -> invalidations += paths to full },
+                ).enumerateRemoteIntoState(reset = false)
+
+            assertTrue(result.ok)
+            assertTrue(
+                invalidations.any { it.second },
+                "narrowing untracked rows; the mount must receive a full-view invalidation, got $invalidations",
+            )
+        }
+
+    @Test
+    fun `a plain enumerate does not invalidate the whole view`() =
+        runTest {
+            stageTwoTrees(aFiles = 2, bFiles = 2)
+            engineForScope().syncOnce()
+
+            val invalidations = mutableListOf<Pair<Set<String>, Boolean>>()
+            val result =
+                engineForScope(
+                    viewInvalidationSink = { paths, full -> invalidations += paths to full },
+                ).enumerateRemoteIntoState(reset = false)
+
+            assertTrue(result.ok)
+            assertTrue(
+                invalidations.none { it.second },
+                "no scope transition happened, so no full-view invalidation may fire, got $invalidations",
+            )
         }
 
     @Test

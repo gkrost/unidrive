@@ -138,9 +138,9 @@ class DaemonRuntime(
                 val engine = SyncEngine(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
                     standingScope = syncPaths, excludePatterns = excludePatterns,
-                    viewInvalidationSink = { changedPaths ->
+                    viewInvalidationSink = { changedPaths, full ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
-                        val event = if (changedPaths.size > cap) {
+                        val event = if (full || changedPaths.size > cap) {
                             HydrationEvent.ViewInvalidated(paths = emptyList(), full = true)
                         } else {
                             HydrationEvent.ViewInvalidated(paths = changedPaths.toList())
@@ -241,7 +241,11 @@ class DaemonRuntime(
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
                 // co-clients warn/refuse on mismatch instead of failing on a
-                // missing field mid-operation.
+                // missing field mid-operation. provider/authenticated are the
+                // account/auth state a status UI needs; the SPI carries no account
+                // identity, so the provider type + name is what we can report
+                // truthfully, and `authenticated` only says that credentials are
+                // loaded (not that they are valid).
                 server.registerHandler("daemon.status") { _, _ ->
                     val uptimeMs = System.currentTimeMillis() - startedAtMs
                     val clientCount = server.clientCount
@@ -250,10 +254,12 @@ class DaemonRuntime(
                     val jobIdJson = if (refreshJobId != null) "\"$refreshJobId\"" else "null"
                     // sync_paths: the effective scope (sync_path entries the daemon was started
                     // with; empty = whole drive). Additive field, read-only over IPC.
-                    val scopeJson = kotlinx.serialization.json.JsonArray(
+                    val syncPathsJson = kotlinx.serialization.json.JsonArray(
                         syncPaths.map { kotlinx.serialization.json.JsonPrimitive(it) },
                     ).toString()
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$scopeJson}"""
+                    val providerJson = kotlinx.serialization.json.JsonPrimitive(provider.id).toString()
+                    val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated}}"""
                 }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every
