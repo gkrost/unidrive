@@ -5,10 +5,11 @@ Untracked paths — paths the client has never crossed the sync boundary
 for — are invisible to deletion logic, making the phantom-row
 delete-cascade class of bug structurally impossible.
 
-**Experimental.** Wired into the CLI as `unidrive ts {sync,claim,unclaim,status}`
-but not yet verified end-to-end against real Internxt or OneDrive
-providers. Use `--dry-run` first. `unidrive sync` (the legacy engine)
-stays the default until provider-integration parity lands.
+**Experimental and frozen.** Wired into the CLI as `unidrive ts {sync,claim,unclaim,status}`
+and exercised end-to-end against live Internxt and OneDrive profiles (see
+`CLOSED.md`). It is frozen until after the MVP: the legacy engine in
+`:app:sync` (`unidrive sync`) ships the MVP and is the only engine behind
+`sync`, the daemon, the mount and the platform clients. Use `--dry-run` first.
 
 ## Why it exists
 
@@ -61,7 +62,7 @@ is just "use `unidrive sync` instead of `unidrive ts sync`".
 |---|---|---|
 | First-sync source of truth | DB rows + sync_root walk | Tracking set is empty; untracked paths invisible to deletion |
 | Adopt-on-content-match | No (engine assumes DB authoritative) | Yes (spec Amendment 2); first-scan over non-empty `sync_root` |
-| Drop a new file into sync_root | Uploaded on next pass | **Not uploaded** — explicit `ts claim` required |
+| Drop a new file into sync_root | Uploaded on next pass | Uploaded on next pass (an upload only; untracked paths never produce a delete) |
 | Crash mid first-sync | Phantom rows can become deletes | Pending* rows re-derive to original intent on resume |
 | Batch-level delete safeguard | Percentage + absolute + per-subtree | `BatchGuard` ratio + absolute; deletes dropped if tripped, uploads still proceed |
 | Identity | path (with rename heuristics) | `(provider_id, remote_file_id)` once known, content-hash for rename (spec Amendment 1) |
@@ -158,7 +159,7 @@ Three columns per scenario:
   reconcile (spec Amendment 2):
     /a.txt   track=∅ + local=● + remote=● + hash match    → adopt
     /b.txt   track=∅ + local=● + remote=● + hash differ   → collision
-    /c.txt   track=∅ + local=● + remote=∅                 → NoOp
+    /c.txt   track=∅ + local=● + remote=∅                 → UploadLocal
 
                        ──── ts sync ────►
 
@@ -166,14 +167,14 @@ Three columns per scenario:
   ┌─ LOCAL ─────┐    ┌─ TRACKING.DB ─────────┐    ┌─ REMOTE ────┐
   │ a.txt "abc" │    │ /a.txt  TrackedSynced │    │ a.txt "abc" │
   │ b.txt "L"   │    │ (no /b.txt row)       │    │ b.txt "R"   │
-  │ c.txt "z"   │    │ (no /c.txt row)       │    │             │
+  │ c.txt "z"   │    │ /c.txt  TrackedSynced │    │ c.txt "z"   │
   └─────────────┘    └───────────────────────┘    └─────────────┘
 
   console:
     ! /b.txt: untracked path exists on both sides with different content
     Resolve with: unidrive ts claim /b.txt
-    (/c.txt is invisible — untracked pure-local files are never deleted
-     and never auto-uploaded; the user runs `ts claim /c.txt` to opt in.)
+    (/c.txt is uploaded: a pure-local untracked file is never deleted,
+     but it is pushed to the remote on the pass that finds it.)
 
 
 ══════════════════════════════════════════════════════════════════════
@@ -233,9 +234,9 @@ BACKLOG entry once `:app:sync-tracking` has provider-integration parity:
   fully or not at all. Placeholder support is platform-tier work per
   [docs/adr/multi-platform.md](../../../docs/adr/multi-platform.md).
 - **Pinning rules.** No `pin_rules` table equivalent.
-- **Real-provider end-to-end verification.** The integration tests use
-  `FakeTrackingProvider`; the engine has not been exercised end-to-end
-  against live Internxt / OneDrive yet. That is the obvious next ticket.
+- **Real-provider verification in routine runs.** The integration tests use
+  `FakeTrackingProvider`; the live tests against Internxt and OneDrive run
+  only in the nightly tier (see `LiveTier`).
 - **Concurrent IO during apply.** Single-threaded apply loop. Real
   parallelism is where this kind of engine grows new bugs — keeping it
   single-threaded keeps the structural-safety story unambiguous.

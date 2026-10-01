@@ -1,6 +1,6 @@
 rootProject.name = "unidrive"
 
-// Composite monorepo root. Linux-MVP scope per ADR-0012 keeps a single
-// included build (`core/`); the previously-imported `ui/` tier was
-// removed in ADR-0013 and `shell-win/` in ADR-0011.
+// Composite monorepo root. The Linux-MVP scope (docs/adr/linux-only.md,
+// docs/adr/multi-platform.md) keeps a single included build (`core/`); the
+// previously-imported `ui/` and `shell-win/` tiers were removed.
 includeBuild("core")
