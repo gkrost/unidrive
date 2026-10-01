@@ -162,6 +162,8 @@ class GraphApiService(
     suspend fun getDelta(
         link: String? = null,
         fromLatest: Boolean = false,
+        // A preview must not reset the delta-cursor age clock that recordDeltaSeen maintains.
+        readOnly: Boolean = false,
     ): DeltaResult {
         val url = link ?: if (fromLatest) "$baseUrl/me/drive/root/delta?token=latest" else "$baseUrl/me/drive/root/delta"
         log.debug("Delta cursor: {}", link?.takeLast(40) ?: if (fromLatest) "(token=latest bootstrap)" else "(initial)")
@@ -174,7 +176,7 @@ class GraphApiService(
                 val response = authenticatedRequest(url)
                 val body = response.bodyAsText()
                 val parsed = json.decodeFromString<DriveItemCollectionResponse>(body)
-                recordDeltaSeen()
+                if (!readOnly) recordDeltaSeen()
                 return DeltaResult(
                     items = parsed.value,
                     nextLink = parsed.nextLink,

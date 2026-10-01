@@ -195,6 +195,16 @@ open class SyncCommand : Runnable {
                 "--dry-run and --force-delete are mutually exclusive: --force-delete is a no-op when no writes happen.",
             )
         }
+        // The watch loop calls syncOnce without the dry-run flag, so `--watch --dry-run` ran real
+        // downloads, uploads and deletes on every poll under a banner that said dry-run. A preview
+        // of a loop has no meaning (each pass works on its own throwaway copy of state.db), so the
+        // pair is refused rather than half-honoured.
+        if (dryRun && watch) {
+            throw CommandLine.ParameterException(
+                spec.commandLine(),
+                "--dry-run and --watch are mutually exclusive: a dry-run previews one pass, --watch loops and would run real syncs.",
+            )
+        }
         // UD-738: `--reset --dry-run` used to be rejected at parse time because
         // `--reset` clears state on disk and `--dry-run` is supposed to be
         // side-effect-free. Now reinterpreted as a *virtual* reset: open an

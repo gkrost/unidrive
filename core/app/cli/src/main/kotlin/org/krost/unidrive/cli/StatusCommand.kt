@@ -200,7 +200,7 @@ class StatusCommand : Runnable {
             println("No state.db for profile '${profile.name}' — nothing pending.")
             return
         }
-        val db = StateDatabase(stateDbPath)
+        val db = StateDatabase(stateDbPath, readOnly = true)
         var downloadsPending = 0
         var uploadsPending = 0
         var downloadBytes = 0L
@@ -264,7 +264,7 @@ class StatusCommand : Runnable {
 
         val stateDbPath = configDir.resolve("state.db")
         if (Files.exists(stateDbPath)) {
-            val db = StateDatabase(stateDbPath)
+            val db = StateDatabase(stateDbPath, readOnly = true)
             try {
                 db.initialize()
                 val entries = db.getAllEntries()
@@ -350,7 +350,7 @@ class StatusCommand : Runnable {
         val stateDbPath = configDir.resolve("state.db")
         val persisted =
             if (Files.exists(stateDbPath)) {
-                val db = StateDatabase(stateDbPath)
+                val db = StateDatabase(stateDbPath, readOnly = true)
                 try {
                     db.initialize()
                     db.getSyncState("effective_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
@@ -561,7 +561,7 @@ class StatusCommand : Runnable {
         }
 
         try {
-            val db = StateDatabase(stateDbPath)
+            val db = StateDatabase(stateDbPath, readOnly = true)
             db.initialize()
             val entries = db.getAllEntries()
             val sparseCount = entries.count { !it.isHydrated && !it.isFolder }
@@ -652,7 +652,7 @@ class StatusCommand : Runnable {
             )
         }
         return try {
-            val db = StateDatabase(stateDbPath)
+            val db = StateDatabase(stateDbPath, readOnly = true)
             db.initialize()
             val entries = db.getAllEntries()
             val sparseCount = entries.count { !it.isHydrated && !it.isFolder }

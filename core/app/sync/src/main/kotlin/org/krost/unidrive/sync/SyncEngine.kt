@@ -390,55 +390,6 @@ open class SyncEngine(
             }
         }.getOrDefault(false)
 
-    // The shapes a placeholder or download artifact in the sync root can have — anything else
-    // is real user content, which the recovery download must never overwrite:
-    //  - a fresh placeholder / interrupted-before-first-byte download: a 0-byte stub
-    //    (createPlaceholder, or applyDownload killed before writing);
-    //  - a partial download: applyDownload writes the sync-root path directly, so a kill
-    //    mid-download leaves a prefix of the remote bytes; recovery finishing it is what
-    //    main's UD-225 loop already does, and uploading the prefix would truncate the remote;
-    //  - a freed placeholder: a sparse remoteSize of zeros stamped with the remote modified
-    //    time (dehydrate). A tool that touches the mtime afterwards (the touch-happy
-    //    property handlers from #396) must not turn it back into an upload of the stub, so
-    //    the zeros themselves are checked.
-    private fun looksLikePlaceholder(
-        local: Path,
-        entry: SyncEntry,
-    ): Boolean {
-        val size = Files.size(local)
-        if (size == 0L) return true
-        if (size < entry.remoteSize) return true
-        if (size == entry.remoteSize && entry.remoteSize > 0L) {
-            val remoteModified = entry.remoteModified
-            if (remoteModified != null &&
-                Files.getLastModifiedTime(local).toMillis() == remoteModified.toEpochMilli()
-            ) {
-                return true
-            }
-            return isAllZero(local)
-        }
-        return false
-    }
-
-    private fun isAllZero(path: Path): Boolean =
-        runCatching {
-            Files.newInputStream(path).use { input ->
-                val buf = ByteArray(64 * 1024)
-                var allZero = true
-                while (allZero) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    for (i in 0 until n) {
-                        if (buf[i] != 0.toByte()) {
-                            allZero = false
-                            break
-                        }
-                    }
-                }
-                allZero
-            }
-        }.getOrDefault(false)
-
     private fun isExcluded(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
 
@@ -1118,7 +1069,7 @@ open class SyncEngine(
         // actual verdict — which a 410 cursor-expiry recovery can upgrade inside
         // the gather — is read back after the gather below.
         val preGatherTrackedRows = db.getEntryCount()
-        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty()
+        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty() || provider.deltaIsFullListing
         // A full enumeration against an established baseline must run NON-streaming
         // so the remote-shrink guard can abort before any transfer is dispatched —
         // the streaming gather dispatches safe-now uploads/downloads mid-scan, which
@@ -1188,7 +1139,7 @@ open class SyncEngine(
                     log.info("Apply mode: skipping remote gather; recovery loops will surface pending entries")
                     emptyMap()
                 } else {
-                    gatherRemoteChanges()
+                    gatherRemoteChanges(readOnly = dryRun)
                 }
         }
 
@@ -1985,10 +1936,11 @@ open class SyncEngine(
         return out
     }
 
-    private suspend fun gatherRemoteChanges(): Map<String, CloudItem> = withContext(Priority.Background) {
+    // [readOnly]: a dry-run preview, told to the provider through ScanContext.readOnly so it persists nothing.
+    private suspend fun gatherRemoteChanges(readOnly: Boolean = false): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
-        var isFullSync = cursor == null
+        var isFullSync = cursor == null || provider.deltaIsFullListing
         var changes = mutableMapOf<String, CloudItem>()
 
         // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
@@ -1997,7 +1949,7 @@ open class SyncEngine(
         // deletion sweep (detectMissingAfterFullSync) is skipped — no enumeration
         // means no authoritative item set to diff against, so we must NOT treat
         // absence as deletion.
-        if (fastBootstrap && isFullSync) {
+        if (fastBootstrap && cursor == null) {
             if (Capability.FastBootstrap in provider.capabilities()) {
                 when (val result = provider.deltaFromLatest()) {
                     is CapabilityResult.Success -> {
@@ -2111,6 +2063,7 @@ open class SyncEngine(
                 resumedItems = resumedItems,
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
                 scopeRoots = trackScope,
+                readOnly = readOnly,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -2201,6 +2154,7 @@ open class SyncEngine(
                     resumedItems = emptyList(),
                     persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
                     scopeRoots = trackScope,
+                    readOnly = readOnly,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =
@@ -2400,7 +2354,7 @@ open class SyncEngine(
     ): Pair<Map<String, CloudItem>, List<SyncAction>> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
-        val isFullSync = cursor == null
+        val isFullSync = cursor == null || provider.deltaIsFullListing
         val changes = mutableMapOf<String, CloudItem>()
         val buffer = StreamingReconcileBuffer()
         val safeAccumulator = mutableListOf<SyncAction>()
@@ -2420,7 +2374,7 @@ open class SyncEngine(
         // UD-223 fast-bootstrap mirror: bootstrap adopts the cursor with
         // zero enumeration, so there's nothing to stream — fall through
         // to the same map-only path as the non-streaming gather.
-        if (fastBootstrap && isFullSync && Capability.FastBootstrap in provider.capabilities()) {
+        if (fastBootstrap && cursor == null && Capability.FastBootstrap in provider.capabilities()) {
             when (val result = provider.deltaFromLatest()) {
                 is CapabilityResult.Success -> {
                     val page = result.value

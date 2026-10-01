@@ -35,6 +35,13 @@ class LocalFsProviderTest {
         }
 
     @Test
+    fun delta_declares_that_every_call_is_a_full_listing() {
+        // delta() walks the tree and sends no tombstones, so the engine must run its absence sweep on
+        // every pass; without this declaration a remote deletion never reaches the sync root.
+        assertTrue(LocalFsProvider(newRoot()).deltaIsFullListing)
+    }
+
+    @Test
     fun delta_returns_full_inventory() =
         runTest {
             val p = LocalFsProvider(newRoot())

@@ -68,7 +68,8 @@ class SweepCommand : Runnable {
                 return@runBlocking
             }
 
-            val db = StateDatabase(dbPath)
+            // Only --rehydrate without --dry-run writes rows; every other mode just reports.
+            val db = StateDatabase(dbPath, readOnly = !(rehydrate && !dryRun))
             db.initialize()
             try {
                 val syncRoot = profile.syncRoot

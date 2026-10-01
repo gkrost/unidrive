@@ -43,6 +43,10 @@ class StateDatabase(
     private val inMemory: Boolean = false,
     // A throwaway on-disk copy made by [snapshotOf]; close() deletes it.
     private val disposableFile: Path? = null,
+    // Open the existing file read-only (SQLite mode=ro) for commands that only report: no mkdir, no
+    // schema stamp, no migration. A file without a current schema is refused instead of rebuilt, and
+    // every write fails. Missing file: refused, and none is created.
+    private val readOnly: Boolean = false,
 ) {
     /** True when this database can be discarded without losing real state (in-memory shadow or snapshot copy). */
     val isDisposable: Boolean get() = inMemory || disposableFile != null
@@ -59,6 +63,10 @@ class StateDatabase(
     @Synchronized
     fun initialize() {
         _conn?.takeIf { !it.isClosed }?.close()
+        if (readOnly) {
+            initializeReadOnly()
+            return
+        }
         val url =
             if (inMemory) {
                 "jdbc:sqlite::memory:"
@@ -69,6 +77,27 @@ class StateDatabase(
         _conn = DriverManager.getConnection(url)
         conn.autoCommit = true
         bootstrapSchema()
+    }
+
+    private fun initializeReadOnly() {
+        check(!inMemory) { "an in-memory database cannot be read-only" }
+        check(Files.exists(dbPath)) { "state.db does not exist: $dbPath" }
+        // Path.toUri() percent-encodes; see snapshotOf for why a raw file: URI is not safe here.
+        val c = DriverManager.getConnection("jdbc:sqlite:${dbPath.toAbsolutePath().toUri()}?mode=ro&busy_timeout=5000")
+        try {
+            val recorded = readSchemaVersionOf(c)
+            check(recorded != null) {
+                "state.db at $dbPath has no schema version (written by an older unidrive); run `unidrive sync` once to upgrade it."
+            }
+            check(recorded <= SCHEMA_VERSION) {
+                "state.db was written by a newer unidrive (schema $recorded, this build supports $SCHEMA_VERSION)."
+            }
+        } catch (e: Throwable) {
+            runCatching { c.close() }
+            throw e
+        }
+        _conn = c
+        conn.autoCommit = true
     }
 
     @Synchronized
