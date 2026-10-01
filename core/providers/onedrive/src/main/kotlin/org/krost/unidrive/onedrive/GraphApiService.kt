@@ -403,11 +403,10 @@ class GraphApiService(
         // blind-overwritten (UD-366 data-loss), with the create-collision keep-both handled by
         // OneDriveProvider.upload.
         val response =
-            httpClient.put("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior") {
+            sendThrottled("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior", HttpMethod.Put) {
                 timeout {
                     requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
                 }
-                bearerAuth(tokenProvider(false))
                 contentType(ContentType.Application.OctetStream)
                 // #291: If-Match makes the content PUT conditional on the caller's view of the item
                 // being current. A concurrent edit between the engine's plan and this PUT flips the
@@ -444,9 +443,7 @@ class GraphApiService(
                 }
             }
         val response =
-            httpClient.request("$baseUrl/me/drive/items/$itemId") {
-                bearerAuth(tokenProvider(false))
-                method = HttpMethod("PATCH")
+            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Patch) {
                 contentType(ContentType.Application.Json)
                 setBody(body.toString())
             }
@@ -464,9 +461,7 @@ class GraphApiService(
 
     suspend fun deleteItem(itemId: String, ifMatchETag: String? = null) {
         val response =
-            httpClient.request("$baseUrl/me/drive/items/$itemId") {
-                bearerAuth(tokenProvider(false))
-                method = HttpMethod("DELETE")
+            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Delete) {
                 // #291: If-Match guards the delete against a concurrent edit between plan and apply.
                 // A non-null eTag makes Graph return 412 Precondition Failed if the item moved on,
                 // rather than destroying a version the engine never saw. Null = legacy unconditional.
@@ -500,8 +495,7 @@ class GraphApiService(
                 putJsonObject("folder") {}
             }
         val response =
-            httpClient.post(url) {
-                bearerAuth(tokenProvider(false))
+            sendThrottled(url, HttpMethod.Post) {
                 contentType(ContentType.Application.Json)
                 setBody(requestBody.toString())
             }
@@ -545,9 +539,7 @@ class GraphApiService(
             }
 
         val response =
-            httpClient.request("$baseUrl/me/drive/items/$itemId") {
-                bearerAuth(tokenProvider(false))
-                method = HttpMethod("PATCH")
+            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Patch) {
                 contentType(ContentType.Application.Json)
                 // If-Match makes the PATCH conditional on the caller's view of the item being
                 // current. A concurrent edit between getItemByPath and moveItem flips the
@@ -757,8 +749,7 @@ class GraphApiService(
                 }
             }
         val sessionResponse =
-            httpClient.post("$baseUrl/me/drive/root:/$encoded:/createUploadSession") {
-                bearerAuth(tokenProvider(false))
+            sendThrottled("$baseUrl/me/drive/root:/$encoded:/createUploadSession", HttpMethod.Post) {
                 contentType(ContentType.Application.Json)
                 // If-Match makes the session-create conditional on the caller's view of the item
                 // being current. A concurrent edit between the metadata fetch and this call flips
@@ -814,6 +805,9 @@ class GraphApiService(
         var currentBytes = bytes
 
         for ((attempt, delayMs) in retryDelays.withIndex()) {
+            // Chunks are the bulk of the write traffic: they take a slot like every other request, so an
+            // open throttle circuit holds them back too.
+            throttleBudget.awaitSlot()
             val response =
                 httpClient.put(uploadUrl) {
                     timeout {
@@ -825,7 +819,10 @@ class GraphApiService(
                 }
 
             // Success or "more chunks" — return immediately
-            if (response.status.value in listOf(200, 201, 202)) return response
+            if (response.status.value in listOf(200, 201, 202)) {
+                throttleBudget.recordSuccess()
+                return response
+            }
 
             // Session expired or gone — surface as a 404/410 so uploadLargeFile's two-attempt
             // wrapper recognises it and retries with a fresh session.
@@ -839,13 +836,14 @@ class GraphApiService(
 
             // Rate limit — retry with backoff
             if (response.status.value == 429) {
+                val retryAfter = response.headers["Retry-After"]?.toLongOrNull()?.times(1000) ?: delayMs
+                throttleBudget.recordThrottle(minOf(retryAfter, MAX_SINGLE_BACKOFF_MS)) // same cap the reads apply to a hint
                 if (attempt == retryDelays.lastIndex) {
                     throw GraphApiException(
                         "Rate limited (429) at offset $currentOffset after ${attempt + 1} retries: ${response.status}",
                         response.status.value,
                     )
                 }
-                val retryAfter = response.headers["Retry-After"]?.toLongOrNull()?.times(1000) ?: delayMs
                 delay(retryAfter)
                 continue
             }
@@ -859,6 +857,7 @@ class GraphApiService(
             }
 
             // Transient server error (5xx, 408) — query status and retry
+            if (response.status.value == 503) throttleBudget.recordThrottle(delayMs) // 503 is a throttle signal, as on reads
             if (attempt == retryDelays.lastIndex) {
                 throw GraphApiException(
                     "Chunk upload failed after ${attempt + 1} retries at offset $currentOffset: ${response.status}",
@@ -896,62 +895,40 @@ class GraphApiService(
     private suspend fun authenticatedRequest(
         url: String,
         method: HttpMethod = HttpMethod.Get,
-    ): HttpResponse {
-        var refreshed = false
-        var throttleAttempts = 0
-        var totalThrottleWaitMs = 0L
-        while (true) {
-            throttleBudget.awaitSlot()
-            val response =
-                httpClient.request(url) {
-                    bearerAuth(tokenProvider(refreshed))
-                    this.method = method
-                }
-            if (response.status == HttpStatusCode.Unauthorized && !refreshed) {
-                log.info("Got 401 on {} — forcing token refresh and retrying once", url.takeLast(60))
-                refreshed = true
-                continue
-            }
-            if (response.status == HttpStatusCode.Unauthorized) {
-                // UD-203: capture request-id so the failing call is correlatable in Graph's logs.
-                throw AuthenticationException(
-                    "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
-                    requestId = extractRequestId(response),
-                )
-            }
-            if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
-                val waitMs = pickBackoffMs(response, throttleAttempts, totalThrottleWaitMs)
-                log.warn(
-                    "Got {} on {} — throttled, waiting {}ms (attempt {}/{})",
-                    response.status.value,
-                    url.takeLast(60),
-                    waitMs,
-                    throttleAttempts + 1,
-                    MAX_THROTTLE_ATTEMPTS,
-                )
-                throttleBudget.recordThrottle(waitMs)
-                delay(waitMs)
-                throttleAttempts++
-                totalThrottleWaitMs += waitMs
-                continue
-            }
-            if (!response.status.isSuccess()) {
-                // UD-203: capture request-id for support-ticket correlation.
-                throw GraphApiException(
-                    "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
-                    response.status.value,
-                    requestId = extractRequestId(response),
-                )
-            }
-            throttleBudget.recordSuccess()
-            return response
-        }
-    }
+    ): HttpResponse = requireSuccess(sendThrottled(url, method))
 
     private suspend fun authenticatedRequest(
         url: String,
         method: HttpMethod,
         body: String,
+    ): HttpResponse =
+        requireSuccess(
+            sendThrottled(url, method) {
+                setBody(body)
+                contentType(ContentType.Application.Json)
+            },
+        )
+
+    /**
+     * #293: the one path every Graph request that does not stream goes through, reads and writes alike.
+     *
+     * Before each attempt it takes a slot from [throttleBudget] (the shared circuit breaker and token
+     * bucket), so a throttle storm brakes writes as well as reads. A 401 is retried once with a forced
+     * token refresh. A 429 or 503 is retried with the server's Retry-After (or exponential backoff) up
+     * to [MAX_THROTTLE_ATTEMPTS] times within [MAX_TOTAL_THROTTLE_WAIT_MS], and every throttle is
+     * recorded on the budget. This is the Graph row of the canonical matrix in [HttpRetryBudget].
+     *
+     * [configure] builds the request afresh for every attempt, so a body is sent again intact. The final
+     * response is returned as it is, whatever its status: a caller that needs a particular error for a
+     * status (a delete that treats 404 as done, a create that reads 409) keeps its own mapping; the
+     * rest use [requireSuccess]. Only 401, 429 and 503 are retried: the answers Graph gives instead of
+     * acting on a request. A 409, 412 or 5xx other than 503 can mean the write took effect, so it
+     * reaches the caller and is never repeated here.
+     */
+    private suspend fun sendThrottled(
+        endpoint: String,
+        method: HttpMethod,
+        configure: suspend HttpRequestBuilder.() -> Unit = {},
     ): HttpResponse {
         var refreshed = false
         var throttleAttempts = 0
@@ -959,30 +936,25 @@ class GraphApiService(
         while (true) {
             throttleBudget.awaitSlot()
             val response =
-                httpClient.request(url) {
-                    bearerAuth(tokenProvider(refreshed))
-                    this.method = method
-                    setBody(body)
-                    contentType(ContentType.Application.Json)
-                }
+                httpClient.request(
+                    HttpRequestBuilder().apply {
+                        url(endpoint)
+                        this.method = method
+                        bearerAuth(tokenProvider(refreshed))
+                        configure()
+                    },
+                )
             if (response.status == HttpStatusCode.Unauthorized && !refreshed) {
-                log.info("Got 401 on {} — forcing token refresh and retrying once", url.takeLast(60))
+                log.info("Got 401 on {} — forcing token refresh and retrying once", endpoint.takeLast(60))
                 refreshed = true
                 continue
-            }
-            if (response.status == HttpStatusCode.Unauthorized) {
-                // UD-203: capture request-id so the failing call is correlatable in Graph's logs.
-                throw AuthenticationException(
-                    "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
-                    requestId = extractRequestId(response),
-                )
             }
             if (shouldBackoff(response, throttleAttempts, totalThrottleWaitMs)) {
                 val waitMs = pickBackoffMs(response, throttleAttempts, totalThrottleWaitMs)
                 log.warn(
                     "Got {} on {} — throttled, waiting {}ms (attempt {}/{})",
                     response.status.value,
-                    url.takeLast(60),
+                    endpoint.takeLast(60),
                     waitMs,
                     throttleAttempts + 1,
                     MAX_THROTTLE_ATTEMPTS,
@@ -993,17 +965,28 @@ class GraphApiService(
                 totalThrottleWaitMs += waitMs
                 continue
             }
-            if (!response.status.isSuccess()) {
-                // UD-203: capture request-id for support-ticket correlation.
-                throw GraphApiException(
-                    "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
-                    response.status.value,
-                    requestId = extractRequestId(response),
-                )
-            }
-            throttleBudget.recordSuccess()
+            if (response.status.isSuccess()) throttleBudget.recordSuccess()
             return response
         }
+    }
+
+    private suspend fun requireSuccess(response: HttpResponse): HttpResponse {
+        if (response.status == HttpStatusCode.Unauthorized) {
+            // UD-203: capture request-id so the failing call is correlatable in Graph's logs.
+            throw AuthenticationException(
+                "Authentication failed (401): ${truncateErrorBody(response.bodyAsText())}",
+                requestId = extractRequestId(response),
+            )
+        }
+        if (!response.status.isSuccess()) {
+            // UD-203: capture request-id for support-ticket correlation.
+            throw GraphApiException(
+                "API error: ${response.status} - ${truncateErrorBody(response.bodyAsText())}",
+                response.status.value,
+                requestId = extractRequestId(response),
+            )
+        }
+        return response
     }
 
     /**
@@ -1151,11 +1134,7 @@ class GraphApiService(
     ): Boolean {
         val item = getItemByPath(path)
         val url = "$baseUrl/me/drive/items/${item.id}/permissions/$permissionId"
-        val response =
-            httpClient.request(url) {
-                bearerAuth(tokenProvider(false))
-                method = HttpMethod("DELETE")
-            }
+        val response = sendThrottled(url, HttpMethod.Delete)
         if (response.status == HttpStatusCode.Unauthorized) {
             throw AuthenticationException("Authentication failed (401): ${response.bodyAsText()}")
         }
@@ -1219,11 +1198,7 @@ class GraphApiService(
         val url = "$baseUrl/subscriptions/$subscriptionId"
 
         return try {
-            val response =
-                httpClient.request(url) {
-                    bearerAuth(tokenProvider(false))
-                    method = HttpMethod("DELETE")
-                }
+            val response = sendThrottled(url, HttpMethod.Delete)
             response.status.isSuccess()
         } catch (e: Exception) {
             log.warn("Failed to delete subscription: {}", e.message)
