@@ -58,11 +58,23 @@ class StateDatabase(
     private val conn: Connection
         get() = _conn ?: error("StateDatabase not initialized — call initialize() first")
 
+    // The thread that opened the manual batch ([beginBatch]) holding the connection's one SQLite
+    // transaction, or null when no manual batch is open. SQLite has no per-thread transactions, so every
+    // other thread's write would silently join it (#300); [beginWrite] uses this to tell them apart.
+    // Both fields are guarded by the instance monitor.
+    private var batchOwner: Thread? = null
+
+    // True while another thread's write has closed the open batch's transaction (the batch is still open
+    // for its owner, which reopens a transaction on its next write).
+    private var batchSuspended: Boolean = false
+
     val recovery: Recovery = Recovery()
 
     @Synchronized
     fun initialize() {
         _conn?.takeIf { !it.isClosed }?.close()
+        batchOwner = null
+        batchSuspended = false
         if (readOnly) {
             initializeReadOnly()
             return
@@ -375,9 +387,12 @@ class StateDatabase(
     /**
      * Run [block] inside a single SQLite transaction. All writes inside the block share one
      * fsync instead of one per statement. Nested calls are no-ops (autoCommit already false).
+     * Called while another thread's manual batch is open, the block still gets a transaction of its
+     * own (see [beginBatch]).
      */
     @Synchronized
     fun <T> batch(block: () -> T): T {
+        beginWrite()
         if (!conn.autoCommit) return block() // already inside a transaction
         conn.autoCommit = false
         return try {
@@ -392,21 +407,65 @@ class StateDatabase(
         }
     }
 
-    /** Begin a manual transaction (for suspend callers that can't use the [batch] lambda). */
+    /**
+     * Begin a manual transaction (for suspend callers that can't use the [batch] lambda).
+     *
+     * The batch belongs to the calling thread: a write from any other thread (an IPC hydration verb while
+     * the engine is in Pass 1) never joins it. That write first commits the transaction as it stands,
+     * runs and commits on its own, and the batch continues in a new transaction on its owner's next
+     * write (#300). A SQLite connection has one transaction, so a rollback therefore discards only what
+     * the owner wrote since the last such interruption; with no other writer a batch is atomic as before.
+     * Only the owner's calls belong to the batch, so a coroutine that begins it must keep writing on the
+     * same thread (`runBlocking` does); on a different thread its writes commit one by one. Opening a
+     * second batch from another thread while one is open fails: there is only one transaction to own.
+     */
     @Synchronized fun beginBatch() {
-        if (conn.autoCommit) conn.autoCommit = false
+        val owner = batchOwner
+        if (owner != null && owner !== Thread.currentThread()) {
+            error("A batch is already open on thread '${owner.name}'; a StateDatabase supports one open batch at a time.")
+        }
+        beginWrite() // the owner calling again resumes a transaction a foreign write had closed
+        if (conn.autoCommit) {
+            conn.autoCommit = false
+            batchOwner = Thread.currentThread()
+        }
     }
 
-    /** Commit a manual transaction started by [beginBatch]. */
+    /** Commit a manual transaction started by [beginBatch] (from whichever thread ends it). */
     @Synchronized fun commitBatch() {
-        conn.commit()
+        if (!batchSuspended) conn.commit()
         conn.autoCommit = true
+        endBatch()
     }
 
-    /** Roll back a manual transaction started by [beginBatch]. */
+    /** Roll back a manual transaction started by [beginBatch] (from whichever thread ends it). */
     @Synchronized fun rollbackBatch() {
-        conn.rollback()
+        if (!batchSuspended) conn.rollback()
         conn.autoCommit = true
+        endBatch()
+    }
+
+    private fun endBatch() {
+        batchOwner = null
+        batchSuspended = false
+    }
+
+    /**
+     * Called first by every method that writes, with the monitor held. If another thread's manual batch
+     * has the connection's transaction open, closes it so this write is not part of it; if this thread
+     * owns a batch whose transaction was closed that way, reopens it. A no-op when no batch is open.
+     */
+    private fun beginWrite() {
+        val owner = batchOwner ?: return
+        if (owner === Thread.currentThread()) {
+            if (batchSuspended) {
+                conn.autoCommit = false
+                batchSuspended = false
+            }
+        } else if (!batchSuspended) {
+            conn.autoCommit = true // JDBC commits the open transaction when autocommit comes back on
+            batchSuspended = true
+        }
     }
 
     /**
@@ -420,6 +479,7 @@ class StateDatabase(
      */
     @Synchronized
     fun upsertEntry(rawEntry: SyncEntry) {
+        beginWrite()
         // #171: store paths in NFC so the reconciler's NFC keys and direct lookups
         // (incl. the co-daemon's possibly-NFD getEntry) match the stored rows.
         // remote_path is normalized on write too, so getEntryByRemotePath — which
@@ -585,6 +645,7 @@ class StateDatabase(
     /** Mark a path as no longer locally cached (is_hydrated = 0). */
     @Synchronized
     fun markUnhydrated(pathRaw: String) {
+        beginWrite()
         val path = PathNormalizer.nfc(pathRaw)
         conn.prepareStatement(
             "UPDATE sync_entries SET is_hydrated = 0 WHERE path = ? AND status = 'EXISTS'",
@@ -744,6 +805,7 @@ class StateDatabase(
      */
     @Synchronized
     fun deleteEntry(pathRaw: String) {
+        beginWrite()
         val path = PathNormalizer.nfc(pathRaw)
         conn.prepareStatement("DELETE FROM sync_entries WHERE path = ? AND status='EXISTS'").use { stmt ->
             stmt.setString(1, path)
@@ -763,6 +825,7 @@ class StateDatabase(
     @Synchronized
     fun setStatusTrashed(remoteId: String): Boolean {
         if (remoteId.startsWith("local:")) return false // never trash a synthetic
+        beginWrite()
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET status='TRASHED' WHERE remote_id=? AND status='EXISTS'",
@@ -786,6 +849,7 @@ class StateDatabase(
         remoteId: String,
         at: Instant,
     ): Boolean {
+        beginWrite()
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET download_quarantined=1, last_error_at=? " +
@@ -812,6 +876,7 @@ class StateDatabase(
         pathRaw: String,
         at: Instant,
     ): Boolean {
+        beginWrite()
         val path = PathNormalizer.nfc(pathRaw)
         conn
             .prepareStatement(
@@ -871,6 +936,7 @@ class StateDatabase(
      */
     @Synchronized
     fun clearDownloadQuarantine(remoteId: String): Boolean {
+        beginWrite()
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET download_quarantined=0, last_error_at=NULL " +
@@ -889,6 +955,7 @@ class StateDatabase(
     @Synchronized
     fun setStatusExists(remoteId: String): Boolean {
         if (remoteId.startsWith("local:")) return false
+        beginWrite()
         conn
             .prepareStatement(
                 "UPDATE sync_entries SET status='EXISTS' WHERE remote_id=? AND status='TRASHED'",
@@ -968,6 +1035,7 @@ class StateDatabase(
         key: String,
         value: String,
     ) {
+        beginWrite()
         conn.prepareStatement("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)").use { stmt ->
             stmt.setString(1, key)
             stmt.setString(2, value)
@@ -980,6 +1048,7 @@ class StateDatabase(
         pattern: String,
         pinned: Boolean,
     ) {
+        beginWrite()
         conn.prepareStatement("INSERT OR REPLACE INTO pin_rules (pattern, pinned) VALUES (?, ?)").use { stmt ->
             stmt.setString(1, pattern)
             stmt.setInt(2, if (pinned) 1 else 0)
@@ -989,6 +1058,7 @@ class StateDatabase(
 
     @Synchronized
     fun removePinRule(pattern: String) {
+        beginWrite()
         conn.prepareStatement("DELETE FROM pin_rules WHERE pattern = ?").use { stmt ->
             stmt.setString(1, pattern)
             stmt.executeUpdate()
@@ -1218,6 +1288,7 @@ class StateDatabase(
         remoteIds: Collection<String>,
     ) {
         if (remoteIds.isEmpty()) return
+        beginWrite()
         val placeholders = remoteIds.joinToString(",") { "?" }
         conn.prepareStatement(
             "UPDATE scan_staging SET reconciled = 1 " +
