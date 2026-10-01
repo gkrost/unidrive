@@ -14,6 +14,31 @@ sealed class HydrationEvent {
     data class Failed(override val path: String, val error: HydrationError) : HydrationEvent()
 
     /**
+     * Correlated completion of a handle-scoped transfer. Emitted when the work
+     * behind an `open_read` (download) or `open_write` (upload, including the
+     * crash-recovery replay) finishes — [handleId] is the client's own handle id,
+     * so a write-back client can mark a file in sync (or surface the failure)
+     * without guessing from the uncorrelated hydrating/hydrated/failed stream.
+     * Verbs whose reply already IS the result (hydrate, dehydrate) emit no
+     * Completed.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe`):
+     *   - success: `{"event":"completed","path":"/a","handle_id":"h1","direction":"upload","ok":true}`
+     *   - failure: `{"event":"completed","path":"/a","handle_id":"h1","direction":"upload","ok":false,"error":"<token>"}`
+     */
+    data class Completed(
+        override val path: String,
+        /** The client-supplied handle id the transfer was started under. */
+        val handleId: String,
+        val direction: Direction,
+        val ok: Boolean,
+        /** Failure token (stable wire token for typed errors, provider message for Generic). Null on success. */
+        val error: HydrationError? = null,
+    ) : HydrationEvent() {
+        enum class Direction { DOWNLOAD, UPLOAD }
+    }
+
+    /**
      * Emitted after [org.krost.unidrive.sync.SyncEngine.enumerateRemoteIntoState] mutates
      * `state.db` (upserts and/or reaps rows). Signals subscribed FUSE co-daemons to drop
      * stale `readdir`/`getattr` cache entries.

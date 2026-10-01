@@ -161,10 +161,13 @@ class LsCommand : Runnable {
 
     companion object {
         // hydration.list reply entry shape (serialiseListEntries in HydrationIpcHandler):
-        //   {"path":"...","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool}
+        //   {"path":"...","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool[,<additive fields>]}
+        // The fields after `folder` (remote_modified_ms, remote_id, etag,
+        // pending_upload, error) are additive and skipped by the tail group, so
+        // old/new daemon replies both parse.
         private val ENTRY_REGEX =
             Regex(
-                """\{"path":"((?:[^"\\]|\\.)*)","size":(-?\d+),"mtime_ms":(-?\d+),"hydrated":(?:true|false),"folder":(true|false)\}""",
+                """\{"path":"((?:[^"\\]|\\.)*)","size":(-?\d+),"mtime_ms":(-?\d+),"hydrated":(?:true|false),"folder":(true|false)(?:,[^}]*)?\}""",
             )
 
         /**

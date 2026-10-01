@@ -19,8 +19,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   open_read   request:  {"verb":"hydration.open_read","handle_id":"...","path":"/foo"}
  *   open_read   reply ok: {"ok":true,"cache_path":"/home/.../foo.txt"}
  *   open_read   reply err:{"ok":false,"error":"<message>"}
- *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"}
- *   open_write  reply:    same as open_read
+ *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"[,"base_etag":"..."]}
+ *   open_write  reply:    same as open_read; base_etag (OPTIONAL) is the etag the client
+ *                         observed at list/open time — a mismatch refuses the write with
+ *                         {"ok":false,"error":"conflict"} before any upload starts
  *   close_handle request: {"verb":"hydration.close_handle","handle_id":"..."}
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
@@ -49,12 +51,21 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"path_exists"}        EEXIST
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
- *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"}
+ *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"[,"replace":true]}
  *               reply:    {"ok":true}
  *                         {"ok":false,"error":"old_path_not_found"}    ENOENT
  *                         {"ok":false,"error":"new_parent_not_found"}  ENOENT
  *                         {"ok":false,"error":"new_path_exists"}       EEXIST
  *                         {"ok":false,"error":"<msg>"}                 EIO
+ *                         replace (OPTIONAL, default false) is POSIX
+ *                         overwrite-if-exists for a FILE destination: the
+ *                         existing destination is deleted first (same delete
+ *                         path as unlink — trash/undo semantics), then the
+ *                         source takes its place. With replace, an
+ *                         open_write upload of the source or the destination
+ *                         that is still queued or running refuses the rename
+ *                         with {"ok":false,"error":"busy"} (nothing touched):
+ *                         retry after the "completed" event for that handle.
  *
  *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
  *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
@@ -235,7 +246,10 @@ class HydrationIpcHandler(
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
-                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
+                // base_etag is OPTIONAL: absent (or a row with no recorded token) →
+                // unconditional upload, byte-identical to the pre-guard contract.
+                val baseEtag = pluck(jsonRequest, "base_etag")
+                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
@@ -322,7 +336,9 @@ class HydrationIpcHandler(
             "hydration.rename" -> {
                 val oldPath = pluckPath(jsonRequest, "old_path") ?: return reply(ok = false, error = "missing_old_path")
                 val newPath = pluckPath(jsonRequest, "new_path") ?: return reply(ok = false, error = "missing_new_path")
-                when (val r = hydration.rename(oldPath, newPath)) {
+                // replace is OPTIONAL (default false): POSIX overwrite-if-exists.
+                val replace = pluckBool(jsonRequest, "replace") ?: false
+                when (val r = hydration.rename(oldPath, newPath, replace)) {
                     is RenameResult.Ok -> reply(ok = true)
                     RenameResult.OldPathNotFound -> reply(ok = false, error = "old_path_not_found")
                     RenameResult.NewParentNotFound -> reply(ok = false, error = "new_parent_not_found")
@@ -372,6 +388,43 @@ class HydrationIpcHandler(
             i = skipWs(line, i + 1)
             if (i >= line.length) return null
             if (name == key) return if (line[i] == '"') readString(line, i)?.first else null
+            val afterValue = skipValue(line, i)
+            if (afterValue < 0) return null
+            i = skipWs(line, afterValue)
+            if (i < line.length && line[i] == ',') i = skipWs(line, i + 1) else break
+        }
+        return null
+    }
+
+    // Boolean pluck for OPTIONAL verb flags (e.g. rename's `replace`). Accepts the
+    // bare JSON literals true/false — what System.Text.Json and serde_json emit —
+    // and, defensively, the quoted strings "true"/"false". A missing key, a bare
+    // null, or any other value yields null so the caller applies its default.
+    // Walks the object's members with the same structure as [pluck].
+    private fun pluckBool(line: String, key: String): Boolean? {
+        var i = skipWs(line, 0)
+        if (i >= line.length || line[i] != '{') return null
+        i = skipWs(line, i + 1)
+        while (i < line.length && line[i] == '"') {
+            val (name, afterName) = readString(line, i) ?: return null
+            i = skipWs(line, afterName)
+            if (i >= line.length || line[i] != ':') return null
+            i = skipWs(line, i + 1)
+            if (i >= line.length) return null
+            if (name == key) {
+                return when {
+                    line.startsWith("true", i) -> true
+                    line.startsWith("false", i) -> false
+                    line[i] == '"' -> readString(line, i)?.first?.let {
+                        when (it.lowercase()) {
+                            "true" -> true
+                            "false" -> false
+                            else -> null
+                        }
+                    }
+                    else -> null
+                }
+            }
             val afterValue = skipValue(line, i)
             if (afterValue < 0) return null
             i = skipWs(line, afterValue)
@@ -466,6 +519,11 @@ private fun serialiseListEntries(entries: List<ListResult.Entry>): String {
             .append(",\"mtime_ms\":").append(e.mtimeEpochMillis)
             .append(",\"hydrated\":").append(e.isHydrated)
             .append(",\"folder\":").append(e.isFolder)
+            .append(",\"remote_modified_ms\":").append(e.remoteModifiedEpochMillis?.toString() ?: "null")
+            .append(",\"remote_id\":").append(e.remoteId?.let { jsonEsc(it) } ?: "null")
+            .append(",\"etag\":").append(e.etag?.let { jsonEsc(it) } ?: "null")
+            .append(",\"pending_upload\":").append(e.pendingUpload)
+            .append(",\"error\":").append(e.hasError)
             .append('}')
     }
     sb.append("]}")
@@ -477,6 +535,11 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
     is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Failed     -> """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}}"""
+    is HydrationEvent.Completed -> {
+        val direction = if (e.direction == HydrationEvent.Completed.Direction.UPLOAD) "upload" else "download"
+        val base = """{"event":"completed","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)},"direction":"$direction","ok":${e.ok}"""
+        if (e.ok) "$base}" else "$base,\"error\":${jsonEsc(e.error?.message ?: "unknown")}}"
+    }
     is HydrationEvent.ViewInvalidated -> {
         if (e.full) {
             """{"event":"view.invalidated","full":true}"""
@@ -487,4 +550,21 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     }
 }
 
-private fun jsonEsc(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+// JSON string literal for [s]. Quote and backslash AND control characters are escaped: a
+// provider's error message (an HTTP error body, say) routinely carries a newline, and one raw
+// newline in a reply or event line splits the NDJSON framing for the reader.
+private fun jsonEsc(s: String): String {
+    val sb = StringBuilder(s.length + 2).append('"')
+    for (c in s) {
+        when {
+            c == '\\' -> sb.append('\\').append('\\')
+            c == '"' -> sb.append('\\').append('"')
+            c == '\n' -> sb.append('\\').append('n')
+            c == '\r' -> sb.append('\\').append('r')
+            c == '\t' -> sb.append('\\').append('t')
+            c < ' ' -> sb.append('\\').append('u').append("%04x".format(c.code))
+            else -> sb.append(c)
+        }
+    }
+    return sb.append('"').toString()
+}

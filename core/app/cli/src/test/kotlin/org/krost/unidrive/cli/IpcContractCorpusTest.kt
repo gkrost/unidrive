@@ -233,9 +233,13 @@ class IpcContractCorpusTest {
             if (path.startsWith("/missing")) OpenResult.Failed(HydrationError.UnknownPath)
             else OpenResult.Ok(cachePathFor(path))
 
-        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult =
-            if (path.startsWith("/missing")) OpenResult.Failed(HydrationError.UnknownPath)
-            else OpenResult.Ok(cachePath)
+        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path, baseEtag: String?): OpenResult =
+            when {
+                path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
+                // A stale base_etag refuses the write before any upload runs.
+                path == "/docs/report.txt" && baseEtag == "stale-etag" -> OpenResult.Failed(HydrationError.Conflict)
+                else -> OpenResult.Ok(cachePath)
+            }
 
         override suspend fun closeHandle(connectionId: String, handleId: String) {}
 
@@ -257,8 +261,23 @@ class IpcContractCorpusTest {
             if (prefix == "/docs") {
                 ListResult.Ok(
                     listOf(
-                        ListResult.Entry("/docs/report.txt", 42, FIXED_MTIME_MS, isHydrated = true, isFolder = false),
-                        ListResult.Entry("/docs/sub", 0, FIXED_MTIME_MS, isHydrated = false, isFolder = true),
+                        ListResult.Entry(
+                            "/docs/report.txt", 42, FIXED_MTIME_MS, isHydrated = true, isFolder = false,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "rid-report", etag = "etag-report",
+                            pendingUpload = false, hasError = false,
+                        ),
+                        ListResult.Entry(
+                            "/docs/sub", 0, FIXED_MTIME_MS, isHydrated = false, isFolder = true,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "rid-sub", etag = null,
+                            pendingUpload = false, hasError = false,
+                        ),
+                        // Written through the mount, upload failed: no remote id / etag /
+                        // remote modified time, both flags raised.
+                        ListResult.Entry(
+                            "/docs/draft.txt", 7, FIXED_MTIME_MS, isHydrated = true, isFolder = false,
+                            remoteModifiedEpochMillis = null, remoteId = null, etag = null,
+                            pendingUpload = true, hasError = true,
+                        ),
                     ),
                 )
             } else {
@@ -289,10 +308,12 @@ class IpcContractCorpusTest {
             else -> OpenResult.Ok(cachePathFor(path))
         }
 
-        override suspend fun rename(oldPath: String, newPath: String): RenameResult = when {
+        override suspend fun rename(oldPath: String, newPath: String, replace: Boolean): RenameResult = when {
             oldPath.startsWith("/missing") -> RenameResult.OldPathNotFound
             newPath.startsWith("/missing/") -> RenameResult.NewParentNotFound
-            newPath == "/docs/sub" -> RenameResult.NewPathExists
+            // Without replace an existing destination refuses; with replace the
+            // scripted fake succeeds (the delete-then-move sequence is opaque here).
+            newPath == "/docs/sub" && !replace -> RenameResult.NewPathExists
             else -> RenameResult.Ok
         }
 
@@ -349,5 +370,6 @@ class IpcContractCorpusTest {
     companion object {
         private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id")
         private const val FIXED_MTIME_MS = 1234567890123L
+        private const val FIXED_REMOTE_MS = 1234567890000L
     }
 }

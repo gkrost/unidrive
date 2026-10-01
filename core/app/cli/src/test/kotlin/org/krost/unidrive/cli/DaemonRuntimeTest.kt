@@ -442,6 +442,9 @@ class DaemonRuntimeTest {
             assertTrue(reply.contains("\"clients_connected\""), "expected clients_connected; got: $reply")
             assertTrue(reply.contains("\"refresh_in_flight\":false"), "expected refresh_in_flight:false; got: $reply")
             assertTrue(reply.contains("\"refresh_job_id\":null"), "expected refresh_job_id:null; got: $reply")
+            assertTrue(reply.contains("\"provider\":\"stub\""), "expected provider id; got: $reply")
+            assertTrue(reply.contains("\"provider_name\":\"Stub\""), "expected provider display name; got: $reply")
+            assertTrue(reply.contains("\"authenticated\":true"), "expected auth state; got: $reply")
         } finally {
             channel.close()
         }

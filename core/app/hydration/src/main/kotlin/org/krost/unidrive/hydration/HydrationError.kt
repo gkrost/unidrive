@@ -34,11 +34,27 @@ sealed interface HydrationError {
         override val message: String = UNKNOWN_PATH_TOKEN
     }
 
+    /**
+     * Optimistic-concurrency mismatch on a write: the client's base etag does
+     * not match the row's current change-detection token, so the write would
+     * silently overwrite a newer remote version. The write is refused BEFORE
+     * any upload starts (nothing was modified — the client may keep both).
+     * Its [message] is the STABLE wire token `conflict`; a mount client maps
+     * it to its own conflict handling (EBUSY-flavoured) rather than EIO.
+     * Changing this string breaks that cross-repo contract.
+     */
+    data object Conflict : HydrationError {
+        override val message: String = CONFLICT_TOKEN
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
 
         /** Wire token for [UnknownPath]; shared verbatim with the mount crate. */
         const val UNKNOWN_PATH_TOKEN = "unknown_path"
+
+        /** Wire token for [Conflict]; shared verbatim with the mount crate. */
+        const val CONFLICT_TOKEN = "conflict"
     }
 }

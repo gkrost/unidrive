@@ -71,6 +71,12 @@ class HydrationImpl(
     private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
+    private companion object {
+        // Wire token for "an upload of the path is still in flight, retry"; the same literal
+        // dehydrate's Busy reply puts on the wire.
+        const val BUSY_TOKEN = "busy"
+    }
+
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
@@ -100,6 +106,14 @@ class HydrationImpl(
                 )
             }
             _events.emit(HydrationEvent.Hydrated(path, bytes))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.DOWNLOAD,
+                    ok = true,
+                ),
+            )
             p
         } catch (e: Exception) {
             // A genuinely-gone read (provider download still not-found after the
@@ -109,6 +123,15 @@ class HydrationImpl(
             val err: HydrationError =
                 if (isNotFound(e)) HydrationError.NotFound else HydrationError.Generic(e.message ?: "download failed")
             _events.emit(HydrationEvent.Failed(path, err))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.DOWNLOAD,
+                    ok = false,
+                    error = err,
+                ),
+            )
             return OpenResult.Failed(err)
         }
 
@@ -116,9 +139,34 @@ class HydrationImpl(
         return OpenResult.Ok(cachePath)
     }
 
-    override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
-        stateDb.getEntry(path)
+    override suspend fun openForWrite(
+        connectionId: String,
+        handleId: String,
+        path: String,
+        cachePath: Path,
+        baseEtag: String?,
+    ): OpenResult {
+        val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+
+        // Optimistic-concurrency guard (#434): refuse a write whose base etag no
+        // longer matches the row's change-detection token BEFORE any upload runs —
+        // the point is to not silently overwrite a newer remote version, so the
+        // refusal must happen before the background upload can clobber it. The
+        // comparison is against the ENGINE's row: a client holding a stale view
+        // (its base etag predates the last enumeration) gets `conflict` and keeps
+        // both copies. A row with no token (never uploaded, or a provider that
+        // exposes none) cannot be guarded — there is no remote version to lose.
+        //
+        // The token is the provider's content hash, NOT a conditional-write etag:
+        // OneDrive's If-Match requires the Graph eTag (which the engine does not
+        // persist), and Internxt has no conditional PUT at all — so the token is
+        // deliberately NOT forwarded to provider.upload. Forwarding a quickXor/sha256
+        // hash as If-Match would 412 every guarded OneDrive replace and land the
+        // keep-both rename path on every mount save.
+        if (baseEtag != null && entry.remoteHash != null && entry.remoteHash != baseEtag) {
+            return OpenResult.Failed(HydrationError.Conflict)
+        }
 
         // Crash-recovery replay: the co-daemon's cache_scanner fires open_write with
         // handle_id = "recovery-<n>" for each cache file whose mtime exceeds the
@@ -133,7 +181,7 @@ class HydrationImpl(
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
             openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            launchSerializedUpload(path, cachePath)
+            launchSerializedUpload(path, cachePath, handleId)
             return OpenResult.Ok(cachePath)
         }
 
@@ -146,14 +194,16 @@ class HydrationImpl(
         // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
         // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
         openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-        launchSerializedUpload(path, cachePath)
+        launchSerializedUpload(path, cachePath, handleId)
         return OpenResult.Ok(cachePath)
     }
 
     // Launches a background upload for [path] from [cachePath], serialized per-path
     // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
     // uploads run concurrently. The cache file is read after acquiring the lock so
-    // the last submitted upload always reads the latest content.
+    // the last submitted upload always reads the latest content. On completion
+    // (either way) emits a [HydrationEvent.Completed] correlated to [handleId] so
+    // the write-back client learns the outcome of the upload it started.
     //
     // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
     // increment-or-create (on launch) and the decrement-and-remove (in the finally
@@ -161,7 +211,11 @@ class HydrationImpl(
     // lambda, a concurrent launch's compute() cannot interleave between the
     // decrement and the removal. This guarantees a slot is never removed while
     // another submitter is in the process of bumping its pending count.
-    private fun launchSerializedUpload(path: String, cachePath: Path) {
+    private fun launchSerializedUpload(
+        path: String,
+        cachePath: Path,
+        handleId: String,
+    ) {
         // Atomically create-or-get the slot and bump its pending count. The bin lock
         // held by compute() ensures that no concurrent finally-block can remove the
         // slot between the moment we decide to reuse it and the moment we increment.
@@ -169,6 +223,10 @@ class HydrationImpl(
             (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
         }!!
         recoveryUploadScope.launch {
+            // Emitted only after the slot is released (below): a client that reacts to
+            // Completed by re-listing must already see pending_upload settled, not still
+            // raised by the slot of the upload it was just told about.
+            var completed: HydrationEvent.Completed? = null
             try {
                 slot.mutex.withLock {
                     try {
@@ -176,10 +234,23 @@ class HydrationImpl(
                         syncEngine.uploadFromCache(path, cachePath)
                         val bytes = java.nio.file.Files.size(cachePath)
                         _events.emit(HydrationEvent.Hydrated(path, bytes))
+                        completed = HydrationEvent.Completed(
+                            path = path,
+                            handleId = handleId,
+                            direction = HydrationEvent.Completed.Direction.UPLOAD,
+                            ok = true,
+                        )
                     } catch (e: Exception) {
                         runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
                         val err = HydrationError.Generic(e.message ?: "upload failed")
                         _events.emit(HydrationEvent.Failed(path, err))
+                        completed = HydrationEvent.Completed(
+                            path = path,
+                            handleId = handleId,
+                            direction = HydrationEvent.Completed.Direction.UPLOAD,
+                            ok = false,
+                            error = err,
+                        )
                     }
                 }
             } finally {
@@ -192,6 +263,7 @@ class HydrationImpl(
                     if (s == null || s.pending.decrementAndGet() == 0) null else s
                 }
             }
+            completed?.let { _events.emit(it) }
         }
     }
 
@@ -254,6 +326,17 @@ class HydrationImpl(
                         mtimeEpochMillis = e.localMtime ?: e.lastSynced.toEpochMilli(),
                         isHydrated = e.isHydrated,
                         isFolder = e.isFolder,
+                        remoteModifiedEpochMillis = e.remoteModified?.toEpochMilli(),
+                        remoteId = e.remoteId,
+                        etag = e.remoteHash,
+                        // toSyncEntry surfaces a `local:` synthetic remote_id as null,
+                        // so a null here means "never uploaded". An edit of a file that
+                        // already has a remote id is owed to the cloud from open_write until
+                        // its upload lands: that window is exactly the upload slot's lifetime.
+                        // last_error_at marks the last attempt as failed (cleared by a later
+                        // successful upload).
+                        pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
+                        hasError = e.lastErrorAt != null,
                     )
                 },
             )
@@ -495,9 +578,18 @@ class HydrationImpl(
         }
     }
 
-    override suspend fun rename(oldPath: String, newPath: String): RenameResult {
+    override suspend fun rename(
+        oldPath: String,
+        newPath: String,
+        replace: Boolean,
+    ): RenameResult {
         val oldNorm = oldPath.trimEnd('/').let { if (it == "") "/" else it }
         val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
+
+        // POSIX rename(2) onto itself is a no-op success. Decided BEFORE the
+        // destination-deletion step below: with replace=true the source would
+        // otherwise be deleted as its own destination.
+        if (oldNorm == newNorm) return RenameResult.Ok
 
         // Pre-flight: source must exist in state.db.
         val sourceEntry = stateDb.getEntry(oldNorm)
@@ -511,14 +603,30 @@ class HydrationImpl(
             if (!parentEntry.isFolder) return RenameResult.NewParentNotFound
         }
 
-        // Pre-flight: destination must not exist. POSIX rename(2) atomically
-        // replaces the destination if it exists; neither OneDrive's PATCH nor
-        // Internxt's move endpoint supports atomic replace, and emulating it
-        // via delete-then-rename leaves a window where the destination is
-        // missing. Refuse with NewPathExists and let userland do the
-        // unlink-then-rename dance (editors handle this gracefully).
-        if (stateDb.getEntry(newNorm) != null) {
-            return RenameResult.NewPathExists
+        // Pre-flight: destination must not exist — unless replace was asked for
+        // (POSIX overwrite-if-exists, the editors' safe-save: write a temp file,
+        // rename it over the target). Without replace the refusal stands so
+        // userland does the unlink-then-rename dance. Replace overwrites a FILE
+        // destination only: no provider offers atomic folder replace, and
+        // deleting a folder to move a file (or another folder) over it is not a
+        // safe-save shape.
+        val destEntry = stateDb.getEntry(newNorm)
+        if (destEntry != null) {
+            if (!replace) return RenameResult.NewPathExists
+            if (destEntry.isFolder || sourceEntry.isFolder) return RenameResult.NewPathExists
+            // A background upload still queued or running for the source or the destination
+            // races the destination delete and the move: the temp file's upload would run
+            // against a path that no longer exists (its client is told it failed) while the
+            // row now at the target is never-uploaded and owned by nothing, or a stale
+            // upload of the destination could land over the renamed content. Safe-save does
+            // close-then-rename, so this window is the normal case, not an edge: refuse
+            // with the same `busy` token dehydrate uses, and the client retries once the
+            // `completed` event for its handle has arrived. Plain rename (no replace) keeps
+            // its behaviour — nothing is deleted there.
+            if (uploadSlots.containsKey(oldNorm) || uploadSlots.containsKey(newNorm)) {
+                return RenameResult.Failed(HydrationError.Generic(BUSY_TOKEN))
+            }
+            deleteReplaceDestination(destEntry, newNorm)?.let { return it }
         }
 
         // Never-uploaded file (remoteId == null): the file only ever existed
@@ -596,6 +704,55 @@ class HydrationImpl(
             RenameResult.Ok
         }.getOrElse { e ->
             RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
+        }
+    }
+
+    // Deletes the existing destination before a replace-rename, through the same
+    // path `unlink` takes — the destination gets the delete's trash/undo
+    // semantics, not a silent destroy. Ghost-aware (mirrors unlink): a `local:`
+    // row whose content actually landed on the cloud must be deleted remotely,
+    // not just dropped locally. Returns null when the destination is gone and
+    // the caller may proceed with the move, or the RenameResult to fail with
+    // (the source row is untouched in every failure case).
+    private suspend fun deleteReplaceDestination(
+        destEntry: org.krost.unidrive.sync.model.SyncEntry,
+        destNorm: String,
+    ): RenameResult? {
+        if (destEntry.remoteId != null) {
+            return try {
+                syncEngine.deleteRemote(destNorm)
+                evictCacheFile(destNorm)
+                null
+            } catch (e: Exception) {
+                RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
+            }
+        }
+        val ghost = try {
+            syncEngine.remoteItemOrNull(destNorm)
+        } catch (e: Exception) {
+            // Transient remote-probe failure: fail the rename rather than
+            // hard-delete the row and orphan a ghost's cloud copy.
+            return RenameResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+        }
+        if (ghost != null && !ghost.isFolder) {
+            return try {
+                syncEngine.deleteRemote(destNorm)
+                evictCacheFile(destNorm)
+                null
+            } catch (e: Exception) {
+                RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
+            }
+        }
+        // Genuinely-local destination (nothing cloud-side): hard-delete the row —
+        // a tombstone carries no reconciliation value for a never-uploaded file —
+        // and evict its cache copy. Cache eviction failure is non-fatal (the row
+        // is the truth); the row delete is not.
+        return try {
+            runCatching { Files.deleteIfExists(syncEngine.resolveCachePath(destNorm)) }
+            stateDb.deleteEntry(destNorm)
+            null
+        } catch (e: Exception) {
+            RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
         }
     }
 

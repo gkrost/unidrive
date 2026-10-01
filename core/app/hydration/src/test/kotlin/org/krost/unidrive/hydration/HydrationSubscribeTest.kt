@@ -47,7 +47,7 @@ class HydrationSubscribeTest {
         val noop = object : Hydration {
             override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult =
                 OpenResult.Failed(HydrationError.Generic("unused"))
-            override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: java.nio.file.Path): OpenResult =
+            override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: java.nio.file.Path, baseEtag: String?): OpenResult =
                 OpenResult.Failed(HydrationError.Generic("unused"))
             override suspend fun closeHandle(connectionId: String, handleId: String) {}
             override suspend fun hydrate(path: String): HydrateResult = HydrateResult.Failed(HydrationError.Generic("unused"))
@@ -60,7 +60,7 @@ class HydrationSubscribeTest {
             override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult =
                 CreateResult.Failed(HydrationError.Generic("unused"))
             override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult = OpenResult.Failed(HydrationError.Generic("unused"))
-            override suspend fun rename(oldPath: String, newPath: String): RenameResult = RenameResult.Failed(HydrationError.Generic("unused"))
+            override suspend fun rename(oldPath: String, newPath: String, replace: Boolean): RenameResult = RenameResult.Failed(HydrationError.Generic("unused"))
             override val events = kotlinx.coroutines.flow.MutableSharedFlow<HydrationEvent>()
             override fun onConnectionClosed(connectionId: String) {}
         }
