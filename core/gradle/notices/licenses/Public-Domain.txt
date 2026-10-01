@@ -1,0 +1,15 @@
+Public Domain
+
+The components listed under this licence are dedicated to the public domain by
+their authors. No licence conditions apply; no permission is needed to use,
+copy, modify, or distribute them. The authoritative statement for each is the
+LICENSE file in the component's project (see the component's Project and
+License URLs in part 1).
+
+Specifically:
+
+  org.json:json (JSON-java) - public domain from version 20231013 on:
+  https://github.com/stleary/JSON-java/blob/master/LICENSE
+
+  SQLite, bundled as native code inside org.xerial:sqlite-jdbc - public domain:
+  https://sqlite.org/copyright.html

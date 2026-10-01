@@ -163,6 +163,10 @@ tasks.shadowJar {
     mergeServiceFiles()
 }
 
+// Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
+// guards them from `check`.
+apply(from = "../../gradle/notices.gradle.kts")
+
 fun run(
     vararg cmd: String,
     ignoreExit: Boolean = false,
