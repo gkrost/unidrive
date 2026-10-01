@@ -39,9 +39,32 @@ class HydrationEventTest {
             is HydrationEvent.Hydrated       -> "ed"
             is HydrationEvent.Dehydrated     -> "dh"
             is HydrationEvent.Failed         -> "fa"
+            is HydrationEvent.Completed      -> "co"
             is HydrationEvent.ViewInvalidated -> "vi"
         }
         assertEquals("ing", s)
+    }
+
+    @Test
+    fun `completed success carries handle id, direction and ok`() {
+        val e = HydrationEvent.Completed("/a.txt", "h1", HydrationEvent.Completed.Direction.UPLOAD, ok = true)
+        val json = serialiseHydrationEvent(e)
+        assertEquals(
+            """{"event":"completed","path":"/a.txt","handle_id":"h1","direction":"upload","ok":true}""",
+            json,
+        )
+    }
+
+    @Test
+    fun `completed failure carries the error token and no success-only fields`() {
+        val e = HydrationEvent.Completed(
+            "/a.txt", "h1", HydrationEvent.Completed.Direction.DOWNLOAD, ok = false, error = HydrationError.NotFound,
+        )
+        val json = serialiseHydrationEvent(e)
+        assertEquals(
+            """{"event":"completed","path":"/a.txt","handle_id":"h1","direction":"download","ok":false,"error":"not_found"}""",
+            json,
+        )
     }
 
     @Test

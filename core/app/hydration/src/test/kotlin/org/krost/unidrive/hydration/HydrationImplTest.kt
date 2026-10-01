@@ -23,6 +23,7 @@ import kotlin.test.Test
 import kotlin.test.assertNull
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -620,6 +621,73 @@ class HydrationImplTest {
         )
     }
 
+    // The write-back client learns the upload outcome through a Completed event
+    // carrying ITS handle id — without it, hydrated/failed events are
+    // indistinguishable between upload and download and uncorrelated to the
+    // open_write that started the work.
+    @Test
+    fun `open_write emits a Completed upload event correlated to the handle`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "bytes") }
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        // Ensure the collector has subscribed before the first emit (SharedFlow
+        // keeps no replay; a late subscriber misses everything).
+        yield()
+
+        env.hydration.openForWrite("conn1", "h-save", "/doc.txt", cacheFile)
+        advanceUntilIdle()
+
+        val completed = events.filterIsInstance<HydrationEvent.Completed>()
+            .single { it.handleId == "h-save" }
+        assertEquals("/doc.txt", completed.path)
+        assertEquals(HydrationEvent.Completed.Direction.UPLOAD, completed.direction)
+        assertTrue(completed.ok, "a successful upload must emit ok=true")
+        assertNull(completed.error)
+        collector.cancel()
+    }
+
+    @Test
+    fun `failed open_write upload emits a Completed upload event with the error token`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val missingCache = env.tempDir.resolve("missing.txt")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForWrite("conn1", "h-save", "/doc.txt", missingCache)
+        advanceUntilIdle()
+
+        val completed = events.filterIsInstance<HydrationEvent.Completed>()
+            .single { it.handleId == "h-save" }
+        assertEquals(HydrationEvent.Completed.Direction.UPLOAD, completed.direction)
+        assertFalse(completed.ok)
+        assertNotNull(completed.error, "a failed upload must carry the failure token")
+        collector.cancel()
+    }
+
+    @Test
+    fun `open_read emits a Completed download event correlated to the handle`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/read.txt", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/read.txt", "hello")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForRead("conn1", "h-read", "/read.txt")
+        advanceUntilIdle()
+
+        val completed = events.filterIsInstance<HydrationEvent.Completed>()
+            .single { it.handleId == "h-read" }
+        assertEquals("/read.txt", completed.path)
+        assertEquals(HydrationEvent.Completed.Direction.DOWNLOAD, completed.direction)
+        assertTrue(completed.ok)
+        collector.cancel()
+    }
+
     @Test
     fun `normal_handle_dirty_close_returns_promptly_without_awaiting_upload`() = runTest {
         // Invariant (#188): a normal dirty close (FUSE release) must return Ok immediately,
@@ -762,9 +830,13 @@ class HydrationImplTest {
         yield(); yield()
         job.cancel()
 
-        assertEquals(2, collected.size)
+        assertEquals(2 + 1, collected.size)
         assertTrue(collected[0] is HydrationEvent.Hydrating)
         assertTrue(collected[1] is HydrationEvent.Hydrated)
+        val completed = collected[2] as HydrationEvent.Completed
+        assertEquals("h1", completed.handleId)
+        assertEquals(HydrationEvent.Completed.Direction.DOWNLOAD, completed.direction)
+        assertTrue(completed.ok)
     }
 
     @Test

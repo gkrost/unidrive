@@ -100,6 +100,14 @@ class HydrationImpl(
                 )
             }
             _events.emit(HydrationEvent.Hydrated(path, bytes))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.DOWNLOAD,
+                    ok = true,
+                ),
+            )
             p
         } catch (e: Exception) {
             // A genuinely-gone read (provider download still not-found after the
@@ -109,6 +117,15 @@ class HydrationImpl(
             val err: HydrationError =
                 if (isNotFound(e)) HydrationError.NotFound else HydrationError.Generic(e.message ?: "download failed")
             _events.emit(HydrationEvent.Failed(path, err))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.DOWNLOAD,
+                    ok = false,
+                    error = err,
+                ),
+            )
             return OpenResult.Failed(err)
         }
 
@@ -133,7 +150,7 @@ class HydrationImpl(
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
             openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            launchSerializedUpload(path, cachePath)
+            launchSerializedUpload(path, cachePath, handleId)
             return OpenResult.Ok(cachePath)
         }
 
@@ -146,14 +163,16 @@ class HydrationImpl(
         // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
         // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
         openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-        launchSerializedUpload(path, cachePath)
+        launchSerializedUpload(path, cachePath, handleId)
         return OpenResult.Ok(cachePath)
     }
 
     // Launches a background upload for [path] from [cachePath], serialized per-path
     // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
     // uploads run concurrently. The cache file is read after acquiring the lock so
-    // the last submitted upload always reads the latest content.
+    // the last submitted upload always reads the latest content. On completion
+    // (either way) emits a [HydrationEvent.Completed] correlated to [handleId] so
+    // the write-back client learns the outcome of the upload it started.
     //
     // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
     // increment-or-create (on launch) and the decrement-and-remove (in the finally
@@ -161,7 +180,11 @@ class HydrationImpl(
     // lambda, a concurrent launch's compute() cannot interleave between the
     // decrement and the removal. This guarantees a slot is never removed while
     // another submitter is in the process of bumping its pending count.
-    private fun launchSerializedUpload(path: String, cachePath: Path) {
+    private fun launchSerializedUpload(
+        path: String,
+        cachePath: Path,
+        handleId: String,
+    ) {
         // Atomically create-or-get the slot and bump its pending count. The bin lock
         // held by compute() ensures that no concurrent finally-block can remove the
         // slot between the moment we decide to reuse it and the moment we increment.
@@ -176,10 +199,27 @@ class HydrationImpl(
                         syncEngine.uploadFromCache(path, cachePath)
                         val bytes = java.nio.file.Files.size(cachePath)
                         _events.emit(HydrationEvent.Hydrated(path, bytes))
+                        _events.emit(
+                            HydrationEvent.Completed(
+                                path = path,
+                                handleId = handleId,
+                                direction = HydrationEvent.Completed.Direction.UPLOAD,
+                                ok = true,
+                            ),
+                        )
                     } catch (e: Exception) {
                         runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
                         val err = HydrationError.Generic(e.message ?: "upload failed")
                         _events.emit(HydrationEvent.Failed(path, err))
+                        _events.emit(
+                            HydrationEvent.Completed(
+                                path = path,
+                                handleId = handleId,
+                                direction = HydrationEvent.Completed.Direction.UPLOAD,
+                                ok = false,
+                                error = err,
+                            ),
+                        )
                     }
                 }
             } finally {
