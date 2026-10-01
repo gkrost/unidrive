@@ -308,10 +308,12 @@ class IpcContractCorpusTest {
             else -> OpenResult.Ok(cachePathFor(path))
         }
 
-        override suspend fun rename(oldPath: String, newPath: String): RenameResult = when {
+        override suspend fun rename(oldPath: String, newPath: String, replace: Boolean): RenameResult = when {
             oldPath.startsWith("/missing") -> RenameResult.OldPathNotFound
             newPath.startsWith("/missing/") -> RenameResult.NewParentNotFound
-            newPath == "/docs/sub" -> RenameResult.NewPathExists
+            // Without replace an existing destination refuses; with replace the
+            // scripted fake succeeds (the delete-then-move sequence is opaque here).
+            newPath == "/docs/sub" && !replace -> RenameResult.NewPathExists
             else -> RenameResult.Ok
         }
 

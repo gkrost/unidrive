@@ -568,9 +568,18 @@ class HydrationImpl(
         }
     }
 
-    override suspend fun rename(oldPath: String, newPath: String): RenameResult {
+    override suspend fun rename(
+        oldPath: String,
+        newPath: String,
+        replace: Boolean,
+    ): RenameResult {
         val oldNorm = oldPath.trimEnd('/').let { if (it == "") "/" else it }
         val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
+
+        // POSIX rename(2) onto itself is a no-op success. Decided BEFORE the
+        // destination-deletion step below: with replace=true the source would
+        // otherwise be deleted as its own destination.
+        if (oldNorm == newNorm) return RenameResult.Ok
 
         // Pre-flight: source must exist in state.db.
         val sourceEntry = stateDb.getEntry(oldNorm)
@@ -584,14 +593,18 @@ class HydrationImpl(
             if (!parentEntry.isFolder) return RenameResult.NewParentNotFound
         }
 
-        // Pre-flight: destination must not exist. POSIX rename(2) atomically
-        // replaces the destination if it exists; neither OneDrive's PATCH nor
-        // Internxt's move endpoint supports atomic replace, and emulating it
-        // via delete-then-rename leaves a window where the destination is
-        // missing. Refuse with NewPathExists and let userland do the
-        // unlink-then-rename dance (editors handle this gracefully).
-        if (stateDb.getEntry(newNorm) != null) {
-            return RenameResult.NewPathExists
+        // Pre-flight: destination must not exist — unless replace was asked for
+        // (POSIX overwrite-if-exists, the editors' safe-save: write a temp file,
+        // rename it over the target). Without replace the refusal stands so
+        // userland does the unlink-then-rename dance. Replace overwrites a FILE
+        // destination only: no provider offers atomic folder replace, and
+        // deleting a folder to move a file (or another folder) over it is not a
+        // safe-save shape.
+        val destEntry = stateDb.getEntry(newNorm)
+        if (destEntry != null) {
+            if (!replace) return RenameResult.NewPathExists
+            if (destEntry.isFolder || sourceEntry.isFolder) return RenameResult.NewPathExists
+            deleteReplaceDestination(destEntry, newNorm)?.let { return it }
         }
 
         // Never-uploaded file (remoteId == null): the file only ever existed
@@ -669,6 +682,55 @@ class HydrationImpl(
             RenameResult.Ok
         }.getOrElse { e ->
             RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
+        }
+    }
+
+    // Deletes the existing destination before a replace-rename, through the same
+    // path `unlink` takes — the destination gets the delete's trash/undo
+    // semantics, not a silent destroy. Ghost-aware (mirrors unlink): a `local:`
+    // row whose content actually landed on the cloud must be deleted remotely,
+    // not just dropped locally. Returns null when the destination is gone and
+    // the caller may proceed with the move, or the RenameResult to fail with
+    // (the source row is untouched in every failure case).
+    private suspend fun deleteReplaceDestination(
+        destEntry: org.krost.unidrive.sync.model.SyncEntry,
+        destNorm: String,
+    ): RenameResult? {
+        if (destEntry.remoteId != null) {
+            return try {
+                syncEngine.deleteRemote(destNorm)
+                evictCacheFile(destNorm)
+                null
+            } catch (e: Exception) {
+                RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
+            }
+        }
+        val ghost = try {
+            syncEngine.remoteItemOrNull(destNorm)
+        } catch (e: Exception) {
+            // Transient remote-probe failure: fail the rename rather than
+            // hard-delete the row and orphan a ghost's cloud copy.
+            return RenameResult.Failed(HydrationError.Generic(e.message ?: "remote probe failed"))
+        }
+        if (ghost != null && !ghost.isFolder) {
+            return try {
+                syncEngine.deleteRemote(destNorm)
+                evictCacheFile(destNorm)
+                null
+            } catch (e: Exception) {
+                RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
+            }
+        }
+        // Genuinely-local destination (nothing cloud-side): hard-delete the row —
+        // a tombstone carries no reconciliation value for a never-uploaded file —
+        // and evict its cache copy. Cache eviction failure is non-fatal (the row
+        // is the truth); the row delete is not.
+        return try {
+            runCatching { Files.deleteIfExists(syncEngine.resolveCachePath(destNorm)) }
+            stateDb.deleteEntry(destNorm)
+            null
+        } catch (e: Exception) {
+            RenameResult.Failed(HydrationError.Generic(e.message ?: "rename replace failed"))
         }
     }
 

@@ -51,12 +51,17 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"path_exists"}        EEXIST
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
- *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"}
+ *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"[,"replace":true]}
  *               reply:    {"ok":true}
  *                         {"ok":false,"error":"old_path_not_found"}    ENOENT
  *                         {"ok":false,"error":"new_parent_not_found"}  ENOENT
  *                         {"ok":false,"error":"new_path_exists"}       EEXIST
  *                         {"ok":false,"error":"<msg>"}                 EIO
+ *                         replace (OPTIONAL, default false) is POSIX
+ *                         overwrite-if-exists for a FILE destination: the
+ *                         existing destination is deleted first (same delete
+ *                         path as unlink — trash/undo semantics), then the
+ *                         source takes its place.
  *
  *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
  *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
@@ -327,7 +332,9 @@ class HydrationIpcHandler(
             "hydration.rename" -> {
                 val oldPath = pluckPath(jsonRequest, "old_path") ?: return reply(ok = false, error = "missing_old_path")
                 val newPath = pluckPath(jsonRequest, "new_path") ?: return reply(ok = false, error = "missing_new_path")
-                when (val r = hydration.rename(oldPath, newPath)) {
+                // replace is OPTIONAL (default false): POSIX overwrite-if-exists.
+                val replace = pluckBool(jsonRequest, "replace") ?: false
+                when (val r = hydration.rename(oldPath, newPath, replace)) {
                     is RenameResult.Ok -> reply(ok = true)
                     RenameResult.OldPathNotFound -> reply(ok = false, error = "old_path_not_found")
                     RenameResult.NewParentNotFound -> reply(ok = false, error = "new_parent_not_found")
@@ -377,6 +384,43 @@ class HydrationIpcHandler(
             i = skipWs(line, i + 1)
             if (i >= line.length) return null
             if (name == key) return if (line[i] == '"') readString(line, i)?.first else null
+            val afterValue = skipValue(line, i)
+            if (afterValue < 0) return null
+            i = skipWs(line, afterValue)
+            if (i < line.length && line[i] == ',') i = skipWs(line, i + 1) else break
+        }
+        return null
+    }
+
+    // Boolean pluck for OPTIONAL verb flags (e.g. rename's `replace`). Accepts the
+    // bare JSON literals true/false — what System.Text.Json and serde_json emit —
+    // and, defensively, the quoted strings "true"/"false". A missing key, a bare
+    // null, or any other value yields null so the caller applies its default.
+    // Walks the object's members with the same structure as [pluck].
+    private fun pluckBool(line: String, key: String): Boolean? {
+        var i = skipWs(line, 0)
+        if (i >= line.length || line[i] != '{') return null
+        i = skipWs(line, i + 1)
+        while (i < line.length && line[i] == '"') {
+            val (name, afterName) = readString(line, i) ?: return null
+            i = skipWs(line, afterName)
+            if (i >= line.length || line[i] != ':') return null
+            i = skipWs(line, i + 1)
+            if (i >= line.length) return null
+            if (name == key) {
+                return when {
+                    line.startsWith("true", i) -> true
+                    line.startsWith("false", i) -> false
+                    line[i] == '"' -> readString(line, i)?.first?.let {
+                        when (it.lowercase()) {
+                            "true" -> true
+                            "false" -> false
+                            else -> null
+                        }
+                    }
+                    else -> null
+                }
+            }
             val afterValue = skipValue(line, i)
             if (afterValue < 0) return null
             i = skipWs(line, afterValue)

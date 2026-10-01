@@ -145,8 +145,8 @@ class HydrationIpcHandlerJsonEscapeTest {
             return OpenResult.Ok(cache)
         }
 
-        override suspend fun rename(oldPath: String, newPath: String): RenameResult {
-            calls += Call("rename", listOf(oldPath, newPath))
+        override suspend fun rename(oldPath: String, newPath: String, replace: Boolean): RenameResult {
+            calls += Call("rename", listOf(oldPath, newPath) + if (replace) listOf("replace") else emptyList())
             return RenameResult.Ok
         }
 

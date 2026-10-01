@@ -45,7 +45,19 @@ interface Hydration {
     suspend fun rmdir(path: String): RmdirResult
     suspend fun create(connectionId: String, handleId: String, path: String): CreateResult
     suspend fun openWriteBegin(connectionId: String, path: String, handleId: String? = null): OpenResult
-    suspend fun rename(oldPath: String, newPath: String): RenameResult
+    /**
+     * Rename [oldPath] to [newPath]. With [replace] (POSIX rename(2)
+     * overwrite-if-exists semantics) an existing FILE destination is deleted
+     * first — through the same delete path `unlink` takes, so whatever
+     * trash/undo the provider offers applies to it — and the source then takes
+     * its place. A folder destination is never replaced. Without [replace] a
+     * destination that exists fails with [RenameResult.NewPathExists] (the
+     * historic contract; editors that safe-save handle the refusal
+     * gracefully). The delete-then-move sequence is not a single atomic
+     * remote op (no provider offers atomic replace): a crash between the two
+     * leaves the destination tombstoned — recoverable — and the source intact.
+     */
+    suspend fun rename(oldPath: String, newPath: String, replace: Boolean = false): RenameResult
 
     val events: Flow<HydrationEvent>
 
