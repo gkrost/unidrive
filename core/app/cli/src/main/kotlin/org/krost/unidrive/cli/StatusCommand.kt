@@ -375,6 +375,9 @@ class StatusCommand : Runnable {
         val baseDir = parent.configBaseDir()
         val ansi = AnsiHelper.isAnsiSupported()
         val profiles = discoverProfiles(baseDir)
+        // #248: nothing configured, no profile dirs: give the same answer as plain `status`
+        // instead of listing the registered provider types as if they were accounts.
+        if (profiles.isEmpty()) parent.reportConfigMissingAndExit(baseDir.resolve("config.toml"))
         val accountsByType = mutableMapOf<String, MutableList<AccountRow>>()
 
         for (profile in profiles) {
@@ -1052,9 +1055,10 @@ internal fun legacyRowStatus(
  *      [ProfileInfo] with `isOrphan = true`. Common after `unidrive auth`
  *      against a type-resolved name (the auth creates the dir but does not
  *      write a config.toml section). Rendered with the `[ORPHAN]` status glyph.
- *   4. If nothing was discovered at all, fall back to the registered
- *      provider types so an out-of-the-box `status --all` (no config) still
- *      shows useful rows.
+ *
+ * Returns an empty list when nothing is configured and no profile dir exists.
+ * The registered provider types are deliberately NOT listed then: they are not
+ * accounts, and the caller reports "no config" as plain `status` does.
  */
 internal fun discoverProfilesFromRaw(
     raw: RawSyncConfig,
@@ -1123,16 +1127,6 @@ internal fun discoverProfilesFromRaw(
                         seen.add(dirName)
                     }
                 }
-        }
-    }
-
-    // 4. Fallback: known types not yet seen (only if NO profiles discovered)
-    if (profiles.isEmpty()) {
-        for (type in SyncConfig.KNOWN_TYPES.sorted()) {
-            if (type !in seen) {
-                profiles.add(SyncConfig.resolveProfile(type, raw))
-                seen.add(type)
-            }
         }
     }
 

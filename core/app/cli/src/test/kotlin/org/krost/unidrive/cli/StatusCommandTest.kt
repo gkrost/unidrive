@@ -236,6 +236,32 @@ class StatusCommandTest {
         }
     }
 
+    // ── #248: no fabricated rows when nothing is configured ───────────────────
+
+    @Test
+    fun `#248 discoverProfilesFromRaw returns no profiles when nothing is configured`() {
+        // With no config.toml providers and no profile dirs, `status --all` used to list one
+        // row per registered provider TYPE (Internxt Drive, Microsoft OneDrive) as if two
+        // accounts existed, while plain `status` said "no unidrive config found". The
+        // discovery step must report an empty list so the caller can say the same thing.
+        val raw = SyncConfig.parseRaw("[general]\n")
+        val baseDir = Files.createTempDirectory("status-test-")
+        try {
+            assertEquals(
+                emptyList(),
+                discoverProfilesFromRaw(raw, baseDir).map { it.name },
+                "provider types are not accounts: an empty config must discover no profiles",
+            )
+            assertEquals(
+                emptyList(),
+                discoverProfilesFromRaw(raw, baseDir.resolve("does-not-exist")).map { it.name },
+                "a missing config dir must discover no profiles either",
+            )
+        } finally {
+            Files.deleteIfExists(baseDir)
+        }
+    }
+
     // ── #117: orphan-profile enumeration invariants ──────────────────────────
 
     @Test
