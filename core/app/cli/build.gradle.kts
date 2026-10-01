@@ -224,6 +224,10 @@ tasks.register("runtimeImage") {
 
     // Capture at config time (Gradle 10: no Task.project at execution).
     val jarFile = tasks.shadowJar.flatMap { it.archiveFile }
+    // Declared input, not only a doLast value: without it a rebuilt jar
+    // leaves the task UP-TO-DATE — a stale image ships, and the jdeps guard
+    // below, living in doLast, never runs again.
+    inputs.files(jarFile).withPropertyName("jarFile")
     val javaHome = runtimeToolchain.map { it.metadata.installationPath }
     val hostIsWindows = System.getProperty("os.name", "").lowercase().contains("win")
 
@@ -433,13 +437,17 @@ fun deployWindows(
         |# which packaged Windows apps have seen redirected or unwritable —
         |# pin it to the host's temp dir instead.
         |${'$'}tmp = if (${'$'}env:TEMP) { ${'$'}env:TEMP } elseif (${'$'}env:TMP) { ${'$'}env:TMP } else { ${'$'}null }
-        |${'$'}tmpDirArg = if (${'$'}tmp) { '-Djdk.net.unixdomain.tmpdir=' + ${'$'}tmp } else { ${'$'}null }
         |${'$'}javaArgs = @(
         |    ${'$'}xmx
         |    '-Dstdout.encoding=UTF-8'
         |    '-Dstderr.encoding=UTF-8'
         |    '--enable-native-access=ALL-UNNAMED'
-        |) + ${'$'}tmpDirArg + @(
+        |)
+        |# Append, never concat with a possibly-null operand: ${'$'}javaArgs + ${'$'}tmpDirArg
+        |# inserts an empty element when TEMP/TMP are unset (java then reads an empty
+        |# first argument as the main class name under PowerShell 7).
+        |if (${'$'}tmp) { ${'$'}javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + ${'$'}tmp) }
+        |${'$'}javaArgs += @(
         |    '-jar'
         |    '$targetJar'
         |)
