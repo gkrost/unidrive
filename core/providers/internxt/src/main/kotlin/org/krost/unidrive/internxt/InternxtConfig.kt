@@ -7,7 +7,9 @@ data class InternxtConfig(
     val tokenPath: Path = defaultTokenPath("internxt"),
     val clientName: String = System.getenv("INTERNXT_CLIENT_NAME") ?: CLIENT_NAME,
     val clientVersion: String = System.getenv("INTERNXT_CLIENT_VERSION") ?: CLIENT_VERSION,
-    val desktopHeader: String = System.getenv("INTERNXT_DESKTOP_HEADER") ?: DESKTOP_HEADER,
+    // Optional in Internxt's own SDK and sent only when set. Not sent by default: unidrive
+    // has no such token and does not invent one. INTERNXT_DESKTOP_HEADER overrides for testing.
+    val desktopHeader: String? = System.getenv("INTERNXT_DESKTOP_HEADER")?.takeIf { it.isNotBlank() },
     val notificationsUrl: String = System.getenv("INTERNXT_NOTIFICATIONS_URL") ?: NOTIFICATIONS_URL,
     val keepOverwritten: Boolean = false,
 ) {
@@ -15,7 +17,6 @@ data class InternxtConfig(
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
         const val CLIENT_NAME = "unidrive"
         const val CLIENT_VERSION = "0.0.1"
-        const val DESKTOP_HEADER = "internxt-desktop-dev-header"
         const val NOTIFICATIONS_URL = "https://notifications.internxt.com"
 
         // Public encryption salt from Internxt's open-source desktop client (not a secret).
