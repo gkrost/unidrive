@@ -48,7 +48,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - [#155] Internxt keep-overwritten prune
 - [#157] `unidrive status` shows `[✔ OK]` on stale cached auth state
 - [#163] Gradle daemon poison: `java.io.EOFException` from `SerializableTestResultStore` with 0-byte results = stop the daemon
-- [#165] `.lock.pid` rendered as `mode (no-mode)` for legacy pid-only sidecars — confusing UX
 - [#166] `unidrive refresh` against a profile with a pre-existing delta cursor returns only incremental delta, not a full enumeration — operator UX surprise
 - [#168] Regression test for ts-CLI provider authentication
 

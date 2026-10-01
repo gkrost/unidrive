@@ -42,17 +42,124 @@ class DaemonCommandTest {
         )
     }
 
-    // Invariant: the legacy pid-only sidecar (no mode field,
-    // rendered as `(no-mode)` historically) is pre-mode-mutex sync and must be
-    // treated as a non-daemon holder — same refusal path, no misleading status.
+    // Invariant: the legacy pid-only sidecar (no mode field) is pre-mode-mutex
+    // sync and must be treated as a non-daemon holder — same refusal path, no
+    // misleading status. It is named as a legacy holder, not as a "(no-mode)"
+    // state the daemon might be in.
     @Test
     fun `daemon-status-treats-legacy-no-mode-holder-as-non-daemon`() {
         val msg = daemonModeMismatchMessage("internxt_test", null, 999)
         assertTrue(
-            msg.contains("is held by mode '(no-mode)'"),
-            "null mode token must render as (no-mode), not the literal 'null'; got: $msg",
+            msg.contains("is held by mode 'legacy (pre-mode-mutex)'"),
+            "a pid-only sidecar must render as a legacy holder; got: $msg",
         )
+        assertTrue(msg.contains("not 'daemon'"), "must state the holder is not a daemon; got: $msg")
+        assertFalse(msg.contains("(no-mode)"), "the ambiguous (no-mode) label must be gone; got: $msg")
         assertFalse(msg.contains("'null'"), "must not leak a literal null mode; got: $msg")
+    }
+
+    @Test
+    fun `daemon-status-refuses-a-live-pid-only-sidecar-as-legacy-holder`() {
+        withPidFile("26168\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { true })
+            assertTrue(check is DaemonLockCheck.Refused, "pid-only sidecar must be refused; got: $check")
+            assertTrue(check.message.contains("legacy (pre-mode-mutex)"), check.message)
+            assertTrue(check.message.contains("kill 26168"), check.message)
+        }
+    }
+
+    // ── daemon status does not trust a stale .lock.pid ───────────────────────
+
+    private fun withPidFile(contents: String?, block: (java.nio.file.Path) -> Unit) {
+        val dir = java.nio.file.Files.createTempDirectory("daemon-status-test")
+        try {
+            val pidFile = dir.resolve(".lock.pid")
+            if (contents != null) java.nio.file.Files.writeString(pidFile, contents)
+            block(pidFile)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    // Invariant: a `.lock.pid` whose pid is no longer running (the daemon was
+    // killed without its cleanup) is a stale lock, not a daemon. Status must say
+    // so plainly and must not print the dead pid as a status line or suggest a
+    // shutdown in progress.
+    @Test
+    fun `daemon-status-reports-dead-pid-as-stale-lock`() {
+        withPidFile("26168 daemon\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { false })
+            val notRunning = check as? DaemonLockCheck.NotRunning
+            assertTrue(notRunning != null, "dead pid must read as not running; got: $check")
+            assertEquals("no daemon running for profile 'p' (stale lock from pid 26168)", notRunning.message)
+            assertFalse(notRunning.message.contains("mid-shutdown"))
+        }
+    }
+
+    // Invariant: liveness is judged before the holder's mode — a dead legacy
+    // sync watcher is just as stale as a dead daemon, and must not be reported
+    // as a live holder of another mode.
+    @Test
+    fun `daemon-status-reports-dead-non-daemon-holder-as-stale-lock`() {
+        withPidFile("26168 sync\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { false })
+            assertEquals(
+                DaemonLockCheck.NotRunning("no daemon running for profile 'p' (stale lock from pid 26168)"),
+                check,
+            )
+        }
+    }
+
+    @Test
+    fun `daemon-status-accepts-live-daemon-pid`() {
+        withPidFile("26168 daemon\n") { pidFile ->
+            assertEquals(DaemonLockCheck.Running(26168), checkDaemonLock("p", pidFile, isAlive = { it == 26168L }))
+        }
+    }
+
+    @Test
+    fun `daemon-status-still-refuses-live-non-daemon-holder`() {
+        withPidFile("26168 sync\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { true })
+            assertTrue(check is DaemonLockCheck.Refused, "live sync holder must still be refused; got: $check")
+            assertTrue(check.message.contains("is held by mode 'sync'"), check.message)
+        }
+    }
+
+    @Test
+    fun `daemon-status-absent-and-malformed-lock-keep-their-messages`() {
+        withPidFile(null) { pidFile ->
+            assertEquals(
+                DaemonLockCheck.NotRunning("no daemon running for profile 'p'"),
+                checkDaemonLock("p", pidFile, isAlive = { true }),
+            )
+        }
+        withPidFile("garbage") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { true })
+            assertTrue(check is DaemonLockCheck.Refused && check.message.contains("malformed lock-pid file"), "$check")
+        }
+    }
+
+    // Real liveness (no injected predicate): the pid of a process that has exited
+    // reads as stale, this JVM's own pid reads as a running daemon.
+    @Test
+    fun `daemon-status-default-liveness-uses-the-real-process-table`() {
+        val javaBin = java.nio.file.Path.of(System.getProperty("java.home"), "bin", "java").toString()
+        val child = ProcessBuilder(javaBin, "-version").redirectErrorStream(true).start()
+        child.inputStream.readAllBytes()
+        child.waitFor()
+        val deadPid = child.pid()
+        withPidFile("$deadPid daemon\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile)
+            assertTrue(
+                check is DaemonLockCheck.NotRunning && check.message.contains("stale lock from pid $deadPid"),
+                "exited process must read as stale; got: $check",
+            )
+        }
+        val ownPid = ProcessHandle.current().pid()
+        withPidFile("$ownPid daemon\n") { pidFile ->
+            assertEquals(DaemonLockCheck.Running(ownPid), checkDaemonLock("p", pidFile))
+        }
     }
 
     // ── daemon stop detects a live mount served by this daemon ───────────────

@@ -130,7 +130,7 @@ class BackupListCommand : Runnable {
         }
 
         val configText = Files.readString(configFile)
-        val raw = SyncConfig.parseRaw(configText)
+        val raw = SyncConfig.parseRaw(configText, configFile.toString())
         val profiles = raw.providers
 
         if (profiles.isEmpty()) {

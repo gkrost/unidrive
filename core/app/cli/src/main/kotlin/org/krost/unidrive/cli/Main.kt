@@ -107,7 +107,7 @@ class Main : Runnable {
         if (_profile != null) return _profile!!
         val configFile = baseConfigDir.resolve("config.toml")
         val configText = if (Files.exists(configFile)) Files.readString(configFile) else "[general]\n"
-        val raw = SyncConfig.parseRaw(configText)
+        val raw = SyncConfig.parseRaw(configText, configFile.toString())
         // UD-242: unified config-missing wording. See `reportConfigMissing` — one line for
         // normal users, plus an 8-line diagnostic block gated behind -v/--verbose for
         // diagnosing MSIX sandboxing, broken symlinks, and similar filtered-FS issues
@@ -258,7 +258,7 @@ class Main : Runnable {
         val configFile = baseConfigDir.resolve("config.toml")
         val raw =
             if (Files.exists(configFile)) {
-                SyncConfig.parseRaw(Files.readString(configFile))
+                SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }

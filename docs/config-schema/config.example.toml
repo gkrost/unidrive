@@ -10,6 +10,8 @@
 
 [providers.internxt]
 type = "internxt"
+# On Windows write paths with forward slashes ("C:/Users/me/Internxt"), doubled backslashes
+# ("C:\\Users\\me\\Internxt") or a single-quoted literal string ('C:\Users\me\Internxt').
 sync_root = "~/Internxt"
 
 # Sync only these remote subtrees. Nothing else materializes under sync_root.

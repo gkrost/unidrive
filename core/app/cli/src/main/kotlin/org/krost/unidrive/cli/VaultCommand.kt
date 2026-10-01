@@ -90,7 +90,7 @@ class VaultEncryptCommand : Runnable {
         }
 
         val configLines = Files.readAllLines(configPath)
-        val raw = SyncConfig.parseRaw(configLines.joinToString("\n"))
+        val raw = SyncConfig.parseRaw(configLines.joinToString("\n"), configPath.toString())
         val linesToRemove = mutableSetOf<Int>()
         var encryptedCount = 0
 

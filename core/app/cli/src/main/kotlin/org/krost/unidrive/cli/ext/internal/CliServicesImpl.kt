@@ -63,7 +63,7 @@ internal class CliServicesImpl(
     override fun listProfileNames(): List<String> {
         val cfg = main.configBaseDir().resolve("config.toml")
         if (!Files.exists(cfg)) return emptyList()
-        val raw = SyncConfig.parseRaw(Files.readString(cfg))
+        val raw = SyncConfig.parseRaw(Files.readString(cfg), cfg.toString())
         return raw.providers.keys.toList()
     }
 

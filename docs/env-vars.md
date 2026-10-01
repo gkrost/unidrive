@@ -27,6 +27,25 @@ filesystem on the receiving side). Do not raise it to mask
 problem. See `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`
 for the history.
 
+## OneDrive
+
+### `UNIDRIVE_ONEDRIVE_OAUTH_PORT`
+
+Loopback port the browser sign-in (`unidrive auth`) listens on for the OAuth
+redirect. The redirect URI sent to Microsoft is built from it
+(`http://localhost:<port>/callback`).
+
+- **Default:** `8080`
+- **Accepted range:** `1..65535`
+- **An unusable value is logged as a warning and the default is used.**
+- **Code:** `core/providers/onedrive/src/main/kotlin/org/krost/unidrive/onedrive/OneDriveConfig.kt`.
+
+Set this when another program already holds 8080: sign-in then fails with
+`Cannot listen on 127.0.0.1:8080 ...`. Microsoft must accept the redirect URI
+for the chosen port. Matching of a `localhost` redirect is documented to ignore
+the port, but a non-default port has not been tried against this app
+registration. `unidrive auth --device-code` needs no port at all.
+
 ## Other env vars in use (not yet documented in this file)
 
 The following production env vars are read by the daemon but their

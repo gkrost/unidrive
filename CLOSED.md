@@ -123,3 +123,4 @@ Things that were done before this branch started. Append new entries when items 
 - Suggested-command output uses `<path>` placeholders instead of real values (not copy-pasteable)
 - Path normalization (NFC) across sync
 - Provider SPI hardening with two providers
+- `.lock.pid` rendered as `mode (no-mode)` for legacy pid-only sidecars — now named `legacy (pre-mode-mutex)` in the `daemon status`/`daemon stop` refusal

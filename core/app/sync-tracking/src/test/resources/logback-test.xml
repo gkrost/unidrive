@@ -1,0 +1,22 @@
+<configuration>
+    <!-- Test runs log to the console only. The shipped logback.xml in :app:cli writes to the
+         operator's runtime log (LOCALAPPDATA/unidrive or ~/.local/share/unidrive), so a test
+         JVM that picked it up appended thousands of test lines to the deployed daemon's log.
+         Logback prefers logback-test.xml over logback.xml when both are on the classpath. -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <encoder>
+            <charset>UTF-8</charset>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{profile:-*}] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="org.krost.unidrive" level="DEBUG"/>
+    <logger name="io.ktor" level="WARN"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
