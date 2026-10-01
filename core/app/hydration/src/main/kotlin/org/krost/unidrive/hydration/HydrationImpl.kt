@@ -254,6 +254,14 @@ class HydrationImpl(
                         mtimeEpochMillis = e.localMtime ?: e.lastSynced.toEpochMilli(),
                         isHydrated = e.isHydrated,
                         isFolder = e.isFolder,
+                        remoteModifiedEpochMillis = e.remoteModified?.toEpochMilli(),
+                        remoteId = e.remoteId,
+                        etag = e.remoteHash,
+                        // toSyncEntry surfaces a `local:` synthetic remote_id as null,
+                        // so a null here means "upload still pending" — never-uploaded
+                        // or in-flight. last_error_at marks the last attempt as failed.
+                        pendingUpload = e.remoteId == null,
+                        hasError = e.lastErrorAt != null,
                     )
                 },
             )

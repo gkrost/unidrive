@@ -67,6 +67,26 @@ sealed class ListResult {
         val mtimeEpochMillis: Long,
         val isHydrated: Boolean,
         val isFolder: Boolean,
+        // Remote modified time straight from the provider, unlike [mtimeEpochMillis]
+        // which is the local watermark (enumeration time for cloud-only rows,
+        // download time for hydrated ones). Null for rows the provider never
+        // reported a modified time for (never-uploaded rows).
+        val remoteModifiedEpochMillis: Long? = null,
+        // Provider identity of the row; null while the upload is still pending
+        // (a row created/edited through the mount that has not landed cloud-side
+        // yet). Lets a mirroring client recognise a remote rename (old path reaped,
+        // new path upserted) as the same item.
+        val remoteId: String? = null,
+        // Provider change-detection token (content hash where the provider offers
+        // one). Null when the provider exposes none — NOT a conditional-write
+        // etag; see the open_write base_etag docs.
+        val etag: String? = null,
+        // True when the row holds local bytes whose upload has not completed —
+        // created/edited through the mount, not yet on the cloud.
+        val pendingUpload: Boolean = false,
+        // True when the last write-back upload attempt against this row failed
+        // (state.db last_error_at stamped; `unidrive doctor` surfaces the same gap).
+        val hasError: Boolean = false,
     )
 }
 

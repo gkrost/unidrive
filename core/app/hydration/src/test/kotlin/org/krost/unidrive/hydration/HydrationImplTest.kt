@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertNull
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -301,6 +302,8 @@ internal class HydrationTestEnv(
         }
 
         fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
+
+        fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
 
         fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()
     }
@@ -900,6 +903,55 @@ class HydrationImplTest {
         assertTrue(r is ListResult.Ok)
         val e = (r as ListResult.Ok).entries.single { it.path == "/gernot" }
         assertEquals(0L, e.size, "a negative remote size must clamp to 0, never reach the wire")
+    }
+
+    // The remote fields a mirroring client needs: the provider's modified time
+    // (mtime_ms alone is the LOCAL watermark — enumeration time for cloud-only
+    // rows), the remote id for rename recognition, the change-detection token,
+    // and the pending-upload / last-error flags.
+    @Test
+    fun `list exposes remote modified time, id, etag and pending flags`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/cloud.txt", remoteSize = 5)
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = (r as ListResult.Ok).entries.single { it.path == "/cloud.txt" }
+        assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), e.remoteModifiedEpochMillis)
+        assertEquals("id-/cloud.txt", e.remoteId)
+        assertEquals("hash-/cloud.txt", e.etag)
+        assertFalse(e.pendingUpload, "a row with a remote id has landed cloud-side")
+        assertFalse(e.hasError)
+    }
+
+    @Test
+    fun `list marks a never-uploaded row as pending upload`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertLocalOnlyHydratedEntry("/local.txt")
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = (r as ListResult.Ok).entries.single { it.path == "/local.txt" }
+        assertTrue(e.pendingUpload, "a row without a remote id is still owed an upload")
+        assertNull(e.remoteId)
+        assertNull(e.remoteModifiedEpochMillis, "the provider never reported a modified time for it")
+        assertFalse(e.hasError, "no upload was attempted, so no failure is stamped")
+    }
+
+    @Test
+    fun `list marks a failed upload row with the error flag`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertCreatedRow("/draft.txt")
+        env.stateDb.markUploadFailed("/draft.txt", Instant.now())
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = (r as ListResult.Ok).entries.single { it.path == "/draft.txt" }
+        assertTrue(e.pendingUpload)
+        assertTrue(e.hasError, "last_error_at must surface as the error flag")
     }
 
     @Test

@@ -466,6 +466,11 @@ private fun serialiseListEntries(entries: List<ListResult.Entry>): String {
             .append(",\"mtime_ms\":").append(e.mtimeEpochMillis)
             .append(",\"hydrated\":").append(e.isHydrated)
             .append(",\"folder\":").append(e.isFolder)
+            .append(",\"remote_modified_ms\":").append(e.remoteModifiedEpochMillis?.toString() ?: "null")
+            .append(",\"remote_id\":").append(e.remoteId?.let { jsonEsc(it) } ?: "null")
+            .append(",\"etag\":").append(e.etag?.let { jsonEsc(it) } ?: "null")
+            .append(",\"pending_upload\":").append(e.pendingUpload)
+            .append(",\"error\":").append(e.hasError)
             .append('}')
     }
     sb.append("]}")

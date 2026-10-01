@@ -86,6 +86,26 @@ class LsCommandTest {
     }
 
     @Test
+    fun parses_list_entries_that_carry_the_additive_fields() {
+        // hydration.list entries grew remote_modified_ms, remote_id, etag, pending_upload and
+        // error after `folder`; a daemon that predates them stops at `folder`. ls must read both,
+        // including null values and a mixed reply — the old regex closed the object right after
+        // `folder`, so ls printed nothing at all against a current daemon.
+        val reply =
+            """{"ok":true,"entries":[""" +
+                """{"path":"/Docs","size":0,"mtime_ms":1000,"hydrated":false,"folder":true,""" +
+                """"remote_modified_ms":900,"remote_id":"rid-docs","etag":null,"pending_upload":false,"error":false},""" +
+                """{"path":"/draft.txt","size":7,"mtime_ms":2000,"hydrated":true,"folder":false,""" +
+                """"remote_modified_ms":null,"remote_id":null,"etag":null,"pending_upload":true,"error":true},""" +
+                """{"path":"/old.txt","size":1,"mtime_ms":3000,"hydrated":false,"folder":false}""" +
+                """]}"""
+        val entries = LsCommand.parseListEntries(reply)
+        assertEquals(listOf("/Docs", "/draft.txt", "/old.txt"), entries.map { it.path })
+        assertEquals(listOf(true, false, false), entries.map { it.isFolder })
+        assertEquals(listOf(1000L, 2000L, 3000L), entries.map { it.mtimeMs })
+    }
+
+    @Test
     fun ls_agrees_with_mount_view() = runBlocking {
         // End-to-end: start a daemon serving a remote with two items, drive the
         // mount-view enumerate (via hydration.subscribe, the co-daemon's mount signal),
