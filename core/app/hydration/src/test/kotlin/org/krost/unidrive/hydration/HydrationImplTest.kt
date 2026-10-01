@@ -2,8 +2,10 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import org.krost.unidrive.Capability
@@ -1085,6 +1087,73 @@ class HydrationImplTest {
         val e = (r as ListResult.Ok).entries.single { it.path == "/draft.txt" }
         assertTrue(e.pendingUpload)
         assertTrue(e.hasError, "last_error_at must surface as the error flag")
+    }
+
+    // An edit of a file that already has a remote id is owed to the cloud from
+    // open_write until the upload lands — remoteId alone cannot say so.
+    @Test
+    fun `list marks an uploaded file pending while its edit is being uploaded`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "edited") }
+
+        env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile)
+        testScheduler.runCurrent() // the upload coroutine is now parked inside the provider
+
+        val during = (env.hydration.list("") as ListResult.Ok).entries.single { it.path == "/doc.txt" }
+        assertTrue(during.pendingUpload, "an edit whose upload is in flight is owed to the cloud")
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        val after = (env.hydration.list("") as ListResult.Ok).entries.single { it.path == "/doc.txt" }
+        assertFalse(after.pendingUpload, "once the upload landed nothing is pending")
+    }
+
+    // A client that reacts to the Completed event by re-listing must already see the
+    // upload settled. An Unconfined collector runs at the emit site, i.e. before the
+    // emitting coroutine could do anything else, so it pins the ordering.
+    @Test
+    fun `a Completed upload event is emitted after pending_upload settled`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "edited") }
+        var pendingWhenCompleted: Boolean? = null
+        val collector = launch(Dispatchers.Unconfined) {
+            env.hydration.events.collect { event ->
+                if (event is HydrationEvent.Completed) {
+                    val e = (env.hydration.list("") as ListResult.Ok).entries.single { it.path == "/doc.txt" }
+                    pendingWhenCompleted = e.pendingUpload
+                }
+            }
+        }
+
+        env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile)
+        advanceUntilIdle()
+
+        assertEquals(false, pendingWhenCompleted, "the list a client takes on Completed must show the upload settled")
+        collector.cancel()
+    }
+
+    // markUploadFailed stamps last_error_at; a later upload that lands must clear it,
+    // or `error` stays raised for a file that is in the cloud.
+    @Test
+    fun `a successful retry clears the error flag a failed upload raised`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        env.hydration.openForWrite("conn1", "h1", "/doc.txt", env.tempDir.resolve("missing.txt"))
+        advanceUntilIdle()
+        assertNotNull(env.stateDb.lastErrorAt("/doc.txt"), "precondition: the failed upload stamped last_error_at")
+
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "bytes") }
+        env.hydration.openForWrite("conn1", "h2", "/doc.txt", cacheFile)
+        advanceUntilIdle()
+        assertEquals("bytes", env.syncEngine.remoteContentSeen("/doc.txt"), "precondition: the retry landed")
+
+        val e = (env.hydration.list("") as ListResult.Ok).entries.single { it.path == "/doc.txt" }
+        assertFalse(e.hasError, "the upload landed; the error flag must not stay raised")
+        assertNull(env.stateDb.lastErrorAt("/doc.txt"))
     }
 
     @Test

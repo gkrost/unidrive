@@ -481,6 +481,7 @@ open class SyncEngine(
                     remoteSize = result.size,
                     remoteModified = result.modified,
                     lastSynced = Instant.now(),
+                    lastErrorAt = existing.lastErrorAtAfterUpload(),
                 ),
             )
         } else {
@@ -493,6 +494,7 @@ open class SyncEngine(
                 localSize = size,
                 isHydrated = true,
                 lastSynced = Instant.now(),
+                lastErrorAt = existing.lastErrorAtAfterUpload(),
             ) ?: SyncEntry(
                 path = path,
                 remoteId = result.id,
@@ -520,6 +522,12 @@ open class SyncEngine(
             result = "success",
         )
     }
+
+    // A landed upload settles an earlier failed attempt: markUploadFailed stamps last_error_at
+    // on the row, and an `existing.copy(...)` would otherwise carry that stamp into the
+    // successful row for good (hydration.list then reports `error` for a file that is in the
+    // cloud). A download quarantine shares the column and keeps its own stamp.
+    private fun SyncEntry.lastErrorAtAfterUpload(): Instant? = if (downloadQuarantined) lastErrorAt else null
 
     /**
      * Resolves the cache file path for a given path within the hydration cache.

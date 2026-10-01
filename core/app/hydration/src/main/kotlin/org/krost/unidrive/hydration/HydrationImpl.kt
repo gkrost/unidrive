@@ -217,6 +217,10 @@ class HydrationImpl(
             (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
         }!!
         recoveryUploadScope.launch {
+            // Emitted only after the slot is released (below): a client that reacts to
+            // Completed by re-listing must already see pending_upload settled, not still
+            // raised by the slot of the upload it was just told about.
+            var completed: HydrationEvent.Completed? = null
             try {
                 slot.mutex.withLock {
                     try {
@@ -224,26 +228,22 @@ class HydrationImpl(
                         syncEngine.uploadFromCache(path, cachePath)
                         val bytes = java.nio.file.Files.size(cachePath)
                         _events.emit(HydrationEvent.Hydrated(path, bytes))
-                        _events.emit(
-                            HydrationEvent.Completed(
-                                path = path,
-                                handleId = handleId,
-                                direction = HydrationEvent.Completed.Direction.UPLOAD,
-                                ok = true,
-                            ),
+                        completed = HydrationEvent.Completed(
+                            path = path,
+                            handleId = handleId,
+                            direction = HydrationEvent.Completed.Direction.UPLOAD,
+                            ok = true,
                         )
                     } catch (e: Exception) {
                         runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
                         val err = HydrationError.Generic(e.message ?: "upload failed")
                         _events.emit(HydrationEvent.Failed(path, err))
-                        _events.emit(
-                            HydrationEvent.Completed(
-                                path = path,
-                                handleId = handleId,
-                                direction = HydrationEvent.Completed.Direction.UPLOAD,
-                                ok = false,
-                                error = err,
-                            ),
+                        completed = HydrationEvent.Completed(
+                            path = path,
+                            handleId = handleId,
+                            direction = HydrationEvent.Completed.Direction.UPLOAD,
+                            ok = false,
+                            error = err,
                         )
                     }
                 }
@@ -257,6 +257,7 @@ class HydrationImpl(
                     if (s == null || s.pending.decrementAndGet() == 0) null else s
                 }
             }
+            completed?.let { _events.emit(it) }
         }
     }
 
@@ -323,9 +324,12 @@ class HydrationImpl(
                         remoteId = e.remoteId,
                         etag = e.remoteHash,
                         // toSyncEntry surfaces a `local:` synthetic remote_id as null,
-                        // so a null here means "upload still pending" — never-uploaded
-                        // or in-flight. last_error_at marks the last attempt as failed.
-                        pendingUpload = e.remoteId == null,
+                        // so a null here means "never uploaded". An edit of a file that
+                        // already has a remote id is owed to the cloud from open_write until
+                        // its upload lands: that window is exactly the upload slot's lifetime.
+                        // last_error_at marks the last attempt as failed (cleared by a later
+                        // successful upload).
+                        pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
                         hasError = e.lastErrorAt != null,
                     )
                 },
