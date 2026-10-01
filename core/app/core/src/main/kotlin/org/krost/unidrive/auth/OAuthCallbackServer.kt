@@ -45,19 +45,33 @@ public val DEFAULT_OAUTH_CALLBACK_TIMEOUT: Duration = 5.minutes
  *                           ("$providerLabel returned error: …").
  * @param timeout            how long to block on `accept` before throwing
  *                           [AuthenticationException]. Default 5 minutes.
+ * @param bindFailureHint    appended to the error when the loopback port cannot be bound,
+ *                           so the caller can say how to move the callback or skip the browser.
  * @return the authorization code from the callback URL.
  *
  * @throws AuthenticationException on provider error param, missing /
- *   mismatched `state` (CSRF), missing `code`, or the timeout firing.
+ *   mismatched `state` (CSRF), missing `code`, the timeout firing, or the
+ *   port being unavailable.
  */
 public suspend fun awaitOAuthCallback(
     port: Int,
     expectedState: String,
     providerLabel: String,
     timeout: Duration = DEFAULT_OAUTH_CALLBACK_TIMEOUT,
+    bindFailureHint: String? = null,
 ): String =
     withContext(Dispatchers.IO) {
-        val server = ServerSocket(port, 0, InetAddress.getByName("127.0.0.1"))
+        val server =
+            try {
+                ServerSocket(port, 0, InetAddress.getByName("127.0.0.1"))
+            } catch (e: java.net.BindException) {
+                throw AuthenticationException(
+                    "Cannot listen on 127.0.0.1:$port for the $providerLabel sign-in callback " +
+                        "(${e.message}); another program is probably using that port." +
+                        (bindFailureHint?.let { " $it" } ?: ""),
+                    e,
+                )
+            }
         server.soTimeout = timeout.inWholeMilliseconds.toInt()
         try {
             val client = server.accept()

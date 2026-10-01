@@ -74,6 +74,24 @@ class OAuthCallbackServerTest {
     }
 
     @Test
+    fun `awaitOAuthCallback reports a busy port as an authentication error naming the port`() {
+        // A port another service already listens on: the bind failure must not surface as a raw
+        // BindException after the browser has opened.
+        java.net.ServerSocket(0, 0, java.net.InetAddress.getByName("127.0.0.1")).use { busy ->
+            val ex =
+                assertFailsWith<AuthenticationException> {
+                    kotlinx.coroutines.runBlocking {
+                        awaitOAuthCallback(port = busy.localPort, expectedState = "s", providerLabel = provider)
+                    }
+                }
+            assert("127.0.0.1:${busy.localPort}" in ex.message.orEmpty()) {
+                "Expected the busy port in the message, got: ${ex.message}"
+            }
+            assert(provider in ex.message.orEmpty()) { "Expected the provider label, got: ${ex.message}" }
+        }
+    }
+
+    @Test
     fun `parseAndValidateCallback uses providerLabel as prefix in error message`() {
         val requestLine = "GET /?error=access_denied&error_description=User%20cancelled HTTP/1.1"
         val azureEx =

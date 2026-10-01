@@ -54,10 +54,13 @@ class TokenManager(
 
         val code =
             awaitOAuthCallback(
-                port = 8080,
+                port = config.oauthCallbackPort,
                 expectedState = state,
                 providerLabel = "Azure",
                 timeout = 5.minutes,
+                bindFailureHint =
+                    "Set ${OneDriveConfig.OAUTH_PORT_ENV} to a free port, or sign in without a browser " +
+                        "with `unidrive auth --device-code`.",
             )
 
         token = oauthService.exchangeCodeForToken(code, pkceVerifier)
