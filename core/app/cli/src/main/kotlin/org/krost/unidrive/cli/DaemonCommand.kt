@@ -466,12 +466,12 @@ internal fun checkDaemonLock(
  * Operator-facing message for the case where a `.lock.pid` holder's mode is
  * not `daemon`. Shared by `daemon status` and `daemon stop` so both commands
  * refuse a non-daemon lock holder with identical, symmetric wording. The
- * legacy pid-only sidecar (no mode field) renders as `(no-mode)` — it predates
- * the mode-mutex and is treated as a non-daemon holder (typically a legacy
+ * legacy pid-only sidecar (no mode field) renders as `legacy (pre-mode-mutex)` — it
+ * predates the mode-mutex and is treated as a non-daemon holder (typically a legacy
  * `unidrive sync` watcher).
  */
 internal fun daemonModeMismatchMessage(profileName: String, modeToken: String?, pid: Long): String {
-    val rendered = modeToken ?: "(no-mode)"
+    val rendered = modeToken ?: "legacy (pre-mode-mutex)"
     return "lock for profile '$profileName' is held by mode '$rendered', not 'daemon'. " +
         "Use the appropriate stop mechanism (e.g. `kill $pid` for sync)."
 }

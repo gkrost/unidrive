@@ -42,17 +42,30 @@ class DaemonCommandTest {
         )
     }
 
-    // Invariant: the legacy pid-only sidecar (no mode field,
-    // rendered as `(no-mode)` historically) is pre-mode-mutex sync and must be
-    // treated as a non-daemon holder — same refusal path, no misleading status.
+    // Invariant: the legacy pid-only sidecar (no mode field) is pre-mode-mutex
+    // sync and must be treated as a non-daemon holder — same refusal path, no
+    // misleading status. It is named as a legacy holder, not as a "(no-mode)"
+    // state the daemon might be in.
     @Test
     fun `daemon-status-treats-legacy-no-mode-holder-as-non-daemon`() {
         val msg = daemonModeMismatchMessage("internxt_test", null, 999)
         assertTrue(
-            msg.contains("is held by mode '(no-mode)'"),
-            "null mode token must render as (no-mode), not the literal 'null'; got: $msg",
+            msg.contains("is held by mode 'legacy (pre-mode-mutex)'"),
+            "a pid-only sidecar must render as a legacy holder; got: $msg",
         )
+        assertTrue(msg.contains("not 'daemon'"), "must state the holder is not a daemon; got: $msg")
+        assertFalse(msg.contains("(no-mode)"), "the ambiguous (no-mode) label must be gone; got: $msg")
         assertFalse(msg.contains("'null'"), "must not leak a literal null mode; got: $msg")
+    }
+
+    @Test
+    fun `daemon-status-refuses-a-live-pid-only-sidecar-as-legacy-holder`() {
+        withPidFile("26168\n") { pidFile ->
+            val check = checkDaemonLock("p", pidFile, isAlive = { true })
+            assertTrue(check is DaemonLockCheck.Refused, "pid-only sidecar must be refused; got: $check")
+            assertTrue(check.message.contains("legacy (pre-mode-mutex)"), check.message)
+            assertTrue(check.message.contains("kill 26168"), check.message)
+        }
     }
 
     // ── daemon status does not trust a stale .lock.pid ───────────────────────
