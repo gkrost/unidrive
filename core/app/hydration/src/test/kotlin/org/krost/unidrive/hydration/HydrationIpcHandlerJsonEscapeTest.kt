@@ -91,8 +91,8 @@ class HydrationIpcHandlerJsonEscapeTest {
             return OpenResult.Ok(cache)
         }
 
-        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
-            calls += Call("open_write", listOf(handleId, path, cachePath.toString()))
+        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path, baseEtag: String?): OpenResult {
+            calls += Call("open_write", listOf(handleId, path, cachePath.toString()) + listOfNotNull(baseEtag))
             return OpenResult.Ok(cache)
         }
 

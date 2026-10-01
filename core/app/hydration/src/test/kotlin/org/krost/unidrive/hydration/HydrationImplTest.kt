@@ -688,6 +688,67 @@ class HydrationImplTest {
         collector.cancel()
     }
 
+    // ── open_write base_etag guard ────────────────────────────────────────────
+
+    // A write whose base etag no longer matches the row's token would silently
+    // overwrite the newer remote version. The guard must refuse BEFORE the
+    // background upload runs — after it, the clobber has already happened.
+    @Test
+    fun `open_write with a stale base_etag refuses with conflict and uploads nothing`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "mine") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile, baseEtag = "hash-/doc.txt-old")
+
+        assertTrue(r is OpenResult.Failed)
+        assertEquals("conflict", (r as OpenResult.Failed).error.message)
+        advanceUntilIdle()
+        assertNull(env.syncEngine.remoteContentSeen("/doc.txt"), "the upload must never run — remote stays untouched")
+        assertNull(env.stateDb.lastErrorAt("/doc.txt"), "a refused write is not a failed upload")
+    }
+
+    @Test
+    fun `open_write with the current base_etag uploads normally`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "mine") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile, baseEtag = "hash-/doc.txt")
+
+        assertTrue(r is OpenResult.Ok, "a current base etag must not block the write")
+        advanceUntilIdle()
+        assertEquals("mine", env.syncEngine.remoteContentSeen("/doc.txt"))
+    }
+
+    @Test
+    fun `open_write without base_etag stays unconditional`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "mine") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile, baseEtag = null)
+
+        assertTrue(r is OpenResult.Ok, "null base etag means no guard — legacy contract")
+        advanceUntilIdle()
+        assertEquals("mine", env.syncEngine.remoteContentSeen("/doc.txt"))
+    }
+
+    // A never-uploaded row (etag null) has no remote version to lose, so even a
+    // mismatching base etag cannot clobber anything — the write must proceed.
+    @Test
+    fun `open_write with base_etag on a never-uploaded row skips the guard`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertLocalOnlyHydratedEntry("/new.txt")
+        val cacheFile = env.tempDir.resolve("new.txt").also { java.nio.file.Files.writeString(it, "first") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/new.txt", cacheFile, baseEtag = "whatever")
+
+        assertTrue(r is OpenResult.Ok, "no remote version exists, so no conflict is possible")
+        advanceUntilIdle()
+        assertEquals("first", env.syncEngine.remoteContentSeen("/new.txt"))
+    }
+
     @Test
     fun `normal_handle_dirty_close_returns_promptly_without_awaiting_upload`() = runTest {
         // Invariant (#188): a normal dirty close (FUSE release) must return Ok immediately,

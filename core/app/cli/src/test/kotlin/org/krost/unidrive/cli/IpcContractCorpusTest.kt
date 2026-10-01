@@ -233,9 +233,13 @@ class IpcContractCorpusTest {
             if (path.startsWith("/missing")) OpenResult.Failed(HydrationError.UnknownPath)
             else OpenResult.Ok(cachePathFor(path))
 
-        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult =
-            if (path.startsWith("/missing")) OpenResult.Failed(HydrationError.UnknownPath)
-            else OpenResult.Ok(cachePath)
+        override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path, baseEtag: String?): OpenResult =
+            when {
+                path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
+                // A stale base_etag refuses the write before any upload runs.
+                path == "/docs/report.txt" && baseEtag == "stale-etag" -> OpenResult.Failed(HydrationError.Conflict)
+                else -> OpenResult.Ok(cachePath)
+            }
 
         override suspend fun closeHandle(connectionId: String, handleId: String) {}
 

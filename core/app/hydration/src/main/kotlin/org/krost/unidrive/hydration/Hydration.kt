@@ -16,7 +16,24 @@ import java.nio.file.Path
  */
 interface Hydration {
     suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult
-    suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult
+
+    /**
+     * Register a write handle for [path] and start a background upload of
+     * [cachePath] (see [HydrationImpl.openForWrite]). [baseEtag] is the
+     * optimistic-concurrency token the client observed via `hydration.list`
+     * (`etag` field) when it last read the file; when it no longer matches the
+     * row's token the write is refused with [HydrationError.Conflict] BEFORE
+     * any upload starts — the remote is untouched and the client keeps both
+     * copies. Null (or a row with no recorded token) skips the guard: a
+     * never-uploaded row has no remote version to lose.
+     */
+    suspend fun openForWrite(
+        connectionId: String,
+        handleId: String,
+        path: String,
+        cachePath: Path,
+        baseEtag: String? = null,
+    ): OpenResult
     suspend fun closeHandle(connectionId: String, handleId: String)
     suspend fun hydrate(path: String): HydrateResult
     suspend fun dehydrate(path: String): DehydrateResult

@@ -133,9 +133,34 @@ class HydrationImpl(
         return OpenResult.Ok(cachePath)
     }
 
-    override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path): OpenResult {
-        stateDb.getEntry(path)
+    override suspend fun openForWrite(
+        connectionId: String,
+        handleId: String,
+        path: String,
+        cachePath: Path,
+        baseEtag: String?,
+    ): OpenResult {
+        val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+
+        // Optimistic-concurrency guard (#434): refuse a write whose base etag no
+        // longer matches the row's change-detection token BEFORE any upload runs —
+        // the point is to not silently overwrite a newer remote version, so the
+        // refusal must happen before the background upload can clobber it. The
+        // comparison is against the ENGINE's row: a client holding a stale view
+        // (its base etag predates the last enumeration) gets `conflict` and keeps
+        // both copies. A row with no token (never uploaded, or a provider that
+        // exposes none) cannot be guarded — there is no remote version to lose.
+        //
+        // The token is the provider's content hash, NOT a conditional-write etag:
+        // OneDrive's If-Match requires the Graph eTag (which the engine does not
+        // persist), and Internxt has no conditional PUT at all — so the token is
+        // deliberately NOT forwarded to provider.upload. Forwarding a quickXor/sha256
+        // hash as If-Match would 412 every guarded OneDrive replace and land the
+        // keep-both rename path on every mount save.
+        if (baseEtag != null && entry.remoteHash != null && entry.remoteHash != baseEtag) {
+            return OpenResult.Failed(HydrationError.Conflict)
+        }
 
         // Crash-recovery replay: the co-daemon's cache_scanner fires open_write with
         // handle_id = "recovery-<n>" for each cache file whose mtime exceeds the

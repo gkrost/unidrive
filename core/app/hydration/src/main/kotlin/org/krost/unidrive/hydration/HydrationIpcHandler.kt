@@ -19,8 +19,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   open_read   request:  {"verb":"hydration.open_read","handle_id":"...","path":"/foo"}
  *   open_read   reply ok: {"ok":true,"cache_path":"/home/.../foo.txt"}
  *   open_read   reply err:{"ok":false,"error":"<message>"}
- *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"}
- *   open_write  reply:    same as open_read
+ *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"[,"base_etag":"..."]}
+ *   open_write  reply:    same as open_read; base_etag (OPTIONAL) is the etag the client
+ *                         observed at list/open time — a mismatch refuses the write with
+ *                         {"ok":false,"error":"conflict"} before any upload starts
  *   close_handle request: {"verb":"hydration.close_handle","handle_id":"..."}
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
@@ -235,7 +237,10 @@ class HydrationIpcHandler(
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
-                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache))) {
+                // base_etag is OPTIONAL: absent (or a row with no recorded token) →
+                // unconditional upload, byte-identical to the pre-guard contract.
+                val baseEtag = pluck(jsonRequest, "base_etag")
+                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
                     is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }

@@ -18,12 +18,19 @@ class HydrationErrorTest {
     }
 
     @Test
+    fun `conflict carries the stable conflict wire token`() {
+        assertEquals("conflict", HydrationError.Conflict.message)
+        assertEquals("conflict", HydrationError.CONFLICT_TOKEN)
+    }
+
+    @Test
     fun `sealed interface allows future variants without breaking exhaustiveness`() {
         val e: HydrationError = HydrationError.Generic("x")
         val rendered = when (e) {
             is HydrationError.Generic -> "generic:${e.message}"
             HydrationError.NotFound -> "not_found"
             HydrationError.UnknownPath -> "unknown_path"
+            HydrationError.Conflict -> "conflict"
         }
         assertTrue(rendered.startsWith("generic:"))
     }
