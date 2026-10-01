@@ -262,6 +262,30 @@ class StatusCommandTest {
         }
     }
 
+    // ── #361: a config the TOML reader rejects is reported with its full path ──
+
+    @Test
+    fun `#361 status names the config file path when a backslash path makes it unreadable`() {
+        val dir = Files.createTempDirectory("status-config-")
+        try {
+            val bs = Char(92)
+            val configFile = dir.resolve("config.toml")
+            Files.writeString(configFile, "[providers.lf]\ntype = \"localfs\"\nsync_root = \"C:${bs}Users${bs}me\"\n")
+            var message: String? = null
+            val command = CommandLine(Main())
+            command.executionExceptionHandler =
+                CommandLine.IExecutionExceptionHandler { ex, _, _ ->
+                    message = ex.message
+                    1
+                }
+            assertEquals(1, command.execute("-c", dir.toString(), "status"))
+            assertTrue(configFile.toString() in message.orEmpty(), "must name the config file path: $message")
+            assertTrue("sync_root" in message.orEmpty(), "must name the key: $message")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     // ── #117: orphan-profile enumeration invariants ──────────────────────────
 
     @Test

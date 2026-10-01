@@ -258,7 +258,7 @@ class Main : Runnable {
         val configFile = baseConfigDir.resolve("config.toml")
         val raw =
             if (Files.exists(configFile)) {
-                SyncConfig.parseRaw(Files.readString(configFile))
+                SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }

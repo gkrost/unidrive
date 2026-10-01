@@ -75,7 +75,7 @@ class ProfileAddCommand : Runnable {
         // Validate no duplicate profile name
         val raw =
             if (Files.exists(configPath)) {
-                SyncConfig.parseRaw(Files.readString(configPath))
+                SyncConfig.parseRaw(Files.readString(configPath), configPath.toString())
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
@@ -188,7 +188,7 @@ class ProfileListCommand : Runnable {
         val configPath = main.configBaseDir().resolve("config.toml")
         val raw =
             if (Files.exists(configPath)) {
-                SyncConfig.parseRaw(Files.readString(configPath))
+                SyncConfig.parseRaw(Files.readString(configPath), configPath.toString())
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
@@ -238,7 +238,7 @@ class ProfileRemoveCommand : Runnable {
         }
 
         val content = Files.readString(configPath)
-        val raw = SyncConfig.parseRaw(content)
+        val raw = SyncConfig.parseRaw(content, configPath.toString())
         if (name !in raw.providers) {
             System.err.println("Error: Profile '$name' not found.")
             System.err.println("Configured: ${raw.providers.keys.joinToString(", ")}")

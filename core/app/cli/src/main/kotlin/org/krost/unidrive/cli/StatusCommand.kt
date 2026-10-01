@@ -312,7 +312,7 @@ class StatusCommand : Runnable {
         val requestedName = parent.provider ?: SyncConfig.resolveDefaultProfile(baseDir)
         val configFile = baseDir.resolve("config.toml")
         val raw =
-            if (Files.exists(configFile)) SyncConfig.parseRaw(Files.readString(configFile))
+            if (Files.exists(configFile)) SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
             else SyncConfig.parseRaw("[general]\n")
         val profile =
             if (resolvesSingleProfileViaConfig(requestedName, raw)) {
@@ -889,7 +889,7 @@ class StatusCommand : Runnable {
         val configFile = baseDir.resolve("config.toml")
         val raw =
             if (Files.exists(configFile)) {
-                SyncConfig.parseRaw(Files.readString(configFile))
+                SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
@@ -990,7 +990,7 @@ internal fun staleGraceFor(baseDir: Path): Duration {
         runCatching {
             val cfg = baseDir.resolve("config.toml")
             val raw =
-                if (Files.exists(cfg)) SyncConfig.parseRaw(Files.readString(cfg)) else SyncConfig.parseRaw("[general]\n")
+                if (Files.exists(cfg)) SyncConfig.parseRaw(Files.readString(cfg), cfg.toString()) else SyncConfig.parseRaw("[general]\n")
             // max_poll_interval is a [general] setting; RawSyncConfig.general is non-null.
             raw.general.max_poll_interval ?: 300
         }.getOrDefault(300)
