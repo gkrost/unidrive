@@ -90,13 +90,14 @@ class DaemonRunCommand : Runnable {
  * Read-only status for the running daemon.
  *
  * Two-stage output per spec unidrive-daemon-design.md §3.3:
- *   1. `.lock.pid` (file-derived): PID + mode — always printed when present.
+ *   1. `.lock.pid` (file-derived): PID + mode — printed when the pid is alive.
+ *      A dead pid (daemon kill -9'd) is reported as a stale lock instead.
  *   2. `daemon.status` RPC reply (uptime_ms, clients_connected,
  *      refresh_in_flight, refresh_job_id) — printed when the socket is
  *      reachable.
  *
- * If `.lock.pid` exists but the socket is gone (daemon mid-shutdown or
- * kill -9'd), prints the file-derived line and a "socket unreachable" note.
+ * If the daemon is alive but the socket is gone (mid-shutdown), prints the
+ * file-derived line and a "socket unreachable" note.
  * Honors the chicken-and-egg constraint: never need the daemon to be up
  * just to know whether it's up.
  */
@@ -120,55 +121,47 @@ class DaemonStatusCommand : Runnable {
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
 
-        when (val result = readLockPid(pidFile)) {
-            is LockPidReadResult.Absent -> {
-                System.err.println("no daemon running for profile '${profile.name}'")
+        val pid = when (val check = checkDaemonLock(profile.name, pidFile)) {
+            is DaemonLockCheck.NotRunning -> {
+                System.err.println(check.message)
                 System.exit(1)
                 return
             }
-            is LockPidReadResult.Malformed -> {
-                System.err.println("malformed lock-pid file at $pidFile: '${result.raw}'")
+            is DaemonLockCheck.Refused -> {
+                System.err.println(check.message)
                 System.exit(1)
                 return
             }
-            is LockPidReadResult.Present -> {
-                val pid = result.contents.pid
-                val modeToken = result.contents.modeToken
-                if (modeToken != "daemon") {
-                    System.err.println(daemonModeMismatchMessage(profile.name, modeToken, pid))
-                    System.exit(1)
-                    return
-                }
-                println("pid $pid, mode $modeToken")
+            is DaemonLockCheck.Running -> check.pid
+        }
+        println("pid $pid, mode daemon")
 
-                // RPC enrichment per spec §4.3 — file-derived data above,
-                // RPC-derived below. The chicken-and-egg case is honored: a
-                // missing socket file means we can't reach the daemon, but
-                // we've already printed the file-derived line.
-                val socketPath = org.krost.unidrive.sync.IpcServer.defaultSocketPath(profile.name)
-                if (!java.nio.file.Files.exists(socketPath)) {
-                    System.err.println("daemon socket not found at $socketPath (daemon may be mid-shutdown)")
-                    return
-                }
-                try {
-                    java.nio.channels.SocketChannel.open(
-                        java.net.UnixDomainSocketAddress.of(socketPath),
-                    ).use { channel ->
-                        channel.write(
-                            java.nio.ByteBuffer.wrap(
-                                ("""{"verb":"daemon.status"}""" + "\n").toByteArray(),
-                            ),
-                        )
-                        val buf = java.nio.ByteBuffer.allocate(1024)
-                        channel.read(buf)
-                        buf.flip()
-                        val reply = String(buf.array(), 0, buf.limit()).substringBefore('\n')
-                        println(reply)
-                    }
-                } catch (e: java.io.IOException) {
-                    System.err.println("daemon socket unreachable: ${e.message}")
-                }
+        // RPC enrichment per spec §4.3 — file-derived data above,
+        // RPC-derived below. The chicken-and-egg case is honored: a
+        // missing socket file means we can't reach the daemon, but
+        // we've already printed the file-derived line.
+        val socketPath = org.krost.unidrive.sync.IpcServer.defaultSocketPath(profile.name)
+        if (!java.nio.file.Files.exists(socketPath)) {
+            System.err.println("daemon socket not found at $socketPath (daemon may be mid-shutdown)")
+            return
+        }
+        try {
+            java.nio.channels.SocketChannel.open(
+                java.net.UnixDomainSocketAddress.of(socketPath),
+            ).use { channel ->
+                channel.write(
+                    java.nio.ByteBuffer.wrap(
+                        ("""{"verb":"daemon.status"}""" + "\n").toByteArray(),
+                    ),
+                )
+                val buf = java.nio.ByteBuffer.allocate(1024)
+                channel.read(buf)
+                buf.flip()
+                val reply = String(buf.array(), 0, buf.limit()).substringBefore('\n')
+                println(reply)
             }
+        } catch (e: java.io.IOException) {
+            System.err.println("daemon socket unreachable: ${e.message}")
         }
     }
 }
@@ -429,6 +422,45 @@ internal fun readLockPid(pidFile: java.nio.file.Path): LockPidReadResult {
     val modeToken = parts.getOrNull(1)
     return LockPidReadResult.Present(LockPidContents(pid, modeToken))
 }
+
+/** True when a process with [pid] is currently running. Shared by `daemon status` and `doctor`. */
+internal fun isLockHolderAlive(pid: Long): Boolean = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+
+/** What `daemon status` learns from the `.lock.pid` sidecar, before it asks the daemon anything. */
+internal sealed class DaemonLockCheck {
+    /** No live daemon holds the profile; [message] goes to stderr. */
+    data class NotRunning(val message: String) : DaemonLockCheck()
+
+    /** The sidecar is unusable or held by something that is not a daemon; [message] goes to stderr. */
+    data class Refused(val message: String) : DaemonLockCheck()
+
+    /** A live daemon (mode `daemon`) holds the profile. */
+    data class Running(val pid: Long) : DaemonLockCheck()
+}
+
+internal fun checkDaemonLock(
+    profileName: String,
+    pidFile: java.nio.file.Path,
+    isAlive: (Long) -> Boolean = ::isLockHolderAlive,
+): DaemonLockCheck =
+    when (val result = readLockPid(pidFile)) {
+        is LockPidReadResult.Absent -> DaemonLockCheck.NotRunning("no daemon running for profile '$profileName'")
+        is LockPidReadResult.Malformed ->
+            DaemonLockCheck.Refused("malformed lock-pid file at $pidFile: '${result.raw}'")
+        is LockPidReadResult.Present -> {
+            val pid = result.contents.pid
+            val modeToken = result.contents.modeToken
+            // A killed holder never runs its cleanup, so its sidecar outlives it. Judge liveness
+            // before the mode: a dead holder of any mode is a stale lock, not a daemon.
+            if (!isAlive(pid)) {
+                DaemonLockCheck.NotRunning("no daemon running for profile '$profileName' (stale lock from pid $pid)")
+            } else if (modeToken != "daemon") {
+                DaemonLockCheck.Refused(daemonModeMismatchMessage(profileName, modeToken, pid))
+            } else {
+                DaemonLockCheck.Running(pid)
+            }
+        }
+    }
 
 /**
  * Operator-facing message for the case where a `.lock.pid` holder's mode is
