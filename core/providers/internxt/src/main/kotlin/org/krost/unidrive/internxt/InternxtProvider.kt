@@ -48,6 +48,10 @@ class InternxtProvider(
     @Volatile
     private var notificationsClient: NotificationsClient? = null
 
+    // INTERNXT_NOTIFICATIONS=off: say so once per provider, not on every authenticate().
+    @Volatile
+    private var notificationsOffLogged = false
+
     @Volatile
     private var remoteChangeCallback: () -> Unit = {}
 
@@ -152,6 +156,13 @@ class InternxtProvider(
     }
 
     private suspend fun ensureNotificationsClient() {
+        if (!config.notificationsEnabled) {
+            if (!notificationsOffLogged) {
+                notificationsOffLogged = true
+                log.info("Internxt notifications disabled by INTERNXT_NOTIFICATIONS; sync polls only")
+            }
+            return
+        }
         if (notificationsClient != null) return
         val creds =
             try {

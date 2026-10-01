@@ -12,8 +12,13 @@ data class InternxtConfig(
     val desktopHeader: String? = System.getenv("INTERNXT_DESKTOP_HEADER")?.takeIf { it.isNotBlank() },
     val notificationsUrl: String = System.getenv("INTERNXT_NOTIFICATIONS_URL") ?: NOTIFICATIONS_URL,
     val keepOverwritten: Boolean = false,
+    // INTERNXT_NOTIFICATIONS=off (also 0 / false) skips the socket.io wake-signal client;
+    // sync then relies on the adaptive poll alone. Anything else, or unset, keeps it on.
+    val notificationsEnabled: Boolean = parseNotificationsEnabled(System.getenv("INTERNXT_NOTIFICATIONS")),
 ) {
     companion object {
+        internal fun parseNotificationsEnabled(raw: String?): Boolean = raw?.trim()?.lowercase() !in setOf("off", "0", "false")
+
         const val API_BASE_URL = "https://gateway.internxt.com/drive"
         const val CLIENT_NAME = "unidrive"
         const val CLIENT_VERSION = "0.0.1"
