@@ -71,6 +71,12 @@ class HydrationImpl(
     private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
+    private companion object {
+        // Wire token for "an upload of the path is still in flight, retry"; the same literal
+        // dehydrate's Busy reply puts on the wire.
+        const val BUSY_TOKEN = "busy"
+    }
+
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
@@ -608,6 +614,18 @@ class HydrationImpl(
         if (destEntry != null) {
             if (!replace) return RenameResult.NewPathExists
             if (destEntry.isFolder || sourceEntry.isFolder) return RenameResult.NewPathExists
+            // A background upload still queued or running for the source or the destination
+            // races the destination delete and the move: the temp file's upload would run
+            // against a path that no longer exists (its client is told it failed) while the
+            // row now at the target is never-uploaded and owned by nothing, or a stale
+            // upload of the destination could land over the renamed content. Safe-save does
+            // close-then-rename, so this window is the normal case, not an edge: refuse
+            // with the same `busy` token dehydrate uses, and the client retries once the
+            // `completed` event for its handle has arrived. Plain rename (no replace) keeps
+            // its behaviour — nothing is deleted there.
+            if (uploadSlots.containsKey(oldNorm) || uploadSlots.containsKey(newNorm)) {
+                return RenameResult.Failed(HydrationError.Generic(BUSY_TOKEN))
+            }
             deleteReplaceDestination(destEntry, newNorm)?.let { return it }
         }
 

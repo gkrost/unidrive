@@ -61,7 +61,11 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         overwrite-if-exists for a FILE destination: the
  *                         existing destination is deleted first (same delete
  *                         path as unlink — trash/undo semantics), then the
- *                         source takes its place.
+ *                         source takes its place. With replace, an
+ *                         open_write upload of the source or the destination
+ *                         that is still queued or running refuses the rename
+ *                         with {"ok":false,"error":"busy"} (nothing touched):
+ *                         retry after the "completed" event for that handle.
  *
  *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
  *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
