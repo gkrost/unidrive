@@ -21,8 +21,92 @@ import java.nio.file.Paths
 private val ktoml = Toml(inputConfig = TomlInputConfig(ignoreUnknownNames = true))
 private val configLog = LoggerFactory.getLogger("org.krost.unidrive.sync.SyncConfig")
 
-/** Top-level so the @Serializable-generated companion is in scope at the call site. */
-internal fun decodeRawSyncConfig(content: String): RawSyncConfig = ktoml.decodeFromString(RawSyncConfig.serializer(), content)
+/**
+ * Top-level so the @Serializable-generated companion is in scope at the call site.
+ *
+ * [source] names the file in error messages. When ktoml rejects the content and the content holds an
+ * invalid escape in a double-quoted string, the failure is rethrown as an [IllegalArgumentException]
+ * that names the file, line and key and says how to write the value (see [findInvalidTomlEscape]).
+ */
+internal fun decodeRawSyncConfig(
+    content: String,
+    source: String = "config.toml",
+): RawSyncConfig =
+    try {
+        ktoml.decodeFromString(RawSyncConfig.serializer(), content)
+    } catch (e: Exception) {
+        val bad = findInvalidTomlEscape(content) ?: throw e
+        throw IllegalArgumentException(invalidEscapeMessage(source, bad), e)
+    }
+
+/** A backslash escape that TOML does not define, found in a double-quoted string. */
+internal data class InvalidTomlEscape(
+    val lineNumber: Int,
+    val key: String?,
+    val sequence: String,
+)
+
+/**
+ * #361: first invalid escape in a double-quoted (basic) string of [content], or null. In a TOML basic
+ * string a backslash starts an escape, so a Windows path like `C:\Users\me` is invalid (`\U` expects
+ * eight hex digits) and ktoml fails with an opaque NumberFormatException. Scans line by line and is
+ * only a diagnostic: it runs after ktoml has already failed, so a valid config is never affected.
+ */
+internal fun findInvalidTomlEscape(content: String): InvalidTomlEscape? {
+    val keyRegex = Regex("""^\s*([^\s=#\[][^=]*?)\s*=""")
+    var key: String? = null
+    content.lines().forEachIndexed { index, line ->
+        keyRegex.find(line)?.let { key = it.groupValues[1] }
+        var inBasic = false
+        var inLiteral = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                inLiteral -> if (c == '\'') inLiteral = false
+                inBasic ->
+                    when (c) {
+                        '"' -> inBasic = false
+                        '\\' -> {
+                            val valid =
+                                when (line.getOrNull(i + 1)) {
+                                    'b', 't', 'n', 'f', 'r', '"', '\\' -> true
+                                    'u' -> hasHexDigits(line, i + 2, 4)
+                                    'U' -> hasHexDigits(line, i + 2, 8)
+                                    else -> false
+                                }
+                            if (!valid) return InvalidTomlEscape(index + 1, key, line.substring(i, minOf(i + 2, line.length)))
+                            i++
+                        }
+                    }
+                c == '"' -> inBasic = true
+                c == '\'' -> inLiteral = true
+                c == '#' -> return@forEachIndexed
+            }
+            i++
+        }
+    }
+    return null
+}
+
+private fun hasHexDigits(
+    line: String,
+    from: Int,
+    count: Int,
+): Boolean = from + count <= line.length && (from until from + count).all { line[it].isDigit() || line[it].lowercaseChar() in 'a'..'f' }
+
+private fun invalidEscapeMessage(
+    source: String,
+    bad: InvalidTomlEscape,
+): String =
+    buildString {
+        append("$source line ${bad.lineNumber}")
+        bad.key?.let { append(", key '$it'") }
+        append(": invalid escape sequence '${bad.sequence}' in a double-quoted string. ")
+        append("In TOML a backslash inside \"...\" starts an escape, so a Windows path must be written with ")
+        append("forward slashes (\"C:/Users/me/Drive\"), doubled backslashes (\"C:\\\\Users\\\\me\\\\Drive\"), ")
+        append("or a single-quoted literal string ('C:\\Users\\me\\Drive').")
+    }
 
 /**
  * UD-282: a TOML section header in `config.toml` that doesn't match the
@@ -483,7 +567,7 @@ data class SyncConfig(
         ): SyncConfig {
             if (!Files.exists(configFile)) return defaults(providerId)
             val content = Files.readString(configFile)
-            return parse(content, providerId)
+            return parse(content, providerId, configFile.toString())
         }
 
         // The default sync-root directory name comes from the provider's own
@@ -568,7 +652,10 @@ data class SyncConfig(
                 providers = emptyMap(),
             )
 
-        fun parseRaw(content: String): RawSyncConfig {
+        fun parseRaw(
+            content: String,
+            source: String = "config.toml",
+        ): RawSyncConfig {
             // UD-282: surface ignored TOML sections (most commonly the
             // `[profiles.X]` → `[providers.X]` typo) instead of letting
             // ktoml drop them silently.
@@ -592,7 +679,7 @@ data class SyncConfig(
                     }
                 }
             }
-            return decodeRawSyncConfig(content)
+            return decodeRawSyncConfig(content, source)
         }
 
         /**
@@ -648,8 +735,9 @@ data class SyncConfig(
         fun parse(
             content: String,
             profileName: String = org.krost.unidrive.ProviderRegistry.defaultProvider(),
+            source: String = "config.toml",
         ): SyncConfig {
-            val raw = decodeRawSyncConfig(content)
+            val raw = decodeRawSyncConfig(content, source)
             return raw.toSyncConfig(profileName)
         }
 
