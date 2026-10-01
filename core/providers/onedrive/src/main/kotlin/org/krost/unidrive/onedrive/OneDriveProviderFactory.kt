@@ -97,7 +97,7 @@ open class OneDriveProviderFactory : ProviderFactory {
     ): CredentialHealth {
         val tokenFile = profileDir.resolve("token.json")
         if (!Files.exists(tokenFile)) {
-            return CredentialHealth.Missing("No token.json — run 'unidrive -p onedrive auth'")
+            return CredentialHealth.Missing("No token.json")
         }
         return try {
             val json = Json { ignoreUnknownKeys = true }

@@ -8,6 +8,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.localfs.LocalFsProvider
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -19,6 +20,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -49,6 +51,32 @@ class LsCommandTest {
         runCatching { Files.deleteIfExists(lockFile.resolveSibling(".lock.pid")) }
         runCatching { tempDir.toFile().deleteRecursively() }
     }
+
+    // localfs answered listChildren of a missing path with an empty list, so
+    // `ls /typo` printed nothing and exited 0 — indistinguishable from an empty folder.
+    @Test
+    fun `live listing of a missing path is null not empty`() =
+        runBlocking {
+            val provider = LocalFsProvider(tempDir)
+            assertNull(LsCommand.listLive(provider, "/does/not/exist"))
+        }
+
+    @Test
+    fun `live listing of an existing empty folder is empty not null`() =
+        runBlocking {
+            Files.createDirectories(tempDir.resolve("empty"))
+            val provider = LocalFsProvider(tempDir)
+            assertEquals(emptyList(), LsCommand.listLive(provider, "/empty"))
+            assertEquals(emptyList(), LsCommand.listLive(LocalFsProvider(tempDir.resolve("empty")), "/"))
+        }
+
+    @Test
+    fun `live listing of a file path lists that file`() =
+        runBlocking {
+            Files.writeString(tempDir.resolve("a.txt"), "hi")
+            val provider = LocalFsProvider(tempDir)
+            assertEquals(listOf("a.txt"), LsCommand.listLive(provider, "/a.txt")?.map { it.name })
+        }
 
     // #145 P2: `ls` mirrors the daemon view only when a DAEMON holds the lock. A plain
     // `unidrive sync` watcher binds the same socket + hydration verbs but isn't the mount

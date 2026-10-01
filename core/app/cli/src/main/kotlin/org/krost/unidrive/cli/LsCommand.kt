@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
+import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
@@ -14,6 +15,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.time.Instant
+import java.util.concurrent.Callable
 
 /**
  * `unidrive [-p <profile>] ls [<path>]` — list children of a remote folder (no recursion).
@@ -31,7 +33,7 @@ import java.time.Instant
  * mount view to disagree with, so the consistency concern does not apply.
  */
 @Command(name = "ls", description = ["List children of a remote folder (no recursion)"], mixinStandardHelpOptions = true)
-class LsCommand : Runnable {
+class LsCommand : Callable<Int> {
     @ParentCommand
     lateinit var parent: Main
 
@@ -48,7 +50,7 @@ class LsCommand : Runnable {
     )
     var live: Boolean = false
 
-    override fun run() {
+    override fun call(): Int {
         val normalized = if (path.startsWith("/")) path else "/$path"
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
@@ -62,25 +64,45 @@ class LsCommand : Runnable {
         if (!live && daemonHoldsLock(parent.providerConfigDir()) && Files.exists(socketPath)) {
             val entries = queryDaemonView(socketPath, normalized)
             if (entries != null) {
+                // hydration.list answers a missing path with an empty list, same as an
+                // empty folder — look the path up in its parent's view to tell them apart.
+                if (entries.isEmpty() && normalized != "/") {
+                    val parentPath = normalized.substringBeforeLast('/').ifEmpty { "/" }
+                    val self = queryDaemonView(socketPath, parentPath)?.find { it.path == normalized }
+                    if (self == null) return noSuchPath(normalized)
+                    if (!self.isFolder) {
+                        printDaemonEntries(listOf(self))
+                        return 0
+                    }
+                }
                 printDaemonEntries(entries)
-                return
+                return 0
             }
             // Daemon socket exists but the query failed (mid-shutdown / stale
             // socket). Fall through to the live query rather than failing.
         }
 
         val provider = parent.createProvider()
-        try {
-            runBlocking {
-                provider.authenticateAndLog()
-                val children = provider.listChildren(normalized)
-                printChildren(children)
+        val listing =
+            try {
+                runBlocking {
+                    provider.authenticateAndLog()
+                    listLive(provider, normalized)
+                }
+            } catch (e: AuthenticationException) {
+                parent.handleAuthError(e, provider)
+                return 1
+            } finally {
+                provider.close()
             }
-        } catch (e: AuthenticationException) {
-            parent.handleAuthError(e, provider)
-        } finally {
-            provider.close()
-        }
+        if (listing == null) return noSuchPath(normalized)
+        printChildren(listing)
+        return 0
+    }
+
+    private fun noSuchPath(normalized: String): Int {
+        System.err.println("ls: no such remote path: $normalized")
+        return 1
     }
 
     /**
@@ -160,6 +182,28 @@ class LsCommand : Runnable {
     private fun jsonStr(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     companion object {
+        /**
+         * Live listing of [normalized], or null when the path does not exist. Some
+         * providers (localfs) return an empty list for a missing path instead of
+         * throwing, which made `ls /typo` indistinguishable from an empty folder, so
+         * an empty non-root listing is confirmed with [CloudProvider.getMetadata].
+         * A file path lists as that single file, like `ls <file>`.
+         */
+        internal suspend fun listLive(
+            provider: CloudProvider,
+            normalized: String,
+        ): List<CloudItem>? {
+            val children = provider.listChildren(normalized)
+            if (children.isNotEmpty() || normalized == "/") return children
+            val self =
+                try {
+                    provider.getMetadata(normalized)
+                } catch (_: java.io.FileNotFoundException) {
+                    return null
+                }
+            return if (self.isFolder) children else listOf(self)
+        }
+
         // hydration.list reply entry shape (serialiseListEntries in HydrationIpcHandler):
         //   {"path":"...","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool[,<additive fields>]}
         // The fields after `folder` (remote_modified_ms, remote_id, etag,
