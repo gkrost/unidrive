@@ -95,7 +95,18 @@ internal class MemProvider : CloudProvider {
 
     override suspend fun createFolder(path: String): CloudItem = error("not used")
 
-    override suspend fun move(fromPath: String, toPath: String): CloudItem = error("not used")
+    override suspend fun move(fromPath: String, toPath: String): CloudItem {
+        val bytes = remote.remove(fromPath) ?: error("not found: $fromPath")
+        val item = items.remove(fromPath) ?: error("not found: $fromPath")
+        remote[toPath] = bytes
+        version++
+        return item
+            .copy(
+                id = "id-$toPath",
+                name = toPath.substringAfterLast("/"),
+                path = toPath,
+            ).also { items[toPath] = it }
+    }
 
     override suspend fun delta(cursor: String?, onPageProgress: ((Int) -> Unit)?, scanContext: org.krost.unidrive.ScanContext?): DeltaPage =
         DeltaPage(items = items.values.toList(), cursor = "cursor", hasMore = false)

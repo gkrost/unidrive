@@ -1077,6 +1077,9 @@ open class SyncEngine(
      * determined to be a no-op because the remote is already gone).
      */
     suspend fun deleteRemote(path: String) {
+        // #449 review: read before the delete — once the row is tombstoned the alive
+        // view no longer answers "did this row's baseline live in the sync root?".
+        val entryBefore = db.getEntry(path)
         try {
             provider.delete(path)
         } catch (e: Exception) {
@@ -1087,6 +1090,33 @@ open class SyncEngine(
             }
         }
         db.markDeleted(path)
+        dropSyncRootCopy(path, entryBefore)
+    }
+
+    // #449 review fix: the remote path is gone and its row tombstoned — the sync-root
+    // mirror must not survive them, or the next scan reads the orphan file as NEW and
+    // re-uploads the path the user just deleted (a resurrection through the mirror).
+    // A row whose baseline is the cache copy (cacheBacked == true: a failed or skipped
+    // mirror) has no sync-root file by definition, so the delete is a no-op there and
+    // legacy rows (null) are covered too. A folder's empty mirror directory goes with
+    // it (a non-empty one holds files of rows that are not deleted — deleteIfExists
+    // refuses it, and that is correct). Files the caller removed already (a mount
+    // unlink evicts its own copies, a sync-root-side delete is what triggered this)
+    // make this a no-op. Best effort either way: the delete already succeeded, and the
+    // sweep of a later session can still reclaim.
+    private fun dropSyncRootCopy(
+        path: String,
+        entryBefore: SyncEntry?,
+    ) {
+        if (entryBefore == null) return
+        runCatching {
+            val target = placeholder.resolveLocal(path)
+            withEchoSuppression(path) {
+                Files.deleteIfExists(target)
+            }
+        }.onFailure { e ->
+            log.warn("#449: could not remove the sync-root copy of the deleted {}: {}", path, e.message)
+        }
     }
 
     /**
@@ -1133,8 +1163,47 @@ open class SyncEngine(
      * both OneDrive and Internxt.
      */
     suspend fun renameRemote(oldPath: String, newPath: String) {
+        // #449 review: read before the move — renamePrefix repaths the rows, and the
+        // alive view then answers for the NEW path only.
+        val entryBefore = db.getEntry(oldPath)
         provider.move(oldPath, newPath)
         db.renamePrefix(oldPath, newPath)
+        moveSyncRootCopy(oldPath, newPath, entryBefore)
+    }
+
+    // #449 review fix: a mount rename moves the remote item, the row(s) and the cache
+    // file, but until now left the sync-root mirror at the old path — an orphan file
+    // with no row, which the next scan read as NEW and re-uploaded under the old name
+    // (the #319 resurrection shape, reintroduced through the mirror). The mirror
+    // follows the rename; rows whose baseline is the cache copy (cacheBacked == true)
+    // and legacy rows (null) have no sync-root file to move. Best effort: a file that
+    // appeared at the destination in the meantime is not ours to replace — the old
+    // copy stays and the next sync decides, exactly as the mirror-skip rule does.
+    private fun moveSyncRootCopy(
+        oldPath: String,
+        newPath: String,
+        entryBefore: SyncEntry?,
+    ) {
+        if (entryBefore?.cacheBacked != false) return
+        runCatching {
+            val from = placeholder.resolveLocal(oldPath)
+            if (!Files.exists(from)) return
+            val to = placeholder.resolveLocal(newPath)
+            withEchoSuppression(newPath) {
+                withEchoSuppression(oldPath) {
+                    Files.createDirectories(to.parent)
+                    // No REPLACE_EXISTING: a file at the destination is not ours to replace.
+                    Files.move(from, to)
+                }
+            }
+        }.onFailure { e ->
+            log.warn(
+                "#449: could not move the sync-root copy of {} to {}: {}",
+                oldPath,
+                newPath,
+                e.message,
+            )
+        }
     }
 
     // The remote item at [path], or null only when the provider proves it ABSENT.

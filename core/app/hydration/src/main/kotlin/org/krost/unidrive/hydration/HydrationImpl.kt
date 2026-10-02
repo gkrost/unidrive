@@ -446,6 +446,7 @@ class HydrationImpl(
     fun hasUploadSlot(path: String): Boolean = uploadSlots.containsKey(path)
 
     override suspend fun hydrate(path: String): HydrateResult {
+        touch(path)
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
             val cachePath = syncEngine.ensureHydrated(path)
@@ -714,6 +715,10 @@ class HydrationImpl(
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
+        // #450: a bare truncate (handleId null) registers no open-set entry, so the
+        // access-grace window of the eviction pass is the only thing standing between
+        // this cache file and a concurrent budget eviction while the write runs.
+        touch(normalised)
         return try {
             val cachePath = prepareEmptyCache(normalised)
             // When a live handle id is provided (O_TRUNC open), register it in
@@ -763,6 +768,8 @@ class HydrationImpl(
                     ),
                 )
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
+                // #450: the bytes that follow are the only copy until the upload lands.
+                touch(normalised)
                 CreateResult.Ok(cachePath = cachePath, handleId = handleId)
             } catch (e: Exception) {
                 CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
