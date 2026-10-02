@@ -1,22 +1,30 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -24,7 +32,23 @@ class HydrationImpl(
     private val syncEngine: SyncEngine,
     private val stateDb: StateDatabase,
     private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    // Upload-queue tuning. The waiting depth bounds how many submitted-but-
+    // not-yet-running uploads the daemon holds; a burst beyond it suspends
+    // the open_write callers (back-pressure towards the client) instead of
+    // growing the queue. A failed upload is retried up to [maxUploadAttempts]
+    // times, with [uploadRetryDelaysMs][i] preceding retry i+1; the transfer
+    // permit is released during the wait so a backing-off path never starves
+    // the daemon-wide budget.
+    val uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
+    val maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
+    val uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
+    // Minimum wall-clock gap between `uploading` progress events per attempt;
+    // coalesces provider progress callbacks to at most a few per second per
+    // file. 0 emits every callback (tests).
+    val uploadProgressMinIntervalMs: Long = DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS,
 ) : Hydration {
+
+    private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
 
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
     override val events: Flow<HydrationEvent> = _events.asSharedFlow()
@@ -68,13 +92,40 @@ class HydrationImpl(
     // the same mutex between A's decrement and A's remove, leaving B holding a
     // mutex that A then deleted, causing a later submitter C to create a fresh
     // mutex — so B and C would run concurrently for the same path.
-    private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
+    private data class UploadSlot(
+        val mutex: Mutex,
+        val pending: AtomicInteger,
+        // Live worker coroutines of this slot, for cancelUpload. Registered on
+        // launch; pruned by cancelUpload (completed jobs report false on
+        // cancel). Dies with the slot when pending drops to zero.
+        val jobs: ConcurrentLinkedQueue<Job> = ConcurrentLinkedQueue(),
+    )
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
+
+    // Waiting-slot budget for the upload queue. Acquired by the submitting
+    // caller (open_write / replay) and released only when the job actually
+    // acquires a transfer permit — so the bound covers uploads waiting either
+    // for their per-path turn or for the daemon-wide budget. A burst beyond
+    // [uploadQueueDepth] suspends the submitter: back-pressure towards the
+    // client instead of unbounded queue growth.
+    private val queueSlots = Semaphore(uploadQueueDepth)
 
     private companion object {
         // Wire token for "an upload of the path is still in flight, retry"; the same literal
         // dehydrate's Busy reply puts on the wire.
         const val BUSY_TOKEN = "busy"
+
+        /** Default bound on uploads waiting to run (see [uploadQueueDepth]). */
+        const val DEFAULT_UPLOAD_QUEUE_DEPTH = 256
+
+        /** Default attempts per queued upload (see [maxUploadAttempts]). */
+        const val DEFAULT_MAX_UPLOAD_ATTEMPTS = 3
+
+        /** Delays preceding retries 2..N of a queued upload (see [uploadRetryDelaysMs]). */
+        val DEFAULT_UPLOAD_RETRY_DELAYS_MS = listOf(2_000L, 10_000L)
+
+        /** Default coalescing gap for `uploading` progress events (see [uploadProgressMinIntervalMs]). */
+        const val DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS = 400L
     }
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
@@ -149,6 +200,36 @@ class HydrationImpl(
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
 
+        // Excluded paths (exclude_patterns) are keep-local: the write is
+        // accepted — the editor's bytes are real local content — but the
+        // upload never runs. Refusing would break the editors and tools that
+        // legitimately create *.tmp / ~$ scratch files through the mount;
+        // running the upload would hit the engine's keep-local guard anyway
+        // and answer hydrated, marking a file in sync that is not in the
+        // cloud. The skipped event (not hydrating/hydrated) plus a Completed
+        // carrying the excluded token tell the client both facts.
+        if (syncEngine.isExcludedPath(path)) {
+            // The engine's keep-local branch uploads nothing but advances the row's
+            // local watermark (last_synced); without it the co-daemon's recovery
+            // scanner replays this file's open_write on every mount, forever.
+            runCatching { syncEngine.uploadFromCache(path, cachePath) }
+                .onFailure { e ->
+                    if (e is CancellationException) throw e
+                    log.warn("keep-local watermark update failed for {}: {}", path, e.message)
+                }
+            _events.emit(HydrationEvent.Skipped(path))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = false,
+                    error = HydrationError.Excluded,
+                ),
+            )
+            return OpenResult.Ok(cachePath, excluded = true)
+        }
+
         // Optimistic-concurrency guard (#434): refuse a write whose base etag no
         // longer matches the row's change-detection token BEFORE any upload runs —
         // the point is to not silently overwrite a newer remote version, so the
@@ -198,61 +279,103 @@ class HydrationImpl(
         return OpenResult.Ok(cachePath)
     }
 
-    // Launches a background upload for [path] from [cachePath], serialized per-path
-    // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
-    // uploads run concurrently. The cache file is read after acquiring the lock so
-    // the last submitted upload always reads the latest content. On completion
-    // (either way) emits a [HydrationEvent.Completed] correlated to [handleId] so
-    // the write-back client learns the outcome of the upload it started.
+    // Submits a background upload for [path] from [cachePath] to the daemon's
+    // upload queue. Same-path uploads queue FIFO (the per-path mutex in
+    // [uploadSlots] is fair); different-path uploads run up to the daemon-wide
+    // per-provider transfer budget shared with the sync engine
+    // ([SyncEngine.withTransferPermit]) — an Explorer copy burst can never
+    // exceed the provider's cap, whatever path the transfers come from.
+    //
+    // Back-pressure: while [uploadQueueDepth] uploads are waiting (per-path
+    // turn or transfer permit), this coroutine suspends in queueSlots.acquire
+    // — the open_write caller waits instead of the queue growing unboundedly.
+    //
+    // Retry: a failed attempt is retried up to [maxUploadAttempts] with the
+    // delays in [uploadRetryDelaysMs] between attempts (the permit is released
+    // during the wait). Every failed attempt stamps the row's last_error_at
+    // and emits failed with retry_scheduled, so the client can distinguish
+    // "the daemon will retry" from "this upload is done failing"; the final
+    // failure additionally WARN-logs. Durability across daemon restarts is
+    // [replayPendingUploads] (the state.db row is the durable queue).
     //
     // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
-    // increment-or-create (on launch) and the decrement-and-remove (in the finally
-    // block). Because compute() holds the map's bin lock for the duration of the
-    // lambda, a concurrent launch's compute() cannot interleave between the
-    // decrement and the removal. This guarantees a slot is never removed while
-    // another submitter is in the process of bumping its pending count.
-    private fun launchSerializedUpload(
+    // increment-or-create (on launch) and the decrement-and-remove (in the
+    // finally block) — atomic under the map's bin lock, so a slot is never
+    // removed while another submitter is bumping its pending count.
+    private suspend fun launchSerializedUpload(
         path: String,
         cachePath: Path,
         handleId: String,
         baseEtag: String?,
     ) {
+        _events.emit(HydrationEvent.Queued(path))
+        queueSlots.acquire()
         // Atomically create-or-get the slot and bump its pending count. The bin lock
         // held by compute() ensures that no concurrent finally-block can remove the
         // slot between the moment we decide to reuse it and the moment we increment.
         val slot = uploadSlots.compute(path) { _, s ->
             (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
         }!!
-        recoveryUploadScope.launch {
+        // ATOMIC start: a plain launch cancelled before its first dispatch never runs its
+        // body, so the slot/permit bookkeeping in the finally blocks below would be skipped
+        // (slot stuck busy, queue permit lost, no Completed for the handle). ATOMIC
+        // guarantees the body is entered; the ensureActive() below then turns a pending
+        // cancel into the normal cancelled path.
+        val worker = recoveryUploadScope.launch(start = CoroutineStart.ATOMIC) {
             // Emitted only after the slot is released (below): a client that reacts to
             // Completed by re-listing must already see pending_upload settled, not still
             // raised by the slot of the upload it was just told about.
             var completed: HydrationEvent.Completed? = null
+            // Exactly-once release of this job's waiting slot: handed over to the
+            // transfer-permit block inside runUploadWithRetries, or released here if
+            // the job never got that far. A plain Boolean is safe — only this
+            // coroutine touches it.
+            var waitingSlotHeld = true
+            // Coalesced progress: at most one `uploading` event per interval per
+            // attempt. tryEmit — a progress callback must never suspend the
+            // transfer on the event buffer.
+            var lastProgressEmitNanos = 0L
+            val minIntervalNanos = uploadProgressMinIntervalMs.coerceAtLeast(0) * 1_000_000
+            val onProgress: (Long, Long) -> Unit = { done, total ->
+                val now = System.nanoTime()
+                if (minIntervalNanos == 0L || now - lastProgressEmitNanos >= minIntervalNanos) {
+                    lastProgressEmitNanos = now
+                    _events.tryEmit(HydrationEvent.Uploading(path, handleId, done, total))
+                }
+            }
             try {
-                slot.mutex.withLock {
-                    try {
-                        _events.emit(HydrationEvent.Hydrating(path))
-                        syncEngine.uploadFromCache(path, cachePath, baseEtag)
-                        val bytes = java.nio.file.Files.size(cachePath)
-                        _events.emit(HydrationEvent.Hydrated(path, bytes))
-                        completed = HydrationEvent.Completed(
-                            path = path,
-                            handleId = handleId,
-                            direction = HydrationEvent.Completed.Direction.UPLOAD,
-                            ok = true,
-                        )
-                    } catch (e: Exception) {
-                        runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                        val err = if (e is org.krost.unidrive.RemoteConflictException) HydrationError.Conflict else HydrationError.Generic(e.message ?: "upload failed")
-                        _events.emit(HydrationEvent.Failed(path, err))
-                        completed = HydrationEvent.Completed(
+                try {
+                    slot.mutex.withLock {
+                        try {
+                            ensureActive()
+                            completed = runUploadWithRetries(path, cachePath, handleId, baseEtag, onProgress) {
+                                if (waitingSlotHeld) {
+                                    queueSlots.release()
+                                    waitingSlotHeld = false
+                                }
+                            }
+                        } finally {
+                            if (waitingSlotHeld) {
+                                queueSlots.release()
+                                waitingSlotHeld = false
+                            }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    // cancelUpload (or daemon shutdown) aborted this submission
+                    // while queued, mid-transfer, or in a retry backoff: the
+                    // handle's correlation must end with a cause, not hang.
+                    // tryEmit — a cancelled coroutine can no longer suspend.
+                    _events.tryEmit(
+                        HydrationEvent.Completed(
                             path = path,
                             handleId = handleId,
                             direction = HydrationEvent.Completed.Direction.UPLOAD,
                             ok = false,
-                            error = err,
-                        )
-                    }
+                            error = HydrationError.Cancelled,
+                        ),
+                    )
+                    throw e
                 }
             } finally {
                 // #319: decrement the CAPTURED slot — a concurrent rename may have
@@ -270,6 +393,135 @@ class HydrationImpl(
             }
             completed?.let { _events.emit(it) }
         }
+        slot.jobs.add(worker)
+    }
+
+    // Runs one queued upload to completion: up to [maxUploadAttempts] transfer
+    // attempts under the daemon-wide permit, emitting hydrating/hydrated (or
+    // failed per attempt) and coalesced uploading progress. [baseEtag] is
+    // forwarded to uploadFromCache for the upload-time convergence guard.
+    // [onPermitAcquired] fires inside the permit block — the queue's waiting
+    // slot is handed over exactly when the transfer actually starts.
+    private suspend fun runUploadWithRetries(
+        path: String,
+        cachePath: Path,
+        handleId: String,
+        baseEtag: String?,
+        onProgress: (Long, Long) -> Unit,
+        onPermitAcquired: () -> Unit,
+    ): HydrationEvent.Completed {
+        var lastError: HydrationError = HydrationError.Generic("upload failed")
+        for (attempt in 1..maxUploadAttempts) {
+            try {
+                syncEngine.withTransferPermit {
+                    onPermitAcquired()
+                    _events.emit(HydrationEvent.Hydrating(path))
+                    syncEngine.uploadFromCache(path, cachePath, baseEtag, onProgress)
+                }
+                val bytes = Files.size(cachePath)
+                _events.emit(HydrationEvent.Hydrated(path, bytes))
+                return HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = true,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: org.krost.unidrive.RemoteConflictException) {
+                // The cloud copy changed between the row's token and the
+                // transfer (upload-time convergence): not transient — a retry
+                // would collide again. The client keeps both copies; surface
+                // the conflict and stop.
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                _events.emit(HydrationEvent.Failed(path, HydrationError.Conflict, retryScheduled = false))
+                log.warn("upload of {} hit a remote conflict, not retrying: {}", path, e.message ?: "conflict")
+                return HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = false,
+                    error = HydrationError.Conflict,
+                )
+            } catch (e: Exception) {
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                // A vanished row (renamed away, unlinked, or reaped while queued) or a vanished cache copy: nothing a
+                // later attempt can change. Retrying would only hold the path's slot (busy to dehydrate and
+                // replace-rename) through the whole backoff schedule before reporting the same failure. (A remote
+                // conflict, #434/#470, never reaches here: it has its own terminal branch above.)
+                val gone = runCatching { stateDb.getEntry(path) }.getOrNull() == null || !Files.exists(cachePath)
+                val err = HydrationError.Generic(e.message ?: "upload failed")
+                lastError = err
+                val retryScheduled = !gone && attempt < maxUploadAttempts
+                _events.emit(HydrationEvent.Failed(path, err, retryScheduled = retryScheduled))
+                if (retryScheduled) {
+                    log.info(
+                        "upload attempt {}/{} failed for {}: {}; retrying",
+                        attempt, maxUploadAttempts, path, e.message,
+                    )
+                    delay(retryDelayMs(attempt))
+                } else if (gone) {
+                    log.warn("upload of {} abandoned: its row or cache copy is gone ({}), not retrying", path, e.message)
+                    break
+                } else {
+                    log.warn(
+                        "upload failed for {} after {} attempts, leaving the row failed (a daemon restart replays it): {}",
+                        path, maxUploadAttempts, e.message ?: "upload failed",
+                    )
+                }
+            }
+        }
+        return HydrationEvent.Completed(
+            path = path,
+            handleId = handleId,
+            direction = HydrationEvent.Completed.Direction.UPLOAD,
+            ok = false,
+            error = lastError,
+        )
+    }
+
+    private fun retryDelayMs(afterAttempt: Int): Long =
+        uploadRetryDelaysMs.getOrNull(afterAttempt - 1)
+            ?: uploadRetryDelaysMs.lastOrNull()
+            ?: 0L
+
+    /**
+     * Re-enqueue uploads for every hydrated file row whose content has never
+     * reached the cloud (`local:` rows with a live cache copy). Called once at
+     * daemon start: the engine-side complement of the co-daemon's recovery-<n>
+     * scanner, and the durability net for uploads that were queued or failing
+     * when the daemon last stopped — a restart alone drains the backlog even
+     * with no client connected. Skips excluded (keep-local) and out-of-scope
+     * rows, and rows whose cache copy is gone. Returns the number of uploads
+     * enqueued; every enqueued upload goes through the same per-path
+     * serialization and transfer budget as client-submitted ones.
+     */
+    suspend fun replayPendingUploads(): Int {
+        var queued = 0
+        for (path in stateDb.pendingUploadPaths()) {
+            if (syncEngine.isExcludedPath(path)) continue
+            if (syncEngine.isOutOfScope(path)) continue
+            val cachePath = syncEngine.resolveCachePath(path)
+            if (!Files.exists(cachePath)) continue
+            launchSerializedUpload(path, cachePath, "engine-replay-${queued + 1}", baseEtag = null)
+            queued++
+        }
+        return queued
+    }
+
+    override suspend fun cancelUpload(path: String): Boolean {
+        val slot = uploadSlots[path] ?: return false
+        // Prune finished workers first so a stale entry can never make the
+        // reply claim an abort that already completed on its own.
+        slot.jobs.removeIf { it.isCompleted }
+        var aborted = false
+        for (job in slot.jobs) {
+            if (!job.isCompleted) {
+                job.cancel()
+                aborted = true
+            }
+        }
+        return aborted
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {
@@ -366,6 +618,7 @@ class HydrationImpl(
                         // the predicate (remoteId == null) cannot see.
                         pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
                         hasError = e.lastErrorAt != null,
+                        excluded = syncEngine.isExcludedPath(e.path),
                     )
                 },
             )
@@ -376,6 +629,10 @@ class HydrationImpl(
 
     override suspend fun mkdir(path: String): MkdirResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        // Scope guard: a folder created outside the profile's sync_path set
+        // would land in the cloud but never show in the mounted view (the view
+        // only lists the scope). Refuse before touching the provider.
+        if (syncEngine.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
         return runCatching {
             _events.emit(HydrationEvent.Hydrating(normalised))
             syncEngine.createRemoteFolder(normalised)
@@ -548,6 +805,9 @@ class HydrationImpl(
 
     override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        // Scope guard: same rationale as mkdir — a truncate outside the
+        // profile's sync_path set would touch cloud data the view never shows.
+        if (syncEngine.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
@@ -560,7 +820,7 @@ class HydrationImpl(
             if (handleId != null) {
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
             }
-            OpenResult.Ok(cachePath)
+            OpenResult.Ok(cachePath, excluded = syncEngine.isExcludedPath(normalised))
         } catch (e: Exception) {
             OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
         }
@@ -570,6 +830,10 @@ class HydrationImpl(
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
         return mutex.withLock {
+            // Scope guard: a file created outside the profile's sync_path set
+            // would upload to the cloud but never show in the mounted view.
+            if (syncEngine.isOutOfScope(normalised)) return@withLock CreateResult.Failed(HydrationError.OutOfScope)
+
             if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
 
             // Parent must exist as a folder row (root "/" / "" is implicit and
@@ -580,6 +844,12 @@ class HydrationImpl(
                     ?: return@withLock CreateResult.ParentNotFound
                 if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
             }
+
+            // Excluded names are keep-local: the row and cache file are still
+            // created (the file exists locally and must be served), but the
+            // reply carries excluded so the client knows the content will never
+            // reach the cloud.
+            val excluded = syncEngine.isExcludedPath(normalised)
 
             try {
                 val cachePath = prepareEmptyCache(normalised)
@@ -600,7 +870,7 @@ class HydrationImpl(
                     ),
                 )
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
-                CreateResult.Ok(cachePath = cachePath, handleId = handleId)
+                CreateResult.Ok(cachePath = cachePath, handleId = handleId, excluded = excluded)
             } catch (e: Exception) {
                 CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
             }
@@ -619,6 +889,15 @@ class HydrationImpl(
         // destination-deletion step below: with replace=true the source would
         // otherwise be deleted as its own destination.
         if (oldNorm == newNorm) return RenameResult.Ok
+
+        // Scope guard: a mounted profile shows its scope as the whole drive, so
+        // only moves whose BOTH ends lie inside the sync_path set stay visible
+        // in the view. A destination outside it would strand the row in cloud
+        // data the mount never shows; a source outside it is data the profile
+        // does not own. Either end out of scope → refuse, nothing is moved.
+        if (syncEngine.isOutOfScope(oldNorm) || syncEngine.isOutOfScope(newNorm)) {
+            return RenameResult.Failed(HydrationError.OutOfScope)
+        }
 
         // Pre-flight: source must exist in state.db.
         val sourceEntry = stateDb.getEntry(oldNorm)

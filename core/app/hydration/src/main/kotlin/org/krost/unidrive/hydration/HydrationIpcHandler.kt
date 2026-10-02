@@ -22,7 +22,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"[,"base_etag":"..."]}
  *   open_write  reply:    same as open_read; base_etag (OPTIONAL) is the etag the client
  *                         observed at list/open time — a mismatch refuses the write with
- *                         {"ok":false,"error":"conflict"} before any upload starts
+ *                         {"ok":false,"error":"conflict"} before any upload starts.
+ *                         An excluded path (exclude_patterns match) answers
+ *                         {"ok":true,"cache_path":"...","excluded":true} and emits a
+ *                         `skipped` event instead of running an upload.
  *   close_handle request: {"verb":"hydration.close_handle","handle_id":"..."}
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
@@ -32,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *   mkdir       request:  {"verb":"hydration.mkdir","path":"/foo"}
  *               reply:    {"ok":true}
  *                         {"ok":false,"error":"parent_not_found"}   ENOENT
+ *                         {"ok":false,"error":"outside_scope"}      path outside the profile's sync_path set
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
  *   unlink      request:  {"verb":"hydration.unlink","path":"/foo.txt"}
@@ -47,8 +51,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  *   create      request:  {"verb":"hydration.create","handle_id":"...","path":"/foo.txt"}
  *               reply:    {"ok":true,"cache_path":"/home/.../foo.txt","handle_id":"..."}
+ *                         (an excluded path adds ,"excluded":true — accepted, never uploaded)
  *                         {"ok":false,"error":"parent_not_found"}   ENOENT
  *                         {"ok":false,"error":"path_exists"}        EEXIST
+ *                         {"ok":false,"error":"outside_scope"}      path outside the profile's sync_path set
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
  *   rename      request:  {"verb":"hydration.rename","old_path":"/a","new_path":"/b"[,"replace":true]}
@@ -56,6 +62,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         {"ok":false,"error":"old_path_not_found"}    ENOENT
  *                         {"ok":false,"error":"new_parent_not_found"}  ENOENT
  *                         {"ok":false,"error":"new_path_exists"}       EEXIST
+ *                         {"ok":false,"error":"outside_scope"}         either end outside the profile's sync_path set
  *                         {"ok":false,"error":"<msg>"}                 EIO
  *                         replace (OPTIONAL, default false) is POSIX
  *                         overwrite-if-exists for a FILE destination: the
@@ -67,7 +74,20 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         with {"ok":false,"error":"busy"} (nothing touched):
  *                         retry after the "completed" event for that handle.
  *
- *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder
+ *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder / outside_scope
+ *
+ *   cancel      request:  {"verb":"hydration.cancel","path":"/foo"}
+ *               reply:    {"ok":true,"cancelled":true}    a queued/running upload was aborted
+ *                         {"ok":false,"error":"cancelled"} → the aborted upload's Completed carries this token
+ *                         {"ok":true,"cancelled":false}    nothing in flight (idempotent)
+ *                         Aborts every in-flight submission for the path (waiting, running,
+ *                         or in retry backoff); the caller follows with the row-level verb
+ *                         (unlink/rename) for the path itself.
+ *
+ *   Upload progress: while a client-written file uploads, the stream carries
+ *   {"event":"uploading","path":"...","handle_id":"...","bytes_done":N,"bytes_total":M}
+ *   coalesced to a few per second per file, correlated by the open_write
+ *   handle like `completed`.
  *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
  *                            absent → no registration (one-shot setattr/bare-truncate, backward-compatible).
  *
@@ -226,6 +246,7 @@ class HydrationIpcHandler(
             "hydration.rmdir",
             "hydration.create",
             "hydration.rename",
+            "hydration.cancel",
         )
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
@@ -237,7 +258,7 @@ class HydrationIpcHandler(
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.openForRead(connectionId, handleId, path)) {
-                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+                    is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -250,7 +271,7 @@ class HydrationIpcHandler(
                 // unconditional upload, byte-identical to the pre-guard contract.
                 val baseEtag = pluck(jsonRequest, "base_etag")
                 when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
-                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+                    is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -260,7 +281,7 @@ class HydrationIpcHandler(
                 // absent → one-shot setattr/bare-truncate (no registration).
                 val handleId = pluck(jsonRequest, "handle_id")
                 when (val r = hydration.openWriteBegin(connectionId, path, handleId)) {
-                    is OpenResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+                    is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -327,7 +348,12 @@ class HydrationIpcHandler(
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 when (val r = hydration.create(connectionId, handleId, path)) {
-                    is CreateResult.Ok -> """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"handle_id":${jsonEsc(r.handleId)}}"""
+                    is CreateResult.Ok ->
+                        if (r.excluded) {
+                            """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"handle_id":${jsonEsc(r.handleId)},"excluded":true}"""
+                        } else {
+                            """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"handle_id":${jsonEsc(r.handleId)}}"""
+                        }
                     CreateResult.ParentNotFound -> reply(ok = false, error = "parent_not_found")
                     CreateResult.PathExists -> reply(ok = false, error = "path_exists")
                     is CreateResult.Failed -> reply(ok = false, error = r.error.message)
@@ -346,6 +372,14 @@ class HydrationIpcHandler(
                     is RenameResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
+            "hydration.cancel" -> {
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                // Idempotent: cancelled=true when a queued/running upload was
+                // aborted, false when nothing was in flight — both satisfy the
+                // caller's "no upload happens" goal, so both are ok.
+                val cancelled = hydration.cancelUpload(path)
+                """{"ok":true,"cancelled":$cancelled}"""
+            }
             "hydration.subscribe" -> {
                 registerSubscriber(connectionId)
                 reply(ok = true)
@@ -356,6 +390,16 @@ class HydrationIpcHandler(
 
     private fun reply(ok: Boolean, error: String? = null): String =
         if (ok) """{"ok":true}""" else """{"ok":false,"error":${jsonEsc(error ?: "unknown")}}"""
+
+    // `excluded` is only serialized when true — an additive wire field: a reply
+    // on the common (non-excluded) path is byte-identical to the pre-field
+    // contract, and existing corpus lines stay valid.
+    private fun openOkReply(r: OpenResult.Ok): String =
+        if (r.excluded) {
+            """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())},"excluded":true}"""
+        } else {
+            """{"ok":true,"cache_path":${jsonEsc(r.cachePath.toString())}}"""
+        }
 
     // Plucks a LOGICAL co-daemon path field and canonicalises it to NFC. This is the
     // single point where co-daemon paths enter the JVM; normalizing once here makes
@@ -524,7 +568,8 @@ private fun serialiseListEntries(entries: List<ListResult.Entry>): String {
             .append(",\"etag\":").append(e.etag?.let { jsonEsc(it) } ?: "null")
             .append(",\"pending_upload\":").append(e.pendingUpload)
             .append(",\"error\":").append(e.hasError)
-            .append('}')
+        if (e.excluded) sb.append(",\"excluded\":true")
+        sb.append('}')
     }
     sb.append("]}")
     return sb.toString()
@@ -534,7 +579,18 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrating  -> """{"event":"hydrating","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
     is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
-    is HydrationEvent.Failed     -> """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}}"""
+    is HydrationEvent.Skipped    -> """{"event":"skipped","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Queued     -> """{"event":"queued","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Uploading -> {
+        """{"event":"uploading","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)}},""" +
+            """"bytes_done":${e.bytesDone},"bytes_total":${e.bytesTotal}}"""
+    }
+    is HydrationEvent.Failed -> {
+        val base = """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}"""
+        // retry_scheduled is only serialized for upload attempts; download and
+        // verb failures keep the pre-existing shape byte-identical.
+        if (e.retryScheduled == null) "$base}" else "$base,\"retry_scheduled\":${e.retryScheduled}}"
+    }
     is HydrationEvent.Completed -> {
         val direction = if (e.direction == HydrationEvent.Completed.Direction.UPLOAD) "upload" else "download"
         val base = """{"event":"completed","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)},"direction":"$direction","ok":${e.ok}"""

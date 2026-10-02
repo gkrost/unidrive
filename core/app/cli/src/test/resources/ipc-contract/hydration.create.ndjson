@@ -4,3 +4,7 @@
 {"ok":false,"error":"parent_not_found"}
 {"verb":"hydration.create","handle_id":"h-2","path":"/docs/report.txt"}
 {"ok":false,"error":"path_exists"}
+{"verb":"hydration.create","handle_id":"h-2","path":"/excluded/scratch.tmp"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/excluded/scratch.tmp","handle_id":"h-2","excluded":true}
+{"verb":"hydration.create","handle_id":"h-2","path":"/outside/new.txt"}
+{"ok":false,"error":"outside_scope"}

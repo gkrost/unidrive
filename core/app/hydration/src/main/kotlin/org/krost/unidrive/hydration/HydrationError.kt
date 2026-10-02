@@ -47,6 +47,45 @@ sealed interface HydrationError {
         override val message: String = CONFLICT_TOKEN
     }
 
+    /**
+     * The path lies outside the profile's sync_path set. A mounted profile
+     * shows its scope as the whole drive, so a folder or file created outside
+     * the scope would land in the cloud but never appear in the view — the
+     * write is refused instead (nothing is created remotely). Raised by
+     * create, mkdir, rename (either end) and open_write_begin. Its [message]
+     * is the STABLE wire token `outside_scope`; a mount client surfaces it as
+     * a failed state with a readable reason. Changing this string breaks that
+     * cross-repo contract.
+     */
+    data object OutOfScope : HydrationError {
+        override val message: String = OUTSIDE_SCOPE_TOKEN
+    }
+
+    /**
+     * The path matches the profile's exclude_patterns. Not a refusal: the
+     * local write is accepted and the content stays local-only — it is
+     * deliberately never uploaded (the same keep-local rule the sync engine's
+     * upload path applies). Carried as [Completed.error] so a client marking
+     * in-sync on a Completed event cannot mark an excluded file as uploaded.
+     * Its [message] is the STABLE wire token `excluded`. Changing this string
+     * breaks that cross-repo contract.
+     */
+    data object Excluded : HydrationError {
+        override val message: String = EXCLUDED_TOKEN
+    }
+
+    /**
+     * The upload was cancelled through [Hydration.cancelUpload] (the user
+     * deleted the file or moved it out while the upload was queued, running,
+     * or in a retry backoff). Carried as [Completed.error] so the client's
+     * handle correlation terminates with a cause instead of hanging. Its
+     * [message] is the STABLE wire token `cancelled`. Changing this string
+     * breaks that cross-repo contract.
+     */
+    data object Cancelled : HydrationError {
+        override val message: String = CANCELLED_TOKEN
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
@@ -56,5 +95,14 @@ sealed interface HydrationError {
 
         /** Wire token for [Conflict]; shared verbatim with the mount crate. */
         const val CONFLICT_TOKEN = "conflict"
+
+        /** Wire token for [OutOfScope]; shared verbatim with the mount crate. */
+        const val OUTSIDE_SCOPE_TOKEN = "outside_scope"
+
+        /** Wire token for [Excluded]; shared verbatim with the mount crate. */
+        const val EXCLUDED_TOKEN = "excluded"
+
+        /** Wire token for [Cancelled]; shared verbatim with the mount crate. */
+        const val CANCELLED_TOKEN = "cancelled"
     }
 }

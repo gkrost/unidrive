@@ -8,3 +8,7 @@
 {"ok":false,"error":"new_path_exists"}
 {"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/docs/sub","replace":true}
 {"ok":true}
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/outside/renamed.txt"}
+{"ok":false,"error":"outside_scope"}
+{"verb":"hydration.rename","old_path":"/outside/report.txt","new_path":"/docs/renamed.txt"}
+{"ok":false,"error":"outside_scope"}

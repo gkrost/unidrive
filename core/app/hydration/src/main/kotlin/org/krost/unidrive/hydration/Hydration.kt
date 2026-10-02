@@ -35,6 +35,26 @@ interface Hydration {
         baseEtag: String? = null,
     ): OpenResult
     suspend fun closeHandle(connectionId: String, handleId: String)
+
+    /**
+     * Cancel the queued or running upload(s) for [path] — what a client calls
+     * when the user deleted the file or moved it out while an upload is still
+     * in flight. Every in-flight submission for the path (waiting for its
+     * per-path turn, waiting for the transfer budget, mid-transfer, or in a
+     * retry backoff) is aborted and reports a Completed carrying the
+     * `cancelled` token, so no client handle is left waiting. Returns true
+     * when at least one submission was aborted, false when nothing was in
+     * flight (the caller's goal — "no upload happens" — is met either way).
+     *
+     * Cancellation is cooperative: a transfer already mid-flight is cut at
+     * the provider's next suspension point, which for HTTP providers aborts
+     * the request; a provider that commits a partial object before its next
+     * suspension point can still leave a remote item behind. Cancel is for
+     * aborting in-flight work — the caller is expected to follow with the
+     * row-level verb (unlink / rename) for the path itself.
+     */
+    suspend fun cancelUpload(path: String): Boolean
+
     suspend fun hydrate(path: String): HydrateResult
     suspend fun dehydrate(path: String): DehydrateResult
     suspend fun lastSynced(path: String): LastSyncedResult
@@ -66,7 +86,13 @@ interface Hydration {
 }
 
 sealed class OpenResult {
-    data class Ok(val cachePath: Path) : OpenResult()
+    data class Ok(
+        val cachePath: Path,
+        // True when the path matches the profile's exclude_patterns: the write
+        // is accepted but the content is deliberately never uploaded (the
+        // keep-local rule). Only serialized on the wire when true.
+        val excluded: Boolean = false,
+    ) : OpenResult()
     data class Failed(val error: HydrationError) : OpenResult()
 }
 
@@ -116,6 +142,10 @@ sealed class ListResult {
         // True when the last write-back upload attempt against this row failed
         // (state.db last_error_at stamped; `unidrive doctor` surfaces the same gap).
         val hasError: Boolean = false,
+        // True when the path matches the profile's exclude_patterns: the row is
+        // served from local content that is deliberately never uploaded. Only
+        // serialized on the wire when true.
+        val excluded: Boolean = false,
     )
 }
 
@@ -139,7 +169,15 @@ sealed class RmdirResult {
 }
 
 sealed class CreateResult {
-    data class Ok(val cachePath: Path, val handleId: String) : CreateResult()
+    data class Ok(
+        val cachePath: Path,
+        val handleId: String,
+        // True when the path matches the profile's exclude_patterns: the row
+        // and cache file are created (the file exists locally), but the
+        // content is deliberately never uploaded (keep-local). Only serialized
+        // on the wire when true.
+        val excluded: Boolean = false,
+    ) : CreateResult()
     data class Failed(val error: HydrationError) : CreateResult()
     data object ParentNotFound : CreateResult()
     data object PathExists : CreateResult()
