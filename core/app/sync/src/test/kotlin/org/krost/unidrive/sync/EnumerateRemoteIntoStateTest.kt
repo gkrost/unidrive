@@ -126,6 +126,40 @@ class EnumerateRemoteIntoStateTest {
             assertFalse(Files.exists(cache), "cache file must be evicted when the remote path is reaped")
         }
 
+    // #149: the filesystem delete is a side effect and must not run inside the
+    // reap's database transaction — the batch commits first, the cache files
+    // are evicted afterwards.
+    @Test
+    fun `the reap evicts cache files after the batch has committed`() =
+        runTest {
+            provider.putRemote("/evict.bin", "E")
+            // The cache file must predate the row (see the test above) or the
+            // #301 guard defers the reap entirely.
+            val cache =
+                engine.resolveCachePath("/evict.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "E")
+                }
+            engine.enumerateRemoteIntoState(reset = false)
+
+            provider.removeRemote("/evict.bin")
+            var cacheExistedWhileBatchOpen = false
+            db.batchCommitHook = { cacheExistedWhileBatchOpen = Files.exists(cache) }
+            val r =
+                try {
+                    engine.enumerateRemoteIntoState(reset = true)
+                } finally {
+                    db.batchCommitHook = null
+                }
+
+            assertEquals(1, r.reaped, "precondition: the path was reaped")
+            assertTrue(
+                cacheExistedWhileBatchOpen,
+                "#149: the cache file must still exist while the reap batch is open",
+            )
+            assertFalse(Files.exists(cache), "the cache file is evicted once the batch has committed")
+        }
+
     // #301: the enumerate-reap must not evict (or tombstone) a path whose
     // hydration upload is queued or in flight — the cache copy may be the only
     // copy of the user's edit, and destroying it lost the bytes everywhere.

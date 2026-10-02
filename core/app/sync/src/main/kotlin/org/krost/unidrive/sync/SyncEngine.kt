@@ -1335,6 +1335,10 @@ open class SyncEngine(
         var reaped = 0
         val reapedViewPaths = mutableSetOf<String>()
         var nextDeferred = emptySet<String>()
+        // #149: cache files are evicted AFTER the batch commits — a filesystem
+        // delete is a non-transactional side effect and must not lengthen the
+        // SQLite lock window.
+        val cacheEvictions = mutableListOf<Path>()
         db.batch {
             updateRemoteEntries(remoteChanges)
             if (complete) {
@@ -1378,7 +1382,7 @@ open class SyncEngine(
                     }
                     deferredReapWarned.remove(path)
                     db.markDeleted(path)
-                    runCatching { Files.deleteIfExists(cachePath) }
+                    cacheEvictions.add(cachePath)
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }
@@ -1396,6 +1400,12 @@ open class SyncEngine(
                     }
                 }
             }
+        }
+        // #149: same per-file behaviour as before (errors swallowed — the row
+        // flip is the truth and the cache copy is a disk-space concern), just
+        // outside the transaction now.
+        for (cachePath in cacheEvictions) {
+            runCatching { Files.deleteIfExists(cachePath) }
         }
         // A bulk disappearance must be corroborated by CONSECUTIVE complete enumerations.
         // On a complete pass, carry this pass's candidate set forward. On an INCOMPLETE

@@ -69,6 +69,11 @@ class StateDatabase(
     // for its owner, which reopens a transaction on its next write).
     private var batchSuspended: Boolean = false
 
+    // Test seam (#149): fired after a top-level [batch] has COMMITTED, before control
+    // returns to the caller. Lets the sync tests observe filesystem side effects that
+    // must happen outside the transaction (the reap's cache eviction).
+    internal var batchCommitHook: (() -> Unit)? = null
+
     val recovery: Recovery = Recovery()
 
     @Synchronized
@@ -406,15 +411,18 @@ class StateDatabase(
         beginWrite()
         if (!conn.autoCommit) return block() // already inside a transaction
         conn.autoCommit = false
-        return try {
+        var committed = false
+        try {
             val result = block()
             conn.commit()
-            result
+            committed = true
+            return result
         } catch (e: Exception) {
             conn.rollback()
             throw e
         } finally {
             conn.autoCommit = true
+            if (committed) batchCommitHook?.invoke()
         }
     }
 
