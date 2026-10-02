@@ -638,6 +638,93 @@ open class SyncEngine(
         }
     }
 
+    /**
+     * The directory that holds this profile's hydration cache (every cache file lives below it, laid
+     * out like the remote tree). #450: what the cache budget measures and evicts.
+     */
+    fun hydrationCacheDir(): Path = resolveCachePath("/")
+
+    /**
+     * #450: may the cache copy of [path] be deleted without losing anything? Answered from the bytes,
+     * not from timestamps (enumeration refreshes a row's `last_synced`, so it cannot tell an edit
+     * from a download). Never evictable ([CacheDisposition.PROTECTED]): no row, a folder, a row without a
+     * remote (never uploaded: the cache is the only copy), a row marked failed, a copy the row's
+     * baseline does not vouch for (modified since it was recorded), and a copy that differs from every
+     * version the row knows. The caller still owes the open-handle and queued-upload checks, which
+     * only the hydration layer can see.
+     */
+    fun cacheDisposition(path: String): CacheDisposition {
+        val entry = db.getEntry(path) ?: return CacheDisposition.PROTECTED
+        if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) return CacheDisposition.PROTECTED
+        val cache = resolveCachePath(path)
+        return try {
+            if (!Files.isRegularFile(cache)) return CacheDisposition.PROTECTED
+            val size = Files.size(cache)
+            val mtime = Files.getLastModifiedTime(cache).toMillis()
+            val cacheIsBaseline = entry.localMtime == mtime && entry.localSize == size
+            if (entry.cacheBacked == true || (entry.cacheBacked == null && cacheIsBaseline)) {
+                // The cache copy is the row's local file: clean only while it is exactly what was recorded.
+                return if (cacheIsBaseline) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
+            }
+            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path) &&
+                Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
+            ) {
+                return CacheDisposition.REDUNDANT
+            }
+            if (cacheMatchesRecordedVersion(entry, cache, size)) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
+        } catch (e: java.io.IOException) {
+            CacheDisposition.PROTECTED
+        }
+    }
+
+    // The bytes of [cache] are a version the row knows: the remote version (content-hash providers) or
+    // the baseline bytes the row hashed when it recorded them (#396, hashless providers).
+    private fun cacheMatchesRecordedVersion(
+        entry: SyncEntry,
+        cache: Path,
+        size: Long,
+    ): Boolean {
+        val algorithm = provider.hashAlgorithm()
+        return if (algorithm != null && !entry.remoteHash.isNullOrEmpty()) {
+            size == entry.remoteSize && HashVerifier.verify(cache, entry.remoteHash, algorithm)
+        } else {
+            entry.localHash != null && HashVerifier.computeSha256Hex(cache) == entry.localHash
+        }
+    }
+
+    /**
+     * #450: delete the cache copy of [path] if [cacheDisposition] still allows it, under the same
+     * per-path lock as [ensureHydrated] (no eviction in the middle of a hydration of the same path).
+     * Returns the freed bytes, or null when the copy was protected or could not be removed. A row whose
+     * local file WAS the cache copy is marked not hydrated (the local bytes are gone; the next sync or
+     * open refills them from the remote); a row that describes the sync-root file is left alone.
+     * [onUnhydrated] is invoked for the first kind, so the hydration layer can publish the event.
+     */
+    suspend fun evictCacheCopy(
+        path: String,
+        onUnhydrated: (String) -> Unit = {},
+    ): Long? =
+        hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock {
+            if (cacheDisposition(path) == CacheDisposition.PROTECTED) return@withLock null
+            val entry = db.getEntry(path) ?: return@withLock null
+            val cache = resolveCachePath(path)
+            val size = runCatching { Files.size(cache) }.getOrNull() ?: return@withLock null
+            val cacheWasLocalFile = entry.cacheBacked == true || (entry.cacheBacked == null && !rowDescribesSyncRootFile(entry, path))
+            try {
+                Files.delete(cache)
+            } catch (e: java.io.IOException) {
+                log.debug("#450: cannot evict the cache copy of {}: {}", path, e.message)
+                return@withLock null
+            }
+            if (cacheWasLocalFile) {
+                db.markUnhydrated(path)
+                onUnhydrated(path)
+            } else if (entry.cacheBacked == null) {
+                db.upsertEntry(entry.copy(cacheBacked = false))
+            }
+            size
+        }
+
     // #418: true when [entry] is about the regular file in the sync root rather than about the
     // cache copy. Two cases:
     //  - a NOT hydrated row with a file there that has a placeholder shape (see
@@ -4793,3 +4880,11 @@ open class SyncEngine(
                 .resolve(cacheKey.ifBlank { "default" })
     }
 }
+
+/**
+ * #450: what [SyncEngine.cacheDisposition] says about a hydration-cache copy.
+ * [PROTECTED] must never be deleted; [REDUNDANT] is byte-identical to the file in the sync root (the
+ * cheapest to evict); [DISPOSABLE] holds only bytes the row already knows (the remote version or the
+ * recorded baseline).
+ */
+enum class CacheDisposition { PROTECTED, REDUNDANT, DISPOSABLE }

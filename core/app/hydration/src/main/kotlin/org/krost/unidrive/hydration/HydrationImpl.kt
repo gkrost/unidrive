@@ -2,6 +2,7 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -11,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.SyncEngine
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
@@ -18,12 +20,23 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class HydrationImpl(
     private val syncEngine: SyncEngine,
     private val stateDb: StateDatabase,
     private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    // #450: per-profile budget of the hydration cache in bytes (`hydration_cache_max_bytes`);
+    // 0 or less = unlimited. See [evictCache].
+    private val cacheMaxBytes: Long = DEFAULT_CACHE_MAX_BYTES,
+    // #450: a cache file used within this window is never evicted: a read that has just been served
+    // is not in the open-set until the handle is registered, and a client that is about to open it
+    // would otherwise be handed a path that vanishes.
+    private val cacheAccessGraceMs: Long = CACHE_ACCESS_GRACE_MS,
+    // #450: after a close or an upload completion the eviction pass runs once this much later, one
+    // pass for any number of triggers (it walks the whole cache directory). 0 = immediately.
+    private val evictionDelayMs: Long = EVICTION_DELAY_MS,
 ) : Hydration {
 
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
@@ -71,15 +84,36 @@ class HydrationImpl(
     private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
-    private companion object {
+    // #450: when each path was last opened, created or written through this instance (epoch ms), for
+    // the least-recently-used order. After a restart a path has no entry and the file's own access and
+    // modification times stand in.
+    private val lastAccess = ConcurrentHashMap<String, Long>()
+    private val evictionMutex = Mutex()
+    private val evictionRequested = AtomicBoolean(false)
+
+    companion object {
         // Wire token for "an upload of the path is still in flight, retry"; the same literal
         // dehydrate's Busy reply puts on the wire.
-        const val BUSY_TOKEN = "busy"
+        private const val BUSY_TOKEN = "busy"
+
+        /** #450: default hydration cache budget per profile, 20 GiB. */
+        const val DEFAULT_CACHE_MAX_BYTES: Long = SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES
+        const val CACHE_ACCESS_GRACE_MS: Long = 60_000
+        const val EVICTION_DELAY_MS: Long = 5_000
+
+        // Temp files the engine stages beside their destination (`<name>.hydrating-<uuid>` for a
+        // download, `.ud-serve-*.tmp` for a copy out of the sync root); a crash leaves them behind.
+        private const val STALE_TEMP_AGE_MS = 60L * 60 * 1000
+    }
+
+    private fun touch(path: String) {
+        lastAccess[path] = System.currentTimeMillis()
     }
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+        touch(path)
 
         val cachePath = try {
             // Always emit Hydrating + Hydrated, even when SyncEngine returns a warm cache
@@ -136,6 +170,7 @@ class HydrationImpl(
         }
 
         openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
+        touch(path)
         return OpenResult.Ok(cachePath)
     }
 
@@ -148,6 +183,7 @@ class HydrationImpl(
     ): OpenResult {
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+        touch(path)
 
         // Optimistic-concurrency guard (#434): refuse a write whose base etag no
         // longer matches the row's change-detection token BEFORE any upload runs —
@@ -268,13 +304,140 @@ class HydrationImpl(
                     uploadSlots.entries.removeIf { it.value === slot }
                 }
             }
+            // The path is no longer pinned by its upload: the budget may have been waiting for that.
+            requestEviction()
             completed?.let { _events.emit(it) }
         }
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {
         openSets[connectionId]?.remove(handleId)
+        requestEviction()
     }
+
+    // ── #450 cache budget ───────────────────────────────────────────────────────────────────────
+
+    /** What one [evictCache] pass found and did. */
+    data class CacheEvictionReport(
+        val budgetBytes: Long,
+        val bytesBefore: Long,
+        val bytesAfter: Long,
+        val evictedFiles: Int,
+    )
+
+    // One pass per burst of triggers, scheduled [evictionDelayMs] after the first. A no-op without a budget.
+    private fun requestEviction() {
+        if (cacheMaxBytes <= 0) return
+        if (!evictionRequested.compareAndSet(false, true)) return
+        recoveryUploadScope.launch {
+            try {
+                if (evictionDelayMs > 0) delay(evictionDelayMs)
+                // Re-arm before the walk: a trigger that arrives during it must schedule another pass.
+                evictionRequested.set(false)
+                evictCache()
+            } catch (_: Exception) {
+                // Best effort: a failed pass leaves the cache over budget until the next trigger.
+            } finally {
+                evictionRequested.set(false)
+            }
+        }
+    }
+
+    /**
+     * Daemon start: drop what a stopped daemon left behind (staging temp files of an interrupted
+     * download or copy, older than an hour) and bring the cache under its budget, which also clears the
+     * cache copies of synced files that were read through the mount in earlier runs.
+     */
+    suspend fun sweepCache(): CacheEvictionReport {
+        val dir = syncEngine.hydrationCacheDir()
+        if (Files.isDirectory(dir)) {
+            val cutoff = System.currentTimeMillis() - STALE_TEMP_AGE_MS
+            runCatching {
+                Files.walk(dir).use { stream ->
+                    stream.filter { Files.isRegularFile(it) && isStagingTemp(it.fileName.toString()) }
+                        .filter { runCatching { Files.getLastModifiedTime(it).toMillis() < cutoff }.getOrDefault(false) }
+                        .forEach { runCatching { Files.deleteIfExists(it) } }
+                }
+            }
+        }
+        return evictCache()
+    }
+
+    private fun isStagingTemp(name: String): Boolean = name.contains(".hydrating-") || (name.startsWith(".ud-serve-") && name.endsWith(".tmp"))
+
+    /** Current size of the cache directory in bytes (every regular file, protected or not). */
+    fun cacheSizeBytes(): Long = listCacheFiles().sumOf { it.size }
+
+    private class CacheFile(val path: String, val file: Path, val size: Long, val lastUsed: Long)
+
+    private fun listCacheFiles(): List<CacheFile> {
+        val dir = syncEngine.hydrationCacheDir()
+        if (!Files.isDirectory(dir)) return emptyList()
+        val result = mutableListOf<CacheFile>()
+        runCatching {
+            Files.walk(dir).use { stream ->
+                stream.filter { Files.isRegularFile(it) }.forEach { f ->
+                    runCatching {
+                        val attrs = Files.readAttributes(f, java.nio.file.attribute.BasicFileAttributes::class.java)
+                        val path = "/" + dir.relativize(f).toString().replace('\\', '/')
+                        val fileTime = maxOf(attrs.lastModifiedTime().toMillis(), attrs.lastAccessTime().toMillis())
+                        result += CacheFile(path, f, attrs.size(), lastAccess[path] ?: fileTime)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    // The checks only this layer can make: an open handle, a queued or in-flight upload (#301, #318),
+    // and the access grace window.
+    private fun inUse(path: String): Boolean =
+        openSets.values.any { it.containsValue(path) } ||
+            uploadSlots.containsKey(path) ||
+            (lastAccess[path]?.let { System.currentTimeMillis() - it < cacheAccessGraceMs } ?: false)
+
+    /**
+     * #450: bring the cache directory under [cacheMaxBytes], least recently used first, copies that are
+     * byte-identical to the file in the sync root before the rest. A file is evicted only if the engine
+     * vouches for it ([org.krost.unidrive.sync.SyncEngine.cacheDisposition]: it holds nothing the cloud
+     * or the sync root does not) and nothing here uses it: no open handle, no queued or in-flight upload
+     * (also re-checked by the engine's own lock at deletion), not accessed within the grace window.
+     * Files without a row (an upload target that was renamed away, #319), unfinished creates, failed
+     * uploads and modified copies are never touched, so the cache can stay over budget.
+     */
+    suspend fun evictCache(): CacheEvictionReport =
+        evictionMutex.withLock {
+            val files = listCacheFiles()
+            val before = files.sumOf { it.size }
+            if (cacheMaxBytes <= 0 || before <= cacheMaxBytes) return@withLock CacheEvictionReport(cacheMaxBytes, before, before, 0)
+            var total = before
+            var evicted = 0
+            val disposable = mutableListOf<CacheFile>()
+
+            suspend fun evict(f: CacheFile) {
+                if (inUse(f.path)) return
+                val freed = syncEngine.evictCacheCopy(f.path) { _events.tryEmit(HydrationEvent.Dehydrated(it)) }
+                if (freed != null) {
+                    total -= freed
+                    evicted++
+                }
+            }
+
+            for (f in files.sortedBy { it.lastUsed }) {
+                if (total <= cacheMaxBytes) break
+                if (inUse(f.path)) continue
+                when (syncEngine.cacheDisposition(f.path)) {
+                    org.krost.unidrive.sync.CacheDisposition.REDUNDANT -> evict(f)
+                    org.krost.unidrive.sync.CacheDisposition.DISPOSABLE -> disposable += f
+                    org.krost.unidrive.sync.CacheDisposition.PROTECTED -> {}
+                }
+            }
+            for (f in disposable) {
+                if (total <= cacheMaxBytes) break
+                evict(f)
+            }
+            CacheEvictionReport(cacheMaxBytes, before, total, evicted)
+        }
 
     // #301: whether a background upload of [path] is queued or in flight. The
     // engine's enumerate-reap consults this (via the engine's uploadInFlight hook,
