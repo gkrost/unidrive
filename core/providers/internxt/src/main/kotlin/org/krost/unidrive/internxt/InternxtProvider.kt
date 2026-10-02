@@ -500,12 +500,16 @@ class InternxtProvider(
 
         // 1. Get file size + mtime without loading into memory. NoSuchFileException
         // here means the local file vanished between scan and upload; surface
-        // after clearing any prior tombstone for the missing path.
+        // after clearing any prior tombstone for the missing path. The content
+        // fingerprint (#311) pins the head+tail windows of the same file so a
+        // same-mtime-same-size rewrite can't ride a resume.
         val fileSize: Long
         val localMtime: java.time.Instant
+        val contentFingerprint: String
         try {
             fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
             localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
+            contentFingerprint = withContext(Dispatchers.IO) { UploadTombstoneStore.contentFingerprint(localPath) }
         } catch (e: java.nio.file.NoSuchFileException) {
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             throw e
@@ -515,29 +519,67 @@ class InternxtProvider(
         // Resume hook. A non-null tomb that still matches the call shape lets us
         // reuse the prior attempt's indexBytes / ciphertext / hash / shardUuid /
         // putUrl in whatever combinations are still safe. A mismatch (different
-        // mtime/size/existingRemoteId, expired RESUME_TTL_MS) discards the
-        // sidecar + the .enc and forces a cold restart with fresh indexBytes.
+        // mtime/size/existingRemoteId, content fingerprint, expired
+        // RESUME_TTL_MS) discards the sidecar + the .enc and forces a cold
+        // restart with fresh indexBytes.
         val existingTomb =
             withContext(Dispatchers.IO) { tombstoneStore.read(pathHashStr) }
         val localMtimeMillis = localMtime.toEpochMilli()
         val nowMillis = System.currentTimeMillis()
+        // #311: mtime+size do not prove content identity — in-place writers
+        // that restore mtime can swap bytes underneath a resume. The tombstone
+        // pins a head+tail fingerprint at cold start; a mismatch (or a null,
+        // i.e. hand-written tombstone) forces fresh indexBytes so the pinned
+        // CTR keystream is never applied to different plaintext.
+        val contentDrifted = existingTomb != null && existingTomb.contentFingerprintHex != contentFingerprint
         val resumeOk =
             existingTomb != null &&
                 existingTomb.localPath == localPath.toAbsolutePath().toString() &&
                 existingTomb.localMtimeMillis == localMtimeMillis &&
                 existingTomb.localSize == fileSize &&
                 existingTomb.existingRemoteId == existingRemoteId &&
+                !contentDrifted &&
                 (nowMillis - existingTomb.startedAtMillis) <= InternxtConfig.RESUME_TTL_MS
-        val tomb: UploadTombstone?
+        var tomb: UploadTombstone?
         if (existingTomb != null && !resumeOk) {
             log.info(
-                "discarding stale upload tombstone for {} (mtime/size/existingRemoteId drift or TTL exceeded)",
+                "discarding stale upload tombstone for {} ({})",
                 localPath,
+                if (contentDrifted) {
+                    "content-fingerprint drift"
+                } else {
+                    "mtime/size/existingRemoteId drift or TTL exceeded"
+                },
             )
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             tomb = null
         } else {
             tomb = existingTomb
+        }
+
+        // #311 backstop: beyond ENCRYPTING the prior ciphertext may already
+        // sit on the storage backend (partial or complete PUT). If the pinned
+        // ciphertext state can't be byte-validated on disk (.enc missing or
+        // size-mismatched), the fall-through would re-encrypt *current* bytes
+        // under the pinned keystream — a second use of the same (key, IV) if
+        // content drifted past the fingerprint windows. Discard and
+        // cold-restart with fresh indexBytes instead. At ENCRYPTING no shard
+        // was ever started, so a re-encrypt there stays first-use.
+        if (tomb != null &&
+            tomb.stage != UploadTombstone.Stage.ENCRYPTING &&
+            (tomb.encryptedSize == null ||
+                tomb.hashHex == null ||
+                !withContext(Dispatchers.IO) { Files.exists(tempFile) } ||
+                withContext(Dispatchers.IO) { Files.size(tempFile) } != tomb.encryptedSize)
+        ) {
+            log.info(
+                "discarding upload tombstone for {} (re-encrypt required at stage {} with unverifiable .enc — " +
+                    "backend may hold prior ciphertext; rotating indexBytes)",
+                localPath,
+                tomb.stage,
+            )
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+            tomb = null
         }
 
         // 2. indexBytes — RESUMED from the tombstone when present (the server-
@@ -582,6 +624,7 @@ class InternxtProvider(
                 ext = ext,
                 indexBytesHex = indexHex,
                 existingRemoteId = existingRemoteId,
+                contentFingerprintHex = contentFingerprint,
                 stage = UploadTombstone.Stage.ENCRYPTING,
                 startedAtMillis = uploadStartedAtMillis,
                 tombstoneWrittenAtMillis = nowMillis,
@@ -593,7 +636,8 @@ class InternxtProvider(
         // Encrypt to deterministic .enc temp file. Skipped on resume from
         // PUT_PENDING or later (the ciphertext + hash + size are already pinned
         // in the tombstone, and the .enc on disk must round-trip the recorded
-        // encryptedSize or we re-encrypt as a safety net).
+        // encryptedSize — a tombstone that can't honour that was already
+        // discarded by the #311 backstop above).
         val needsEncrypt =
             currentTomb.stage == UploadTombstone.Stage.ENCRYPTING ||
                 currentTomb.encryptedSize == null ||

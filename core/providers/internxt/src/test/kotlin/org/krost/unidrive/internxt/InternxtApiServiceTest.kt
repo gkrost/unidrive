@@ -1476,6 +1476,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         stage = UploadTombstone.Stage.ENCRYPTING,
                         startedAtMillis = System.currentTimeMillis(),
                         tombstoneWrittenAtMillis = System.currentTimeMillis(),
@@ -1526,6 +1527,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-pinned",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,
@@ -1577,6 +1579,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-already-put",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,
@@ -1627,6 +1630,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-finished",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,
@@ -1684,6 +1688,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = staleIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-stale",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,
@@ -1735,6 +1740,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = staleIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-stale",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 32L,
@@ -1796,6 +1802,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-expired",
                         bridgePutUrl = "https://shard-host.invalid/expired-target",
                         encryptedSize = 48L,
@@ -1863,6 +1870,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = staleIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-stale",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,
@@ -1885,6 +1893,203 @@ class InternxtApiServiceTest {
                 assertEquals(1, counters.startCalls.get())
                 assertEquals(1, counters.createFileCalls.get(), "NEW call routes through createFile (not replaceFile)")
                 assertEquals(0, counters.replaceFileCalls.get())
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    /**
+     * #311 regression (the headline two-time-pad case). Content is rewritten
+     * in place between attempts — same length, mtime restored — so the
+     * mtime+size resume checks pass. The tombstone's content fingerprint is
+     * the only thing standing between the pinned CTR keystream and the new
+     * plaintext: the resume MUST discard the tombstone and rotate indexBytes,
+     * because the prior ciphertext may already sit on the storage backend
+     * (stage PUT_DONE here).
+     */
+    @Test
+    fun `content drift with same mtime and size discards the tombstone and rotates indexBytes (#311)`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-content-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val pinnedIndex = "ab".repeat(32)
+                val now = System.currentTimeMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis(),
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-put-once",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "cd".repeat(32),
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                // Rewrite the content IN PLACE: same length, mtime restored —
+                // the exact writer behaviour (rsync --times, in-place editors)
+                // that mtime+size checks cannot see.
+                val originalMtime = java.nio.file.Files.getLastModifiedTime(local)
+                java.nio.file.Files.write(local, ByteArray(32) { (it * 3 + 7).toByte() })
+                java.nio.file.Files.setLastModifiedTime(local, originalMtime)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, counters.startCalls.get(), "content drift → cold restart (fresh startUpload)")
+                assertEquals(1, counters.putCalls.get(), "the new content's ciphertext is what gets PUT")
+                kotlin.test.assertNotEquals(
+                    pinnedIndex,
+                    counters.capturedFinishIndexHex.single(),
+                    "content drifted under identical mtime+size → tombstone discard → fresh indexBytes. " +
+                        "Reusing the pinned keystream over the new plaintext while the old ciphertext sits " +
+                        "on the backend is a CTR two-time pad (P1 XOR P2 leaks to the storage operator).",
+                )
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    /**
+     * #311 regression (stale-upload variant). PUT_PENDING with an intact,
+     * size-matching .enc and a still-fresh presigned URL: without the
+     * fingerprint binding this resume would PUT the PRIOR attempt's
+     * ciphertext — stale content under current metadata — without ever
+     * looking at the file again.
+     */
+    @Test
+    fun `content drift at PUT_PENDING with intact ciphertext discards and uploads fresh content (#311)`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-staleput-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val pinnedIndex = "ba".repeat(32)
+                val now = System.currentTimeMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis(),
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-stale-put",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "02".repeat(32),
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
+                        stage = UploadTombstone.Stage.PUT_PENDING,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                seedEnc(store, pathHash, 48L)
+
+                val originalMtime = java.nio.file.Files.getLastModifiedTime(local)
+                java.nio.file.Files.write(local, ByteArray(32) { (it * 5 + 11).toByte() })
+                java.nio.file.Files.setLastModifiedTime(local, originalMtime)
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(
+                    1,
+                    counters.startCalls.get(),
+                    "content drift with a cached fresh URL must still cold-restart — the cached .enc is stale",
+                )
+                assertEquals(1, counters.putCalls.get())
+                kotlin.test.assertNotEquals(pinnedIndex, counters.capturedFinishIndexHex.single())
+            } finally {
+                java.nio.file.Files.deleteIfExists(local)
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    /**
+     * #311 backstop regression. Content is UNCHANGED (fingerprint matches)
+     * and the tombstone is fully pinned at PUT_DONE — but the .enc ciphertext
+     * is gone from disk (external cleanup of the tombstone dir). The prior
+     * ciphertext may already sit on the backend, so the resume must NOT
+     * re-encrypt current bytes under the pinned keystream; it cold-restarts
+     * with fresh indexBytes. (Before #311 this path re-encrypted in place.)
+     */
+    @Test
+    fun `unverifiable ciphertext beyond ENCRYPTING cold-restarts instead of re-encrypting under the pinned keystream (#311 backstop)`() =
+        kotlinx.coroutines.test.runTest {
+            val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-backstop-")
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            try {
+                val provider = newProviderRooted(tmp)
+                val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+                val pathHash = UploadTombstoneStore.pathHash(local.toAbsolutePath().toString())
+                val pinnedIndex = "ef".repeat(32)
+                val now = System.currentTimeMillis()
+                store.write(
+                    pathHash,
+                    UploadTombstone(
+                        localPath = local.toAbsolutePath().toString(),
+                        localMtimeMillis = java.nio.file.Files.getLastModifiedTime(local).toMillis(),
+                        localSize = 32L,
+                        bucket = "test-bucket",
+                        folderUuid = "root-folder-uuid",
+                        plainName = local.fileName.toString().substringBeforeLast('.'),
+                        ext = "bin",
+                        indexBytesHex = pinnedIndex,
+                        shardUuid = "shard-uuid-orphaned",
+                        bridgePutUrl = "https://shard-host.invalid/put-target",
+                        encryptedSize = 48L,
+                        hashHex = "01".repeat(32),
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
+                        stage = UploadTombstone.Stage.PUT_DONE,
+                        startedAtMillis = now,
+                        tombstoneWrittenAtMillis = now,
+                    ),
+                )
+                // NOTE: no seedEnc — the .enc is deliberately missing.
+
+                val counters = TombMockCounters()
+                installMockClientOnProvider(provider, tombMockEngine(counters))
+                provider.upload(local, "/${local.fileName}", existingRemoteId = null, onProgress = null)
+
+                assertEquals(1, counters.startCalls.get(), "unverifiable .enc beyond ENCRYPTING → fresh startUpload")
+                assertEquals(1, counters.putCalls.get())
+                kotlin.test.assertNotEquals(
+                    pinnedIndex,
+                    counters.capturedFinishIndexHex.single(),
+                    "a re-encrypt with unverifiable .enc must rotate indexBytes — reusing the pinned keystream " +
+                        "when the backend may already hold its ciphertext is the #311 two-time pad",
+                )
             } finally {
                 java.nio.file.Files.deleteIfExists(local)
                 tmp.toFile().deleteRecursively()
@@ -1928,6 +2133,7 @@ class InternxtApiServiceTest {
                         plainName = local.fileName.toString().substringBeforeLast('.'),
                         ext = "bin",
                         indexBytesHex = pinnedIndex,
+                        contentFingerprintHex = UploadTombstoneStore.contentFingerprint(local),
                         shardUuid = "shard-uuid-pre-409",
                         bridgePutUrl = "https://shard-host.invalid/put-target",
                         encryptedSize = 48L,

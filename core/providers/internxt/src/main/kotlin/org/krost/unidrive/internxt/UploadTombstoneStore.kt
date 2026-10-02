@@ -3,9 +3,12 @@ package org.krost.unidrive.internxt
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.UnidriveJson
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 
 /**
@@ -174,6 +177,13 @@ internal class UploadTombstoneStore(
         private val json: Json = UnidriveJson
 
         /**
+         * Head/tail window size for [contentFingerprint]. Files at or below
+         * this size are hashed in full, so any byte change trips the check;
+         * larger files pin the first and last 64 KiB.
+         */
+        private const val FINGERPRINT_WINDOW_BYTES: Int = 64 * 1024
+
+        /**
          * `sha256(localPath.absolute().toString())` as lowercase hex.
          * Used as the stable per-upload key so concurrent `upload()` calls
          * for different paths can't collide. Path normalisation is left
@@ -184,6 +194,48 @@ internal class UploadTombstoneStore(
             val digest = MessageDigest.getInstance("SHA-256")
             val bytes = digest.digest(localPathString.toByteArray(Charsets.UTF_8))
             return bytes.joinToString("") { "%02x".format(it) }
+        }
+
+        /**
+         * Cheap content-identity fingerprint (#311): SHA-256 over the first
+         * and last [FINGERPRINT_WINDOW_BYTES] of the file (the whole file
+         * when it is no larger than one window). mtime+size alone do not
+         * prove content identity — in-place writers that restore mtime
+         * (`rsync --times`, editors that save in place) can swap bytes
+         * underneath a resume — so the tombstone pins this fingerprint at
+         * cold start and the provider re-derives and compares it before any
+         * reuse of the pinned `indexBytes`.
+         *
+         * Not a general integrity check: a same-size rewrite confined to the
+         * middle of a file larger than two windows is invisible to it. That
+         * residual is covered separately in the provider — a stage beyond
+         * ENCRYPTING whose `.enc` can't be byte-validated always cold-restarts
+         * rather than re-encrypting under the pinned keystream.
+         */
+        fun contentFingerprint(localPath: Path): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            FileChannel.open(localPath, StandardOpenOption.READ).use { channel ->
+                val size = channel.size()
+                val window = FINGERPRINT_WINDOW_BYTES.toLong()
+                digest.update(readWindow(channel, 0L, minOf(size, window)))
+                if (size > window) {
+                    digest.update(readWindow(channel, size - window, window))
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        private fun readWindow(
+            channel: FileChannel,
+            position: Long,
+            length: Long,
+        ): ByteArray {
+            val buffer = ByteBuffer.allocate(length.toInt())
+            while (buffer.hasRemaining()) {
+                val read = channel.read(buffer, position + buffer.position())
+                if (read < 0) break // file shrank between size() and this read
+            }
+            return buffer.array().copyOf(buffer.position())
         }
     }
 }
@@ -220,6 +272,15 @@ internal data class UploadTombstone(
     val encryptedSize: Long? = null,
     val hashHex: String? = null,
     val existingRemoteId: String? = null,
+    /**
+     * #311: `UploadTombstoneStore.contentFingerprint()` of the local file at
+     * cold start. The resume path re-derives it and treats a mismatch — or
+     * a null (only possible in hand-written tombstones; schema-1 sidecars
+     * are rejected at parse time) — as staleness, forcing a cold restart
+     * with fresh indexBytes instead of reusing the pinned CTR keystream
+     * over unknown plaintext.
+     */
+    val contentFingerprintHex: String? = null,
     val stage: Stage,
     val startedAtMillis: Long,
     val tombstoneWrittenAtMillis: Long,
@@ -232,6 +293,9 @@ internal data class UploadTombstone(
     }
 
     companion object {
-        const val CURRENT_SCHEMA: Int = 1
+        // v2 (#311): adds content_fingerprint_hex. Schema-1 tombstones have no
+        // content binding, so they are routed to discard (read() returns null
+        // → gc sweeps them) rather than trusted for a resume.
+        const val CURRENT_SCHEMA: Int = 2
     }
 }
