@@ -14,6 +14,19 @@ sealed class HydrationEvent {
     data class Failed(override val path: String, val error: HydrationError) : HydrationEvent()
 
     /**
+     * Emitted instead of the hydrating/hydrated pair when a write lands on a
+     * path matched by the profile's exclude_patterns: the content is accepted
+     * and kept local-only — it is deliberately never uploaded, so the row must
+     * never present as in-sync. Followed by a [Completed] with
+     * [HydrationError.Excluded] so the client's handle correlation still
+     * terminates.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"skipped","path":"/a/scratch.tmp"}`
+     */
+    data class Skipped(override val path: String) : HydrationEvent()
+
+    /**
      * Correlated completion of a handle-scoped transfer. Emitted when the work
      * behind an `open_read` (download) or `open_write` (upload, including the
      * crash-recovery replay) finishes — [handleId] is the client's own handle id,

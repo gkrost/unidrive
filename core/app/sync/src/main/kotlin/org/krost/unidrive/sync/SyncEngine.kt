@@ -156,6 +156,14 @@ open class SyncEngine(
 
     private fun isTracked(remotePath: String): Boolean = SyncScope.contains(remotePath, trackScope) || remotePath in trackAncestors
 
+    /**
+     * True when [path] lies outside the standing sync scope (config
+     * `sync_path`); empty scope means the whole drive, so nothing is out of
+     * scope. The hydration write verbs use this to refuse writes that would
+     * create or move cloud data the mounted view can never show.
+     */
+    fun isOutOfScope(path: String): Boolean = !SyncScope.contains(path, trackScope)
+
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
     // (canonical→real-local reverse map for newly-arrived aliased rows).
@@ -599,7 +607,13 @@ open class SyncEngine(
             }
         }.getOrDefault(false)
 
-    private fun isExcluded(path: String): Boolean =
+    /**
+     * True when [path] matches the effective exclude patterns (configured
+     * excludes union the defaults). Keep-local rule: such paths are never
+     * uploaded. Shared by the upload path and the hydration write verbs, which
+     * must report an excluded write instead of letting it present as in-sync.
+     */
+    fun isExcludedPath(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
 
     suspend fun uploadFromCache(
@@ -608,7 +622,7 @@ open class SyncEngine(
         ifMatchETag: String? = null,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
-        if (isExcluded(path)) {
+        if (isExcludedPath(path)) {
             log.info("Skipping upload of excluded path (keep-local): {}", path)
             // Keep-local files are never uploaded, but the local watermark must still
             // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,

@@ -31,6 +31,8 @@ class HydrationErrorTest {
             HydrationError.NotFound -> "not_found"
             HydrationError.UnknownPath -> "unknown_path"
             HydrationError.Conflict -> "conflict"
+            HydrationError.OutOfScope -> "outside_scope"
+            HydrationError.Excluded -> "excluded"
         }
         assertTrue(rendered.startsWith("generic:"))
     }

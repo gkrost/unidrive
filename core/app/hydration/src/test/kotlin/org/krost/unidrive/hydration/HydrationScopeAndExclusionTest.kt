@@ -1,0 +1,156 @@
+package org.krost.unidrive.hydration
+
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Write-path guards: the sync_path scope and the exclude_patterns keep-local
+ * rule. A scoped profile shows its scope as the whole drive, so a write
+ * outside it would create cloud data the mounted view can never show —
+ * refused with the typed `outside_scope` token. An excluded name (editors'
+ * *.tmp, ~$ scratch) is accepted but deliberately never uploaded: the reply
+ * and the skipped event must make that visible instead of letting the file
+ * present as in-sync.
+ */
+class HydrationScopeAndExclusionTest {
+    private val SCOPE = "/_INBOX"
+
+    private fun scopedEnv(recoveryUploadScope: kotlinx.coroutines.CoroutineScope? = null) =
+        HydrationTestEnv(recoveryUploadScope = recoveryUploadScope, syncPaths = listOf(SCOPE))
+
+    @Test
+    fun `mkdir outside the sync scope is refused and never reaches the provider`() = runTest {
+        val env = scopedEnv()
+        val r = env.hydration.mkdir("/outside")
+        assertIs<MkdirResult.Failed>(r)
+        assertEquals(HydrationError.OUTSIDE_SCOPE_TOKEN, r.error.message)
+        assertTrue(
+            env.syncEngine.createdFolders().isEmpty(),
+            "a refused mkdir must not create anything in the cloud",
+        )
+    }
+
+    @Test
+    fun `mkdir inside the sync scope creates the folder in the cloud`() = runTest {
+        val env = scopedEnv()
+        val r = env.hydration.mkdir("/_INBOX/new")
+        assertIs<MkdirResult.Ok>(r)
+        assertEquals(listOf("/_INBOX/new"), env.syncEngine.createdFolders())
+    }
+
+    @Test
+    fun `create outside the sync scope is refused and writes no row or cache`() = runTest {
+        val env = scopedEnv()
+        val r = env.hydration.create("conn1", "h1", "/outside/x.txt")
+        assertIs<CreateResult.Failed>(r)
+        assertEquals(HydrationError.OUTSIDE_SCOPE_TOKEN, r.error.message)
+        assertNull(env.stateDb.remoteSizeOf("/outside/x.txt"), "a refused create must not write a row")
+        assertFalse(Files.exists(env.syncEngine.resolveCachePath("/outside/x.txt")))
+    }
+
+    @Test
+    fun `open_write_begin outside the sync scope is refused`() = runTest {
+        val env = scopedEnv()
+        val r = env.hydration.openWriteBegin("conn1", "/outside/x.txt", "h1")
+        assertIs<OpenResult.Failed>(r)
+        assertEquals(HydrationError.OUTSIDE_SCOPE_TOKEN, r.error.message)
+    }
+
+    @Test
+    fun `rename with the destination outside the scope is refused and moves nothing`() = runTest {
+        val env = scopedEnv()
+        env.stateDb.insertFolderEntry(SCOPE)
+        env.stateDb.insertCreatedRow("/_INBOX/a.txt")
+        val r = env.hydration.rename("/_INBOX/a.txt", "/outside/b.txt")
+        assertIs<RenameResult.Failed>(r)
+        assertEquals(HydrationError.OUTSIDE_SCOPE_TOKEN, r.error.message)
+        assertEquals(0L, env.stateDb.remoteSizeOf("/_INBOX/a.txt"), "the source row must be untouched")
+        assertNull(env.stateDb.remoteSizeOf("/outside/b.txt"), "nothing may be written to the out-of-scope path")
+    }
+
+    @Test
+    fun `rename with the source outside the scope is refused`() = runTest {
+        val env = scopedEnv()
+        env.stateDb.insertCreatedRow("/outside/s.txt")
+        val r = env.hydration.rename("/outside/s.txt", "/_INBOX/t.txt")
+        assertIs<RenameResult.Failed>(r)
+        assertEquals(HydrationError.OUTSIDE_SCOPE_TOKEN, r.error.message)
+        assertEquals(0L, env.stateDb.remoteSizeOf("/outside/s.txt"), "the source row must be untouched")
+    }
+
+    @Test
+    fun `create accepts an excluded file and open_write never uploads it`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+
+        val created = env.hydration.create("conn1", "h1", "/new/scratch.tmp")
+        assertIs<CreateResult.Ok>(created)
+        assertTrue(created.excluded, "an excluded create must report excluded:true")
+        assertEquals(0L, env.stateDb.remoteSizeOf("/new/scratch.tmp"))
+
+        Files.writeString(created.cachePath, "local scratch bytes")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        val opened = env.hydration.openForWrite("conn1", "h1", "/new/scratch.tmp", created.cachePath)
+        assertIs<OpenResult.Ok>(opened)
+        assertTrue(opened.excluded, "an excluded open_write must report excluded:true")
+        advanceUntilIdle()
+
+        // The keep-local contract: no upload ran, and the event stream said so
+        // — skipped, never hydrating/hydrated, and a Completed that cannot be
+        // mistaken for a successful transfer.
+        assertNull(env.syncEngine.remoteContentSeen("/new/scratch.tmp"), "an excluded file must never be uploaded")
+        assertEquals(0, events.filterIsInstance<HydrationEvent.Hydrating>().size)
+        assertEquals(0, events.filterIsInstance<HydrationEvent.Hydrated>().size)
+        assertIs<HydrationEvent.Skipped>(events.first())
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single()
+        assertFalse(completed.ok)
+        assertEquals(HydrationError.EXCLUDED_TOKEN, completed.error?.message)
+        assertEquals("h1", completed.handleId)
+        collector.cancel()
+    }
+
+    @Test
+    fun `open_write_begin on an excluded path reports excluded`() = runTest {
+        val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+        val created = env.hydration.create("conn1", "h1", "/new/scratch.tmp")
+        assertIs<CreateResult.Ok>(created)
+        val r = env.hydration.openWriteBegin("conn1", "/new/scratch.tmp", "h2")
+        assertIs<OpenResult.Ok>(r)
+        assertTrue(r.excluded)
+    }
+
+    @Test
+    fun `create inside the scope is not flagged excluded`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, syncPaths = listOf(SCOPE))
+        env.stateDb.insertFolderEntry(SCOPE)
+        val r = env.hydration.create("conn1", "h1", "/_INBOX/real.txt")
+        assertIs<CreateResult.Ok>(r)
+        assertFalse(r.excluded)
+    }
+
+    @Test
+    fun `list marks excluded entries`() = runTest {
+        val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertCreatedRow("/new/keep.txt")
+        env.stateDb.insertCreatedRow("/new/scratch.tmp")
+
+        val r = env.hydration.list("/new")
+        assertIs<ListResult.Ok>(r)
+        val byPath = r.entries.associateBy { it.path }
+        assertFalse(byPath.getValue("/new/keep.txt").excluded)
+        assertTrue(byPath.getValue("/new/scratch.tmp").excluded)
+    }
+}

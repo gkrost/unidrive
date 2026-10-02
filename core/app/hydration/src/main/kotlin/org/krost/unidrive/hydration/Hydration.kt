@@ -66,7 +66,13 @@ interface Hydration {
 }
 
 sealed class OpenResult {
-    data class Ok(val cachePath: Path) : OpenResult()
+    data class Ok(
+        val cachePath: Path,
+        // True when the path matches the profile's exclude_patterns: the write
+        // is accepted but the content is deliberately never uploaded (the
+        // keep-local rule). Only serialized on the wire when true.
+        val excluded: Boolean = false,
+    ) : OpenResult()
     data class Failed(val error: HydrationError) : OpenResult()
 }
 
@@ -116,6 +122,10 @@ sealed class ListResult {
         // True when the last write-back upload attempt against this row failed
         // (state.db last_error_at stamped; `unidrive doctor` surfaces the same gap).
         val hasError: Boolean = false,
+        // True when the path matches the profile's exclude_patterns: the row is
+        // served from local content that is deliberately never uploaded. Only
+        // serialized on the wire when true.
+        val excluded: Boolean = false,
     )
 }
 
@@ -139,7 +149,15 @@ sealed class RmdirResult {
 }
 
 sealed class CreateResult {
-    data class Ok(val cachePath: Path, val handleId: String) : CreateResult()
+    data class Ok(
+        val cachePath: Path,
+        val handleId: String,
+        // True when the path matches the profile's exclude_patterns: the row
+        // and cache file are created (the file exists locally), but the
+        // content is deliberately never uploaded (keep-local). Only serialized
+        // on the wire when true.
+        val excluded: Boolean = false,
+    ) : CreateResult()
     data class Failed(val error: HydrationError) : CreateResult()
     data object ParentNotFound : CreateResult()
     data object PathExists : CreateResult()

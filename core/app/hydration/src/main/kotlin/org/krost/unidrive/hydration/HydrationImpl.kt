@@ -149,6 +149,28 @@ class HydrationImpl(
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
 
+        // Excluded paths (exclude_patterns) are keep-local: the write is
+        // accepted — the editor's bytes are real local content — but the
+        // upload never runs. Refusing would break the editors and tools that
+        // legitimately create *.tmp / ~$ scratch files through the mount;
+        // running the upload would hit the engine's keep-local guard anyway
+        // and answer hydrated, marking a file in sync that is not in the
+        // cloud. The skipped event (not hydrating/hydrated) plus a Completed
+        // carrying the excluded token tell the client both facts.
+        if (syncEngine.isExcludedPath(path)) {
+            _events.emit(HydrationEvent.Skipped(path))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = false,
+                    error = HydrationError.Excluded,
+                ),
+            )
+            return OpenResult.Ok(cachePath, excluded = true)
+        }
+
         // Optimistic-concurrency guard (#434): refuse a write whose base etag no
         // longer matches the row's change-detection token BEFORE any upload runs —
         // the point is to not silently overwrite a newer remote version, so the
@@ -366,6 +388,7 @@ class HydrationImpl(
                         // the predicate (remoteId == null) cannot see.
                         pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
                         hasError = e.lastErrorAt != null,
+                        excluded = syncEngine.isExcludedPath(e.path),
                     )
                 },
             )
@@ -376,6 +399,10 @@ class HydrationImpl(
 
     override suspend fun mkdir(path: String): MkdirResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        // Scope guard: a folder created outside the profile's sync_path set
+        // would land in the cloud but never show in the mounted view (the view
+        // only lists the scope). Refuse before touching the provider.
+        if (syncEngine.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
         return runCatching {
             _events.emit(HydrationEvent.Hydrating(normalised))
             syncEngine.createRemoteFolder(normalised)
@@ -548,6 +575,9 @@ class HydrationImpl(
 
     override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        // Scope guard: same rationale as mkdir — a truncate outside the
+        // profile's sync_path set would touch cloud data the view never shows.
+        if (syncEngine.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
@@ -560,7 +590,7 @@ class HydrationImpl(
             if (handleId != null) {
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
             }
-            OpenResult.Ok(cachePath)
+            OpenResult.Ok(cachePath, excluded = syncEngine.isExcludedPath(normalised))
         } catch (e: Exception) {
             OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
         }
@@ -570,6 +600,10 @@ class HydrationImpl(
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
         return mutex.withLock {
+            // Scope guard: a file created outside the profile's sync_path set
+            // would upload to the cloud but never show in the mounted view.
+            if (syncEngine.isOutOfScope(normalised)) return@withLock CreateResult.Failed(HydrationError.OutOfScope)
+
             if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
 
             // Parent must exist as a folder row (root "/" / "" is implicit and
@@ -580,6 +614,12 @@ class HydrationImpl(
                     ?: return@withLock CreateResult.ParentNotFound
                 if (!parentEntry.isFolder) return@withLock CreateResult.ParentNotFound
             }
+
+            // Excluded names are keep-local: the row and cache file are still
+            // created (the file exists locally and must be served), but the
+            // reply carries excluded so the client knows the content will never
+            // reach the cloud.
+            val excluded = syncEngine.isExcludedPath(normalised)
 
             try {
                 val cachePath = prepareEmptyCache(normalised)
@@ -600,7 +640,7 @@ class HydrationImpl(
                     ),
                 )
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
-                CreateResult.Ok(cachePath = cachePath, handleId = handleId)
+                CreateResult.Ok(cachePath = cachePath, handleId = handleId, excluded = excluded)
             } catch (e: Exception) {
                 CreateResult.Failed(HydrationError.Generic(e.message ?: "create failed"))
             }
@@ -619,6 +659,15 @@ class HydrationImpl(
         // destination-deletion step below: with replace=true the source would
         // otherwise be deleted as its own destination.
         if (oldNorm == newNorm) return RenameResult.Ok
+
+        // Scope guard: a mounted profile shows its scope as the whole drive, so
+        // only moves whose BOTH ends lie inside the sync_path set stay visible
+        // in the view. A destination outside it would strand the row in cloud
+        // data the mount never shows; a source outside it is data the profile
+        // does not own. Either end out of scope → refuse, nothing is moved.
+        if (syncEngine.isOutOfScope(oldNorm) || syncEngine.isOutOfScope(newNorm)) {
+            return RenameResult.Failed(HydrationError.OutOfScope)
+        }
 
         // Pre-flight: source must exist in state.db.
         val sourceEntry = stateDb.getEntry(oldNorm)

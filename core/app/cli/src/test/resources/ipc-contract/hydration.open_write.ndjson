@@ -4,3 +4,7 @@
 {"ok":false,"error":"unknown_path"}
 {"verb":"hydration.open_write","handle_id":"h-1","path":"/docs/report.txt","cache_path":"/cache/unidrive/hydration/docs/report.txt","base_etag":"stale-etag"}
 {"ok":false,"error":"conflict"}
+{"verb":"hydration.open_write","handle_id":"h-1","path":"/excluded/scratch.tmp","cache_path":"/cache/unidrive/hydration/excluded/scratch.tmp"}
+{"ok":true,"cache_path":"/cache/unidrive/hydration/excluded/scratch.tmp","excluded":true}
+{"verb":"hydration.open_write","handle_id":"h-1","path":"/outside/x.txt","cache_path":"/cache/unidrive/hydration/outside/x.txt"}
+{"ok":false,"error":"outside_scope"}

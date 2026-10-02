@@ -122,7 +122,24 @@ internal class MinimalFakeProvider(
 
     override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("delete not used")
 
-    override suspend fun createFolder(path: String): CloudItem = error("createFolder not used")
+    // Folders created through createRemoteFolder, recorded for the scope-guard
+    // tests (a refused mkdir must not reach the provider).
+    val createdFolders = mutableListOf<String>()
+
+    override suspend fun createFolder(path: String): CloudItem {
+        createdFolders.add(path)
+        return CloudItem(
+            id = "folder-$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 0L,
+            isFolder = true,
+            modified = java.time.Instant.now(),
+            created = null,
+            hash = null,
+            mimeType = null,
+        )
+    }
 
     override suspend fun move(fromPath: String, toPath: String): CloudItem = error("move not used")
 
@@ -168,6 +185,10 @@ internal class HydrationTestEnv(
     /** Optional scope for recovery uploads. Pass the [runTest] scope to control
      *  background-job dispatch in recovery-path tests; null uses the default. */
     recoveryUploadScope: CoroutineScope? = null,
+    /** Standing sync scope (sync_path set) for the scope-guard tests; empty = whole drive. */
+    val syncPaths: List<String> = emptyList(),
+    /** Configured exclude patterns for the keep-local tests. */
+    val excludePatterns: List<String> = emptyList(),
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -189,6 +210,9 @@ internal class HydrationTestEnv(
             db = db,
             syncRoot = Files.createTempDirectory("unidrive-hydration-sync"),
             cacheRoot = cacheRoot,
+            syncPaths = syncPaths,
+            standingScope = syncPaths,
+            excludePatterns = excludePatterns,
         )
 
         stateDb = StateDatabaseFacade(db)
@@ -324,6 +348,9 @@ internal class HydrationTestEnv(
 
         /** Resolves a path to its cache location. */
         fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
+
+        /** Folders the provider was asked to create (scope-guard assertions). */
+        fun createdFolders(): List<String> = fakeProvider.createdFolders
 
         /**
          * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.
