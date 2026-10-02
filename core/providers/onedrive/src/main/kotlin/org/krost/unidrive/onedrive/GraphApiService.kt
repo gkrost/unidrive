@@ -221,6 +221,11 @@ class GraphApiService(
         // Content-Type: text/html) instead of bytes can't be recovered by
         // re-GETting the same stale URL. Re-resolve the download URL once.
         var htmlReresolved = false
+        // #329: the pre-authenticated @microsoft.graph.downloadUrl carries a tempauth
+        // token that expires (~1 h). A 401/403 on that URL says nothing about account
+        // auth: re-resolve the item once for a fresh URL before treating it as an
+        // authentication failure. Bounded to a single re-resolve (no loop).
+        var authUrlReresolved = false
         while (true) {
             try {
                 throttleBudget.awaitSlot()
@@ -232,6 +237,9 @@ class GraphApiService(
                     statement.execute { response ->
                         if (authNeeded && response.status == HttpStatusCode.Unauthorized && !authRefreshed) {
                             return@execute DownloadOutcome.RetryAuth
+                        }
+                        if (!authNeeded && (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden)) {
+                            return@execute DownloadOutcome.ExpiredUrl(response.status.value)
                         }
                         if (response.status == HttpStatusCode.Unauthorized) {
                             throw AuthenticationException(
@@ -298,6 +306,27 @@ class GraphApiService(
                     DownloadOutcome.RetryAuth -> {
                         log.info("Got 401 on download itemId={} — forcing token refresh and retrying once", itemId)
                         authRefreshed = true
+                        continue
+                    }
+                    is DownloadOutcome.ExpiredUrl -> {
+                        // #329: the tempauth token of the pre-authenticated downloadUrl
+                        // expired — not an account-auth problem. Re-resolve the item once
+                        // for a fresh URL (mirrors the HTML re-resolve arm below); only a
+                        // 401/403 on the fresh URL is surfaced as an authentication failure.
+                        if (authUrlReresolved) {
+                            throw AuthenticationException(
+                                "Authentication failed (${outcome.statusCode}) on a re-resolved download URL for item $itemId",
+                            )
+                        }
+                        authUrlReresolved = true
+                        log.warn(
+                            "Got {} on the pre-authenticated download URL itemId={} — re-resolving for a fresh URL and retrying once",
+                            outcome.statusCode,
+                            itemId,
+                        )
+                        val fresh = getItemById(itemId)
+                        url = fresh.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+                        authNeeded = fresh.downloadUrl == null
                         continue
                     }
                     is DownloadOutcome.Throttle -> {
@@ -1052,6 +1081,12 @@ class GraphApiService(
         data object Done : DownloadOutcome()
 
         data object RetryAuth : DownloadOutcome()
+
+        // #329: the pre-authenticated downloadUrl's tempauth token expired (401/403 on
+        // an authNeeded == false request). Carries the status for the failure surface.
+        data class ExpiredUrl(
+            val statusCode: Int,
+        ) : DownloadOutcome()
 
         data class Throttle(
             val waitMs: Long,

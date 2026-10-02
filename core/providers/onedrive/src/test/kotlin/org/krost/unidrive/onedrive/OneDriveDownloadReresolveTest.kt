@@ -7,6 +7,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
+import org.krost.unidrive.AuthenticationException
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -246,6 +247,109 @@ class OneDriveDownloadReresolveTest {
             // Bounded: initial resolve + exactly one re-resolve = 2 path resolves; no more.
             assertEquals(2, getByPathCalls.get(), "the item must be re-resolved AT MOST once (no infinite loop)")
             provider.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #329: the pre-authenticated @microsoft.graph.downloadUrl carries a tempauth token
+    // that expires (~1 h). A 401 on that URL says nothing about account auth — the item
+    // must be re-resolved once for a fresh URL and the download retried, instead of
+    // being misclassified as an AuthenticationException.
+    @Test
+    fun `an expired pre-authenticated download url 401 is re-resolved once and the download succeeds`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        // getItemById inside downloadFile: hands out an expired CDN URL first,
+                        // a fresh one after the re-resolve.
+                        url.contains("/me/drive/items/item-401") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            val dl = if (n == 0) "https://cdn.example/expired" else "https://cdn.example/fresh401"
+                            respond(
+                                content = jsonItem("item-401", dl),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        // The expired pre-auth URL answers 401 — the tempauth token aged out.
+                        url == "https://cdn.example/expired" -> {
+                            respond(
+                                content = """{"error":{"code":"InvalidAuthenticationToken","message":"Access token expired."}}""",
+                                status = HttpStatusCode.Unauthorized,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        // The re-resolved URL serves the bytes.
+                        url == "https://cdn.example/fresh401" -> {
+                            respond(
+                                content = "FRESH",
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/octet-stream"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329", ".bin")
+            service.downloadFile("item-401", dest)
+
+            assertEquals("FRESH", Files.readString(dest), "the fresh URL must serve the download")
+            assertEquals(2, itemByIdCalls.get(), "the item must be resolved exactly twice (initial + one re-resolve)")
+            service.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #329: a 401 that persists on the re-resolved URL is a real failure — but exactly
+    // one re-resolve, no loop.
+    @Test
+    fun `a 401 that persists after re-resolution throws AuthenticationException with no second re-resolve`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/me/drive/items/item-401b") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            val dl = if (n == 0) "https://cdn.example/gone401a" else "https://cdn.example/gone401b"
+                            respond(
+                                content = jsonItem("item-401b", dl),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url.startsWith("https://cdn.example/gone401") -> {
+                            respond(
+                                content = """{"error":{"code":"InvalidAuthenticationToken","message":"Access token expired."}}""",
+                                status = HttpStatusCode.Unauthorized,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329b", ".bin")
+            assertFailsWith<AuthenticationException> {
+                service.downloadFile("item-401b", dest)
+            }
+            assertEquals(
+                2,
+                itemByIdCalls.get(),
+                "at most one re-resolve: initial + one, never a loop",
+            )
+            service.close()
             Files.deleteIfExists(dest)
         }
 }
