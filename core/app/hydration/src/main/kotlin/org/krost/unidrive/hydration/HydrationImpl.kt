@@ -445,9 +445,14 @@ class HydrationImpl(
                 )
             } catch (e: Exception) {
                 runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                // A vanished row (renamed away, unlinked, or reaped while queued) or a vanished cache copy: nothing a
+                // later attempt can change. Retrying would only hold the path's slot (busy to dehydrate and
+                // replace-rename) through the whole backoff schedule before reporting the same failure. (A remote
+                // conflict, #434/#470, never reaches here: it has its own terminal branch above.)
+                val gone = runCatching { stateDb.getEntry(path) }.getOrNull() == null || !Files.exists(cachePath)
                 val err = HydrationError.Generic(e.message ?: "upload failed")
                 lastError = err
-                val retryScheduled = attempt < maxUploadAttempts
+                val retryScheduled = !gone && attempt < maxUploadAttempts
                 _events.emit(HydrationEvent.Failed(path, err, retryScheduled = retryScheduled))
                 if (retryScheduled) {
                     log.info(
@@ -455,6 +460,9 @@ class HydrationImpl(
                         attempt, maxUploadAttempts, path, e.message,
                     )
                     delay(retryDelayMs(attempt))
+                } else if (gone) {
+                    log.warn("upload of {} abandoned: its row or cache copy is gone ({}), not retrying", path, e.message)
+                    break
                 } else {
                     log.warn(
                         "upload failed for {} after {} attempts, leaving the row failed (a daemon restart replays it): {}",

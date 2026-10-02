@@ -91,6 +91,56 @@ class HydrationUploadQueueTest {
     }
 
     @Test
+    fun `a remote conflict is reported as conflict and is not retried`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 3,
+            uploadRetryDelaysMs = listOf(1L, 1L),
+        )
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        writeCache(env, "/docs/f.txt", "my edit")
+        env.syncEngine.conflictUploads(999)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForWrite("conn1", "h1", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        advanceUntilIdle()
+
+        assertEquals(1, env.syncEngine.uploadAttempts(), "a conflict is deterministic: retrying cannot succeed")
+        assertEquals(listOf(false), events.filterIsInstance<HydrationEvent.Failed>().map { it.retryScheduled })
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single()
+        assertFalse(completed.ok)
+        assertEquals(HydrationError.CONFLICT_TOKEN, completed.error?.message)
+        assertTrue(Files.exists(env.syncEngine.resolveCachePath("/docs/f.txt")), "the cache copy is the only copy of the edit")
+        collector.cancel()
+    }
+
+    @Test
+    fun `an upload whose row vanished while queued is not retried`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 3,
+            uploadRetryDelaysMs = listOf(1L, 1L),
+        )
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        writeCache(env, "/docs/f.txt", "orphaned edit")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForWrite("conn1", "h1", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        env.stateDb.deleteRow("/docs/f.txt") // renamed away / unlinked before the worker ran
+        advanceUntilIdle()
+
+        assertEquals(listOf(false), events.filterIsInstance<HydrationEvent.Failed>().map { it.retryScheduled })
+        assertFalse(events.filterIsInstance<HydrationEvent.Completed>().single().ok)
+        assertEquals(0, env.syncEngine.uploadAttempts(), "the engine refuses before reaching the provider")
+        assertFalse(env.hydration.hasUploadSlot("/docs/f.txt"))
+        collector.cancel()
+    }
+
+    @Test
     fun `queued event precedes hydrating for every submitted upload`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this)
         env.stateDb.insertCreatedRow("/docs/f.txt")

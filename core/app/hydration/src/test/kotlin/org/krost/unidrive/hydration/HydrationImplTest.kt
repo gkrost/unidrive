@@ -56,6 +56,10 @@ internal class MinimalFakeProvider(
     // to a huge number for a permanent failure.
     val uploadFailuresRemaining = AtomicInteger(0)
 
+    // Like [uploadFailuresRemaining] but the failure is a RemoteConflictException (the
+    // provider's "remote changed under the edit" refusal).
+    val uploadConflictRemaining = AtomicInteger(0)
+
     // Upload progress emulation: progressSteps > 0 makes upload() report
     // onProgress in [progressSteps] evenly spaced steps; progressPaceMs > 0
     // additionally delays between steps (real-time coalescing tests).
@@ -114,6 +118,9 @@ internal class MinimalFakeProvider(
         uploadAttempts.incrementAndGet()
         if (uploadFailuresRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p } > 0) {
             throw IllegalStateException("injected upload failure")
+        }
+        uploadConflictRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p }.let { before ->
+            if (before > 0) throw org.krost.unidrive.RemoteConflictException("injected remote conflict: $remotePath")
         }
         // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
         val active = activeUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
@@ -412,6 +419,9 @@ internal class HydrationTestEnv(
 
         fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
 
+        /** Drops the row outright (a rename-away / unlink / reap while an upload is queued). */
+        fun deleteRow(path: String) = db.deleteEntry(path)
+
         /** The row's local-mtime watermark (what `hydration.last_synced` reports). */
         fun localMtimeOf(path: String): Long? = db.getEntry(path)?.localMtime
 
@@ -436,6 +446,11 @@ internal class HydrationTestEnv(
 
         /** Folders the provider was asked to create (scope-guard assertions). */
         fun createdFolders(): List<String> = fakeProvider.createdFolders
+
+        /** Injects [count] RemoteConflictException refusals from upload() before the next success. */
+        fun conflictUploads(count: Int) {
+            fakeProvider.uploadConflictRemaining.set(count)
+        }
 
         /** Injects [count] upload() failures before the next success. */
         fun failUploads(count: Int) {
