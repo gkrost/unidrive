@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import org.krost.unidrive.AuthenticationException
@@ -15,10 +16,12 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -384,6 +387,15 @@ open class SyncEngine(
     // state. A caller that loses the CAS is a no-op (skipped=true).
     private val enumerateInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // #318: per-path serialization for ensureHydrated's warm-cache check + download.
+    // Without it, a second open whose warm-cache size check fails re-downloads with
+    // TRUNCATE_EXISTING into the cache file while a first handle is still reading it
+    // (silent short/garbage reads on POSIX), and two concurrent cold opens
+    // double-download the same file. Entries persist for the daemon session — the
+    // same lifetime tradeoff as HydrationImpl.createMutexes, bounded by the number
+    // of distinct paths ever hydrated.
+    private val hydrateMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
      * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
@@ -447,8 +459,15 @@ open class SyncEngine(
      * cache directly to userspace reads — a silently accepted corrupt file would
      * be immediately visible to the user, unlike [applyDownload]'s
      * local-placeholder path where a warning is recoverable on the next sync.
+     *
+     * #318: the whole check+download runs under a per-path mutex. Concurrent
+     * opens of the same path must not double-download, and a re-download must
+     * never truncate a cache file another handle is reading.
      */
-    suspend fun ensureHydrated(path: String): Path {
+    suspend fun ensureHydrated(path: String): Path =
+        hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock { ensureHydratedLocked(path) }
+
+    private suspend fun ensureHydratedLocked(path: String): Path {
         val entry = db.getEntry(path)
             ?: throw IllegalArgumentException("Unknown remote path: $path")
         val cachePath = resolveCachePath(path)
@@ -487,48 +506,67 @@ open class SyncEngine(
             mimeType = null,
         )
         Files.createDirectories(cachePath.parent)
-        val downloadedSize = downloadByIdOrPath(remoteItem, path, cachePath)
-        if (verifyIntegrity) {
-            val verified = HashVerifier.verify(cachePath, entry.remoteHash, algorithm = provider.hashAlgorithm())
-            if (!verified) {
-                Files.deleteIfExists(cachePath)
-                throw IllegalStateException("Integrity check failed for hydration cache: $path")
+        // #318: download to a temp sibling and atomically swap it in, so a handle
+        // already reading the old cache keeps its inode instead of having the file
+        // truncated under it by TRUNCATE_EXISTING (silent short/garbage reads).
+        val staged =
+            cachePath.resolveSibling(
+                cachePath.fileName.toString() + ".hydrating-" + java.util.UUID.randomUUID(),
+            )
+        try {
+            val downloadedSize = downloadByIdOrPath(remoteItem, path, staged)
+            if (verifyIntegrity) {
+                val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
+                if (!verified) {
+                    // The surviving old cache may be corrupt-but-right-sized; removing
+                    // it forces a clean re-download on the next open instead of
+                    // serving it warm.
+                    Files.deleteIfExists(cachePath)
+                    throw IllegalStateException("Integrity check failed for hydration cache: $path")
+                }
             }
+            try {
+                Files.move(staged, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(staged, cachePath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            // Persist the freshly-downloaded size as remoteSize. The provider validated the
+            // download against the authoritative remote length (throwing on a short read), so
+            // this is the current truth. Without it a remote that changed size since the last
+            // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
+            // perfectly valid re-download.
+            val current = db.getEntry(path) ?: entry
+            if (rowDescribesSyncRootFile(current, path)) {
+                // #418: the download went to the cache, a different file from the one in the sync
+                // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
+                // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
+                // start claiming it does). Rewriting them from the cache copy made the next scan read an
+                // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
+                // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
+                // describes them.
+                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
+            } else {
+                // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
+                // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
+                // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
+                val rebaselined = current.copy(
+                    isHydrated = true,
+                    remoteSize = downloadedSize,
+                    localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                    localSize = Files.size(cachePath),
+                    lastSynced = Instant.now(),
+                )
+                // The row just adopted the cache copy's stats, so the hash must describe the cache
+                // copy's bytes: keeping a hash recorded for the previous contents would pair stale
+                // bytes with a fresh mtime/size and let a later touch be absorbed as unchanged.
+                db.upsertEntry(
+                    withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
+                )
+            }
+            return cachePath
+        } finally {
+            runCatching { Files.deleteIfExists(staged) }
         }
-        // Persist the freshly-downloaded size as remoteSize. The provider validated the
-        // download against the authoritative remote length (throwing on a short read), so
-        // this is the current truth. Without it a remote that changed size since the last
-        // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
-        // perfectly valid re-download.
-        val current = db.getEntry(path) ?: entry
-        if (rowDescribesSyncRootFile(current, path)) {
-            // #418: the download went to the cache, a different file from the one in the sync
-            // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
-            // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
-            // start claiming it does). Rewriting them from the cache copy made the next scan read an
-            // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
-            // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
-            // describes them.
-            db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
-        } else {
-            // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
-            // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
-            // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
-            val rebaselined = current.copy(
-                isHydrated = true,
-                remoteSize = downloadedSize,
-                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
-                localSize = Files.size(cachePath),
-                lastSynced = Instant.now(),
-            )
-            // The row just adopted the cache copy's stats, so the hash must describe the cache
-            // copy's bytes: keeping a hash recorded for the previous contents would pair stale
-            // bytes with a fresh mtime/size and let a later touch be absorbed as unchanged.
-            db.upsertEntry(
-                withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
-            )
-        }
-        return cachePath
     }
 
     // #418: true when [entry] is about the regular file in the sync root rather than about the
