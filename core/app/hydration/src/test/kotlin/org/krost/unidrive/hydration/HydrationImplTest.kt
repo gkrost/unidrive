@@ -56,6 +56,12 @@ internal class MinimalFakeProvider(
     // to a huge number for a permanent failure.
     val uploadFailuresRemaining = AtomicInteger(0)
 
+    // Upload progress emulation: progressSteps > 0 makes upload() report
+    // onProgress in [progressSteps] evenly spaced steps; progressPaceMs > 0
+    // additionally delays between steps (real-time coalescing tests).
+    var progressSteps: Int = 0
+    var progressPaceMs: Long = 0
+
     // Total upload() invocations (attempt counting for the retry tests) and
     // daemon-wide concurrency tracking for the transfer-cap test.
     private val uploadAttempts = AtomicInteger(0)
@@ -121,6 +127,13 @@ internal class MinimalFakeProvider(
         try {
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
+            if (progressSteps > 0 && onProgress != null) {
+                val total = bytes.size.toLong()
+                for (i in 1..progressSteps) {
+                    if (progressPaceMs > 0) kotlinx.coroutines.delay(progressPaceMs)
+                    onProgress(total * i / progressSteps, total)
+                }
+            }
             uploadedFiles[remotePath] = bytes
             completedUploads.incrementAndGet()
             return CloudItem(
@@ -222,6 +235,8 @@ internal class HydrationTestEnv(
     val uploadQueueDepth: Int = 256,
     val maxUploadAttempts: Int = 3,
     val uploadRetryDelaysMs: List<Long> = listOf(2_000L, 10_000L),
+    /** Coalescing gap for `uploading` progress events (0 = emit every callback). */
+    val uploadProgressMinIntervalMs: Long = 400,
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -260,6 +275,7 @@ internal class HydrationTestEnv(
             uploadQueueDepth = uploadQueueDepth,
             maxUploadAttempts = maxUploadAttempts,
             uploadRetryDelaysMs = uploadRetryDelaysMs,
+            uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
         )
     }
 

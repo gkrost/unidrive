@@ -33,6 +33,7 @@ class HydrationErrorTest {
             HydrationError.Conflict -> "conflict"
             HydrationError.OutOfScope -> "outside_scope"
             HydrationError.Excluded -> "excluded"
+            HydrationError.Cancelled -> "cancelled"
         }
         assertTrue(rendered.startsWith("generic:"))
     }

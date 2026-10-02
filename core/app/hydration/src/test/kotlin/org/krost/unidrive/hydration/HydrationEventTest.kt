@@ -41,6 +41,7 @@ class HydrationEventTest {
             is HydrationEvent.Failed         -> "fa"
             is HydrationEvent.Queued         -> "qu"
             is HydrationEvent.Skipped        -> "sk"
+            is HydrationEvent.Uploading      -> "up"
             is HydrationEvent.Completed      -> "co"
             is HydrationEvent.ViewInvalidated -> "vi"
         }

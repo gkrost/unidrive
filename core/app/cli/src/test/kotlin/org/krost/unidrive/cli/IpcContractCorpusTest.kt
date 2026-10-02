@@ -248,6 +248,8 @@ class IpcContractCorpusTest {
 
         override suspend fun closeHandle(connectionId: String, handleId: String) {}
 
+        override suspend fun cancelUpload(path: String): Boolean = path == "/docs/open.txt"
+
         override suspend fun hydrate(path: String): HydrateResult =
             if (path.startsWith("/missing")) HydrateResult.Failed(HydrationError.UnknownPath)
             else HydrateResult.Ok

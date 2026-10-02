@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -21,6 +22,7 @@ import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -38,6 +40,10 @@ class HydrationImpl(
     val uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
     val maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
     val uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
+    // Minimum wall-clock gap between `uploading` progress events per attempt;
+    // coalesces provider progress callbacks to at most a few per second per
+    // file. 0 emits every callback (tests).
+    val uploadProgressMinIntervalMs: Long = DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS,
 ) : Hydration {
 
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
@@ -84,7 +90,14 @@ class HydrationImpl(
     // the same mutex between A's decrement and A's remove, leaving B holding a
     // mutex that A then deleted, causing a later submitter C to create a fresh
     // mutex — so B and C would run concurrently for the same path.
-    private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
+    private data class UploadSlot(
+        val mutex: Mutex,
+        val pending: AtomicInteger,
+        // Live worker coroutines of this slot, for cancelUpload. Registered on
+        // launch; pruned by cancelUpload (completed jobs report false on
+        // cancel). Dies with the slot when pending drops to zero.
+        val jobs: ConcurrentLinkedQueue<Job> = ConcurrentLinkedQueue(),
+    )
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
     // Waiting-slot budget for the upload queue. Acquired by the submitting
@@ -108,6 +121,9 @@ class HydrationImpl(
 
         /** Delays preceding retries 2..N of a queued upload (see [uploadRetryDelaysMs]). */
         val DEFAULT_UPLOAD_RETRY_DELAYS_MS = listOf(2_000L, 10_000L)
+
+        /** Default coalescing gap for `uploading` progress events (see [uploadProgressMinIntervalMs]). */
+        const val DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS = 400L
     }
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
@@ -290,7 +306,7 @@ class HydrationImpl(
         val slot = uploadSlots.compute(path) { _, s ->
             (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
         }!!
-        recoveryUploadScope.launch {
+        val worker = recoveryUploadScope.launch {
             // Emitted only after the slot is released (below): a client that reacts to
             // Completed by re-listing must already see pending_upload settled, not still
             // raised by the slot of the upload it was just told about.
@@ -300,21 +316,50 @@ class HydrationImpl(
             // the job never got that far. A plain Boolean is safe — only this
             // coroutine touches it.
             var waitingSlotHeld = true
+            // Coalesced progress: at most one `uploading` event per interval per
+            // attempt. tryEmit — a progress callback must never suspend the
+            // transfer on the event buffer.
+            var lastProgressEmitNanos = 0L
+            val minIntervalNanos = uploadProgressMinIntervalMs.coerceAtLeast(0) * 1_000_000
+            val onProgress: (Long, Long) -> Unit = { done, total ->
+                val now = System.nanoTime()
+                if (minIntervalNanos == 0L || now - lastProgressEmitNanos >= minIntervalNanos) {
+                    lastProgressEmitNanos = now
+                    _events.tryEmit(HydrationEvent.Uploading(path, handleId, done, total))
+                }
+            }
             try {
-                slot.mutex.withLock {
-                    try {
-                        completed = runUploadWithRetries(path, cachePath, handleId, baseEtag) {
+                try {
+                    slot.mutex.withLock {
+                        try {
+                            completed = runUploadWithRetries(path, cachePath, handleId, baseEtag, onProgress) {
+                                if (waitingSlotHeld) {
+                                    queueSlots.release()
+                                    waitingSlotHeld = false
+                                }
+                            }
+                        } finally {
                             if (waitingSlotHeld) {
                                 queueSlots.release()
                                 waitingSlotHeld = false
                             }
                         }
-                    } finally {
-                        if (waitingSlotHeld) {
-                            queueSlots.release()
-                            waitingSlotHeld = false
-                        }
                     }
+                } catch (e: CancellationException) {
+                    // cancelUpload (or daemon shutdown) aborted this submission
+                    // while queued, mid-transfer, or in a retry backoff: the
+                    // handle's correlation must end with a cause, not hang.
+                    // tryEmit — a cancelled coroutine can no longer suspend.
+                    _events.tryEmit(
+                        HydrationEvent.Completed(
+                            path = path,
+                            handleId = handleId,
+                            direction = HydrationEvent.Completed.Direction.UPLOAD,
+                            ok = false,
+                            error = HydrationError.Cancelled,
+                        ),
+                    )
+                    throw e
                 }
             } finally {
                 // #319: decrement the CAPTURED slot — a concurrent rename may have
@@ -332,19 +377,21 @@ class HydrationImpl(
             }
             completed?.let { _events.emit(it) }
         }
+        slot.jobs.add(worker)
     }
 
     // Runs one queued upload to completion: up to [maxUploadAttempts] transfer
     // attempts under the daemon-wide permit, emitting hydrating/hydrated (or
-    // failed per attempt). [baseEtag] is forwarded to uploadFromCache for the
-    // upload-time convergence guard. [onPermitAcquired] fires inside the
-    // permit block — the queue's waiting slot is handed over exactly when the
-    // transfer actually starts.
+    // failed per attempt) and coalesced uploading progress. [baseEtag] is
+    // forwarded to uploadFromCache for the upload-time convergence guard.
+    // [onPermitAcquired] fires inside the permit block — the queue's waiting
+    // slot is handed over exactly when the transfer actually starts.
     private suspend fun runUploadWithRetries(
         path: String,
         cachePath: Path,
         handleId: String,
         baseEtag: String?,
+        onProgress: (Long, Long) -> Unit,
         onPermitAcquired: () -> Unit,
     ): HydrationEvent.Completed {
         var lastError: HydrationError = HydrationError.Generic("upload failed")
@@ -353,7 +400,7 @@ class HydrationImpl(
                 syncEngine.withTransferPermit {
                     onPermitAcquired()
                     _events.emit(HydrationEvent.Hydrating(path))
-                    syncEngine.uploadFromCache(path, cachePath, baseEtag)
+                    syncEngine.uploadFromCache(path, cachePath, baseEtag, onProgress)
                 }
                 val bytes = Files.size(cachePath)
                 _events.emit(HydrationEvent.Hydrated(path, bytes))
@@ -436,6 +483,21 @@ class HydrationImpl(
             queued++
         }
         return queued
+    }
+
+    override suspend fun cancelUpload(path: String): Boolean {
+        val slot = uploadSlots[path] ?: return false
+        // Prune finished workers first so a stale entry can never make the
+        // reply claim an abort that already completed on its own.
+        slot.jobs.removeIf { it.isCompleted }
+        var aborted = false
+        for (job in slot.jobs) {
+            if (!job.isCompleted) {
+                job.cancel()
+                aborted = true
+            }
+        }
+        return aborted
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {

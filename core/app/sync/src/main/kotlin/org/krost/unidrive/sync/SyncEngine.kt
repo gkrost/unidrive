@@ -641,6 +641,11 @@ open class SyncEngine(
         path: String,
         cachePath: Path,
         ifMatchETag: String? = null,
+        // Byte progress of the transfer, (transferred, total). Optional: the
+        // hydration upload path threads it into `uploading` events; callers
+        // that don't need it leave it null (the sync-progress reporter below
+        // always runs).
+        onProgress: ((Long, Long) -> Unit)? = null,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
         if (isExcludedPath(path)) {
@@ -700,6 +705,7 @@ open class SyncEngine(
             try {
                 provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
                     reporter.onTransferProgress(path, transferred, total)
+                    onProgress?.invoke(transferred, total)
                 }
             } catch (e: Exception) {
                 auditLog?.emit(

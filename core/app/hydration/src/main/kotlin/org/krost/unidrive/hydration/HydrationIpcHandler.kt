@@ -75,6 +75,19 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         retry after the "completed" event for that handle.
  *
  *   open_write_begin request: {"verb":"hydration.open_write_begin","path":"/foo"}  [,"handle_id":"wh-N"]  reply ok: {"ok":true,"cache_path":"..."}  errs: unknown_path / path_is_folder / outside_scope
+ *
+ *   cancel      request:  {"verb":"hydration.cancel","path":"/foo"}
+ *               reply:    {"ok":true,"cancelled":true}    a queued/running upload was aborted
+ *                         {"ok":false,"error":"cancelled"} → the aborted upload's Completed carries this token
+ *                         {"ok":true,"cancelled":false}    nothing in flight (idempotent)
+ *                         Aborts every in-flight submission for the path (waiting, running,
+ *                         or in retry backoff); the caller follows with the row-level verb
+ *                         (unlink/rename) for the path itself.
+ *
+ *   Upload progress: while a client-written file uploads, the stream carries
+ *   {"event":"uploading","path":"...","handle_id":"...","bytes_done":N,"bytes_total":M}
+ *   coalesced to a few per second per file, correlated by the open_write
+ *   handle like `completed`.
  *                            handle_id is OPTIONAL: present → registers a JVM open-set entry (O_TRUNC live open);
  *                            absent → no registration (one-shot setattr/bare-truncate, backward-compatible).
  *
@@ -233,6 +246,7 @@ class HydrationIpcHandler(
             "hydration.rmdir",
             "hydration.create",
             "hydration.rename",
+            "hydration.cancel",
         )
     }
     suspend fun handle(connectionId: String, jsonRequest: String): String {
@@ -357,6 +371,14 @@ class HydrationIpcHandler(
                     RenameResult.NewPathExists -> reply(ok = false, error = "new_path_exists")
                     is RenameResult.Failed -> reply(ok = false, error = r.error.message)
                 }
+            }
+            "hydration.cancel" -> {
+                val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
+                // Idempotent: cancelled=true when a queued/running upload was
+                // aborted, false when nothing was in flight — both satisfy the
+                // caller's "no upload happens" goal, so both are ok.
+                val cancelled = hydration.cancelUpload(path)
+                """{"ok":true,"cancelled":$cancelled}"""
             }
             "hydration.subscribe" -> {
                 registerSubscriber(connectionId)
@@ -559,6 +581,10 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Skipped    -> """{"event":"skipped","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Queued     -> """{"event":"queued","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Uploading -> {
+        """{"event":"uploading","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)}},""" +
+            """"bytes_done":${e.bytesDone},"bytes_total":${e.bytesTotal}}"""
+    }
     is HydrationEvent.Failed -> {
         val base = """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}"""
         // retry_scheduled is only serialized for upload attempts; download and

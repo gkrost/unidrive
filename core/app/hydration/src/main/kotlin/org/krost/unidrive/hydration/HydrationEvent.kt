@@ -75,6 +75,22 @@ sealed class HydrationEvent {
     }
 
     /**
+     * Byte progress of a client-written upload, correlated to the open_write
+     * handle like [Completed]. Coalesced to at most a few per second per file
+     * (providers that cannot report progress simply never emit this — the
+     * stream only carries the hydrating/hydrated pair and the Completed).
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"uploading","path":"/a/save.doc","handle_id":"h1","bytes_done":4096,"bytes_total":65536}`
+     */
+    data class Uploading(
+        override val path: String,
+        val handleId: String,
+        val bytesDone: Long,
+        val bytesTotal: Long,
+    ) : HydrationEvent()
+
+    /**
      * Emitted after [org.krost.unidrive.sync.SyncEngine.enumerateRemoteIntoState] mutates
      * `state.db` (upserts and/or reaps rows). Signals subscribed FUSE co-daemons to drop
      * stale `readdir`/`getattr` cache entries.

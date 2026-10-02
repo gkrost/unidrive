@@ -74,6 +74,18 @@ sealed interface HydrationError {
         override val message: String = EXCLUDED_TOKEN
     }
 
+    /**
+     * The upload was cancelled through [Hydration.cancelUpload] (the user
+     * deleted the file or moved it out while the upload was queued, running,
+     * or in a retry backoff). Carried as [Completed.error] so the client's
+     * handle correlation terminates with a cause instead of hanging. Its
+     * [message] is the STABLE wire token `cancelled`. Changing this string
+     * breaks that cross-repo contract.
+     */
+    data object Cancelled : HydrationError {
+        override val message: String = CANCELLED_TOKEN
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
@@ -89,5 +101,8 @@ sealed interface HydrationError {
 
         /** Wire token for [Excluded]; shared verbatim with the mount crate. */
         const val EXCLUDED_TOKEN = "excluded"
+
+        /** Wire token for [Cancelled]; shared verbatim with the mount crate. */
+        const val CANCELLED_TOKEN = "cancelled"
     }
 }
