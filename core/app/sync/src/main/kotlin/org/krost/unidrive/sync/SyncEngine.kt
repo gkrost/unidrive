@@ -709,7 +709,10 @@ open class SyncEngine(
             val entry = db.getEntry(path) ?: return@withLock null
             val cache = resolveCachePath(path)
             val size = runCatching { Files.size(cache) }.getOrNull() ?: return@withLock null
-            val cacheWasLocalFile = entry.cacheBacked == true || (entry.cacheBacked == null && !rowDescribesSyncRootFile(entry, path))
+            val mtime = runCatching { Files.getLastModifiedTime(cache).toMillis() }.getOrNull() ?: return@withLock null
+            // The same test cacheDisposition used: the cache copy is the row's local file.
+            val cacheWasLocalFile =
+                entry.cacheBacked == true || (entry.cacheBacked == null && entry.localMtime == mtime && entry.localSize == size)
             try {
                 Files.delete(cache)
             } catch (e: java.io.IOException) {

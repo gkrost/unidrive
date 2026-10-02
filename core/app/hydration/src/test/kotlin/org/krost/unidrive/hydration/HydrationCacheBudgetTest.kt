@@ -301,6 +301,25 @@ class HydrationCacheBudgetTest {
         }
 
     @Test
+    fun `evicting a copy of a legacy row whose sync-root file was edited leaves the row hydrated`() =
+        runTest {
+            val env = freshEnv()
+            val cache = env.syncedAndRead("a.txt").getValue("a.txt")
+            // A row from before cache_backed existed, and the user has since edited the sync-root file.
+            env.db.upsertEntry(assertNotNull(env.db.getEntry("/a.txt")).copy(cacheBacked = null))
+            val syncFile = env.syncRoot.resolve("a.txt")
+            Files.write(syncFile, bytesOf(77))
+            Files.setLastModifiedTime(syncFile, FileTime.from(Instant.now().plusSeconds(10)))
+            val hydration = env.hydration(this, budget = 1)
+
+            hydration.evictCache()
+
+            assertFalse(Files.exists(cache), "the copy equals the recorded baseline bytes: evictable")
+            assertEquals(true, env.db.getEntry("/a.txt")?.isHydrated, "the row describes the (edited) sync-root file, not the cache")
+            assertContentEquals(bytesOf(77), Files.readAllBytes(syncFile))
+        }
+
+    @Test
     fun `no budget and a cache under budget evict nothing`() =
         runTest {
             val env = freshEnv()
