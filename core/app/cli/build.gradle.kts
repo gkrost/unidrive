@@ -27,6 +27,50 @@ kotlin {
     jvmToolchain(21)
 }
 
+// The packaged distribution ships a jlink runtime image instead of
+// requiring a user-installed JDK. Two module groups:
+//   - jdepsModuleSet is exactly what `jdeps --print-module-deps` reports
+//     for the fat jar. It is pinned in two places on purpose — here and in
+//     RuntimeModulesTest — so a new dependency that changes the module set
+//     fails `check` and the image is updated deliberately, not silently.
+//   - extraRuntimeModules is needed at runtime but invisible to jdeps:
+//     service-loaded or reflective paths in the bundled libraries (JDBC
+//     driver, HTTP/WebSocket stacks) land here, plus the deliberate
+//     additions — the JDK HTTP client, the JUL binding those stacks bind
+//     to, TLS EC-certificate support, the optional charsets, locale data
+//     for non-US date/number formats, and the zip filesystem provider.
+// java.desktop deliberately absent: the OAuth browser opener uses the
+// platform openers (rundll32/open/xdg-open), not java.awt.Desktop, so the
+// ~10 MB desktop module does not ship.
+val jdepsModuleSet =
+    listOf(
+        "java.base",
+        "java.instrument",
+        "java.management",
+        "java.naming",
+        "java.sql",
+        "jdk.unsupported",
+    )
+val extraRuntimeModules =
+    listOf(
+        "java.net.http",
+        "java.logging",
+        "jdk.crypto.ec",
+        "jdk.charsets",
+        "jdk.localedata",
+        "jdk.zipfs",
+    )
+
+// jlink produces a runtime of its own version, so the packaged image is
+// jlinked from the bundled runtime JDK — the current JDK release train the
+// platform packages are measured against — while the engine's bytecode
+// stays at the compile toolchain level above. The runtime JDK leads the
+// bytecode target on purpose; bump it with the release train.
+val runtimeToolchain =
+    the<org.gradle.jvm.toolchain.JavaToolchainService>().launcherFor {
+        languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(27)
+    }
+
 application {
     mainClass.set("org.krost.unidrive.cli.MainKt")
     // UD-258: force UTF-8 on stdout/stderr so Windows JVMs don't encode
@@ -166,6 +210,78 @@ tasks.shadowJar {
 // Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
 // guards them from `check`.
 apply(from = "../../gradle/notices.gradle.kts")
+
+tasks.register("runtimeImage") {
+    group = "distribution"
+    description =
+        "jlink a trimmed runtime image next to the shadow jar — " +
+            "what a packaged distribution ships instead of a user-installed JDK"
+
+    dependsOn(tasks.shadowJar)
+
+    val imageDir = layout.buildDirectory.dir("runtime-image")
+    outputs.dir(imageDir).withPropertyName("imageDir")
+
+    // Capture at config time (Gradle 10: no Task.project at execution).
+    val jarFile = tasks.shadowJar.flatMap { it.archiveFile }
+    // Declared input, not only a doLast value: without it a rebuilt jar
+    // leaves the task UP-TO-DATE — a stale image ships, and the jdeps guard
+    // below, living in doLast, never runs again.
+    inputs.files(jarFile).withPropertyName("jarFile")
+    val javaHome = runtimeToolchain.map { it.metadata.installationPath }
+    val hostIsWindows = System.getProperty("os.name", "").lowercase().contains("win")
+
+    doLast {
+        val javaHomeDir = javaHome.get().asFile
+        fun tool(name: String) = javaHomeDir.resolve("bin/$name${if (hostIsWindows) ".exe" else ""}").absolutePath
+
+        // The jar's actual module footprint must still match the pin —
+        // same check RuntimeModulesTest runs, repeated here so a bare
+        // :app:cli:runtimeImage cannot build an image off a stale list.
+        val jarPath = jarFile.get().asFile.absolutePath
+        val jdepsOut =
+            run(tool("jdeps"), "--print-module-deps", "--multi-release", "21", "--ignore-missing-deps", "-q", jarPath)
+        val actualModules = jdepsOut.substringAfterLast('\n', jdepsOut).trim()
+        if (actualModules != jdepsModuleSet.joinToString(",")) {
+            throw GradleException(
+                "The jar's JDK module dependencies changed: jdeps reports [$actualModules], " +
+                    "the image pins [${jdepsModuleSet.joinToString(",")}]. Update jdepsModuleSet here and the " +
+                    "pinned set in RuntimeModulesTest, then re-verify the image boots the jar.",
+            )
+        }
+
+        val outDir = imageDir.get().asFile
+        if (outDir.exists()) outDir.deleteRecursively()
+        run(
+            tool("jlink"),
+            "--add-modules",
+            (jdepsModuleSet + extraRuntimeModules).joinToString(","),
+            "--strip-debug",
+            "--no-man-pages",
+            "--no-header-files",
+            "--compress",
+            "zip-9",
+            "--output",
+            outDir.absolutePath,
+        )
+
+        // Redistribution ships the runtime's licenses: OpenJDK GPLv2 with
+        // Classpath Exception plus per-module third-party notices. jlink
+        // copies module legal/ directories into the image by default; a
+        // missing one means the image was built with a stripping option
+        // combination that must not go out the door.
+        val legal = outDir.resolve("legal")
+        if (!legal.isDirectory || legal.listFiles().isNullOrEmpty()) {
+            throw GradleException(
+                "The runtime image at ${outDir.absolutePath} has no legal/ directory — " +
+                    "redistributed images must ship the runtime licenses.",
+            )
+        }
+
+        val sizeMb = outDir.walkBottomUp().filter { it.isFile }.sumOf { it.length() } / (1024 * 1024)
+        println("[runtime-image] ${outDir.absolutePath} ($sizeMb MB, ${legal.listFiles()!!.size} legal entries)")
+    }
+}
 
 fun run(
     vararg cmd: String,
@@ -313,11 +429,25 @@ fun deployWindows(
         |# stream as UTF-8.
         |chcp 65001 > ${'$'}null
         |
+        |# Heap size: UNIDRIVE_XMX holds a bare size (e.g. 512m, 2g — no -Xmx
+        |# prefix). The old fixed -Xmx6g assumed a workstation; the packaged
+        |# image runs on ordinary desktops too.
+        |${'$'}xmx = if (${'$'}env:UNIDRIVE_XMX) { '-Xmx' + ${'$'}env:UNIDRIVE_XMX } else { '-Xmx2g' }
+        |# AF_UNIX socket temp dir: the JVM's default tracks java.io.tmpdir,
+        |# which packaged Windows apps have seen redirected or unwritable —
+        |# pin it to the host's temp dir instead.
+        |${'$'}tmp = if (${'$'}env:TEMP) { ${'$'}env:TEMP } elseif (${'$'}env:TMP) { ${'$'}env:TMP } else { ${'$'}null }
         |${'$'}javaArgs = @(
-        |    '-Xmx6g'
+        |    ${'$'}xmx
         |    '-Dstdout.encoding=UTF-8'
         |    '-Dstderr.encoding=UTF-8'
         |    '--enable-native-access=ALL-UNNAMED'
+        |)
+        |# Append, never concat with a possibly-null operand: ${'$'}javaArgs + ${'$'}tmpDirArg
+        |# inserts an empty element when TEMP/TMP are unset (java then reads an empty
+        |# first argument as the main class name under PowerShell 7).
+        |if (${'$'}tmp) { ${'$'}javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + ${'$'}tmp) }
+        |${'$'}javaArgs += @(
         |    '-jar'
         |    '$targetJar'
         |)
@@ -343,8 +473,11 @@ fun deployWindows(
     val sentinelPath = "$localAppData\\\\unidrive\\\\stop"
     batchWrapper.writeText(
         "@echo off\r\n" +
+            "set \"XMX=-Xmx2g\"\r\n" +
+            "if defined UNIDRIVE_XMX set \"XMX=-Xmx%UNIDRIVE_XMX%\"\r\n" +
             ":loop\r\n" +
-            "java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar " +
+            "java %XMX% -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED " +
+            "-Djdk.net.unixdomain.tmpdir=\"%TEMP%\" -jar " +
             "\"${targetJar.absolutePath}\" sync --watch\r\n" +
             "if exist \"${localAppData}\\unidrive\\stop\" (\r\n" +
             "    del \"${localAppData}\\unidrive\\stop\"\r\n" +
@@ -404,7 +537,9 @@ fun deployLinux(
     launcher.writeText(
         """
         |#!/usr/bin/env bash
-        |exec java -Xmx6g -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED -jar "$targetJar" "${'$'}@"
+        |# Heap size via UNIDRIVE_XMX (a bare size, e.g. 512m, 2g — no -Xmx prefix).
+        |XMX="-Xmx${'$'}{UNIDRIVE_XMX:-2g}"
+        |exec java "${'$'}XMX" -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED "-Djdk.net.unixdomain.tmpdir=${'$'}{TMPDIR:-/tmp}" -jar "$targetJar" "${'$'}@"
         """.trimMargin() + "\n",
     )
     launcher.setExecutable(true)
@@ -469,4 +604,9 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    // RuntimeModulesTest jdeps-es the fat jar to pin its JDK module set —
+    // build the jar for `check` too, so the module pin is verified on every
+    // test run rather than only when someone remembers to build the image.
+    dependsOn(tasks.shadowJar)
+    systemProperty("unidrive.runtime.test.jar", tasks.shadowJar.flatMap { it.archiveFile }.get().asFile.absolutePath)
 }

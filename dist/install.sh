@@ -77,7 +77,9 @@ echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 mkdir -p "${INSTALL_BIN}"
 cat > "${INSTALL_BIN}/unidrive" <<WRAPPER
 #!/usr/bin/env bash
-exec java --enable-native-access=ALL-UNNAMED -jar "${INSTALL_LIB}/${CLI_BASENAME}" "\$@"
+# Heap size via UNIDRIVE_XMX (a bare size, e.g. 512m, 2g — no -Xmx prefix).
+XMX="-Xmx\${UNIDRIVE_XMX:-2g}"
+exec java "\$XMX" --enable-native-access=ALL-UNNAMED "-Djdk.net.unixdomain.tmpdir=\${TMPDIR:-/tmp}" -jar "${INSTALL_LIB}/${CLI_BASENAME}" "\$@"
 WRAPPER
 chmod +x "${INSTALL_BIN}/unidrive"
 echo "  ${INSTALL_BIN}/unidrive"

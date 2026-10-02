@@ -27,6 +27,28 @@ JDK 21+, Linux with `systemd --user`.
 ./gradlew :core:app:cli:assemble    # build fat JAR
 ```
 
+## Packaged distribution (no user-installed JDK)
+
+A platform package ships a `jlink` runtime image next to the fat JAR. The image
+is jlinked from the bundled runtime JDK — the current JDK release train — while
+the engine's bytecode stays at the compile toolchain level (`jlink` produces a
+runtime of its own version, so the image JVM deliberately leads the bytecode
+target):
+
+```bash
+./gradlew :core:app:cli:shadowJar :core:app:cli:runtimeImage
+# → core/app/cli/build/runtime-image/  (bin/java + legal/, ~50 MB)
+#   runtime-image/bin/java -jar core/app/cli/build/libs/unidrive-*.jar --version
+```
+
+The image's JDK module set is pinned — a new dependency that changes it fails
+`check` (see `RuntimeModulesTest`), and CI runs the whole gate a second time
+with the engine executing on the bundled runtime JDK. Launchers honour
+`UNIDRIVE_XMX` (bare size, e.g. `512m`, `2g`; default `2g`) and pin
+`-Djdk.net.unixdomain.tmpdir` to the host's temp directory. The bundled runtime
+follows the JDK release train: each feature release ships as a normal app
+update, with the LTS marks as the long-haul targets.
+
 ## Install (user-space, no root)
 
 ```bash
