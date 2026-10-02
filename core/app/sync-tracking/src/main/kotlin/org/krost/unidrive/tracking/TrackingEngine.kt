@@ -581,6 +581,24 @@ class TrackingEngine(
                 }
                 for (item in page.items) {
                     if (item.isFolder) continue
+                    // #401 detector: two live remote items sharing one path cannot both
+                    // be represented in the path-keyed tracking set. Marking the pass
+                    // incomplete suppresses delete actions for it (no wrong-twin reap
+                    // on a name the provider resolves arbitrarily). No migration: the
+                    // tracking store is frozen; the standing detector is the guard.
+                    val prior = out[item.path]
+                    if (prior != null && prior.exists && !item.deleted && prior.remoteFileId != item.id) {
+                        log.warn(
+                            "#401: two live remote items share the path {} (ids {} and {}); " +
+                                "marking this pass incomplete so deletes stay suppressed. " +
+                                "Resolve the duplicate in the cloud.",
+                            item.path,
+                            prior.remoteFileId,
+                            item.id,
+                        )
+                        complete = false
+                        continue
+                    }
                     out[item.path] =
                         if (item.deleted) {
                             // Explicit deletion signal (OneDrive maps

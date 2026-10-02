@@ -79,6 +79,13 @@ class FakeTrackingProvider : CloudProvider {
     val incrementalDeletes: MutableList<String> = mutableListOf()
 
     /**
+     * #401 test hook: live items appended to the delta page verbatim. The [files]
+     * map is path-keyed and cannot hold two live items for one path — this models
+     * a provider emitting same-named twins.
+     */
+    var extraDeltaItems: List<CloudItem> = emptyList()
+
+    /**
      * UD-410 test hook: when [delta] is called with a cursor equal to this
      * value, throw [DeltaCursorExpiredException] (the 410-Gone signal). Models
      * a stored cursor that aged out / a re-keyed drive. The recovery pass
@@ -359,7 +366,7 @@ class FakeTrackingProvider : CloudProvider {
                 deletedItems + changedItems
             } else {
                 files.entries.map { (path, bytes) -> itemFor(path, bytes) }
-            }
+            } + extraDeltaItems
         return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = passComplete)
     }
 

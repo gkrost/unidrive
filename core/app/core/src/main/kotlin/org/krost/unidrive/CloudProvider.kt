@@ -103,6 +103,19 @@ interface CloudProvider {
      */
     suspend fun delete(remotePath: String, ifMatchETag: String? = null)
 
+    /**
+     * #402: delete the item with [remoteId] instead of resolving [remotePath] by name.
+     * Path-based resolution picks the first of same-named siblings, so a delete can
+     * trash the wrong twin; callers that hold the row's real cloud id (non-`local:`)
+     * route here. [remotePath] is carried for error messages and for providers
+     * without an id-addressed delete — the default falls back to [delete].
+     * Precedent: [downloadById] / [upload]'s `existingRemoteId`.
+     */
+    suspend fun deleteById(
+        remoteId: String,
+        remotePath: String,
+    ) = delete(remotePath)
+
     suspend fun createFolder(path: String): CloudItem
 
     /**
@@ -121,6 +134,18 @@ interface CloudProvider {
         fromPath: String,
         toPath: String,
     ): CloudItem
+
+    /**
+     * #402: move the item with [remoteId] instead of resolving [fromPath] by name —
+     * same rationale as [deleteById]. The default falls back to [move] so providers
+     * without an id-addressed move keep working; the engine routes through here
+     * whenever the source row carries a real cloud id.
+     */
+    suspend fun moveById(
+        remoteId: String,
+        fromPath: String,
+        toPath: String,
+    ): CloudItem = move(fromPath, toPath)
 
     /**
      * Walk the remote and return the change set since [cursor].

@@ -214,6 +214,159 @@ open class SyncEngine(
         recentlyUploaded.entries.removeIf { it.value.isBefore(cutoff) }
     }
 
+    // #401: paths the last gather flagged as collided — two live remote items resolving
+    // to one path key. A path-addressed delete/move on one of these could hit either
+    // twin, so apply refuses them unless the action carries a real remote id (#402).
+    // Rebuilt by every gather: the collision exists for as long as the twins do.
+    private val collidedPaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    // #401/#309: the collision key folds case when the local filesystem is
+    // case-insensitive, so case-only twins collide (and get reported) instead of
+    // writing two rows that map to one local file. NFC is already applied by
+    // resolveItemPath. Windows check mirrors sameSyncRoot.
+    private val foldGatherKeys: Boolean = System.getProperty("os.name", "").lowercase().contains("win")
+
+    private fun gatherKey(path: String): String = if (foldGatherKeys) path.lowercase() else path
+
+    // #401: one collision path's winner and the twins it displaced.
+    private inner class CollisionRecord(
+        val winner: CloudItem,
+    ) {
+        val losers = mutableListOf<CloudItem>()
+    }
+
+    /**
+     * #401: deterministic admission of remote delta items into the gather map.
+     *
+     * Named justification (structural-safety property): reconcile keys are injective
+     * and nothing the provider emits is dropped unreported. Replaces the gather's
+     * `changes[path] = item` sites, where last-one-wins let the provider's emit
+     * order decide which same-named item survived — the other was dropped silently.
+     *
+     * Where a key is already taken, the winner is folder > file > the id state.db
+     * already tracks at that path > smallest id — a pure function of the two items
+     * plus the DB, independent of emission order. The loser is recorded (reported
+     * after the gather via [reportGatheredCollisions]) and dropped.
+     *
+     * @return the item now holding the key (the winner), so callers can tell whether
+     *   [item] survived.
+     */
+    private fun admit(
+        changes: MutableMap<String, CloudItem>,
+        keyToPath: MutableMap<String, String>,
+        collisions: MutableMap<String, CollisionRecord>,
+        item: CloudItem,
+    ): CloudItem {
+        val key = gatherKey(item.path)
+        val incumbentPath = keyToPath[key]
+        if (incumbentPath == null) {
+            changes[item.path] = item
+            keyToPath[key] = item.path
+            return item
+        }
+        val incumbent = changes.getValue(incumbentPath)
+        if (incumbent.id == item.id) {
+            // Same remote item re-reported on a later page — a mid-gather remote edit
+            // surfacing a newer version. Fresh data wins (pre-#401 last-wins), and a
+            // version refresh is not a twin collision.
+            changes[incumbentPath] = item
+            keyToPath[key] = item.path
+            return item
+        }
+        val winner = collisionWinner(incumbent, item)
+        val loser = if (winner === incumbent) item else incumbent
+        if (winner !== incumbent) {
+            changes.remove(incumbentPath)
+            changes[winner.path] = winner
+            keyToPath[key] = winner.path
+        }
+        // A tombstone losing to the live replacement at its own path is a normal
+        // create-after-delete sequence, not a twin — drop it without reporting.
+        if (!loser.deleted) {
+            collisions.getOrPut(winner.path) { CollisionRecord(winner) }.losers.add(loser)
+        }
+        return winner
+    }
+
+    // #401 winner rule: a live item beats a tombstone (the replacement at the same
+    // path is the current truth); then folder beats file (the folder owns the path
+    // space); then the id state.db already tracks at this path (stability across
+    // runs — the engine keeps syncing the twin it has been syncing); then the
+    // smallest id, so two never-tracked twins resolve identically under any emit
+    // order.
+    private fun collisionWinner(
+        a: CloudItem,
+        b: CloudItem,
+    ): CloudItem =
+        when {
+            a.deleted != b.deleted -> if (b.deleted) a else b
+            a.isFolder != b.isFolder -> if (a.isFolder) a else b
+            else -> {
+                val tracked = runCatching { db.getEntryByRemotePath(a.path)?.remoteId }.getOrNull()
+                when {
+                    tracked != null && a.id == tracked -> a
+                    tracked != null && b.id == tracked -> b
+                    a.id <= b.id -> a
+                    else -> b
+                }
+            }
+        }
+
+    /**
+     * #401: report what the gather suppressed. Per collision: WARN with both ids,
+     * sizes and mtimes, `reporter.onWarning`, a skipped-ops.jsonl entry; then the
+     * run-level `sync_state` counters `status` renders. The loser ids come back so
+     * the absence sweep (detectMissingAfterFullSync) keeps treating them as seen —
+     * a suppressed twin must never be reaped via a path-addressed delete.
+     * Deliberately does NOT mark the gather incomplete: that would suspend reaping
+     * and new uploads for the whole profile for as long as one twin exists.
+     */
+    private fun reportGatheredCollisions(
+        collisions: Map<String, CollisionRecord>,
+        dryRun: Boolean,
+    ): Set<String> {
+        collidedPaths.clear()
+        collidedPaths.addAll(collisions.keys)
+        if (collisions.isEmpty()) {
+            db.setSyncState(REMOTE_COLLISIONS_KEY, "0")
+            // clearSyncState is private to StateDatabase; an empty value reads the
+            // same as absent ("0 collisions", no paths) through getSyncState.
+            db.setSyncState(REMOTE_COLLISION_PATHS_KEY, "")
+            return emptySet()
+        }
+        val losers = mutableSetOf<String>()
+        for ((path, record) in collisions) {
+            val w = record.winner
+            for (l in record.losers) {
+                losers.add(l.id)
+                val msg =
+                    "Remote path collision at $path: keeping id=${w.id} (size=${w.size}, mtime=${w.modified}); " +
+                        "suppressing id=${l.id} (size=${l.size}, mtime=${l.modified}). The twin stays cloud-only — " +
+                        "resolve or remove the duplicate in the cloud to sync it."
+                log.warn(msg)
+                reporter.onWarning(msg)
+                logSkippedOp("remote-collision", path, "duplicate remote item; winner=${w.id} loser=${l.id}", dryRun)
+            }
+        }
+        db.setSyncState(REMOTE_COLLISIONS_KEY, collisions.size.toString())
+        db.setSyncState(REMOTE_COLLISION_PATHS_KEY, collisions.keys.take(COLLISION_PATHS_STATUS_LIMIT).joinToString("\t"))
+        return losers
+    }
+
+    // #401: a path-addressed mutation on a collided path could hit either twin and
+    // the action carries no remote id to aim it with. Skip; the action re-plans
+    // once the duplicate is resolved in the cloud. Internal for the wrong-twin test.
+    internal fun refuseCollidedPath(action: SyncAction): Boolean {
+        if (action.path !in collidedPaths) return false
+        val msg =
+            "Not applying ${actionLabel(action)} for ${action.path}: two remote items share this path and " +
+                "the action has no remote id to aim at. Resolve the duplicate in the cloud first."
+        log.warn(msg)
+        reporter.onWarning("Skipped: $msg")
+        logSkippedOp(action, "collided_path_no_remote_id", dryRun = false)
+        return true
+    }
+
     // Single-flight guard for enumerateRemoteIntoState across ALL callers: the
     // --poll-interval poller, the sync.enumerate verb (EnumerateRpcHandler), and
     // mount-routed refresh.run (RefreshRpcHandler calls the engine directly).
@@ -1953,6 +2106,13 @@ open class SyncEngine(
         val cursor = storedCursor?.ifEmpty { null }
         var isFullSync = cursor == null || provider.deltaIsFullListing
         var changes = mutableMapOf<String, CloudItem>()
+        // #401: every `changes[path] = item` site goes through admit() so same-named
+        // remote items cannot silently drop a twin (see the admit doc).
+        val keyToPath = HashMap<String, String>()
+        val collisions = HashMap<String, CollisionRecord>()
+        fun admitChange(item: CloudItem) {
+            admit(changes, keyToPath, collisions, item)
+        }
 
         // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
         // cursor without enumerating. Provider must declare FastBootstrap; otherwise
@@ -1967,8 +2127,9 @@ open class SyncEngine(
                         val page = result.value
                         for (item in page.items) {
                             val resolved = resolveItemPath(item) ?: continue
-                            changes[resolved.path] = resolved
+                            admitChange(resolved)
                         }
+                        reportGatheredCollisions(collisions, readOnly)
                         // UD-223: promote the cursor directly. Bootstrap guarantees no transfers
                         // fire on this run (the action list is empty by construction), so the
                         // usual "pending → delta after zero failures" dance is skipped —
@@ -2127,7 +2288,7 @@ open class SyncEngine(
             var page = nextPage(cursor)
             for (item in page.items) {
                 val resolved = resolveItemPath(item) ?: continue
-                changes[resolved.path] = resolved
+                admitChange(resolved)
             }
             persistPendingCursor(page.cursor)
             // UD-742: heartbeat after each remote page. Internxt paginates
@@ -2141,7 +2302,7 @@ open class SyncEngine(
                 page = nextPage(page.cursor)
                 for (item in page.items) {
                     val resolved = resolveItemPath(item) ?: continue
-                    changes[resolved.path] = resolved
+                    admitChange(resolved)
                 }
                 persistPendingCursor(page.cursor)
                 reporter.onScanProgress("remote", changes.size)
@@ -2183,6 +2344,8 @@ open class SyncEngine(
             }
             // Reset all mutable accumulation state for the recovery pass.
             changes = mutableMapOf()
+            keyToPath.clear()
+            collisions.clear()
             allComplete = true
             isFullSync = true
             // Recovery: full enumeration from null cursor. Any ProviderException here
@@ -2191,7 +2354,7 @@ open class SyncEngine(
             var rPage = nextPageRecovery(null)
             for (item in rPage.items) {
                 val resolved = resolveItemPath(item) ?: continue
-                changes[resolved.path] = resolved
+                admitChange(resolved)
             }
             persistPendingCursor(rPage.cursor)
             reporter.onScanProgress("remote", changes.size)
@@ -2199,7 +2362,7 @@ open class SyncEngine(
                 rPage = nextPageRecovery(rPage.cursor)
                 for (item in rPage.items) {
                     val resolved = resolveItemPath(item) ?: continue
-                    changes[resolved.path] = resolved
+                    admitChange(resolved)
                 }
                 persistPendingCursor(rPage.cursor)
                 reporter.onScanProgress("remote", changes.size)
@@ -2232,8 +2395,12 @@ open class SyncEngine(
             db.completeScan(scanId)
         }
 
+        // #401: report suppressed twins BEFORE the absence sweep so their ids are
+        // excluded from reaping.
+        val collisionLoserIds = reportGatheredCollisions(collisions, readOnly)
+
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes)
+            detectMissingAfterFullSync(changes, collisionLoserIds)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -2367,6 +2534,10 @@ open class SyncEngine(
         val cursor = storedCursor?.ifEmpty { null }
         val isFullSync = cursor == null || provider.deltaIsFullListing
         val changes = mutableMapOf<String, CloudItem>()
+        // #401: the streaming path admits through the same collision winner-rule as
+        // the buffered gather (see gatherRemoteChanges).
+        val keyToPath = HashMap<String, String>()
+        val collisions = HashMap<String, CollisionRecord>()
         val buffer = StreamingReconcileBuffer()
         val safeAccumulator = mutableListOf<SyncAction>()
         // resolveSlice processes the full localChanges map on every delta page,
@@ -2702,9 +2873,15 @@ open class SyncEngine(
                     val slice = LinkedHashMap<String, CloudItem>()
                     val ids = mutableListOf<String>()
                     for ((_, item) in held) {
-                        slice[item.resolved.path] = item.resolved
                         ids.add(item.originalId)
-                        changes[item.resolved.path] = item.resolved
+                        // #401: single admit into the gather map. The page slice carries
+                        // the key's winner only when THIS page's item is it — a twin that
+                        // lost to an earlier page's winner was already reconciled on that
+                        // page, and the collision is recorded by the admit itself.
+                        val winner = admit(changes, keyToPath, collisions, item.resolved)
+                        if (winner.id == item.resolved.id) {
+                            slice[winner.path] = winner
+                        }
                     }
                     reporter.onScanProgress("remote", changes.size)
                     // Pass the pre-fetched complete top-level set (page-order-independent).
@@ -2782,8 +2959,12 @@ open class SyncEngine(
             db.completeScan(scanId)
         }
 
+        // #401: report suppressed twins BEFORE the absence sweep so their ids are
+        // excluded from reaping (same ordering as the buffered gather).
+        val collisionLoserIds = reportGatheredCollisions(collisions, dryRun = false)
+
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes)
+            detectMissingAfterFullSync(changes, collisionLoserIds)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -2887,8 +3068,16 @@ open class SyncEngine(
         return item.copy(path = entry.path, name = entry.path.substringAfterLast("/"))
     }
 
-    private fun detectMissingAfterFullSync(remoteChanges: MutableMap<String, CloudItem>) {
+    private fun detectMissingAfterFullSync(
+        remoteChanges: MutableMap<String, CloudItem>,
+        admittedLoserIds: Set<String> = emptySet(),
+    ) {
         val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
+        // #401: a twin suppressed by the gather collision winner-rule keeps its DB row
+        // alive but holds no key in remoteChanges; without this it would look absent
+        // and the sweep would synthesize a path-addressed DeleteRemote for it — the
+        // wrong-twin delete #402 closed. Suppressed ≠ deleted.
+        seenRemoteIds.addAll(admittedLoserIds)
         pruneRecentlyUploaded()
 
         for (entry in db.getAllEntries()) {
@@ -3167,7 +3356,14 @@ open class SyncEngine(
         val isFolder = oldEntry?.isFolder ?: false
         val result =
             try {
-                provider.move(remoteFrom, remoteTo)
+                if (!action.remoteId.startsWith("local:")) {
+                    // #402: aim the move at the twin the row tracks, not at whichever
+                    // same-named sibling getMetadata's path lookup finds first.
+                    provider.moveById(action.remoteId, remoteFrom, remoteTo)
+                } else {
+                    if (refuseCollidedPath(action)) return
+                    provider.move(remoteFrom, remoteTo)
+                }
             } catch (e: Exception) {
                 auditLog?.emit(
                     action = "Move",
@@ -3339,11 +3535,20 @@ open class SyncEngine(
         // (`remotePath ?: path`). Non-aliased rows have remotePath null →
         // delete at action.path, byte-identical to pre-#115.
         val remotePath = priorEntry?.remotePath ?: action.path
+        val remoteId = priorEntry?.remoteId
         // UD-753: per-operation log at the engine (was repeated across provider services).
         log.debug("Delete: {} (remote {})", action.path, remotePath)
         var auditResult = "success"
         try {
-            provider.delete(remotePath)
+            if (remoteId != null && !remoteId.startsWith("local:")) {
+                // #402: the row's real cloud uuid addresses the twin the engine
+                // actually tracks; path resolution would pick the first of any
+                // same-named siblings and could trash the wrong one.
+                provider.deleteById(remoteId, remotePath)
+            } else {
+                if (refuseCollidedPath(action)) return
+                provider.delete(remotePath)
+            }
         } catch (e: ProviderException) {
             // Only a typed already-gone signal (Folder/Item not found) is a
             // safe no-op delete that may fall through and tombstone the row.
@@ -3377,7 +3582,6 @@ open class SyncEngine(
         // as a queryable tombstone. Internxt's `delete` routes through the
         // recycle bin (`POST /storage/trash/add`); a recovery SELECT on TRASHED
         // rows + a batched untrash PATCH is the documented restore path.
-        val remoteId = priorEntry?.remoteId
         if (remoteId != null) {
             db.setStatusTrashed(remoteId)
         } else {
@@ -4157,11 +4361,22 @@ open class SyncEngine(
         reason: String,
         dryRun: Boolean,
     ) {
+        logSkippedOp(actionLabel(action), action.path, reason, dryRun)
+    }
+
+    // #401 overload: gather-collision records have no SyncAction — the label and
+    // path stand in. Same JSONL shape as the action-based entry.
+    private fun logSkippedOp(
+        label: String,
+        path: String,
+        reason: String,
+        dryRun: Boolean,
+    ) {
         if (dryRun) return // a preview records nothing; the callers report a warning instead
-        val path = skippedOpsLogPath ?: return
-        val line = formatSkippedOpJson(actionLabel(action), action.path, reason, Instant.now())
-        Files.createDirectories(path.parent)
-        Files.writeString(path, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+        val logPath = skippedOpsLogPath ?: return
+        val line = formatSkippedOpJson(label, path, reason, Instant.now())
+        Files.createDirectories(logPath.parent)
+        Files.writeString(logPath, line + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
 
     // UD-297: literally-empty syncRoot detector. Narrow on purpose — any
@@ -4266,6 +4481,13 @@ open class SyncEngine(
         const val REMOTE_WAKE_DEBOUNCE_MS: Long = 5_000L
 
         const val STREAMING_RECONCILE_CHANNEL_CAPACITY: Int = 4
+
+        // #401: sync_state keys backing the `status` collision surface. The paths
+        // value is TAB-joined, capped so a drive-wide naming collision cannot bloat
+        // either the row or the status output.
+        const val REMOTE_COLLISIONS_KEY: String = "remote_collisions"
+        const val REMOTE_COLLISION_PATHS_KEY: String = "remote_collisions_paths"
+        const val COLLISION_PATHS_STATUS_LIMIT: Int = 50
 
         internal fun formatSkippedOpJson(
             action: String,
