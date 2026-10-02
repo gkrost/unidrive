@@ -2,9 +2,11 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -314,7 +316,12 @@ class HydrationImpl(
         val slot = uploadSlots.compute(path) { _, s ->
             (s ?: UploadSlot(Mutex(), AtomicInteger(0))).also { it.pending.incrementAndGet() }
         }!!
-        val worker = recoveryUploadScope.launch {
+        // ATOMIC start: a plain launch cancelled before its first dispatch never runs its
+        // body, so the slot/permit bookkeeping in the finally blocks below would be skipped
+        // (slot stuck busy, queue permit lost, no Completed for the handle). ATOMIC
+        // guarantees the body is entered; the ensureActive() below then turns a pending
+        // cancel into the normal cancelled path.
+        val worker = recoveryUploadScope.launch(start = CoroutineStart.ATOMIC) {
             // Emitted only after the slot is released (below): a client that reacts to
             // Completed by re-listing must already see pending_upload settled, not still
             // raised by the slot of the upload it was just told about.
@@ -340,6 +347,7 @@ class HydrationImpl(
                 try {
                     slot.mutex.withLock {
                         try {
+                            ensureActive()
                             completed = runUploadWithRetries(path, cachePath, handleId, baseEtag, onProgress) {
                                 if (waitingSlotHeld) {
                                     queueSlots.release()

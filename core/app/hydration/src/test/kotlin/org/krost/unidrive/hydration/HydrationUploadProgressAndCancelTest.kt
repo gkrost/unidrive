@@ -151,6 +151,45 @@ class HydrationUploadProgressAndCancelTest {
     }
 
     @Test
+    fun `cancel before the worker coroutine first runs still releases the slot and the queue permit`() = runTest {
+        // The worker is launched on the (test) dispatcher and has not been scheduled
+        // when the cancel arrives. A plainly-launched coroutine cancelled before its
+        // first dispatch never runs its body, so neither its `finally` (pending count,
+        // slot removal) nor its queue-permit release executes: the path would then be
+        // busy to dehydrate and protected from cache reaping forever, one waiting-queue
+        // permit would be lost per occurrence, and the client handle would never get a
+        // Completed.
+        val env = HydrationTestEnv(recoveryUploadScope = this, uploadQueueDepth = 1)
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        env.stateDb.insertCreatedRow("/docs/g.txt")
+        writeCache(env, "/docs/f.txt", "f bytes")
+        writeCache(env, "/docs/g.txt", "g bytes")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForWrite("conn1", "h1", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        assertTrue(env.hydration.cancelUpload("/docs/f.txt"), "a queued, not yet started upload must be cancellable")
+        advanceUntilIdle()
+
+        assertFalse(env.hydration.hasUploadSlot("/docs/f.txt"), "the cancelled upload must not leave its slot behind")
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single { it.handleId == "h1" }
+        assertEquals(HydrationError.CANCELLED_TOKEN, completed.error?.message)
+        assertNull(env.syncEngine.remoteContentSeen("/docs/f.txt"))
+
+        // Depth 1: if the cancelled job leaked its waiting-queue permit this submission suspends forever.
+        val secondReturned = CompletableDeferred<Unit>()
+        launch {
+            env.hydration.openForWrite("conn1", "h2", "/docs/g.txt", env.syncEngine.resolveCachePath("/docs/g.txt"))
+            secondReturned.complete(Unit)
+        }
+        advanceUntilIdle()
+        assertTrue(secondReturned.isCompleted, "a leaked queue permit blocks every later open_write")
+        assertEquals("g bytes", env.syncEngine.remoteContentSeen("/docs/g.txt"))
+        collector.cancel()
+    }
+
+    @Test
     fun `cancel with nothing in flight answers cancelled false`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this)
         env.stateDb.insertCreatedRow("/docs/f.txt")
