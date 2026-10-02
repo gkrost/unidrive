@@ -495,6 +495,8 @@ open class SyncEngine(
         ) {
             return cachePath
         }
+        // #449: the sync root already holds these bytes: copy them instead of downloading again.
+        if (copySyncRootCopyIntoCache(entry, path, cachePath)) return cachePath
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
         // (fast path) or fall back to path-based (when remoteId is null).
         val remoteItem = CloudItem(
@@ -569,6 +571,61 @@ open class SyncEngine(
             return cachePath
         } finally {
             runCatching { Files.deleteIfExists(staged) }
+        }
+    }
+
+    // #449 read side. Copies the sync-root file into [cachePath] (never a hard link: the mount
+    // writes the cache file in place, and a shared inode would change the sync-root bytes behind
+    // the row's baseline) when that file is provably the row's current remote version; false means
+    // "download as before". The proof, all of it needed:
+    //  - the row is hydrated, has a remote and describes the sync-root file (mtime and size still
+    //    match the baseline, so nobody edited it since), and the size is the remote size;
+    //  - a provider with a content hash: the bytes hash to the remote hash; otherwise the
+    //    baseline mtime is the remote modified time (the download stamps it, so an upload of a
+    //    user's own file does not qualify) and a recorded local hash (#396) still matches the bytes.
+    // The cache copy is written beside its destination and renamed into place, and dropped if the
+    // source changed while it was being read.
+    private fun copySyncRootCopyIntoCache(
+        entry: SyncEntry,
+        path: String,
+        cachePath: Path,
+    ): Boolean {
+        if (entry.isFolder || !entry.isHydrated || entry.remoteId == null) return false
+        var tmp: Path? = null
+        return try {
+            if (!rowDescribesSyncRootFile(entry, path)) return false
+            val local = placeholder.resolveLocal(path)
+            val size = Files.size(local)
+            if (size != entry.remoteSize) return false
+            val mtime = Files.getLastModifiedTime(local).toMillis()
+            val algorithm = provider.hashAlgorithm()
+            val current =
+                if (algorithm != null && !entry.remoteHash.isNullOrEmpty()) {
+                    HashVerifier.verify(local, entry.remoteHash, algorithm)
+                } else {
+                    entry.remoteModified?.toEpochMilli() == mtime &&
+                        (entry.localHash == null || HashVerifier.computeSha256Hex(local) == entry.localHash)
+                }
+            if (!current) return false
+            Files.createDirectories(cachePath.parent)
+            val copy = Files.createTempFile(cachePath.parent, ".ud-serve-", ".tmp").also { tmp = it }
+            Files.copy(local, copy, StandardCopyOption.REPLACE_EXISTING)
+            // Same footprint as a download: the copy's mtime is "now" on every platform (Windows
+            // would carry the source's over), so the cache never looks like the sync-root file.
+            Files.setLastModifiedTime(copy, java.nio.file.attribute.FileTime.from(Instant.now()))
+            if (Files.size(copy) != size || Files.size(local) != size || Files.getLastModifiedTime(local).toMillis() != mtime) return false
+            try {
+                Files.move(copy, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                Files.move(copy, cachePath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            log.debug("#449: served {} from the sync root, no download", path)
+            true
+        } catch (e: java.io.IOException) {
+            log.debug("#449: cannot serve {} from the sync root ({}), downloading", path, e.message)
+            false
+        } finally {
+            tmp?.let { runCatching { Files.deleteIfExists(it) } }
         }
     }
 
