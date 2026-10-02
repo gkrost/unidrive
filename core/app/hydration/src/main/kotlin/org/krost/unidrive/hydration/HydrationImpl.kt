@@ -1068,6 +1068,17 @@ class HydrationImpl(
             return RenameResult.Failed(HydrationError.OutOfScope)
         }
 
+        // Excluded destination (#461 route guard): a rename MOVES the remote
+        // object, so a destination matching exclude_patterns would strand cloud
+        // content at a name the sync engine's enumeration skips — the object
+        // stays in the cloud but never shows in any view again. Refused with
+        // the typed `excluded` token; the row and the remote are untouched.
+        // (Creating an excluded name is the other case: create/open_write_begin
+        // accept it as keep-local — nothing exists in the cloud to strand.)
+        if (syncEngine.isExcludedPath(newNorm)) {
+            return RenameResult.Failed(HydrationError.Excluded)
+        }
+
         // Pre-flight: source must exist in state.db.
         val sourceEntry = stateDb.getEntry(oldNorm)
             ?: return RenameResult.OldPathNotFound
