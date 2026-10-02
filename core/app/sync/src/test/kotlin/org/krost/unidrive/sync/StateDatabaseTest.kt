@@ -1326,6 +1326,95 @@ class StateDatabaseTest {
     }
 
     @Test
+    fun `migration — cache_backed column is added in-place to an existing DB and existing rows read it as null`() {
+        // #449: the shipped shape BEFORE cache_backed (includes local_hash). The next initialize() must ADD
+        // the column without dropping rows or bumping schema_version; an existing row reads
+        // cacheBacked = null ("unknown"), which keeps the cache-presence guard for it.
+        val tmpDir = Files.createTempDirectory("unidrive-cachebacked-migration")
+        val dbFile = tmpDir.resolve("state.db")
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    CREATE TABLE sync_entries (
+                        remote_id            TEXT PRIMARY KEY,
+                        parent_uuid          TEXT,
+                        path                 TEXT NOT NULL,
+                        remote_path          TEXT,
+                        remote_hash          TEXT,
+                        remote_size          INTEGER NOT NULL DEFAULT 0,
+                        remote_modified      TEXT,
+                        local_mtime          INTEGER,
+                        local_size           INTEGER,
+                        is_folder            INTEGER NOT NULL DEFAULT 0,
+                        is_pinned            INTEGER NOT NULL DEFAULT 0,
+                        is_hydrated          INTEGER NOT NULL DEFAULT 0,
+                        last_synced          TEXT NOT NULL,
+                        status               TEXT NOT NULL DEFAULT 'EXISTS'
+                                             CHECK (status IN ('EXISTS','TRASHED','DELETED')),
+                        download_quarantined INTEGER NOT NULL DEFAULT 0,
+                        last_error_at        TEXT,
+                        local_hash           TEXT
+                    )
+                """,
+                )
+                stmt.executeUpdate(
+                    "CREATE VIEW alive_entries AS SELECT * FROM sync_entries WHERE status='EXISTS'",
+                )
+                stmt.executeUpdate(
+                    "CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_state VALUES ('${StateDatabase.SCHEMA_VERSION_KEY}', " +
+                        "'${StateDatabase.SCHEMA_VERSION}')",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO sync_entries (remote_id, path, remote_hash, local_mtime, local_size, is_hydrated, last_synced) " +
+                        "VALUES ('u-existing', '/Docs/report.pdf', 'h1', 1711627200000, 42, 1, '2026-01-01T00:00:00Z')",
+                )
+            }
+        }
+
+        val upgraded = StateDatabase(dbFile)
+        upgraded.initialize()
+        try {
+            val row = upgraded.getEntry("/Docs/report.pdf")
+            assertNotNull(row, "pre-#449 row must survive the additive migration")
+            assertNull(row.cacheBacked, "an existing row has no cache_backed -> reads as null (unknown)")
+            assertEquals(42L, row.localSize)
+            assertEquals(
+                StateDatabase.SCHEMA_VERSION.toString(),
+                upgraded.getSyncState(StateDatabase.SCHEMA_VERSION_KEY),
+                "additive column: no schema_version bump",
+            )
+            upgraded.upsertEntry(row.copy(cacheBacked = false))
+            assertEquals(false, upgraded.getEntry("/Docs/report.pdf")?.cacheBacked)
+            // Second initialize() is idempotent (column already present) and keeps the value.
+            upgraded.initialize()
+            assertEquals(false, upgraded.getEntry("/Docs/report.pdf")?.cacheBacked)
+        } finally {
+            upgraded.close()
+        }
+    }
+
+    @Test
+    fun `cache_backed round-trips through upsert and is dropped when a row is written as not hydrated`() {
+        db.upsertEntry(entry("/m.txt").copy(isHydrated = true, cacheBacked = true))
+        assertEquals(true, db.getEntry("/m.txt")?.cacheBacked)
+        db.upsertEntry(db.getEntry("/m.txt")!!.copy(cacheBacked = false))
+        assertEquals(false, db.getEntry("/m.txt")?.cacheBacked)
+        // A scanner-style refresh (.copy of the row) keeps it.
+        db.upsertEntry(db.getEntry("/m.txt")!!.copy(localMtime = 1711627999000))
+        assertEquals(false, db.getEntry("/m.txt")?.cacheBacked)
+
+        // No local bytes: where the baseline lives means nothing, and a re-hydrate must not inherit it.
+        db.upsertEntry(db.getEntry("/m.txt")!!.copy(isHydrated = false))
+        assertNull(db.getEntry("/m.txt")?.cacheBacked)
+        db.upsertEntry(db.getEntry("/m.txt")!!.copy(isHydrated = true))
+        assertNull(db.getEntry("/m.txt")?.cacheBacked)
+    }
+
+    @Test
     fun `staging — scan_staging is added in-place to an existing v2 DB without disturbing rows`() {
         // Simulate a v2 DB created before the resumable-scan slice landed:
         // sync_entries + alive_entries + indexes are present, schema_version

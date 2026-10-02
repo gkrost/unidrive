@@ -493,10 +493,18 @@ open class SyncEngine(
             (entry.remoteId == null ||
                 runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)
         ) {
+            // #449: a row from before cache_backed existed whose baseline still describes the sync-root file
+            // is settled here, so a later delete of that file is not mistaken for a cache-only row.
+            if (entry.cacheBacked == null && rowDescribesSyncRootFile(entry, path)) {
+                db.upsertEntry(entry.copy(cacheBacked = false))
+            }
             return cachePath
         }
         // #449: the sync root already holds these bytes: copy them instead of downloading again.
-        if (copySyncRootCopyIntoCache(entry, path, cachePath)) return cachePath
+        if (copySyncRootCopyIntoCache(entry, path, cachePath)) {
+            if (entry.cacheBacked != false) db.upsertEntry(entry.copy(cacheBacked = false))
+            return cachePath
+        }
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
         // (fast path) or fall back to path-based (when remoteId is null).
         val remoteItem = CloudItem(
@@ -549,7 +557,7 @@ open class SyncEngine(
                 // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
                 // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
                 // describes them.
-                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
+                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now(), cacheBacked = false))
             } else {
                 // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
                 // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
@@ -560,6 +568,7 @@ open class SyncEngine(
                     localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
                     localSize = Files.size(cachePath),
                     lastSynced = Instant.now(),
+                    cacheBacked = true,
                 )
                 // The row just adopted the cache copy's stats, so the hash must describe the cache
                 // copy's bytes: keeping a hash recorded for the previous contents would pair stale
@@ -682,6 +691,7 @@ open class SyncEngine(
                     isHydrated = true,
                     // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
                     localHash = null,
+                    cacheBacked = true,
                 ) ?: SyncEntry(
                     path = path,
                     remoteId = null,
@@ -694,6 +704,7 @@ open class SyncEngine(
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = Instant.now(),
+                    cacheBacked = true,
                 ),
             )
             return
@@ -805,6 +816,7 @@ open class SyncEngine(
                             isHydrated = true,
                             lastSynced = Instant.now(),
                             lastErrorAt = existing.lastErrorAtAfterUpload(),
+                            cacheBacked = false,
                         ),
                         localPath,
                         sentLocal,
@@ -838,11 +850,24 @@ open class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
                 lastErrorAt = existing.lastErrorAtAfterUpload(),
+                cacheBacked = true,
             )
             // The row just adopted the cache copy's stats, and these are exactly the bytes the
             // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)
             // so the touch shield covers mount-edited files too.
-            db.upsertEntry(withSentHash(uploaded, cachePath, sent))
+            val hashed = withSentHash(uploaded, cachePath, sent)
+            // #449 write side: a file made or edited through the mount has no sync-root file the row
+            // describes, so a later plain `sync` would read the missing file as a local delete (#459).
+            // Now that the provider has the bytes, put the same bytes there; the row's baseline is then
+            // that file (the hash just taken, of the same bytes, stays) and no longer the cache copy.
+            val mirrored = mirrorIntoSyncRoot(path, cachePath, sent)
+            db.upsertEntry(
+                if (mirrored != null) {
+                    hashed.copy(localMtime = mirrored.first, localSize = mirrored.second, cacheBacked = false)
+                } else {
+                    hashed
+                },
+            )
         }
         auditLog?.emit(
             action = "Upload",
@@ -852,6 +877,55 @@ open class SyncEngine(
             newHash = result.hash,
             result = "success",
         )
+    }
+
+    // #449 write side, for a row that describes no sync-root file. Places the bytes just uploaded from
+    // [cachePath] at the row's path in the sync root and returns the (mtime, size) of that file, which
+    // become the row's baseline; null means nothing was written and the row keeps recording the cache
+    // copy (cache_backed = true), which the Reconciler guard keeps from being read as a local delete.
+    // Skipped, never forced, when:
+    //  - the path is out of scope or not representable locally, or the sync root itself does not
+    //    exist (a mount-only profile must not grow a folder tree it never asked for);
+    //  - a file (or a directory) is already there: the row does not describe it, so it changed since
+    //    the baseline or was never tracked, and the next sync decides, exactly as without the mirror;
+    //  - the cache file changed since the stats taken before the upload: a newer write is queued
+    //    behind this one and mirrors itself.
+    // The file is copied to a temp file in the destination directory (`*.tmp`, a default exclude, so
+    // a scan never sees it) and renamed in, with the watcher's echo suppressed. A copy, not a hard
+    // link, for the same reason as in [copySyncRootCopyIntoCache]. Any I/O failure is logged and
+    // swallowed: the upload already succeeded and must not be reported as failed.
+    private fun mirrorIntoSyncRoot(
+        path: String,
+        cachePath: Path,
+        sent: Pair<Long, Long>?,
+    ): Pair<Long, Long>? {
+        if (sent == null) return null
+        if (!isTracked(path) || localNameIssue(path) != null || !Files.isDirectory(syncRoot)) return null
+        var tmp: Path? = null
+        return try {
+            val target = placeholder.resolveLocal(path)
+            val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+            if (Files.exists(target, noFollow)) {
+                log.info("#449: not mirroring {} into the sync root: a file is already there that the row does not describe, the next sync decides", path)
+                return null
+            }
+            if (statBeforeUpload(cachePath) != sent) return null
+            Files.createDirectories(target.parent)
+            val copy = Files.createTempFile(target.parent, ".ud-mirror-", ".tmp").also { tmp = it }
+            Files.copy(cachePath, copy, StandardCopyOption.REPLACE_EXISTING)
+            Files.setLastModifiedTime(copy, java.nio.file.attribute.FileTime.fromMillis(sent.first))
+            if (statBeforeUpload(cachePath) != sent || Files.size(copy) != sent.second) return null
+            withEchoSuppression(path) {
+                // No REPLACE_EXISTING: a file that appeared in the meantime is not ours to replace.
+                Files.move(copy, target)
+            }
+            Files.getLastModifiedTime(target).toMillis() to Files.size(target)
+        } catch (e: Exception) {
+            log.warn("#449: could not mirror {} into the sync root, the row keeps the cache copy as its local file: {}", path, e.message)
+            null
+        } finally {
+            tmp?.let { runCatching { Files.deleteIfExists(it) } }
+        }
     }
 
     // A landed upload settles an earlier failed attempt: markUploadFailed stamps last_error_at

@@ -49,6 +49,15 @@ data class SyncEntry(
     // touched-but-unchanged file (mtime bumped by a shell handler, indexer, antivirus...)
     // from a real edit. Null = unknown, which keeps the plain mtime+size behaviour.
     val localHash: String? = null,
+    // #449: which file the local baseline (localMtime, localSize, localHash) describes.
+    // true  = the hydration cache copy: the bytes were written or downloaded into the cache and the
+    //         sync root holds no file the row describes (mount mode, or a mirror into the sync root
+    //         that failed or was skipped). A missing sync-root file is then NOT a local delete.
+    // false = the sync-root file: a missing sync-root file IS a deliberate local delete, whatever
+    //         copy the cache still holds.
+    // null  = unknown (rows written before the column): treated like true while a cache copy exists.
+    // Only meaningful while [isHydrated]; the database stores null for a row without local bytes.
+    val cacheBacked: Boolean? = null,
 ) {
     // UD-901 / #136: the pending-upload predicate, assembled in ONE place. A pending
     // upload is a file whose only copy is the local/cache bytes and which has never
