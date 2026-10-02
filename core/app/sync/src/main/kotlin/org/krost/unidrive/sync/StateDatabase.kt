@@ -94,7 +94,14 @@ class StateDatabase(
             }
         _conn = DriverManager.getConnection(url)
         conn.autoCommit = true
-        bootstrapSchema()
+        try {
+            bootstrapSchema()
+        } catch (e: Throwable) {
+            // A refused open (#323) must not leak the connection it opened.
+            runCatching { _conn?.close() }
+            _conn = null
+            throw e
+        }
     }
 
     private fun initializeReadOnly() {
@@ -167,6 +174,15 @@ class StateDatabase(
                 // collide with stale objects.
                 conn.createStatement().use { stmt ->
                     stmt.executeUpdate("DROP TABLE IF EXISTS sync_entries")
+                }
+            } else {
+                // #323: an older jar must never stamp the version downward — the
+                // next upgrade would believe nothing changed and skip migrations.
+                // Refuse before any write (mirrors the read-only and snapshot
+                // guards); equal or lower versions behave as before.
+                check(recordedVersion <= SCHEMA_VERSION) {
+                    "state.db was written by a newer unidrive (schema $recordedVersion, this build supports $SCHEMA_VERSION); " +
+                        "upgrade unidrive or use a different state db."
                 }
             }
         }

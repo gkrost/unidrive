@@ -1512,4 +1512,71 @@ class StateDatabaseTest {
         // Idempotent on non-existent path: must not throw.
         db.markDeleted("/never_existed")
     }
+
+    // #323: an older jar opening a newer state.db must refuse to open and must
+    // never stamp the recorded version downward.
+
+    private fun schemaVersionOf(dbPath: java.nio.file.Path): Int? {
+        DriverManager.getConnection("jdbc:sqlite:${dbPath.toAbsolutePath().toUri()}").use { c ->
+            c.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT value FROM sync_state WHERE key='schema_version'").use { rs ->
+                    return if (rs.next()) rs.getString(1).toIntOrNull() else null
+                }
+            }
+        }
+    }
+
+    private fun writeSchemaVersion(dbPath: java.nio.file.Path, version: Int) {
+        DriverManager.getConnection("jdbc:sqlite:${dbPath.toAbsolutePath().toUri()}").use { c ->
+            c.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    "UPDATE sync_state SET value='$version' WHERE key='schema_version'",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `opening a state_db stamped by a newer schema is refused and the stamp is untouched`() {
+        val dbPath = Files.createTempDirectory("ud-323-newer").resolve("state.db")
+        StateDatabase(dbPath).let { it.initialize(); it.close() }
+        writeSchemaVersion(dbPath, StateDatabase.SCHEMA_VERSION + 1)
+
+        val ex =
+            assertFailsWith<IllegalStateException> {
+                StateDatabase(dbPath).let { it.initialize(); it.close() }
+            }
+        assertTrue(
+            ex.message!!.contains("schema ${StateDatabase.SCHEMA_VERSION + 1}") &&
+                ex.message!!.contains("supports ${StateDatabase.SCHEMA_VERSION}") &&
+                ex.message!!.contains("upgrade unidrive"),
+            "the refusal must name both versions and the way out, got: ${ex.message}",
+        )
+        assertEquals(
+            StateDatabase.SCHEMA_VERSION + 1,
+            schemaVersionOf(dbPath),
+            "a refused open must not write anything, least of all stamp the version downward",
+        )
+    }
+
+    @Test
+    fun `a state_db at the current schema version opens`() {
+        val dbPath = Files.createTempDirectory("ud-323-current").resolve("state.db")
+        StateDatabase(dbPath).let { it.initialize(); it.close() }
+        assertEquals(StateDatabase.SCHEMA_VERSION, schemaVersionOf(dbPath))
+
+        StateDatabase(dbPath).let { it.initialize(); it.close() }
+        assertEquals(StateDatabase.SCHEMA_VERSION, schemaVersionOf(dbPath), "reopening keeps the stamp")
+    }
+
+    @Test
+    fun `a state_db at an older schema version migrates and is stamped current`() {
+        val dbPath = Files.createTempDirectory("ud-323-older").resolve("state.db")
+        StateDatabase(dbPath).let { it.initialize(); it.close() }
+        writeSchemaVersion(dbPath, 1)
+
+        StateDatabase(dbPath).let { it.initialize(); it.close() }
+
+        assertEquals(StateDatabase.SCHEMA_VERSION, schemaVersionOf(dbPath), "an older stamp migrates forward to current")
+    }
 }
