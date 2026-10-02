@@ -336,6 +336,10 @@ class HydrationImpl(
                         // its upload lands: that window is exactly the upload slot's lifetime.
                         // last_error_at marks the last attempt as failed (cleared by a later
                         // successful upload).
+                        // #136: deliberately BROADER than SyncEntry.isPendingUpload (the
+                        // UD-901 predicate) — this wire flag must also cover a remote-backed
+                        // file whose cached edit is still queued in an upload slot, which
+                        // the predicate (remoteId == null) cannot see.
                         pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
                         hasError = e.lastErrorAt != null,
                     )

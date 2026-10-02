@@ -49,7 +49,18 @@ data class SyncEntry(
     // touched-but-unchanged file (mtime bumped by a shell handler, indexer, antivirus...)
     // from a real edit. Null = unknown, which keeps the plain mtime+size behaviour.
     val localHash: String? = null,
-)
+) {
+    // UD-901 / #136: the pending-upload predicate, assembled in ONE place. A pending
+    // upload is a file whose only copy is the local/cache bytes and which has never
+    // reached the cloud. Consumers used to re-assemble the predicate from halves
+    // (`remoteId == null` here, `isHydrated` there), and rows in the gap — a sparse
+    // partial-download row (remoteId == null, isHydrated == false) has no real bytes
+    // to upload — were counted or re-uploaded by whichever half the consumer checked.
+    // Deliberately a computed property: derived from two stored columns, so it takes
+    // no part in equals/copy.
+    val isPendingUpload: Boolean
+        get() = remoteId == null && isHydrated
+}
 
 /**
  * Lifecycle state of a [SyncEntry]. EXISTS rows are the only ones the sync

@@ -455,7 +455,10 @@ open class SyncEngine(
         // Local-only rows (remoteId == null: created/edited through the mount, not
         // yet uploaded — remoteSize is 0 while the cache holds the just-written
         // bytes) have NO remote to compare against or re-download from; the cache is
-        // the only copy, so always trust them on the warm path.
+        // the only copy, so always trust them on the warm path. #136: this
+        // remoteId == null is NOT the UD-901 pending-upload predicate — it means "no
+        // remote to compare against", and isHydrated here carries the warm-trust
+        // meaning, so the split check is intentional.
         if (entry.isHydrated && Files.exists(cachePath) &&
             (entry.remoteId == null ||
                 runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)

@@ -136,9 +136,14 @@ internal fun computeLocalSizeBuckets(entries: List<org.krost.unidrive.sync.model
     var hydrated = 0L
     var pending = 0L
     for (e in entries) {
+        // The !isHydrated guard stays OUTSIDE the predicate on purpose (#136): a
+        // sparse partial-download row (remoteId == null, isHydrated == false) has no
+        // real bytes on disk, so it belongs in neither bucket (the SPARSE column
+        // reports it). For the hydrated rows that remain, pending is the whole
+        // UD-901 predicate, not the remoteId half.
         if (e.isFolder || !e.isHydrated) continue
         val size = e.localSize ?: 0L
-        if (e.remoteId != null) hydrated += size else pending += size
+        if (e.isPendingUpload) pending += size else hydrated += size
     }
     return LocalSizeBuckets(hydrated, pending)
 }
@@ -213,7 +218,11 @@ class StatusCommand : Runnable {
                 if (!entry.isHydrated) {
                     downloadsPending++
                     downloadBytes += entry.remoteSize
-                } else if (entry.remoteId == null) {
+                } else if (entry.isPendingUpload) {
+                    // #136: the whole UD-901 predicate — the !isHydrated arm above
+                    // already routed sparse partial-download rows (remoteId == null,
+                    // isHydrated == false) to downloads, so this arm sees only
+                    // hydrated rows and the predicate reduces to remoteId == null.
                     uploadsPending++
                     uploadBytes += entry.localSize ?: 0L
                 }

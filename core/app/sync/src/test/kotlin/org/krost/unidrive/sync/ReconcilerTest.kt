@@ -1028,6 +1028,64 @@ class ReconcilerTest {
         assertEquals("/internal/file-a.bin", uploads[0].path)
     }
 
+    // #136: the gap row — remoteId=null AND isHydrated=false (a sparse
+    // partial-download row) — satisfies half of the UD-901 predicate. The
+    // upload-recovery loop must check BOTH halves and NOT plan an Upload for it
+    // (there are no local bytes to upload); the download-recovery lane is where
+    // such a row belongs.
+    @Test
+    fun `UD-901 gap row remoteId null isHydrated false is not recovered as an upload`() {
+        // The gap row: never uploaded, but also no real bytes on disk.
+        db.upsertEntry(
+            SyncEntry(
+                path = "/gap.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 100,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 0,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        // Control: a real pending-upload row (whole predicate true).
+        db.upsertEntry(
+            SyncEntry(
+                path = "/pending.bin",
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = 1711627200000,
+                localSize = 100,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.EPOCH,
+            ),
+        )
+        val abs = syncRoot.resolve("pending.bin")
+        Files.createDirectories(abs.parent)
+        Files.writeString(abs, "x".repeat(100))
+
+        val actions =
+            reconciler.reconcile(
+                remoteChanges = emptyMap(),
+                localChanges = emptyMap(),
+                syncPaths = emptyList(),
+            )
+
+        val uploads = actions.filterIsInstance<SyncAction.Upload>()
+        assertEquals(listOf("/pending.bin"), uploads.map { it.path }, "only the whole-predicate row is upload-pending")
+        assertTrue(
+            actions.filterIsInstance<SyncAction.DownloadContent>().any { it.path == "/gap.bin" },
+            "the gap row is recovered by the download lane instead",
+        )
+    }
+
     @Test
     fun `UD-901a UD-225 download recovery respects syncPath scope`() {
         // Seed three half-downloaded rows (isHydrated=false, remoteSize>0)

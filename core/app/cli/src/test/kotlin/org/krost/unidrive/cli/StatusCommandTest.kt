@@ -120,6 +120,22 @@ class StatusCommandTest {
         assertEquals(0L, buckets.pendingBytes)
     }
 
+    // #136: the predicate gap row — remoteId=null AND isHydrated=false — matches
+    // only half of the UD-901 pending-upload predicate. It has no real bytes on
+    // disk, so it must land in NEITHER bucket; only the remoteId half would have
+    // counted it as pending.
+    @Test
+    fun `UD-901 gap row remoteId null isHydrated false counts as neither bucket`() {
+        val entries =
+            listOf(
+                fileEntry("/gap.bin", size = 4_000, remoteId = null, isHydrated = false),
+                fileEntry("/pending.bin", size = 6_000, remoteId = null, isHydrated = true),
+            )
+        val buckets = computeLocalSizeBuckets(entries)
+        assertEquals(0L, buckets.hydratedBytes)
+        assertEquals(6_000L, buckets.pendingBytes, "only the whole-predicate row is upload-pending")
+    }
+
     // ── discoverProfilesFromRaw — `status --all` enumeration ────────────────
 
     @Test
