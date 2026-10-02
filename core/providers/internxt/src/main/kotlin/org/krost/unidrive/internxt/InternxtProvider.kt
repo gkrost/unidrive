@@ -761,6 +761,12 @@ class InternxtProvider(
         // appears when the reconciler thought a path was new but the remote already has it.
         val finalItem: CloudItem
         if (existingRemoteId != null) {
+            if (ifMatchETag != null) {
+                val current = api.getFileMeta(existingRemoteId)
+                if (internxtVersionToken(current) != ifMatchETag) {
+                    throw RemoteConflictException("Internxt item changed before replace: $remotePath")
+                }
+            }
             // Destructive-overwrite guard: when `keepOverwritten` is on,
             // rename the prior cloud content to `${plainName}.unidrive-prev-${utcStamp}`
             // and create the new content as a fresh file instead of letting
@@ -2042,6 +2048,9 @@ class InternxtProvider(
          */
         fun sanitizeName(raw: String): String = raw.trim()
 
+        internal fun internxtVersionToken(file: InternxtFile): String =
+            "${file.uuid}|${file.modificationTime.orEmpty()}|${file.size}"
+
         private fun InternxtFile.isTombstoned(): Boolean =
             status == "TRASHED" || status == "DELETED" || removed || deleted
 
@@ -2070,7 +2079,7 @@ class InternxtProvider(
                 isFolder = false,
                 modified = file.modificationInstant,
                 created = file.creationInstant,
-                hash = null,
+                hash = internxtVersionToken(file),
                 // UD-352c: Internxt's API returns `file.type` as a file
                 // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
                 // (e.g. "image/heic"). Setting mimeType = cleanType here
@@ -2138,7 +2147,7 @@ class InternxtProvider(
                 isFolder = false,
                 modified = file.modificationInstant,
                 created = file.creationInstant,
-                hash = null,
+                hash = internxtVersionToken(file),
                 // UD-352c: Internxt's API returns `file.type` as a file
                 // EXTENSION (e.g. "heic", "jpg"), not a real MIME type
                 // (e.g. "image/heic"). Setting mimeType = cleanType here

@@ -400,6 +400,7 @@ open class SyncEngine(
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
+        ifMatchETag: String? = null,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
         if (isExcluded(path)) {
@@ -447,7 +448,7 @@ open class SyncEngine(
         val sent = statBeforeUpload(cachePath)
         val result =
             try {
-                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId) { transferred, total ->
+                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
                     reporter.onTransferProgress(path, transferred, total)
                 }
             } catch (e: Exception) {

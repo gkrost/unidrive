@@ -39,6 +39,12 @@ Plus mandatory client-side encryption between Drive metadata (carries the IV) an
 
 Upload (`InternxtProvider.kt`) runs in five stages:
 
+For an overwrite, the provider compares the listing token (file UUID,
+modification time, and size) with fresh metadata immediately before the
+replace. Internxt has no conditional replace endpoint, so a concurrent change
+in the narrow metadata-to-replace window remains possible; a mismatch before
+that window is returned as a conflict and leaves the cloud copy untouched.
+
 1. Generate random `indexBytes[32]`; derive `iv = indexBytes[0:16]`.
 2. Derive `fileKey = SHA-512(bucketKey || indexBytes)[:32]` from the user's mnemonic-seeded bucket key.
 3. AES-256-CTR encrypt local file → temp file via `CipherInputStream`; compute SHA-256 of ciphertext in the same pass.
