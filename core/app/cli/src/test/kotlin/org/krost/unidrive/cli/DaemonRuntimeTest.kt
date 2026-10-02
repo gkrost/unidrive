@@ -183,6 +183,7 @@ class DaemonRuntimeTest {
                     """{"verb":"hydration.mkdir","path":"/startup"}""",
                     """{"verb":"hydration.unlink","path":"/startup/unlink.txt"}""",
                     """{"verb":"hydration.rmdir","path":"/startup/rmdir.txt"}""",
+                    """{"verb":"hydration.cancel","path":"/startup/cancel.txt"}""",
                     """{"verb":"hydration.create","handle_id":"h4","path":"/startup/create.txt"}""",
                     """{"verb":"hydration.rename","old_path":"/startup/r1.txt","new_path":"/startup/r2.txt"}""",
                     """{"verb":"sync.subscribe"}""",
@@ -205,6 +206,21 @@ class DaemonRuntimeTest {
                             json is kotlinx.serialization.json.JsonObject && json.containsKey("ok"),
                             "verb must be answered with a reply carrying ok; sent $request, got: $reply",
                         )
+                        // A reply carrying ok is not enough: the server's own fallback for a
+                        // verb with no handler is {"ok":false,"error":"unknown_verb"}, so with
+                        // the socket bound before the handlers were registered every documented
+                        // verb would still "get a reply" and this test would stay green. A
+                        // documented verb must reach its handler; only the made-up one is unknown.
+                        val error = (json as kotlinx.serialization.json.JsonObject)["error"]
+                            ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                        if (request.contains("daemon.statusx")) {
+                            assertTrue(error == "unknown_verb", "an unregistered verb must be answered unknown_verb, got: $reply")
+                        } else {
+                            assertTrue(
+                                error != "unknown_verb" && error != "missing_verb",
+                                "documented verb reached no handler (socket bound before registration?); sent $request, got: $reply",
+                            )
+                        }
                     } finally {
                         channel.close()
                     }
