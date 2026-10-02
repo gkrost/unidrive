@@ -255,13 +255,17 @@ class HydrationImpl(
                     }
                 }
             } finally {
-                // Atomically decrement and remove-when-zero. The bin lock held by
-                // compute() ensures no concurrent launch's compute() can observe the
-                // slot between the decrement and the null-return (removal). If
-                // pending reaches zero the lambda returns null → ConcurrentHashMap
-                // removes the entry; otherwise the existing slot is kept.
-                uploadSlots.compute(path) { _, s ->
-                    if (s == null || s.pending.decrementAndGet() == 0) null else s
+                // #319: decrement the CAPTURED slot — a concurrent rename may have
+                // re-keyed it under the destination path (the running coroutine's
+                // captured path is stale). Removal is by slot IDENTITY, not by path:
+                // when this coroutine's upload was the last pending one, every map
+                // entry still pointing at this slot is removed, wherever a rename
+                // moved it; if a concurrent submitter re-raised the count (its
+                // compute() found this slot before our decrement), the entry stays
+                // and that submitter's own finally removes it at zero.
+                val remaining = slot.pending.decrementAndGet()
+                if (remaining == 0) {
+                    uploadSlots.entries.removeIf { it.value === slot }
                 }
             }
             completed?.let { _events.emit(it) }
@@ -700,6 +704,7 @@ class HydrationImpl(
                 return runCatching {
                     syncEngine.renameRemote(oldNorm, newNorm)
                     moveCacheFile(oldNorm, newNorm)
+                    rekeyUploadSlot(oldNorm, newNorm)
                     stateDb.getEntry(newNorm)?.let { moved ->
                         stateDb.upsertEntry(
                             moved.copy(
@@ -717,6 +722,7 @@ class HydrationImpl(
             }
             return runCatching {
                 moveCacheFile(oldNorm, newNorm)
+                rekeyUploadSlot(oldNorm, newNorm)
                 stateDb.renamePrefix(oldNorm, newNorm)
                 RenameResult.Ok
             }.getOrElse { e ->
@@ -724,12 +730,36 @@ class HydrationImpl(
             }
         }
 
+        // Cloud-backed source: move on the provider, then bring the local state
+        // along. #319: the cache file moves too (it previously stayed behind under
+        // the old path), and a live upload slot is re-keyed so busy-checks and the
+        // list pending flag keep tracking the queued upload. A queued upload for
+        // the old path will find its row gone (renamePrefix repathed it) and
+        // uploadFromCache now refuses to recreate rows — the bytes survive in the
+        // moved cache and the co-daemon's recovery scanner replays them at the new
+        // path, instead of the upload resurrecting the old remote path.
         return runCatching {
             syncEngine.renameRemote(oldNorm, newNorm)
+            moveCacheFile(oldNorm, newNorm)
+            rekeyUploadSlot(oldNorm, newNorm)
             RenameResult.Ok
         }.getOrElse { e ->
             RenameResult.Failed(HydrationError.Generic(e.message ?: "rename failed"))
         }
+    }
+
+    // #319: move a live upload slot from the old to the new path across a rename,
+    // so dehydrate's busy check, the replace-rename refusal, and list's
+    // pendingUpload flag keep tracking the queued upload under its new key. The
+    // running coroutine captured the old path and old cache path: its upload fails
+    // on the vanished row (uploadFromCache refuses to recreate rows) and its
+    // cleanup removes the slot by identity, not by path, so the re-key cannot leak
+    // it. A submitter that lands between the remove and the put creates a fresh
+    // slot at the old path and cleans it up itself.
+    private fun rekeyUploadSlot(oldPath: String, newPath: String) {
+        if (oldPath == newPath) return
+        val slot = uploadSlots.remove(oldPath) ?: return
+        uploadSlots[newPath] = slot
     }
 
     // Deletes the existing destination before a replace-rename, through the same

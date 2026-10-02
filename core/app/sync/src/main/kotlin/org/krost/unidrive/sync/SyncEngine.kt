@@ -639,13 +639,23 @@ open class SyncEngine(
             return
         }
         val existingEntry = db.getEntry(path)
-        val prevHash = existingEntry?.remoteHash
-        val existingRemoteId = existingEntry?.remoteId
+            // #319/#301: no row means the file was renamed away, unlinked, or reaped
+            // (the remote vanished) while this upload sat queued. The old fallback
+            // created a fresh row and uploaded anyway, which resurrected the old
+            // remote path after a rename and let the reap race a queued edit.
+            // Refuse: the caller's client gets a failed Completed event, the bytes
+            // stay in the cache, and the recovery scanner re-targets them at the
+            // row's current path.
+            ?: throw IllegalStateException(
+                "uploadFromCache: row for $path vanished while the upload was queued; refusing to recreate it",
+            )
+        val prevHash = existingEntry.remoteHash
+        val existingRemoteId = existingEntry.remoteId
         // #115: if the existing row is a locale-aliased one, its content lives
         // at the canonical remote path; the FUSE write-back must upload there,
         // not at the alias `path`. Non-aliased rows have remotePath == null →
         // upload at `path`, byte-identical to pre-#115.
-        val remotePath = existingEntry?.remotePath ?: path
+        val remotePath = existingEntry.remotePath ?: path
         val sizeForLog = Files.size(cachePath)
         val sent = statBeforeUpload(cachePath)
         val result =
@@ -670,7 +680,27 @@ open class SyncEngine(
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
-        if (existing != null && rowDescribesSyncRootFile(existing, path)) {
+        if (existing == null) {
+            // #319: the row vanished while the bytes were in flight (a delete or
+            // reap raced the upload). The remote copy is current; writing a fresh
+            // row here resurrected a deleted path in state.db. Skip the row write —
+            // the next enumeration decides between adopting the remote item and
+            // re-reaping it.
+            log.warn(
+                "uploadFromCache: row for {} vanished mid-upload; remote copy is current, skipping row write",
+                path,
+            )
+            auditLog?.emit(
+                action = "Upload",
+                path = path,
+                size = size,
+                oldHash = prevHash,
+                newHash = result.hash,
+                result = "success",
+            )
+            return
+        }
+        if (rowDescribesSyncRootFile(existing, path)) {
             // The row describes the file in the sync root, not this cache copy (an open_read
             // hydrated the cache and the crash-recovery scanner replayed it as an open_write).
             // The upload already landed remotely, so refresh the remote fields only and leave
@@ -689,7 +719,10 @@ open class SyncEngine(
                 ),
             )
         } else {
-            val uploaded = existing?.copy(
+            // #319: `existing` is non-null here (the vanished-row case returns above),
+            // so the upload rebaselines the row that owns the bytes instead of
+            // minting an ownerless one.
+            val uploaded = existing.copy(
                 remoteId = result.id,
                 remoteHash = result.hash,
                 remoteSize = result.size,
@@ -699,18 +732,6 @@ open class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
                 lastErrorAt = existing.lastErrorAtAfterUpload(),
-            ) ?: SyncEntry(
-                path = path,
-                remoteId = result.id,
-                remoteHash = result.hash,
-                remoteSize = result.size,
-                remoteModified = result.modified,
-                localMtime = mtime,
-                localSize = size,
-                isFolder = false,
-                isPinned = false,
-                isHydrated = true,
-                lastSynced = Instant.now(),
             )
             // The row just adopted the cache copy's stats, and these are exactly the bytes the
             // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)

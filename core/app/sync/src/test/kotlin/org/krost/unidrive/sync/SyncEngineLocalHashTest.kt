@@ -156,6 +156,10 @@ class SyncEngineLocalHashTest {
             val eng = engine()
             provider.deltaItems = emptyList()
             eng.syncOnce()
+            // #319: the write-back requires the row the FUSE create flow wrote
+            // (HydrationImpl.create) — a row-less upload is refused so it cannot
+            // resurrect a vanished path. Seed the never-uploaded row here.
+            seedLocalOnlyRow("/local.txt")
             val cacheCopy = Files.createTempDirectory("ud-396-wb").resolve("local.txt")
             val bytes = "written through the mount".toByteArray()
             Files.write(cacheCopy, bytes)
@@ -166,6 +170,26 @@ class SyncEngineLocalHashTest {
             assertNotNull(row?.remoteId, "the write-back was uploaded")
             assertEquals(sha256(cacheCopy), row.localHash)
         }
+
+    // The row HydrationImpl.create writes for a file created through the mount:
+    // never uploaded, cache holds the only copy.
+    private fun seedLocalOnlyRow(path: String) {
+        db.upsertEntry(
+            SyncEntry(
+                path = path,
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = null,
+                localMtime = Instant.now().toEpochMilli(),
+                localSize = 0L,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
 
     @Test
     fun `a mount-mode re-download records the hash of the downloaded bytes instead of keeping the stale one`() =
@@ -278,6 +302,8 @@ class SyncEngineLocalHashTest {
             val eng = engine()
             provider.deltaItems = emptyList()
             eng.syncOnce()
+            // #319: the write-back requires the row the FUSE create flow wrote.
+            seedLocalOnlyRow("/local.txt")
             val cacheCopy = Files.createTempDirectory("ud-396-wb-race").resolve("local.txt")
             Files.writeString(cacheCopy, "first version")
             editDuringUpload("edited version".toByteArray())

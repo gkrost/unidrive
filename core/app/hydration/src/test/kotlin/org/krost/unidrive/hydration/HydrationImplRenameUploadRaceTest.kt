@@ -19,6 +19,8 @@ import java.nio.file.Path
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -207,11 +209,74 @@ class HydrationImplRenameUploadRaceTest {
             Files.createDirectories(it.parent)
             Files.writeString(it, "EDITED")
         }
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { rig.impl.events.collect { events.add(it) } }
+        yield()
 
         assertTrue(rig.impl.openForWrite("c", "h1", "/src.txt", cache) is OpenResult.Ok)
         val r = rig.impl.rename("/src.txt", "/dst.txt")
 
         assertEquals(RenameResult.Ok, r, "only the replace path is gated; the plain rename keeps its old behaviour")
         advanceUntilIdle()
+        collector.cancel()
+
+        // #319: the queued upload must NOT resurrect the old remote path. The row
+        // moved to /dst.txt, so the upload is refused (its Completed event reports
+        // the failure) and the moved cache holds the bytes for the recovery replay.
+        assertEquals(
+            listOf("move:/src.txt->/dst.txt"),
+            rig.provider.log,
+            "the rename must move the file; no upload may resurrect the old path",
+        )
+        assertNull(rig.db.getEntry("/src.txt"), "no row may be resurrected at the old path")
+        assertNotNull(rig.db.getEntry("/dst.txt"), "the renamed row survives at the new path")
+        assertEquals(
+            "EDITED",
+            Files.readString(rig.engine.resolveCachePath("/dst.txt")),
+            "the cache bytes must follow the rename (the recovery replay re-uploads them at the new path)",
+        )
+        assertFalse(Files.exists(rig.engine.resolveCachePath("/src.txt")), "the stale cache copy must be gone")
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single { it.handleId == "h1" }
+        assertFalse(completed.ok, "the queued upload must report failure instead of resurrecting the old path")
+    }
+
+    // #319: the rename re-keys the live upload slot under the destination, so
+    // dehydrate's busy check keeps protecting the moved (un-uploaded) cache copy
+    // during the window before the doomed old-path upload drains.
+    @Test
+    fun `rename re-keys the upload slot so the moved cache stays busy-protected`() = runTest {
+        val rig = Rig(this)
+        rig.seedUploaded("/src.txt")
+        val cache = rig.engine.resolveCachePath("/src.txt").also {
+            Files.createDirectories(it.parent)
+            Files.writeString(it, "EDITED")
+        }
+
+        assertTrue(rig.impl.openForWrite("c", "h1", "/src.txt", cache) is OpenResult.Ok)
+        assertEquals(RenameResult.Ok, rig.impl.rename("/src.txt", "/dst.txt"))
+
+        assertEquals(
+            DehydrateResult.Busy,
+            rig.impl.dehydrate("/dst.txt"),
+            "the moved cache holds an un-uploaded edit; dehydrate must stay busy",
+        )
+        assertTrue(Files.exists(rig.engine.resolveCachePath("/dst.txt")))
+        advanceUntilIdle()
+    }
+
+    // #319: a queued upload whose row vanished (renamed away, unlinked, or reaped)
+    // must be refused, not fall back to minting a fresh row and uploading — that
+    // fallback resurrected the old remote path after a rename.
+    @Test
+    fun `uploadFromCache refuses when the row vanished instead of resurrecting it`() = runTest {
+        val rig = Rig(this)
+        val cache = rig.engine.resolveCachePath("/gone.txt").also {
+            Files.createDirectories(it.parent)
+            Files.writeString(it, "ORPHAN")
+        }
+
+        assertFailsWith<IllegalStateException> { rig.engine.uploadFromCache("/gone.txt", cache) }
+        assertNull(rig.db.getEntry("/gone.txt"), "no row may be recreated for a vanished path")
+        assertTrue(rig.provider.log.isEmpty(), "nothing may be uploaded for a row that no longer exists")
     }
 }
