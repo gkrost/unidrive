@@ -141,6 +141,78 @@ class UploadFromCacheMirrorTest {
             }
         }
 
+    // Review fix: the mirror used to survive the delete of its row. The next scan then
+    // read the orphan file — no row, real bytes — as NEW and re-uploaded the path the
+    // user had just deleted: the deleted file was resurrected in the cloud by its own
+    // mirror.
+    @Test
+    fun `a mount unlink removes the mirror, the deleted path is not resurrected by the next sync`() =
+        runTest {
+            establishCursor()
+            writeThroughMount(engine, "/gone.txt")
+            assertTrue(Files.isRegularFile(syncRoot.resolve("gone.txt")), "precondition: the mirror exists")
+
+            // What hydration.unlink issues for an uploaded file.
+            engine.deleteRemote("/gone.txt")
+
+            assertFalse(Files.exists(syncRoot.resolve("gone.txt")), "the mirror must not survive the delete")
+
+            provider.uploadedPaths.clear()
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            assertEquals(listOf("/gone.txt"), provider.deletedPaths, "the delete reached the remote exactly once")
+            assertEquals(emptyList(), provider.uploadedPaths, "the orphaned mirror must not be re-uploaded")
+            assertNull(db.getEntry("/gone.txt"))
+        }
+
+    // Review fix: a mount rename moves the remote item, the row and the cache file, but
+    // used to leave the mirror at the old path — an orphan the next scan uploaded under
+    // the old name (the #319 resurrection shape, through the mirror).
+    @Test
+    fun `a mount rename moves the mirror, the old name is not resurrected by the next sync`() =
+        runTest {
+            establishCursor()
+            writeThroughMount(engine, "/a.txt")
+            assertTrue(Files.isRegularFile(syncRoot.resolve("a.txt")), "precondition: the mirror exists")
+
+            // What hydration.rename issues for an uploaded file.
+            engine.renameRemote("/a.txt", "/b.txt")
+
+            assertFalse(Files.exists(syncRoot.resolve("a.txt")), "the old mirror path must be gone")
+            assertContentEquals(bytes, Files.readAllBytes(syncRoot.resolve("b.txt")), "the mirror follows the rename")
+            val row = assertNotNull(db.getEntry("/b.txt"))
+            assertEquals(false, row.cacheBacked, "the renamed row's baseline is still the sync-root file")
+            assertNull(db.getEntry("/a.txt"))
+
+            provider.uploadedPaths.clear()
+            provider.deltaItems = emptyList()
+            engine.syncOnce()
+
+            assertEquals(listOf("/a.txt" to "/b.txt"), provider.movedPaths, "the remote move is the rename")
+            assertEquals(emptyList(), provider.uploadedPaths, "the stray old mirror must not be re-uploaded")
+        }
+
+    // Review fix: a folder whose row is deleted takes its EMPTY mirror directory along;
+    // a directory holding files that belong to no deleted row is left alone.
+    @Test
+    fun `deleting a folder removes its empty mirror directory but never one holding other files`() =
+        runTest {
+            establishCursor()
+
+            db.insertFolder("/d", "id-/d", Instant.now())
+            Files.createDirectories(syncRoot.resolve("d"))
+            engine.deleteRemote("/d")
+            assertFalse(Files.exists(syncRoot.resolve("d")), "the empty mirror directory goes with the folder")
+
+            db.insertFolder("/e", "id-/e", Instant.now())
+            Files.createDirectories(syncRoot.resolve("e"))
+            Files.writeString(syncRoot.resolve("e/untracked.txt"), "keep")
+            engine.deleteRemote("/e")
+            assertTrue(Files.isDirectory(syncRoot.resolve("e")), "a non-empty directory is not the folder's alone")
+            assertContentEquals("keep".toByteArray(), Files.readAllBytes(syncRoot.resolve("e/untracked.txt")))
+        }
+
     @Test
     fun `a sync-root file edited since the baseline is never overwritten, the next sync decides`() =
         runTest {

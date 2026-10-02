@@ -1,6 +1,7 @@
 package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.Capability
@@ -16,7 +17,9 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -124,5 +127,64 @@ class HydrationWriteThroughSyncTest {
 
             assertEquals(listOf("/doc.txt"), env.provider.deleted, "the user deleted the sync-root file on purpose: the delete must reach the remote")
             assertContentEquals("content of keep1.txt".toByteArray(), env.provider.remote["/keep1.txt"])
+        }
+
+    /** create + write the cache + open_write, drained to upload and mirror. */
+    private suspend fun TestScope.writeThroughMount(env: Env, hydration: Hydration, path: String): Path {
+        val created = hydration.create("conn", "h-create", path)
+        assertTrue(created is CreateResult.Ok, "expected Ok, got $created")
+        Files.write(created.cachePath, "bytes of $path".toByteArray())
+        assertTrue(hydration.openForWrite("conn", "h-write", path, created.cachePath, baseEtag = null) is OpenResult.Ok)
+        advanceUntilIdle()
+        hydration.closeHandle("conn", "h-write")
+        hydration.closeHandle("conn", "h-create")
+        return created.cachePath
+    }
+
+    // Review fix: the mirror used to survive the mount unlink. The next sync then read
+    // the orphan file as NEW and re-uploaded the deleted path — the delete was undone
+    // in the cloud by the file's own mirror.
+    @Test
+    fun `an unlink through the mount takes the mirror with it and is not resurrected`() =
+        runTest {
+            val env = freshEnv()
+            val hydration = HydrationImpl(env.engine, env.db, recoveryUploadScope = this)
+            env.engine.syncOnce()
+            writeThroughMount(env, hydration, "/doomed.txt")
+            val mirror = env.syncRoot.resolve("doomed.txt")
+            assertTrue(Files.isRegularFile(mirror), "precondition: the write was mirrored")
+
+            assertTrue(hydration.unlink("/doomed.txt") is UnlinkResult.Ok)
+
+            assertFalse(Files.exists(mirror), "the mirror must not survive the mount unlink")
+            env.engine.syncOnce()
+
+            assertEquals(listOf("/doomed.txt"), env.provider.deleted, "the delete reached the remote exactly once")
+            assertNull(env.db.getEntry("/doomed.txt"))
+        }
+
+    // Review fix: the rename moved the remote item, the row and the cache file, but left
+    // the mirror at the old path — the next sync re-uploaded the old name (resurrection).
+    @Test
+    fun `a rename through the mount moves the mirror`() =
+        runTest {
+            val env = freshEnv()
+            val hydration = HydrationImpl(env.engine, env.db, recoveryUploadScope = this)
+            env.engine.syncOnce()
+            writeThroughMount(env, hydration, "/a.txt")
+            assertTrue(Files.isRegularFile(env.syncRoot.resolve("a.txt")), "precondition: the write was mirrored")
+
+            assertEquals(RenameResult.Ok, hydration.rename("/a.txt", "/b.txt"))
+
+            assertFalse(Files.exists(env.syncRoot.resolve("a.txt")), "the old mirror path must be gone")
+            assertContentEquals(
+                "bytes of /a.txt".toByteArray(),
+                Files.readAllBytes(env.syncRoot.resolve("b.txt")),
+                "the mirror follows the rename",
+            )
+            env.engine.syncOnce()
+
+            assertNull(env.provider.remote["/a.txt"], "the old name must not be resurrected in the cloud")
+            assertNotNull(env.provider.remote["/b.txt"])
         }
 }
