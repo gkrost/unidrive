@@ -472,17 +472,36 @@ class InternxtProvider(
     }
 
     // UD-304: multipart constants available in InternxtConfig.MULTIPART_*; not yet consumed (pending UD-307 multipart endpoint impl).
+    // #464: compares the caller's write token with the item's current metadata. No token (a new file, or a caller that has none)
+    // means no check. A different token means the cloud copy changed after the caller listed it.
+    private suspend fun checkWriteToken(
+        existingRemoteId: String?,
+        ifMatchETag: String?,
+        remotePath: String,
+    ) {
+        if (existingRemoteId == null || ifMatchETag == null) return
+        val current = api.getFileMeta(existingRemoteId)
+        if (internxtVersionToken(current) != ifMatchETag) {
+            throw RemoteConflictException("Internxt item changed before replace: $remotePath")
+        }
+    }
+
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
-        // #291: Internxt replace-in-place keys on the file UUID (existingRemoteId), not an eTag;
-        // it has no If-Match-style conditional PUT, so the optimistic-concurrency token is ignored.
+        // #291: Internxt replace-in-place keys on the file UUID (existingRemoteId), not an eTag. It has no If-Match-style
+        // conditional PUT; #464: the token is "<uuid>|<modificationTime>|<size>" ([internxtVersionToken]), compared with fresh
+        // metadata before anything is sent and again right before the replace.
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         val segments = pathSegments(remotePath)
         if (segments.isEmpty()) throw ProviderException("Cannot upload to root")
+
+        // #464: a stale write token is refused before the file is encrypted and sent, not after: the late check below only
+        // narrows the window, but discovering a conflict after a gigabyte went to the storage backend wastes it all.
+        checkWriteToken(existingRemoteId, ifMatchETag, remotePath)
 
         val fileName = segments.last()
         val ext = if (fileName.contains('.')) fileName.substringAfterLast('.') else null
@@ -761,12 +780,7 @@ class InternxtProvider(
         // appears when the reconciler thought a path was new but the remote already has it.
         val finalItem: CloudItem
         if (existingRemoteId != null) {
-            if (ifMatchETag != null) {
-                val current = api.getFileMeta(existingRemoteId)
-                if (internxtVersionToken(current) != ifMatchETag) {
-                    throw RemoteConflictException("Internxt item changed before replace: $remotePath")
-                }
-            }
+            checkWriteToken(existingRemoteId, ifMatchETag, remotePath) // the narrow window between the early check and the replace
             // Destructive-overwrite guard: when `keepOverwritten` is on,
             // rename the prior cloud content to `${plainName}.unidrive-prev-${utcStamp}`
             // and create the new content as a fresh file instead of letting

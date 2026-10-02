@@ -47,6 +47,14 @@ class Reconciler(
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
+    // A hash is only comparable when both sides have one. A row written before the provider reported a hash (Internxt rows have
+    // remote_hash = null; #464 gave its listing a version token) must not look remotely modified just because the listing now
+    // carries one: that would re-download every existing file on the first sync after the upgrade. mtime still decides then.
+    private fun remoteHashChanged(
+        remote: String?,
+        recorded: String?,
+    ): Boolean = remote != null && recorded != null && remote != recorded
+
     var lastUnhydratedFolderDeletes: List<String> = emptyList()
         private set
 
@@ -199,7 +207,7 @@ class Reconciler(
                     // branch can adopt-or-download instead of falling through to the
                     // unhandled (NEW, MODIFIED) case and silently dropping the action.
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteItem.hash != entry.remoteHash ||
+                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
                         remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
@@ -442,7 +450,7 @@ class Reconciler(
                     remoteItem.deleted -> ChangeState.DELETED
                     entry == null -> ChangeState.NEW
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteItem.hash != entry.remoteHash ||
+                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
                         remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
