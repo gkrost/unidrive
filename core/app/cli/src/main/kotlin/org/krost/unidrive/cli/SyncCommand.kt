@@ -521,8 +521,18 @@ open class SyncCommand : Runnable {
                 // Pass `this` (the runBlocking scope) as recoveryUploadScope so that
                 // crash-recovery open_write calls run on the daemon's managed scope
                 // rather than a fire-and-forget orphan scope.
-                val hydration = HydrationImpl(engine, db, recoveryUploadScope = this)
+                val hydration =
+                    HydrationImpl(
+                        engine,
+                        db,
+                        recoveryUploadScope = this,
+                        cacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
+                    )
                 hydrationRef = hydration
+                launch {
+                    runCatching { hydration.sweepCache() }
+                        .onFailure { System.err.println("hydration cache sweep at start failed: ${it.message}") }
+                }
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in HydrationIpcHandler.VERBS) {
                     ipcServer.registerHandler(verb) { connId, json ->

@@ -409,6 +409,50 @@ class DoctorCommandTest {
         assertEquals(DoctorCommand.Severity.OK, check.severity)
     }
 
+    // ── Hydration cache size (#450) ───────────────────────────────────────
+
+    @Test
+    fun `hydration-cache check reports size against the budget and warns over it`() {
+        val cacheDir = Files.createTempDirectory("unidrive-doctor-cache")
+        Files.write(cacheDir.resolve("a.bin"), ByteArray(3000))
+        Files.createDirectories(cacheDir.resolve("sub"))
+        Files.write(cacheDir.resolve("sub/b.bin"), ByteArray(2000))
+        val cmd = DoctorCommand()
+
+        val under = cmd.checkHydrationCache(cacheDir, budgetBytes = 10_000)
+        assertEquals(DoctorCommand.Severity.OK, under.severity)
+        assertTrue("2 file(s)" in under.summary && "4.9 KiB" in under.summary && "9.8 KiB" in under.summary, under.summary)
+
+        val over = cmd.checkHydrationCache(cacheDir, budgetBytes = 4_000)
+        assertEquals(DoctorCommand.Severity.WARN, over.severity)
+        assertTrue("over budget" in over.summary, over.summary)
+
+        val unlimited = cmd.checkHydrationCache(cacheDir, budgetBytes = 0)
+        assertEquals(DoctorCommand.Severity.OK, unlimited.severity)
+        assertTrue("unlimited" in unlimited.summary, unlimited.summary)
+
+        val missing = cmd.checkHydrationCache(cacheDir.resolve("nope"), budgetBytes = 10_000)
+        assertEquals(DoctorCommand.Severity.OK, missing.severity)
+        assertTrue("0 file(s)" in missing.summary, missing.summary)
+    }
+
+    @Test
+    fun `runChecks includes the hydration-cache line only when given a cache directory`() {
+        seedDb { db ->
+            db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString())
+        }
+        assertTrue(runDoctor().none { it.check == "hydration-cache" })
+        val withCache = DoctorCommand().runChecks(
+            profileDir,
+            syncRoot,
+            false,
+            nowOverride = Instant.parse("2026-05-17T12:00:00Z"),
+            cacheDir = Files.createTempDirectory("unidrive-doctor-cache2"),
+            cacheBudgetBytes = 1000,
+        )
+        assertEquals(DoctorCommand.Severity.OK, result(withCache, "hydration-cache").severity)
+    }
+
     // ── Hydration drift — 60 missing files trips WARN ─────────────────────
 
     @Test

@@ -53,6 +53,8 @@ class DaemonRuntime(
     // one periodic enumerate on serveScope, serialised by the sync.enumerate
     // in-flight guard. 0 = off (strictly reactive, the daemon default).
     private val pollIntervalMs: Long = 0,
+    // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited.
+    private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -153,8 +155,14 @@ class DaemonRuntime(
                         hydrationIpcRef?.dispatchEvent(event)
                     },
                 )
-                val hydration = HydrationImpl(engine, db!!)
+                val hydration = HydrationImpl(engine, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
                 hydrationRef = hydration
+                // #450: what a stopped daemon left in the hydration cache (staging temp files, the
+                // copies of synced files read through the mount) is trimmed to the budget at start.
+                serveScope.launch {
+                    runCatching { hydration.sweepCache() }
+                        .onFailure { log.warn("hydration cache sweep at start failed", it) }
+                }
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 hydrationIpcRef = hydrationIpc
 

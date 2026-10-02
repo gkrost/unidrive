@@ -57,6 +57,11 @@
               { "type": "array", "items": { "type": "string", "pattern": "^/" } }
             ]
           },
+          "hydration_cache_max_bytes": {
+            "description": "Budget of this profile's hydration cache in bytes (the copies reads and writes through the mount leave under ~/.cache/unidrive/hydration/<profile>). Least recently used copies that hold nothing the cloud or the sync root does not are evicted after each close, after each upload and at daemon start. 0 means unlimited. Default 21474836480 (20 GiB).",
+            "type": "integer",
+            "minimum": 0
+          },
           "bucket": { "type": "string" },
           "region": { "type": "string" },
           "endpoint": { "type": "string" },

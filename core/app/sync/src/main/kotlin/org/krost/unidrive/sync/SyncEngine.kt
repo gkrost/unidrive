@@ -522,6 +522,16 @@ open class SyncEngine(
             (entry.remoteId == null ||
                 runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)
         ) {
+            // #449: a row from before cache_backed existed whose baseline still describes the sync-root file
+            // is settled here, so a later delete of that file is not mistaken for a cache-only row.
+            if (entry.cacheBacked == null && rowDescribesSyncRootFile(entry, path)) {
+                db.upsertEntry(entry.copy(cacheBacked = false))
+            }
+            return cachePath
+        }
+        // #449: the sync root already holds these bytes: copy them instead of downloading again.
+        if (copySyncRootCopyIntoCache(entry, path, cachePath)) {
+            if (entry.cacheBacked != false) db.upsertEntry(entry.copy(cacheBacked = false))
             return cachePath
         }
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
@@ -576,7 +586,7 @@ open class SyncEngine(
                 // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
                 // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
                 // describes them.
-                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
+                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now(), cacheBacked = false))
             } else {
                 // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
                 // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
@@ -587,6 +597,7 @@ open class SyncEngine(
                     localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
                     localSize = Files.size(cachePath),
                     lastSynced = Instant.now(),
+                    cacheBacked = true,
                 )
                 // The row just adopted the cache copy's stats, so the hash must describe the cache
                 // copy's bytes: keeping a hash recorded for the previous contents would pair stale
@@ -600,6 +611,151 @@ open class SyncEngine(
             runCatching { Files.deleteIfExists(staged) }
         }
     }
+
+    // #449 read side. Copies the sync-root file into [cachePath] (never a hard link: the mount
+    // writes the cache file in place, and a shared inode would change the sync-root bytes behind
+    // the row's baseline) when that file is provably the row's current remote version; false means
+    // "download as before". The proof, all of it needed:
+    //  - the row is hydrated, has a remote and describes the sync-root file (mtime and size still
+    //    match the baseline, so nobody edited it since), and the size is the remote size;
+    //  - a provider with a content hash: the bytes hash to the remote hash; otherwise the
+    //    baseline mtime is the remote modified time (the download stamps it, so an upload of a
+    //    user's own file does not qualify) and a recorded local hash (#396) still matches the bytes.
+    // The cache copy is written beside its destination and renamed into place, and dropped if the
+    // source changed while it was being read.
+    private fun copySyncRootCopyIntoCache(
+        entry: SyncEntry,
+        path: String,
+        cachePath: Path,
+    ): Boolean {
+        if (entry.isFolder || !entry.isHydrated || entry.remoteId == null) return false
+        var tmp: Path? = null
+        return try {
+            if (!rowDescribesSyncRootFile(entry, path)) return false
+            val local = placeholder.resolveLocal(path)
+            val size = Files.size(local)
+            if (size != entry.remoteSize) return false
+            val mtime = Files.getLastModifiedTime(local).toMillis()
+            val algorithm = provider.hashAlgorithm()
+            val current =
+                if (algorithm != null && !entry.remoteHash.isNullOrEmpty()) {
+                    HashVerifier.verify(local, entry.remoteHash, algorithm)
+                } else {
+                    entry.remoteModified?.toEpochMilli() == mtime &&
+                        (entry.localHash == null || HashVerifier.computeSha256Hex(local) == entry.localHash)
+                }
+            if (!current) return false
+            Files.createDirectories(cachePath.parent)
+            val copy = Files.createTempFile(cachePath.parent, ".ud-serve-", ".tmp").also { tmp = it }
+            Files.copy(local, copy, StandardCopyOption.REPLACE_EXISTING)
+            // Same footprint as a download: the copy's mtime is "now" on every platform (Windows
+            // would carry the source's over), so the cache never looks like the sync-root file.
+            Files.setLastModifiedTime(copy, java.nio.file.attribute.FileTime.from(Instant.now()))
+            if (Files.size(copy) != size || Files.size(local) != size || Files.getLastModifiedTime(local).toMillis() != mtime) return false
+            try {
+                Files.move(copy, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                Files.move(copy, cachePath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            log.debug("#449: served {} from the sync root, no download", path)
+            true
+        } catch (e: java.io.IOException) {
+            log.debug("#449: cannot serve {} from the sync root ({}), downloading", path, e.message)
+            false
+        } finally {
+            tmp?.let { runCatching { Files.deleteIfExists(it) } }
+        }
+    }
+
+    /**
+     * The directory that holds this profile's hydration cache (every cache file lives below it, laid
+     * out like the remote tree). #450: what the cache budget measures and evicts.
+     */
+    fun hydrationCacheDir(): Path = resolveCachePath("/")
+
+    /**
+     * #450: may the cache copy of [path] be deleted without losing anything? Answered from the bytes,
+     * not from timestamps (enumeration refreshes a row's `last_synced`, so it cannot tell an edit
+     * from a download). Never evictable ([CacheDisposition.PROTECTED]): no row, a folder, a row without a
+     * remote (never uploaded: the cache is the only copy), a row marked failed, a copy the row's
+     * baseline does not vouch for (modified since it was recorded), and a copy that differs from every
+     * version the row knows. The caller still owes the open-handle and queued-upload checks, which
+     * only the hydration layer can see.
+     */
+    fun cacheDisposition(path: String): CacheDisposition {
+        val entry = db.getEntry(path) ?: return CacheDisposition.PROTECTED
+        if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) return CacheDisposition.PROTECTED
+        val cache = resolveCachePath(path)
+        return try {
+            if (!Files.isRegularFile(cache)) return CacheDisposition.PROTECTED
+            val size = Files.size(cache)
+            val mtime = Files.getLastModifiedTime(cache).toMillis()
+            val cacheIsBaseline = entry.localMtime == mtime && entry.localSize == size
+            if (entry.cacheBacked == true || (entry.cacheBacked == null && cacheIsBaseline)) {
+                // The cache copy is the row's local file: clean only while it is exactly what was recorded.
+                return if (cacheIsBaseline) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
+            }
+            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path) &&
+                Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
+            ) {
+                return CacheDisposition.REDUNDANT
+            }
+            if (cacheMatchesRecordedVersion(entry, cache, size)) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
+        } catch (e: java.io.IOException) {
+            CacheDisposition.PROTECTED
+        }
+    }
+
+    // The bytes of [cache] are a version the row knows: the remote version (content-hash providers) or
+    // the baseline bytes the row hashed when it recorded them (#396, hashless providers).
+    private fun cacheMatchesRecordedVersion(
+        entry: SyncEntry,
+        cache: Path,
+        size: Long,
+    ): Boolean {
+        val algorithm = provider.hashAlgorithm()
+        return if (algorithm != null && !entry.remoteHash.isNullOrEmpty()) {
+            size == entry.remoteSize && HashVerifier.verify(cache, entry.remoteHash, algorithm)
+        } else {
+            entry.localHash != null && HashVerifier.computeSha256Hex(cache) == entry.localHash
+        }
+    }
+
+    /**
+     * #450: delete the cache copy of [path] if [cacheDisposition] still allows it, under the same
+     * per-path lock as [ensureHydrated] (no eviction in the middle of a hydration of the same path).
+     * Returns the freed bytes, or null when the copy was protected or could not be removed. A row whose
+     * local file WAS the cache copy is marked not hydrated (the local bytes are gone; the next sync or
+     * open refills them from the remote); a row that describes the sync-root file is left alone.
+     * [onUnhydrated] is invoked for the first kind, so the hydration layer can publish the event.
+     */
+    suspend fun evictCacheCopy(
+        path: String,
+        onUnhydrated: (String) -> Unit = {},
+    ): Long? =
+        hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock {
+            if (cacheDisposition(path) == CacheDisposition.PROTECTED) return@withLock null
+            val entry = db.getEntry(path) ?: return@withLock null
+            val cache = resolveCachePath(path)
+            val size = runCatching { Files.size(cache) }.getOrNull() ?: return@withLock null
+            val mtime = runCatching { Files.getLastModifiedTime(cache).toMillis() }.getOrNull() ?: return@withLock null
+            // The same test cacheDisposition used: the cache copy is the row's local file.
+            val cacheWasLocalFile =
+                entry.cacheBacked == true || (entry.cacheBacked == null && entry.localMtime == mtime && entry.localSize == size)
+            try {
+                Files.delete(cache)
+            } catch (e: java.io.IOException) {
+                log.debug("#450: cannot evict the cache copy of {}: {}", path, e.message)
+                return@withLock null
+            }
+            if (cacheWasLocalFile) {
+                db.markUnhydrated(path)
+                onUnhydrated(path)
+            } else if (entry.cacheBacked == null) {
+                db.upsertEntry(entry.copy(cacheBacked = false))
+            }
+            size
+        }
 
     // #418: true when [entry] is about the regular file in the sync root rather than about the
     // cache copy. Two cases:
@@ -665,6 +821,7 @@ open class SyncEngine(
                     isHydrated = true,
                     // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
                     localHash = null,
+                    cacheBacked = true,
                 ) ?: SyncEntry(
                     path = path,
                     remoteId = null,
@@ -677,6 +834,7 @@ open class SyncEngine(
                     isPinned = false,
                     isHydrated = true,
                     lastSynced = Instant.now(),
+                    cacheBacked = true,
                 ),
             )
             return
@@ -789,6 +947,7 @@ open class SyncEngine(
                             isHydrated = true,
                             lastSynced = Instant.now(),
                             lastErrorAt = existing.lastErrorAtAfterUpload(),
+                            cacheBacked = false,
                         ),
                         localPath,
                         sentLocal,
@@ -822,11 +981,24 @@ open class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
                 lastErrorAt = existing.lastErrorAtAfterUpload(),
+                cacheBacked = true,
             )
             // The row just adopted the cache copy's stats, and these are exactly the bytes the
             // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)
             // so the touch shield covers mount-edited files too.
-            db.upsertEntry(withSentHash(uploaded, cachePath, sent))
+            val hashed = withSentHash(uploaded, cachePath, sent)
+            // #449 write side: a file made or edited through the mount has no sync-root file the row
+            // describes, so a later plain `sync` would read the missing file as a local delete (#459).
+            // Now that the provider has the bytes, put the same bytes there; the row's baseline is then
+            // that file (the hash just taken, of the same bytes, stays) and no longer the cache copy.
+            val mirrored = mirrorIntoSyncRoot(path, cachePath, sent)
+            db.upsertEntry(
+                if (mirrored != null) {
+                    hashed.copy(localMtime = mirrored.first, localSize = mirrored.second, cacheBacked = false)
+                } else {
+                    hashed
+                },
+            )
         }
         auditLog?.emit(
             action = "Upload",
@@ -836,6 +1008,55 @@ open class SyncEngine(
             newHash = result.hash,
             result = "success",
         )
+    }
+
+    // #449 write side, for a row that describes no sync-root file. Places the bytes just uploaded from
+    // [cachePath] at the row's path in the sync root and returns the (mtime, size) of that file, which
+    // become the row's baseline; null means nothing was written and the row keeps recording the cache
+    // copy (cache_backed = true), which the Reconciler guard keeps from being read as a local delete.
+    // Skipped, never forced, when:
+    //  - the path is out of scope or not representable locally, or the sync root itself does not
+    //    exist (a mount-only profile must not grow a folder tree it never asked for);
+    //  - a file (or a directory) is already there: the row does not describe it, so it changed since
+    //    the baseline or was never tracked, and the next sync decides, exactly as without the mirror;
+    //  - the cache file changed since the stats taken before the upload: a newer write is queued
+    //    behind this one and mirrors itself.
+    // The file is copied to a temp file in the destination directory (`*.tmp`, a default exclude, so
+    // a scan never sees it) and renamed in, with the watcher's echo suppressed. A copy, not a hard
+    // link, for the same reason as in [copySyncRootCopyIntoCache]. Any I/O failure is logged and
+    // swallowed: the upload already succeeded and must not be reported as failed.
+    private fun mirrorIntoSyncRoot(
+        path: String,
+        cachePath: Path,
+        sent: Pair<Long, Long>?,
+    ): Pair<Long, Long>? {
+        if (sent == null) return null
+        if (!isTracked(path) || localNameIssue(path) != null || !Files.isDirectory(syncRoot)) return null
+        var tmp: Path? = null
+        return try {
+            val target = placeholder.resolveLocal(path)
+            val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+            if (Files.exists(target, noFollow)) {
+                log.info("#449: not mirroring {} into the sync root: a file is already there that the row does not describe, the next sync decides", path)
+                return null
+            }
+            if (statBeforeUpload(cachePath) != sent) return null
+            Files.createDirectories(target.parent)
+            val copy = Files.createTempFile(target.parent, ".ud-mirror-", ".tmp").also { tmp = it }
+            Files.copy(cachePath, copy, StandardCopyOption.REPLACE_EXISTING)
+            Files.setLastModifiedTime(copy, java.nio.file.attribute.FileTime.fromMillis(sent.first))
+            if (statBeforeUpload(cachePath) != sent || Files.size(copy) != sent.second) return null
+            withEchoSuppression(path) {
+                // No REPLACE_EXISTING: a file that appeared in the meantime is not ours to replace.
+                Files.move(copy, target)
+            }
+            Files.getLastModifiedTime(target).toMillis() to Files.size(target)
+        } catch (e: Exception) {
+            log.warn("#449: could not mirror {} into the sync root, the row keeps the cache copy as its local file: {}", path, e.message)
+            null
+        } finally {
+            tmp?.let { runCatching { Files.deleteIfExists(it) } }
+        }
     }
 
     // A landed upload settles an earlier failed attempt: markUploadFailed stamps last_error_at
@@ -897,6 +1118,9 @@ open class SyncEngine(
      * determined to be a no-op because the remote is already gone).
      */
     suspend fun deleteRemote(path: String) {
+        // #449 review: read before the delete — once the row is tombstoned the alive
+        // view no longer answers "did this row's baseline live in the sync root?".
+        val entryBefore = db.getEntry(path)
         try {
             provider.delete(path)
         } catch (e: Exception) {
@@ -907,6 +1131,33 @@ open class SyncEngine(
             }
         }
         db.markDeleted(path)
+        dropSyncRootCopy(path, entryBefore)
+    }
+
+    // #449 review fix: the remote path is gone and its row tombstoned — the sync-root
+    // mirror must not survive them, or the next scan reads the orphan file as NEW and
+    // re-uploads the path the user just deleted (a resurrection through the mirror).
+    // A row whose baseline is the cache copy (cacheBacked == true: a failed or skipped
+    // mirror) has no sync-root file by definition, so the delete is a no-op there and
+    // legacy rows (null) are covered too. A folder's empty mirror directory goes with
+    // it (a non-empty one holds files of rows that are not deleted — deleteIfExists
+    // refuses it, and that is correct). Files the caller removed already (a mount
+    // unlink evicts its own copies, a sync-root-side delete is what triggered this)
+    // make this a no-op. Best effort either way: the delete already succeeded, and the
+    // sweep of a later session can still reclaim.
+    private fun dropSyncRootCopy(
+        path: String,
+        entryBefore: SyncEntry?,
+    ) {
+        if (entryBefore == null) return
+        runCatching {
+            val target = placeholder.resolveLocal(path)
+            withEchoSuppression(path) {
+                Files.deleteIfExists(target)
+            }
+        }.onFailure { e ->
+            log.warn("#449: could not remove the sync-root copy of the deleted {}: {}", path, e.message)
+        }
     }
 
     /**
@@ -953,8 +1204,47 @@ open class SyncEngine(
      * both OneDrive and Internxt.
      */
     suspend fun renameRemote(oldPath: String, newPath: String) {
+        // #449 review: read before the move — renamePrefix repaths the rows, and the
+        // alive view then answers for the NEW path only.
+        val entryBefore = db.getEntry(oldPath)
         provider.move(oldPath, newPath)
         db.renamePrefix(oldPath, newPath)
+        moveSyncRootCopy(oldPath, newPath, entryBefore)
+    }
+
+    // #449 review fix: a mount rename moves the remote item, the row(s) and the cache
+    // file, but until now left the sync-root mirror at the old path — an orphan file
+    // with no row, which the next scan read as NEW and re-uploaded under the old name
+    // (the #319 resurrection shape, reintroduced through the mirror). The mirror
+    // follows the rename; rows whose baseline is the cache copy (cacheBacked == true)
+    // and legacy rows (null) have no sync-root file to move. Best effort: a file that
+    // appeared at the destination in the meantime is not ours to replace — the old
+    // copy stays and the next sync decides, exactly as the mirror-skip rule does.
+    private fun moveSyncRootCopy(
+        oldPath: String,
+        newPath: String,
+        entryBefore: SyncEntry?,
+    ) {
+        if (entryBefore?.cacheBacked != false) return
+        runCatching {
+            val from = placeholder.resolveLocal(oldPath)
+            if (!Files.exists(from)) return
+            val to = placeholder.resolveLocal(newPath)
+            withEchoSuppression(newPath) {
+                withEchoSuppression(oldPath) {
+                    Files.createDirectories(to.parent)
+                    // No REPLACE_EXISTING: a file at the destination is not ours to replace.
+                    Files.move(from, to)
+                }
+            }
+        }.onFailure { e ->
+            log.warn(
+                "#449: could not move the sync-root copy of {} to {}: {}",
+                oldPath,
+                newPath,
+                e.message,
+            )
+        }
     }
 
     // The remote item at [path], or null only when the provider proves it ABSENT.
@@ -4697,3 +4987,11 @@ open class SyncEngine(
                 .resolve(cacheKey.ifBlank { "default" })
     }
 }
+
+/**
+ * #450: what [SyncEngine.cacheDisposition] says about a hydration-cache copy.
+ * [PROTECTED] must never be deleted; [REDUNDANT] is byte-identical to the file in the sync root (the
+ * cheapest to evict); [DISPOSABLE] holds only bytes the row already knows (the remote version or the
+ * recorded baseline).
+ */
+enum class CacheDisposition { PROTECTED, REDUNDANT, DISPOSABLE }

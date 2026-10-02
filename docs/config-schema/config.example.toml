@@ -20,4 +20,10 @@ sync_root = "~/Internxt"
 # sync_path = "/_INBOX"
 # sync_path = ["/_INBOX", "/gernot_ssh"]
 
+# Budget of the hydration cache (what reads and writes through the mount leave under
+# ~/.cache/unidrive/hydration/<profile>), in bytes. Eviction never touches a file with an open
+# handle, a queued or failed upload, an unfinished create or an unsynced edit. 0 = unlimited.
+# Default 21474836480 (20 GiB). `unidrive doctor` shows the size against the budget.
+# hydration_cache_max_bytes = 21474836480
+
 # exclude_patterns = ["/dev/git/**"]

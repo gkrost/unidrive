@@ -192,7 +192,8 @@ class StateDatabase(
                                          CHECK (status IN ('EXISTS','TRASHED','DELETED')),
                     download_quarantined INTEGER NOT NULL DEFAULT 0,
                     last_error_at        TEXT,
-                    local_hash           TEXT
+                    local_hash           TEXT,
+                    cache_backed         INTEGER
                 )
             """,
             )
@@ -333,6 +334,15 @@ class StateDatabase(
             if (!columnExists("sync_entries", "local_hash")) {
                 stmt.executeUpdate(
                     "ALTER TABLE sync_entries ADD COLUMN local_hash TEXT",
+                )
+            }
+            // #449: where the row's local baseline lives. NULL = unknown (every row written before
+            // this column), 1 = the hydration cache copy, 0 = the sync-root file. Same additive
+            // pattern, no schema_version bump; NULL keeps the cache-presence guard of the
+            // Reconciler for old rows. The CREATE TABLE above includes it for fresh installs.
+            if (!columnExists("sync_entries", "cache_backed")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN cache_backed INTEGER",
                 )
             }
         }
@@ -542,8 +552,8 @@ class StateDatabase(
             INSERT OR REPLACE INTO sync_entries
                 (remote_id, parent_uuid, path, remote_path, remote_hash, remote_size, remote_modified,
                  local_mtime, local_size, is_folder, is_pinned, is_hydrated, last_synced, status,
-                 download_quarantined, last_error_at, local_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 download_quarantined, last_error_at, local_hash, cache_backed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             ).use { stmt ->
                 stmt.setString(1, storedId)
@@ -566,6 +576,9 @@ class StateDatabase(
                 // describe. Dropping it here means every dehydrate path clears it and a later
                 // re-hydrate can never inherit a hash of bytes that are gone.
                 stmt.setString(17, if (entry.isHydrated) entry.localHash else null)
+                // #449: like the hash, where the baseline lives only means something while there are local bytes.
+                val backed = if (entry.isHydrated) entry.cacheBacked else null
+                if (backed == null) stmt.setNull(18, java.sql.Types.INTEGER) else stmt.setInt(18, if (backed) 1 else 0)
                 stmt.executeUpdate()
             }
     }
@@ -1431,6 +1444,7 @@ class StateDatabase(
             downloadQuarantined = getInt("download_quarantined") == 1,
             lastErrorAt = getString("last_error_at")?.let { Instant.parse(it) },
             localHash = getString("local_hash"),
+            cacheBacked = getInt("cache_backed").let { if (wasNull()) null else it == 1 },
         )
     }
 

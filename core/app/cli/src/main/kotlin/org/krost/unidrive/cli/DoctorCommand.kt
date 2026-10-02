@@ -10,6 +10,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
@@ -87,7 +89,17 @@ class DoctorCommand : Runnable {
                 emptyList()
             }
 
-        val checks = runChecks(profileDir, syncRoot, full, excludePatterns = excludePatterns)
+        // #450: where this profile's hydration cache lives and what it may grow to. Like the exclude
+        // patterns above, a wedged config must not stop doctor: fall back to the default budget.
+        val cacheDir = SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name)
+        val cacheBudget: Long =
+            try {
+                parent.loadSyncConfig().hydrationCacheMaxBytes(profile.name)
+            } catch (_: Throwable) {
+                SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES
+            }
+
+        val checks = runChecks(profileDir, syncRoot, full, excludePatterns = excludePatterns, cacheDir = cacheDir, cacheBudgetBytes = cacheBudget)
         if (json) {
             println(renderJson(checks))
         } else {
@@ -113,6 +125,8 @@ class DoctorCommand : Runnable {
         full: Boolean,
         nowOverride: Instant? = null,
         excludePatterns: List<String> = emptyList(),
+        cacheDir: Path? = null,
+        cacheBudgetBytes: Long = SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES,
     ): List<CheckResult> {
         val now = nowOverride ?: Instant.now()
         val results = mutableListOf<CheckResult>()
@@ -142,6 +156,7 @@ class DoctorCommand : Runnable {
                 emptyList(),
             )
         }
+        if (cacheDir != null) results += checkHydrationCache(cacheDir, cacheBudgetBytes)
         results += checkRecentDestructive(profileDir, now)
         return results
     }
@@ -404,6 +419,51 @@ class DoctorCommand : Runnable {
             detail,
         )
     }
+
+    /**
+     * **Check — Hydration cache size (#450).** Total bytes of the profile's hydration cache directory
+     * against its budget (`hydration_cache_max_bytes`, 0 = unlimited). WARN when over budget: the
+     * eviction pass skips files with an open handle, a queued or failed upload, an unfinished create
+     * or an unsynced edit, so a cache that stays over budget is holding bytes that exist nowhere else
+     * (or the daemon has not run a pass yet). Read-only.
+     */
+    internal fun checkHydrationCache(
+        cacheDir: Path,
+        budgetBytes: Long,
+    ): CheckResult {
+        val name = "hydration-cache"
+        var bytes = 0L
+        var files = 0
+        if (Files.isDirectory(cacheDir)) {
+            Files.walk(cacheDir).use { stream ->
+                val iter = stream.iterator()
+                while (iter.hasNext()) {
+                    val p = iter.next()
+                    if (Files.isRegularFile(p)) {
+                        files++
+                        bytes += runCatching { Files.size(p) }.getOrDefault(0L)
+                    }
+                }
+            }
+        }
+        val budget = if (budgetBytes > 0) formatBytes(budgetBytes) else "unlimited"
+        val summary = "$files file(s), ${formatBytes(bytes)} of $budget budget ($cacheDir)"
+        val over = budgetBytes > 0 && bytes > budgetBytes
+        return CheckResult(
+            name,
+            if (over) Severity.WARN else Severity.OK,
+            if (over) "$summary: over budget (protected files cannot be evicted; the daemon trims at start and after each close)" else summary,
+            emptyList(),
+        )
+    }
+
+    private fun formatBytes(n: Long): String =
+        when {
+            n >= 1L shl 30 -> String.format(java.util.Locale.ROOT, "%.1f GiB", n.toDouble() / (1L shl 30))
+            n >= 1L shl 20 -> String.format(java.util.Locale.ROOT, "%.1f MiB", n.toDouble() / (1L shl 20))
+            n >= 1L shl 10 -> String.format(java.util.Locale.ROOT, "%.1f KiB", n.toDouble() / (1L shl 10))
+            else -> "$n B"
+        }
 
     /**
      * **Check 7 — Recent destructive activity.** Tails the last 7 days of

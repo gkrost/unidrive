@@ -319,6 +319,9 @@ data class RawProvider(
     // Absent = the whole drive. The CLI --sync-path overrides it per invocation.
     @Serializable(with = StringOrListSerializer::class)
     val sync_path: List<String>? = null,
+    // #450: budget of this profile's hydration cache in bytes (the copies the mount's reads and
+    // writes leave under ~/.cache/unidrive/hydration/<profile>). 0 = unlimited. Absent = the default.
+    val hydration_cache_max_bytes: Long? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -435,6 +438,10 @@ data class SyncConfig(
 
     fun providerExcludePatterns(providerId: String): List<String> = providers[providerId]?.excludePatterns ?: emptyList()
 
+    /** #450: this profile's hydration cache budget in bytes; 0 = unlimited. */
+    fun hydrationCacheMaxBytes(profileName: String): Long =
+        (providers[profileName]?.hydrationCacheMaxBytes ?: DEFAULT_HYDRATION_CACHE_MAX_BYTES).coerceAtLeast(0L)
+
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
@@ -443,9 +450,13 @@ data class SyncConfig(
         val pinExcludes: List<String> = emptyList(),
         val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
         val excludePatterns: List<String> = emptyList(),
+        val hydrationCacheMaxBytes: Long? = null,
     )
 
     companion object {
+        /** #450: default hydration cache budget per profile, 20 GiB. */
+        const val DEFAULT_HYDRATION_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
+
         /**
          * Patterns excluded from sync for every profile, before any user
          * (TOML global / per-provider / CLI --exclude) patterns. Consolidates
@@ -772,6 +783,7 @@ data class SyncConfig(
                                 .mapKeys { (k, _) -> k.removeSurrounding("\"") }
                                 .mapValues { (_, v) -> parsePolicy(v) },
                         excludePatterns = rp.exclude_patterns ?: emptyList(),
+                        hydrationCacheMaxBytes = rp.hydration_cache_max_bytes,
                     )
                 }
             val pollInt = general.poll_interval ?: 60
