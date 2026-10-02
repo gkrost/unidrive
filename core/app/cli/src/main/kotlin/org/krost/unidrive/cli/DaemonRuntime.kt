@@ -194,6 +194,20 @@ class DaemonRuntime(
                 }
                 serveScope.launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
 
+                // Engine-side upload recovery: re-enqueue rows written through the
+                // mount whose upload never landed (still queued or failed when the
+                // daemon last stopped). Runs before any client connects, so a
+                // restart alone drains the backlog; the uploads go through the
+                // same per-path serialization and daemon-wide transfer budget as
+                // client-submitted ones. The co-daemon's recovery-<n> scanner
+                // stays as the client-side complement for cache files the row
+                // scan cannot see.
+                serveScope.launch {
+                    runCatching { hydration.replayPendingUploads() }
+                        .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
+                        .onFailure { log.warn("pending-upload replay failed", it) }
+                }
+
                 // sync.subscribe — symmetric to SyncCommand's wiring.
                 server.registerHandler("sync.subscribe") { connId, _ ->
                     server.scheduleAfterReply(connId) {

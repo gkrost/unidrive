@@ -11,7 +11,30 @@ sealed class HydrationEvent {
     data class Hydrating(override val path: String) : HydrationEvent()
     data class Hydrated(override val path: String, val bytes: Long) : HydrationEvent()
     data class Dehydrated(override val path: String) : HydrationEvent()
-    data class Failed(override val path: String, val error: HydrationError) : HydrationEvent()
+    data class Failed(
+        override val path: String,
+        val error: HydrationError,
+        /**
+         * Upload attempts only: whether the daemon will retry this upload on
+         * its own (true — the client can show "waiting/retrying" and need do
+         * nothing) or has given up for good (false — the row stays visibly
+         * failed until a client re-submit or a daemon restart replays it).
+         * Null (absent on the wire) for non-upload failures, keeping the
+         * pre-existing event shape byte-identical there.
+         */
+        val retryScheduled: Boolean? = null,
+    ) : HydrationEvent()
+
+    /**
+     * An upload submitted through `open_write` was accepted into the daemon's
+     * upload queue but has not started transferring yet (the daemon-wide
+     * per-provider transfer budget is busy). A client shows the file as
+     * waiting until hydrating/failed arrives. Always followed by one of those.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"queued","path":"/a/save.doc"}`
+     */
+    data class Queued(override val path: String) : HydrationEvent()
 
     /**
      * Emitted instead of the hydrating/hydrated pair when a write lands on a

@@ -51,6 +51,18 @@ internal class MinimalFakeProvider(
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
     var uploadGate: CompletableDeferred<Unit>? = null
 
+    // Upload failure injection: upload() throws while this is > 0 (decremented
+    // per call). Drives the retry tests: set to N for N transient failures,
+    // to a huge number for a permanent failure.
+    val uploadFailuresRemaining = AtomicInteger(0)
+
+    // Total upload() invocations (attempt counting for the retry tests) and
+    // daemon-wide concurrency tracking for the transfer-cap test.
+    private val uploadAttempts = AtomicInteger(0)
+    private val activeUploadsTotal = AtomicInteger(0)
+    private val maxConcurrentUploadsTotal = AtomicInteger(0)
+    private val completedUploads = AtomicInteger(0)
+
     // Per-path concurrency tracking for the serialization test.
     // activeUploadsByPath: how many upload coroutines are currently inside upload() for each path.
     // maxConcurrentUploadsByPath: the peak observed value of activeUploadsByPath per path.
@@ -93,17 +105,24 @@ internal class MinimalFakeProvider(
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        uploadAttempts.incrementAndGet()
+        if (uploadFailuresRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p } > 0) {
+            throw IllegalStateException("injected upload failure")
+        }
         // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
         val active = activeUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
         val peak = maxConcurrentUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
         val currentActive = active.incrementAndGet()
         // Update peak if current active count exceeds the recorded maximum.
         peak.getAndUpdate { prev -> maxOf(prev, currentActive) }
+        val totalNow = activeUploadsTotal.incrementAndGet()
+        maxConcurrentUploadsTotal.getAndUpdate { prev -> maxOf(prev, totalNow) }
 
         try {
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
             uploadedFiles[remotePath] = bytes
+            completedUploads.incrementAndGet()
             return CloudItem(
                 id = "uploaded-$remotePath",
                 name = remotePath.substringAfterLast('/'),
@@ -117,6 +136,7 @@ internal class MinimalFakeProvider(
             )
         } finally {
             active.decrementAndGet()
+            activeUploadsTotal.decrementAndGet()
         }
     }
 
@@ -170,6 +190,15 @@ internal class MinimalFakeProvider(
      */
     fun maxConcurrentUploadsForPath(path: String): Int =
         maxConcurrentUploadsByPath[path]?.get() ?: 0
+
+    /** Total upload() invocations seen so far (attempt counter for retry tests). */
+    fun uploadAttempts(): Int = uploadAttempts.get()
+
+    /** Peak number of upload() calls in flight across ALL paths (cap test). */
+    fun maxConcurrentUploadsTotal(): Int = maxConcurrentUploadsTotal.get()
+
+    /** upload() calls that ran to completion (drain detection in the cap test). */
+    fun completedUploads(): Int = completedUploads.get()
 }
 
 /**
@@ -189,6 +218,10 @@ internal class HydrationTestEnv(
     val syncPaths: List<String> = emptyList(),
     /** Configured exclude patterns for the keep-local tests. */
     val excludePatterns: List<String> = emptyList(),
+    /** Upload-queue tuning passed through to [HydrationImpl]. */
+    val uploadQueueDepth: Int = 256,
+    val maxUploadAttempts: Int = 3,
+    val uploadRetryDelaysMs: List<Long> = listOf(2_000L, 10_000L),
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -199,7 +232,10 @@ internal class HydrationTestEnv(
 
     val stateDb: StateDatabaseFacade
     val syncEngine: SyncEngineFacade
-    val hydration: Hydration
+    val hydration: HydrationImpl
+
+    /** Direct access to the fake provider (upload gate, failure/counters). */
+    val providerForTest: MinimalFakeProvider get() = fakeProvider
 
     init {
         val db = StateDatabase(dbPath = dbPath, inMemory = true)
@@ -217,11 +253,14 @@ internal class HydrationTestEnv(
 
         stateDb = StateDatabaseFacade(db)
         syncEngine = SyncEngineFacade(fakeProvider, engine)
-        hydration = if (recoveryUploadScope != null) {
-            HydrationImpl(syncEngine = engine, stateDb = db, recoveryUploadScope = recoveryUploadScope)
-        } else {
-            HydrationImpl(syncEngine = engine, stateDb = db)
-        }
+        hydration = HydrationImpl(
+            syncEngine = engine,
+            stateDb = db,
+            recoveryUploadScope = recoveryUploadScope ?: CoroutineScope(Dispatchers.IO),
+            uploadQueueDepth = uploadQueueDepth,
+            maxUploadAttempts = maxUploadAttempts,
+            uploadRetryDelaysMs = uploadRetryDelaysMs,
+        )
     }
 
     internal inner class StateDatabaseFacade(private val db: StateDatabase) {
@@ -351,6 +390,17 @@ internal class HydrationTestEnv(
 
         /** Folders the provider was asked to create (scope-guard assertions). */
         fun createdFolders(): List<String> = fakeProvider.createdFolders
+
+        /** Injects [count] upload() failures before the next success. */
+        fun failUploads(count: Int) {
+            fakeProvider.uploadFailuresRemaining.set(count)
+        }
+
+        /** Total upload() attempts seen by the provider (retry tests). */
+        fun uploadAttempts(): Int = fakeProvider.uploadAttempts()
+
+        /** Peak concurrent upload() calls across all paths (transfer-cap test). */
+        fun maxConcurrentUploadsTotal(): Int = fakeProvider.maxConcurrentUploadsTotal()
 
         /**
          * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.

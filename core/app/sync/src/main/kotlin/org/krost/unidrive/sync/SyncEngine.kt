@@ -164,6 +164,27 @@ open class SyncEngine(
      */
     fun isOutOfScope(path: String): Boolean = !SyncScope.contains(path, trackScope)
 
+    // UD-263: per-provider transfer concurrency cap, computed once at
+    // construction. Audit values flow from docs/providers/<id>-robustness.md
+    // §5 → ProviderMetadata → here. One daemon-wide semaphore shared by the
+    // sync pass (Pass 2 + streaming-gather executor) and the hydration upload
+    // path, so an Explorer copy burst through the mount can never exceed the
+    // provider's cap (Internxt allows 2) no matter which path the transfers
+    // come from. Memory-pressure protection on big files is delegated to the
+    // provider's HttpRetryBudget (UD-232).
+    private val perProviderConcurrency: Int =
+        org.krost.unidrive.ProviderRegistry
+            .getMetadata(providerId)
+            ?.maxConcurrentTransfers ?: 4
+    private val transferBudget = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+
+    /**
+     * Run [block] holding one permit of the daemon-wide per-provider transfer
+     * budget. The hydration upload path goes through this so mount writes and
+     * sync passes share one cap instead of each running unbounded.
+     */
+    suspend fun <T> withTransferPermit(block: suspend () -> T): T = transferBudget.withPermit { block() }
+
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
     // (canonical→real-local reverse map for newly-arrived aliased rows).
@@ -1177,18 +1198,12 @@ open class SyncEngine(
         val executedPaths =
             java.util.concurrent.ConcurrentHashMap
                 .newKeySet<String>()
-        // UD-263: per-provider transfer concurrency cap. Lifted to the top
-        // of doSyncOnce so both Pass 2 AND the streaming-gather executor
-        // share one semaphore — they pick from a single concurrency
-        // budget rather than each having their own. Audit values flow
-        // from docs/providers/<id>-robustness.md §5 → ProviderMetadata
-        // → here. Memory-pressure protection on big files is delegated to
-        // the provider's HttpRetryBudget (UD-232).
-        val perProviderConcurrency =
-            org.krost.unidrive.ProviderRegistry
-                .getMetadata(providerId)
-                ?.maxConcurrentTransfers ?: 4
-        val transferSemaphore = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+        // UD-263: the per-provider transfer budget is a construction-time field
+        // ([transferBudget]) shared with the hydration upload path via
+        // [withTransferPermit] — one daemon-wide cap, not one per sync pass.
+        // The per-provider audit values (docs/providers/<id>-robustness.md §5
+        // → ProviderMetadata) still drive the cap.
+        val transferSemaphore = transferBudget
 
         // UD-299: detect sync_root drift between runs. state.db is per-profile
         // (not per-(profile, sync_root)), so editing sync_root in config.toml
@@ -1796,11 +1811,11 @@ open class SyncEngine(
             return
         }
 
-        // perProviderConcurrency + transferSemaphore are now declared at
-        // the top of doSyncOnce so the streaming-gather executor and Pass 2
-        // share one concurrency budget. The per-provider audit values
-        // (docs/providers/<id>-robustness.md §5 → ProviderMetadata) still
-        // drive the cap.
+        // perProviderConcurrency + transferBudget are declared at
+        // construction so the streaming-gather executor, Pass 2 and the
+        // hydration upload path all share one concurrency budget. The
+        // per-provider audit values (docs/providers/<id>-robustness.md §5
+        // → ProviderMetadata) still drive the cap.
         log.info(
             "Pass 2 transfer semaphore: provider={} maxConcurrentTransfers={}",
             providerId.ifBlank { "<unknown>" },

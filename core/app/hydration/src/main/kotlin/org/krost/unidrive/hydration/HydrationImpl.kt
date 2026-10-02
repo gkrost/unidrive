@@ -1,17 +1,21 @@
 package org.krost.unidrive.hydration
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
@@ -24,7 +28,19 @@ class HydrationImpl(
     private val syncEngine: SyncEngine,
     private val stateDb: StateDatabase,
     private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    // Upload-queue tuning. The waiting depth bounds how many submitted-but-
+    // not-yet-running uploads the daemon holds; a burst beyond it suspends
+    // the open_write callers (back-pressure towards the client) instead of
+    // growing the queue. A failed upload is retried up to [maxUploadAttempts]
+    // times, with [uploadRetryDelaysMs][i] preceding retry i+1; the transfer
+    // permit is released during the wait so a backing-off path never starves
+    // the daemon-wide budget.
+    val uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
+    val maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
+    val uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
 ) : Hydration {
+
+    private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
 
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
     override val events: Flow<HydrationEvent> = _events.asSharedFlow()
@@ -71,10 +87,27 @@ class HydrationImpl(
     private data class UploadSlot(val mutex: Mutex, val pending: AtomicInteger)
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
 
+    // Waiting-slot budget for the upload queue. Acquired by the submitting
+    // caller (open_write / replay) and released only when the job actually
+    // acquires a transfer permit — so the bound covers uploads waiting either
+    // for their per-path turn or for the daemon-wide budget. A burst beyond
+    // [uploadQueueDepth] suspends the submitter: back-pressure towards the
+    // client instead of unbounded queue growth.
+    private val queueSlots = Semaphore(uploadQueueDepth)
+
     private companion object {
         // Wire token for "an upload of the path is still in flight, retry"; the same literal
         // dehydrate's Busy reply puts on the wire.
         const val BUSY_TOKEN = "busy"
+
+        /** Default bound on uploads waiting to run (see [uploadQueueDepth]). */
+        const val DEFAULT_UPLOAD_QUEUE_DEPTH = 256
+
+        /** Default attempts per queued upload (see [maxUploadAttempts]). */
+        const val DEFAULT_MAX_UPLOAD_ATTEMPTS = 3
+
+        /** Delays preceding retries 2..N of a queued upload (see [uploadRetryDelaysMs]). */
+        val DEFAULT_UPLOAD_RETRY_DELAYS_MS = listOf(2_000L, 10_000L)
     }
 
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
@@ -220,25 +253,37 @@ class HydrationImpl(
         return OpenResult.Ok(cachePath)
     }
 
-    // Launches a background upload for [path] from [cachePath], serialized per-path
-    // via the mutex in [uploadSlots]. Same-path uploads queue FIFO; different-path
-    // uploads run concurrently. The cache file is read after acquiring the lock so
-    // the last submitted upload always reads the latest content. On completion
-    // (either way) emits a [HydrationEvent.Completed] correlated to [handleId] so
-    // the write-back client learns the outcome of the upload it started.
+    // Submits a background upload for [path] from [cachePath] to the daemon's
+    // upload queue. Same-path uploads queue FIFO (the per-path mutex in
+    // [uploadSlots] is fair); different-path uploads run up to the daemon-wide
+    // per-provider transfer budget shared with the sync engine
+    // ([SyncEngine.withTransferPermit]) — an Explorer copy burst can never
+    // exceed the provider's cap, whatever path the transfers come from.
+    //
+    // Back-pressure: while [uploadQueueDepth] uploads are waiting (per-path
+    // turn or transfer permit), this coroutine suspends in queueSlots.acquire
+    // — the open_write caller waits instead of the queue growing unboundedly.
+    //
+    // Retry: a failed attempt is retried up to [maxUploadAttempts] with the
+    // delays in [uploadRetryDelaysMs] between attempts (the permit is released
+    // during the wait). Every failed attempt stamps the row's last_error_at
+    // and emits failed with retry_scheduled, so the client can distinguish
+    // "the daemon will retry" from "this upload is done failing"; the final
+    // failure additionally WARN-logs. Durability across daemon restarts is
+    // [replayPendingUploads] (the state.db row is the durable queue).
     //
     // Map cleanup: ConcurrentHashMap.compute() is used for BOTH the
-    // increment-or-create (on launch) and the decrement-and-remove (in the finally
-    // block). Because compute() holds the map's bin lock for the duration of the
-    // lambda, a concurrent launch's compute() cannot interleave between the
-    // decrement and the removal. This guarantees a slot is never removed while
-    // another submitter is in the process of bumping its pending count.
-    private fun launchSerializedUpload(
+    // increment-or-create (on launch) and the decrement-and-remove (in the
+    // finally block) — atomic under the map's bin lock, so a slot is never
+    // removed while another submitter is bumping its pending count.
+    private suspend fun launchSerializedUpload(
         path: String,
         cachePath: Path,
         handleId: String,
         baseEtag: String?,
     ) {
+        _events.emit(HydrationEvent.Queued(path))
+        queueSlots.acquire()
         // Atomically create-or-get the slot and bump its pending count. The bin lock
         // held by compute() ensures that no concurrent finally-block can remove the
         // slot between the moment we decide to reuse it and the moment we increment.
@@ -250,30 +295,25 @@ class HydrationImpl(
             // Completed by re-listing must already see pending_upload settled, not still
             // raised by the slot of the upload it was just told about.
             var completed: HydrationEvent.Completed? = null
+            // Exactly-once release of this job's waiting slot: handed over to the
+            // transfer-permit block inside runUploadWithRetries, or released here if
+            // the job never got that far. A plain Boolean is safe — only this
+            // coroutine touches it.
+            var waitingSlotHeld = true
             try {
                 slot.mutex.withLock {
                     try {
-                        _events.emit(HydrationEvent.Hydrating(path))
-                        syncEngine.uploadFromCache(path, cachePath, baseEtag)
-                        val bytes = java.nio.file.Files.size(cachePath)
-                        _events.emit(HydrationEvent.Hydrated(path, bytes))
-                        completed = HydrationEvent.Completed(
-                            path = path,
-                            handleId = handleId,
-                            direction = HydrationEvent.Completed.Direction.UPLOAD,
-                            ok = true,
-                        )
-                    } catch (e: Exception) {
-                        runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                        val err = if (e is org.krost.unidrive.RemoteConflictException) HydrationError.Conflict else HydrationError.Generic(e.message ?: "upload failed")
-                        _events.emit(HydrationEvent.Failed(path, err))
-                        completed = HydrationEvent.Completed(
-                            path = path,
-                            handleId = handleId,
-                            direction = HydrationEvent.Completed.Direction.UPLOAD,
-                            ok = false,
-                            error = err,
-                        )
+                        completed = runUploadWithRetries(path, cachePath, handleId, baseEtag) {
+                            if (waitingSlotHeld) {
+                                queueSlots.release()
+                                waitingSlotHeld = false
+                            }
+                        }
+                    } finally {
+                        if (waitingSlotHeld) {
+                            queueSlots.release()
+                            waitingSlotHeld = false
+                        }
                     }
                 }
             } finally {
@@ -292,6 +332,110 @@ class HydrationImpl(
             }
             completed?.let { _events.emit(it) }
         }
+    }
+
+    // Runs one queued upload to completion: up to [maxUploadAttempts] transfer
+    // attempts under the daemon-wide permit, emitting hydrating/hydrated (or
+    // failed per attempt). [baseEtag] is forwarded to uploadFromCache for the
+    // upload-time convergence guard. [onPermitAcquired] fires inside the
+    // permit block — the queue's waiting slot is handed over exactly when the
+    // transfer actually starts.
+    private suspend fun runUploadWithRetries(
+        path: String,
+        cachePath: Path,
+        handleId: String,
+        baseEtag: String?,
+        onPermitAcquired: () -> Unit,
+    ): HydrationEvent.Completed {
+        var lastError: HydrationError = HydrationError.Generic("upload failed")
+        for (attempt in 1..maxUploadAttempts) {
+            try {
+                syncEngine.withTransferPermit {
+                    onPermitAcquired()
+                    _events.emit(HydrationEvent.Hydrating(path))
+                    syncEngine.uploadFromCache(path, cachePath, baseEtag)
+                }
+                val bytes = Files.size(cachePath)
+                _events.emit(HydrationEvent.Hydrated(path, bytes))
+                return HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = true,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: org.krost.unidrive.RemoteConflictException) {
+                // The cloud copy changed between the row's token and the
+                // transfer (upload-time convergence): not transient — a retry
+                // would collide again. The client keeps both copies; surface
+                // the conflict and stop.
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                _events.emit(HydrationEvent.Failed(path, HydrationError.Conflict, retryScheduled = false))
+                log.warn("upload of {} hit a remote conflict, not retrying: {}", path, e.message ?: "conflict")
+                return HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = false,
+                    error = HydrationError.Conflict,
+                )
+            } catch (e: Exception) {
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                val err = HydrationError.Generic(e.message ?: "upload failed")
+                lastError = err
+                val retryScheduled = attempt < maxUploadAttempts
+                _events.emit(HydrationEvent.Failed(path, err, retryScheduled = retryScheduled))
+                if (retryScheduled) {
+                    log.info(
+                        "upload attempt {}/{} failed for {}: {}; retrying",
+                        attempt, maxUploadAttempts, path, e.message,
+                    )
+                    delay(retryDelayMs(attempt))
+                } else {
+                    log.warn(
+                        "upload failed for {} after {} attempts, leaving the row failed (a daemon restart replays it): {}",
+                        path, maxUploadAttempts, e.message ?: "upload failed",
+                    )
+                }
+            }
+        }
+        return HydrationEvent.Completed(
+            path = path,
+            handleId = handleId,
+            direction = HydrationEvent.Completed.Direction.UPLOAD,
+            ok = false,
+            error = lastError,
+        )
+    }
+
+    private fun retryDelayMs(afterAttempt: Int): Long =
+        uploadRetryDelaysMs.getOrNull(afterAttempt - 1)
+            ?: uploadRetryDelaysMs.lastOrNull()
+            ?: 0L
+
+    /**
+     * Re-enqueue uploads for every hydrated file row whose content has never
+     * reached the cloud (`local:` rows with a live cache copy). Called once at
+     * daemon start: the engine-side complement of the co-daemon's recovery-<n>
+     * scanner, and the durability net for uploads that were queued or failing
+     * when the daemon last stopped — a restart alone drains the backlog even
+     * with no client connected. Skips excluded (keep-local) and out-of-scope
+     * rows, and rows whose cache copy is gone. Returns the number of uploads
+     * enqueued; every enqueued upload goes through the same per-path
+     * serialization and transfer budget as client-submitted ones.
+     */
+    suspend fun replayPendingUploads(): Int {
+        var queued = 0
+        for (path in stateDb.pendingUploadPaths()) {
+            if (syncEngine.isExcludedPath(path)) continue
+            if (syncEngine.isOutOfScope(path)) continue
+            val cachePath = syncEngine.resolveCachePath(path)
+            if (!Files.exists(cachePath)) continue
+            launchSerializedUpload(path, cachePath, "engine-replay-${queued + 1}", baseEtag = null)
+            queued++
+        }
+        return queued
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {

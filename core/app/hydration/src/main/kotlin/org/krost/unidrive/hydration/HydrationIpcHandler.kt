@@ -558,7 +558,13 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Hydrated   -> """{"event":"hydrated","path":${jsonEsc(e.path)},"bytes":${e.bytes}}"""
     is HydrationEvent.Dehydrated -> """{"event":"dehydrated","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Skipped    -> """{"event":"skipped","path":${jsonEsc(e.path)}}"""
-    is HydrationEvent.Failed     -> """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}}"""
+    is HydrationEvent.Queued     -> """{"event":"queued","path":${jsonEsc(e.path)}}"""
+    is HydrationEvent.Failed -> {
+        val base = """{"event":"failed","path":${jsonEsc(e.path)},"error":${jsonEsc(e.error.message)}"""
+        // retry_scheduled is only serialized for upload attempts; download and
+        // verb failures keep the pre-existing shape byte-identical.
+        if (e.retryScheduled == null) "$base}" else "$base,\"retry_scheduled\":${e.retryScheduled}}"
+    }
     is HydrationEvent.Completed -> {
         val direction = if (e.direction == HydrationEvent.Completed.Direction.UPLOAD) "upload" else "download"
         val base = """{"event":"completed","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)},"direction":"$direction","ok":${e.ok}"""
