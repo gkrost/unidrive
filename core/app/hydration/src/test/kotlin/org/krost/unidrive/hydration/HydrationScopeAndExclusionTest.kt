@@ -122,6 +122,30 @@ class HydrationScopeAndExclusionTest {
     }
 
     @Test
+    fun `excluded open_write advances the local watermark so the recovery scanner stops replaying it`() = runTest {
+        // The engine's keep-local branch in uploadFromCache advances localMtime so the
+        // co-daemon's crash-recovery scanner (replays open_write for cache files newer
+        // than last_synced) does not replay the file on every mount. The excluded
+        // short-circuit in open_write must not skip that bookkeeping.
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+        val created = env.hydration.create("conn1", "h1", "/new/scratch.tmp")
+        assertIs<CreateResult.Ok>(created)
+        Files.writeString(created.cachePath, "edited after create")
+        Files.setLastModifiedTime(created.cachePath, java.nio.file.attribute.FileTime.fromMillis(4_102_444_800_000L))
+
+        env.hydration.openForWrite("conn1", "h1", "/new/scratch.tmp", created.cachePath)
+        advanceUntilIdle()
+
+        assertEquals(
+            4_102_444_800_000L,
+            env.stateDb.localMtimeOf("/new/scratch.tmp"),
+            "last_synced must reflect the cache mtime or every restart replays the excluded file",
+        )
+        assertNull(env.syncEngine.remoteContentSeen("/new/scratch.tmp"), "an excluded file must never be uploaded")
+    }
+
+    @Test
     fun `open_write_begin on an excluded path reports excluded`() = runTest {
         val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
         env.stateDb.insertFolderEntry("/new")

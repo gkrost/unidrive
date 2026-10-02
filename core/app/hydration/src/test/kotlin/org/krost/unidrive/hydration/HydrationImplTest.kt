@@ -412,6 +412,9 @@ internal class HydrationTestEnv(
 
         fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
 
+        /** The row's local-mtime watermark (what `hydration.last_synced` reports). */
+        fun localMtimeOf(path: String): Long? = db.getEntry(path)?.localMtime
+
         fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
 
         fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()

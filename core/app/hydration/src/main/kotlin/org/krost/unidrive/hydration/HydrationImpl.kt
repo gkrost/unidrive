@@ -207,6 +207,14 @@ class HydrationImpl(
         // cloud. The skipped event (not hydrating/hydrated) plus a Completed
         // carrying the excluded token tell the client both facts.
         if (syncEngine.isExcludedPath(path)) {
+            // The engine's keep-local branch uploads nothing but advances the row's
+            // local watermark (last_synced); without it the co-daemon's recovery
+            // scanner replays this file's open_write on every mount, forever.
+            runCatching { syncEngine.uploadFromCache(path, cachePath) }
+                .onFailure { e ->
+                    if (e is CancellationException) throw e
+                    log.warn("keep-local watermark update failed for {}: {}", path, e.message)
+                }
             _events.emit(HydrationEvent.Skipped(path))
             _events.emit(
                 HydrationEvent.Completed(
