@@ -257,34 +257,38 @@ class GraphApiService(
                                 Files.createDirectories(destPath.parent)
                                 val tmpPath = destPath.parent.resolve("${destPath.fileName}.unidrive-tmp")
                                 try {
-                                    Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                                        val buf = ByteArray(8192)
-                                        var w = 0L
-                                        while (true) {
-                                            val n = channel.readAvailable(buf)
-                                            if (n <= 0) break
-                                            out.write(buf, 0, n)
-                                            w += n
+                                    val w =
+                                        Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                                            val buf = ByteArray(8192)
+                                            var n = 0L
+                                            while (true) {
+                                                val r = channel.readAvailable(buf)
+                                                if (r <= 0) break
+                                                out.write(buf, 0, r)
+                                                n += r
+                                            }
+                                            n
                                         }
-                                        w
-                                    }.also {
-                                        Files.move(tmpPath, destPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                                    // #354: the truncation guard runs on the TEMP file, before the
+                                    // atomic move. A connection that closes mid-body without throwing
+                                    // used to have its short temp promoted over the destination
+                                    // first and only detected afterwards — the intact previous
+                                    // version was gone before truncation surfaced. A short read now
+                                    // deletes the temp and throws with the destination untouched,
+                                    // the same guarantee the thrown-exception path already had.
+                                    val expected = response.contentLength()
+                                    if (expected != null && expected >= 0L && w != expected) {
+                                        throw java.io.IOException(
+                                            "Truncated download itemId=$itemId: got $w of $expected bytes",
+                                        )
                                     }
+                                    Files.move(tmpPath, destPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                                    w
                                 } catch (e: Exception) {
                                     Files.deleteIfExists(tmpPath)
                                     throw e
                                 }
                             }
-                        // Truncation guard: a connection that closes mid-body can yield a
-                        // short file without throwing. Compare bytes written against the
-                        // response Content-Length and treat a short read as a retryable
-                        // flake, so a partial cache is never returned as a complete download.
-                        val expected = response.contentLength()
-                        if (expected != null && expected >= 0L && written != expected) {
-                            throw java.io.IOException(
-                                "Truncated download itemId=$itemId: got $written of $expected bytes",
-                            )
-                        }
                         downloadedBytes = written
                         DownloadOutcome.Done
                     }
