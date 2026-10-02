@@ -127,6 +127,7 @@ internal class MinimalFakeProvider(
         try {
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
+            remoteFiles[remotePath] = bytes
             if (progressSteps > 0 && onProgress != null) {
                 val total = bytes.size.toLong()
                 for (i in 1..progressSteps) {
@@ -153,7 +154,15 @@ internal class MinimalFakeProvider(
         }
     }
 
-    override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("delete not used")
+    // Real (recording) delete/move: the safe-save rename sequence deletes the
+    // replace destination and moves the uploaded source in the cloud.
+    val deletedPaths = mutableListOf<String>()
+    val movedPairs = mutableListOf<Pair<String, String>>()
+
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
+        deletedPaths.add(remotePath)
+        remoteFiles.remove(remotePath)
+    }
 
     // Folders created through createRemoteFolder, recorded for the scope-guard
     // tests (a refused mkdir must not reach the provider).
@@ -174,7 +183,22 @@ internal class MinimalFakeProvider(
         )
     }
 
-    override suspend fun move(fromPath: String, toPath: String): CloudItem = error("move not used")
+    override suspend fun move(fromPath: String, toPath: String): CloudItem {
+        movedPairs.add(fromPath to toPath)
+        val bytes = remoteFiles.remove(fromPath) ?: ByteArray(0)
+        remoteFiles[toPath] = bytes
+        return CloudItem(
+            id = "uploaded-$toPath",
+            name = toPath.substringAfterLast('/'),
+            path = toPath,
+            size = bytes.size.toLong(),
+            isFolder = false,
+            modified = java.time.Instant.now(),
+            created = null,
+            hash = bytes.size.toString(),
+            mimeType = null,
+        )
+    }
 
     override suspend fun delta(
         cursor: String?,
@@ -191,6 +215,9 @@ internal class MinimalFakeProvider(
 
     /** Returns the content most recently uploaded to [path], or null if never uploaded. */
     fun uploadedContent(path: String): String? = uploadedFiles[path]?.toString(Charsets.UTF_8)
+
+    /** Live remote object content at [path] (reflects delete/move too). */
+    fun remoteContent(path: String): String? = remoteFiles[path]?.toString(Charsets.UTF_8)
 
     /** Configure the next downloadById call to throw the given exception. */
     fun makeNextDownloadThrow(throwable: Throwable) {
@@ -417,6 +444,12 @@ internal class HydrationTestEnv(
 
         /** Peak concurrent upload() calls across all paths (transfer-cap test). */
         fun maxConcurrentUploadsTotal(): Int = fakeProvider.maxConcurrentUploadsTotal()
+
+        /** Live remote object content at [path] (reflects delete/move too). */
+        fun remoteContent(path: String): String? = fakeProvider.remoteContent(path)
+
+        fun deletedPaths(): List<String> = fakeProvider.deletedPaths
+        fun movedPairs(): List<Pair<String, String>> = fakeProvider.movedPairs
 
         /**
          * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.

@@ -191,6 +191,80 @@ class HydrationUploadQueueTest {
     }
 
     @Test
+    fun `full write sequence - create, write, open_write, completed, list settles`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        assertIs<MkdirResult.Ok>(env.hydration.mkdir("/docs"))
+        val created = env.hydration.create("conn1", "h1", "/docs/hello.txt")
+        assertIs<CreateResult.Ok>(created)
+        Files.writeString(created.cachePath, "hello cloud")
+        val opened = env.hydration.openForWrite("conn1", "h1", "/docs/hello.txt", created.cachePath)
+        assertIs<OpenResult.Ok>(opened)
+        advanceUntilIdle()
+
+        assertEquals("hello cloud", env.syncEngine.remoteContentSeen("/docs/hello.txt"))
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single()
+        assertTrue(completed.ok)
+        assertEquals("h1", completed.handleId)
+        val entry = (env.hydration.list("/docs") as ListResult.Ok).entries.single()
+        assertFalse(entry.pendingUpload, "after completed the row is settled")
+        assertEquals("uploaded-/docs/hello.txt", entry.remoteId, "the row carries the cloud id")
+        collector.cancel()
+    }
+
+    @Test
+    fun `safe-save sequence - temp upload then replace-rename lands the new version`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        assertIs<MkdirResult.Ok>(env.hydration.mkdir("/docs"))
+        // Seed the target through the same write path.
+        val seeded = env.hydration.create("conn1", "h-old", "/docs/target.txt")
+        assertIs<CreateResult.Ok>(seeded)
+        Files.writeString(seeded.cachePath, "old version")
+        env.hydration.openForWrite("conn1", "h-old", "/docs/target.txt", seeded.cachePath)
+        advanceUntilIdle()
+
+        // Safe-save: temp file, write, upload, then rename over the target.
+        val tmp = env.hydration.create("conn1", "h-tmp", "/docs/.save-tmp")
+        assertIs<CreateResult.Ok>(tmp)
+        Files.writeString(tmp.cachePath, "new version")
+        env.hydration.openForWrite("conn1", "h-tmp", "/docs/.save-tmp", tmp.cachePath)
+        advanceUntilIdle()
+        events.awaitCompletedOk("h-tmp")
+
+        val beforeRename = (env.hydration.list("/docs") as ListResult.Ok).entries.associateBy { it.path }
+        assertEquals(
+            "uploaded-/docs/.save-tmp",
+            beforeRename.getValue("/docs/.save-tmp").remoteId,
+            "the temp row must be uploaded before the replace-rename",
+        )
+        assertEquals("new version", env.syncEngine.remoteContent("/docs/.save-tmp"), "pre-rename remote state")
+        assertIs<RenameResult.Ok>(env.hydration.rename("/docs/.save-tmp", "/docs/target.txt", replace = true))
+        advanceUntilIdle()
+
+        assertEquals(listOf("/docs/target.txt"), env.syncEngine.deletedPaths(), "the replace destination is deleted")
+        assertEquals(listOf("/docs/.save-tmp" to "/docs/target.txt"), env.syncEngine.movedPairs(), "the source is moved")
+        assertEquals("new version", env.syncEngine.remoteContent("/docs/target.txt"))
+        collector.cancel()
+    }
+
+    private suspend fun MutableList<HydrationEvent>.awaitCompletedOk(handleId: String) {
+        // The Completed event is emitted after the slot releases; a short real
+        // wait inside virtual time is enough because the upload already ran.
+        kotlinx.coroutines.yield()
+        kotlin.test.assertNotNull(
+            filterIsInstance<HydrationEvent.Completed>().singleOrNull { it.handleId == handleId && it.ok },
+            "upload for $handleId must have completed",
+        )
+    }
+
+    @Test
     fun `replay enqueues pending local rows once, skipping excluded and out-of-scope ones`() = runTest {
         val env = HydrationTestEnv(
             recoveryUploadScope = this,
