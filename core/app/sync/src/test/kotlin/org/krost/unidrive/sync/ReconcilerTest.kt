@@ -401,6 +401,46 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `hydrated row whose baseline is the sync-root file + local-missing + cache copy present deletes remote`() {
+        // #449: the sync-root file was synced (or read through the mount, or mirrored after a mount write).
+        // The cache copy that stays behind (#450) must not block the user's deliberate delete.
+        db.upsertEntry(dbEntry("/was-synced.txt", isHydrated = true).copy(cacheBacked = false))
+        val cachePresent = Reconciler(
+            db,
+            syncRoot,
+            ConflictPolicy.LAST_WRITER_WINS,
+            isHydrationCachePresent = { true },
+        )
+
+        val actions = cachePresent.reconcile(
+            mapOf("/was-synced.txt" to cloudItem("/was-synced.txt")),
+            mapOf("/was-synced.txt" to ChangeState.DELETED),
+        )
+
+        assertTrue(actions.any { it is SyncAction.DeleteRemote }, "got $actions")
+    }
+
+    @Test
+    fun `hydrated row whose baseline is the cache copy + local-missing is protected, with or without the column`() {
+        for ((name, backed) in listOf("/cache-only.txt" to true, "/legacy-row.txt" to null)) {
+            db.upsertEntry(dbEntry(name, isHydrated = true).copy(cacheBacked = backed))
+        }
+        val cachePresent = Reconciler(
+            db,
+            syncRoot,
+            ConflictPolicy.LAST_WRITER_WINS,
+            isHydrationCachePresent = { true },
+        )
+
+        val actions = cachePresent.reconcile(
+            mapOf("/cache-only.txt" to cloudItem("/cache-only.txt"), "/legacy-row.txt" to cloudItem("/legacy-row.txt")),
+            mapOf("/cache-only.txt" to ChangeState.DELETED, "/legacy-row.txt" to ChangeState.DELETED),
+        )
+
+        assertTrue(actions.none { it is SyncAction.DeleteRemote }, "got $actions")
+    }
+
+    @Test
     fun `a row recorded without a hash is not remote-modified when the provider starts reporting one`() {
         // Internxt rows were written with remote_hash = null (the provider had no hash). The version token that
         // #464 puts on the listing must not make every existing row look remotely modified on the first sync after
