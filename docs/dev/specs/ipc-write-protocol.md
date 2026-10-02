@@ -207,6 +207,10 @@ still leave a remote item; the caller follows with the row-level verb
   (default 3). Every failed attempt stamps the row (`error` flag in
   `hydration.list`, doctor surfacing) and emits `failed` with
   `retry_scheduled:true`; the last attempt emits `retry_scheduled:false`.
+  Two failures are never retried and emit `retry_scheduled:false` at once: a `conflict` (the cloud copy
+  changed under the edit) and an upload whose row or cache copy has vanished while it was queued (renamed away,
+  unlinked, reaped): nothing a later attempt can change, and waiting would keep the path busy to `dehydrate` and
+  replace-`rename`.
 - **Replay:** state.db rows are the durable queue. At daemon start every
   hydrated file row whose content never reached the cloud is re-enqueued once
   through the same queue — a restart alone drains the backlog with no client
