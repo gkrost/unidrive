@@ -71,6 +71,33 @@ class UploadFromCacheKeepsWriteTest {
         )
 
     @Test
+    fun `a write through the cache never overwrites an unsynced local edit in the sync root`() =
+        runTest {
+            provider.files["/f.txt"] = oldBytes
+            provider.deltaItems = listOf(remoteItem(oldBytes.size.toLong()))
+            engine.syncOnce()
+            val syncFile = syncRoot.resolve("f.txt")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+
+            // The user edits the file in the sync root; nobody has uploaded that edit yet.
+            val localEdit = "local edit C, made in the sync root, not uploaded".toByteArray()
+            Files.write(syncFile, localEdit)
+            Files.setLastModifiedTime(syncFile, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 5000))
+
+            // Meanwhile a write through the mount reaches the remote.
+            val cacheCopy = engine.resolveCachePath("/f.txt")
+            Files.createDirectories(cacheCopy.parent)
+            Files.write(cacheCopy, newBytes)
+            engine.uploadFromCache("/f.txt", cacheCopy)
+
+            assertContentEquals(localEdit, Files.readAllBytes(syncFile), "the unsynced local edit must survive the mirror")
+            engine.syncOnce()
+            val survivors = Files.walk(syncRoot).use { s -> s.filter { Files.isRegularFile(it) }.map { Files.readAllBytes(it).toList() }.toList() }
+            assertTrue(survivors.any { it == localEdit.toList() }, "the local edit must still exist after the next sync (as f.txt or a conflict copy)")
+        }
+
+    @Test
     fun `a write through the cache is not reverted by the next sync`() =
         runTest {
             provider.files["/f.txt"] = oldBytes

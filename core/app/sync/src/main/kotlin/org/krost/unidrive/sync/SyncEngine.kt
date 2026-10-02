@@ -396,6 +396,9 @@ open class SyncEngine(
     // of distinct paths ever hydrated.
     private val hydrateMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
 
+    // #301: paths whose reap was deferred and already warned about (see the enumerate-reap).
+    private val deferredReapWarned: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
      * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
@@ -1026,12 +1029,12 @@ open class SyncEngine(
                             }.getOrDefault(false)
                         }
                     if (uploadInFlight(path) || row?.isPendingUpload == true || cacheDirty) {
-                        log.warn(
-                            "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit",
-                            path,
-                        )
+                        // The daemon enumerates every poll interval: warn once per path, not once per poll.
+                        val msg = "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit"
+                        if (deferredReapWarned.add(path)) log.warn(msg, path) else log.debug(msg, path)
                         continue
                     }
+                    deferredReapWarned.remove(path)
                     db.markDeleted(path)
                     runCatching { Files.deleteIfExists(cachePath) }
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
