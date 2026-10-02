@@ -485,21 +485,35 @@ class IpcServer(
         // of the prior successful request).
         pendingPostReply.remove(connId)
 
-        val verb = parseVerb(line) ?: run {
-            log.warn("IPC: request without 'verb' field, dropping: {}", line.take(80))
-            return
-        }
-        val handler = handlers[verb] ?: run {
-            log.warn("IPC: no handler for verb '{}'", verb)
-            return
-        }
+        // Every well-framed request line gets a reply, including the unanswerable
+        // ones. A dropped request (no verb field, or no handler for the verb) is
+        // indistinguishable from a lost frame: the client waits on a reply line
+        // that never arrives and hangs. This was the daemon-startup hang — a
+        // client polling `daemon.status` while the daemon was still registering
+        // handlers got silence and waited forever. Handlers are now registered
+        // before start() binds the socket, so a live connection always finds a
+        // handler for a documented verb; `unknown_verb` then only answers verbs
+        // no version of this daemon knows, which the client can surface instead
+        // of hanging on.
+        val verb = parseVerb(line)
+        val handler = verb?.let { handlers[it] }
         var handlerThrew = false
-        val reply = try {
-            kotlinx.coroutines.withContext(handlerDispatcher) { handler(connId, line) }
-        } catch (e: Exception) {
-            handlerThrew = true
-            log.error("IPC: handler '$verb' threw", e)
-            """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
+        val reply = when {
+            verb == null -> {
+                log.warn("IPC: request without 'verb' field: {}", line.take(80))
+                """{"ok":false,"error":"missing_verb"}"""
+            }
+            handler == null -> {
+                log.warn("IPC: no handler for verb '{}'", verb)
+                """{"ok":false,"error":"unknown_verb"}"""
+            }
+            else -> try {
+                kotlinx.coroutines.withContext(handlerDispatcher) { handler(connId, line) }
+            } catch (e: Exception) {
+                handlerThrew = true
+                log.error("IPC: handler '$verb' threw", e)
+                """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
+            }
         }
         val entry = clients.firstOrNull { it.channel === client } ?: return
         runCatching {

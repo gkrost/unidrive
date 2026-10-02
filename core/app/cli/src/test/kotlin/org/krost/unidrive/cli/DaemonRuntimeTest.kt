@@ -138,6 +138,102 @@ class DaemonRuntimeTest {
         daemonJob.join()
     }
 
+    /**
+     * A request for every documented verb, sent the instant the socket file
+     * appears, must get a reply line. Pins the startup ordering: the daemon
+     * binds the socket only after all handlers are registered, so there is no
+     * window in which an accepted request is dropped ("no handler") and the
+     * sender hangs. An unknown verb must also be answered (unknown_verb), not
+     * dropped. daemon.shutdown goes last because its ack stops the daemon.
+     */
+    @Test
+    fun verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply() =
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val runtime = DaemonRuntime(
+                profileName = "test_profile",
+                lockFile = lockFile,
+                dbPath = dbPath,
+                syncRoot = tempDir,
+                socketPath = socketPath,
+                providerFactory = { StubProvider() },
+            )
+            val daemonJob = launch { runtime.start() }
+            try {
+                repeat(100) {
+                    if (Files.exists(socketPath)) return@repeat
+                    delay(50)
+                }
+                assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
+
+                // Each documented verb with its minimal real request. Distinct
+                // paths so state-mutating verbs (create, open_write_begin) never
+                // interact; every one of these is answered by a registered
+                // handler, whether the outcome is ok or a typed error.
+                val requests = listOf(
+                    """{"verb":"daemon.status"}""",
+                    """{"verb":"hydration.open_read","handle_id":"h1","path":"/startup/read.txt"}""",
+                    """{"verb":"hydration.open_write","handle_id":"h2","path":"/startup/write.txt","cache_path":"${tempDir.resolve("write-cache.bin")}"}""",
+                    """{"verb":"hydration.open_write_begin","path":"/startup/truncate.txt"}""",
+                    """{"verb":"hydration.close_handle","handle_id":"h3"}""",
+                    """{"verb":"hydration.hydrate","path":"/startup/hydrate.txt"}""",
+                    """{"verb":"hydration.dehydrate","path":"/startup/dehydrate.txt"}""",
+                    """{"verb":"hydration.subscribe"}""",
+                    """{"verb":"hydration.last_synced","path":"/startup/ls.txt"}""",
+                    """{"verb":"hydration.list","prefix":"/"}""",
+                    """{"verb":"hydration.mkdir","path":"/startup"}""",
+                    """{"verb":"hydration.unlink","path":"/startup/unlink.txt"}""",
+                    """{"verb":"hydration.rmdir","path":"/startup/rmdir.txt"}""",
+                    """{"verb":"hydration.create","handle_id":"h4","path":"/startup/create.txt"}""",
+                    """{"verb":"hydration.rename","old_path":"/startup/r1.txt","new_path":"/startup/r2.txt"}""",
+                    """{"verb":"sync.subscribe"}""",
+                    """{"verb":"refresh.run"}""",
+                    """{"verb":"sync.enumerate"}""",
+                    // No handler exists for this verb; the client must still learn that.
+                    """{"verb":"daemon.statusx"}""",
+                    """{"verb":"daemon.shutdown"}""",
+                )
+                for (request in requests) {
+                    val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+                    try {
+                        channel.configureBlocking(false)
+                        val req = request + "\n"
+                        val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+                        while (w.hasRemaining()) channel.write(w)
+                        val reply = readFirstReplyLine(channel, timeoutMs = 5_000)
+                        val json = kotlinx.serialization.json.Json.parseToJsonElement(reply)
+                        assertTrue(
+                            json is kotlinx.serialization.json.JsonObject && json.containsKey("ok"),
+                            "verb must be answered with a reply carrying ok; sent $request, got: $reply",
+                        )
+                    } finally {
+                        channel.close()
+                    }
+                }
+            } finally {
+                runtime.close()
+                daemonJob.join()
+            }
+        }
+
+    /** Reads one \n-terminated reply line, failing loudly when none arrives in [timeoutMs]. */
+    private suspend fun readFirstReplyLine(channel: SocketChannel, timeoutMs: Long): String {
+        val collected = StringBuilder()
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline && !collected.contains('\n')) {
+            val buf = ByteBuffer.allocate(8192)
+            val n = channel.read(buf)
+            if (n > 0) {
+                buf.flip()
+                collected.append(String(buf.array(), 0, buf.limit()))
+            } else {
+                delay(20)
+            }
+        }
+        val newline = collected.indexOf('\n')
+        check(newline >= 0) { "no reply line within ${timeoutMs}ms; collected: $collected" }
+        return collected.substring(0, newline)
+    }
+
     @Test
     fun `#419 graceful shutdown removes the socket file and its meta sibling`() = runBlocking {
         // IpcServer.defaultSocketPath writes this `.meta` next to a hashed socket name so a UI can
