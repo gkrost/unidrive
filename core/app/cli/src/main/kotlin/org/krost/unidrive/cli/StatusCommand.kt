@@ -12,6 +12,7 @@ import org.krost.unidrive.sync.RawSyncConfig
 import org.krost.unidrive.sync.Reconciler
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.SyncScope
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -261,6 +262,8 @@ class StatusCommand : Runnable {
         var nonHydrated = 0
         var lastFullScan: String? = null
         var pendingCursor: String? = null
+        var remoteCollisions = 0
+        var remoteCollisionPaths: List<String> = emptyList()
 
         val stateDbPath = configDir.resolve("state.db")
         if (Files.exists(stateDbPath)) {
@@ -274,6 +277,13 @@ class StatusCommand : Runnable {
                 nonHydrated = files.count { !it.isHydrated }
                 lastFullScan = db.getSyncState("last_full_scan")
                 pendingCursor = db.getSyncState("pending_cursor")
+                // #401: unresolved remote path collisions.
+                remoteCollisions = db.getSyncState(SyncEngine.REMOTE_COLLISIONS_KEY)?.toIntOrNull() ?: 0
+                remoteCollisionPaths =
+                    db.getSyncState(SyncEngine.REMOTE_COLLISION_PATHS_KEY)
+                        ?.split("\t")
+                        ?.filter { it.isNotEmpty() }
+                        .orEmpty()
             } finally {
                 db.close()
             }
@@ -304,6 +314,8 @@ class StatusCommand : Runnable {
             pendingCursor = pendingCursor,
             lastFullScan = lastFullScan,
             extraFields = extraFields,
+            remoteCollisions = remoteCollisions,
+            remoteCollisionPaths = remoteCollisionPaths,
         )
     }
 
@@ -334,6 +346,36 @@ class StatusCommand : Runnable {
         val ansi = AnsiHelper.isAnsiSupported()
         renderTable(listOf(group), ansi)
         printScopeLine(profile, configDir)
+        printCollisionLine(configDir)
+    }
+
+    // #401: surface unresolved remote path collisions (two cloud items sharing one
+    // path) under the single-profile status table, so the suppressed twin is visible
+    // before a path-addressed operation bites. Silent on a clean drive and on any
+    // read failure (status must not crash on a legacy/unreadable state.db).
+    private fun printCollisionLine(configDir: Path) {
+        runCatching {
+            val stateDbPath = configDir.resolve("state.db")
+            if (!Files.exists(stateDbPath)) return
+            val db = StateDatabase(stateDbPath, readOnly = true)
+            try {
+                db.initialize()
+                val count = db.getSyncState(SyncEngine.REMOTE_COLLISIONS_KEY)?.toIntOrNull() ?: 0
+                if (count <= 0) return
+                val paths =
+                    db.getSyncState(SyncEngine.REMOTE_COLLISION_PATHS_KEY)
+                        ?.split("\t")
+                        ?.filter { it.isNotEmpty() }
+                        .orEmpty()
+                println(
+                    "Remote collisions: $count path(s) where two cloud items share one name " +
+                        "(one kept, one suppressed) — resolve in the cloud:",
+                )
+                paths.take(SyncEngine.COLLISION_PATHS_STATUS_LIMIT).forEach { println("  $it") }
+            } finally {
+                db.close()
+            }
+        }
     }
 
     private fun printScopeLine(

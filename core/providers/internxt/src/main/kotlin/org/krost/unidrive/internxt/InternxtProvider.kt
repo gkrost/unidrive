@@ -201,7 +201,12 @@ class InternxtProvider(
         val content = api.getFolderContents(parentUuid)
 
         // UD-317: sanitise child name so entries with stray `\n` still match a clean `name` arg.
-        val folder = content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == name }
+        // #402: fail closed on ambiguity — with two live same-named matches, `find` picks
+        // whichever the listing emitted first, and a delete/move resolved through here can
+        // hit the wrong twin. Throw instead; only a single exact match resolves.
+        val folders = content.children.filter { sanitizeName(it.plainName ?: it.name ?: "") == name }
+        if (folders.size > 1) throwAmbiguous(folders.size, name, parentPath)
+        val folder = folders.firstOrNull()
         if (folder != null) return folder.toCloudItem(parentPath)
 
         // Two-pass match: an exact full-name (base + type) match anywhere in the
@@ -211,16 +216,14 @@ class InternxtProvider(
         // path-based consumers (deleteRemote, download, move) then hit the
         // wrong file. The baseName fallback only fires when NO exact match
         // exists in the whole listing.
-        val exactFile =
-            content.files.find { file ->
-                val baseName = sanitizeName(file.plainName ?: file.name ?: "")
-                val cleanType = file.type?.let { sanitizeName(it) }
-                val fullName = if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) "$baseName.$cleanType" else baseName
-                fullName == name
-            }
+        val exactFiles = content.files.filter { file -> fileMatchesFullName(file, name) }
+        if (exactFiles.size > 1) throwAmbiguous(exactFiles.size, name, parentPath)
+        val exactFile = exactFiles.firstOrNull()
         if (exactFile != null) return exactFile.toCloudItem(parentPath)
 
-        val baseNameFile = content.files.find { file -> sanitizeName(file.plainName ?: file.name ?: "") == name }
+        val baseNameFiles = content.files.filter { file -> sanitizeName(file.plainName ?: file.name ?: "") == name }
+        if (baseNameFiles.size > 1) throwAmbiguous(baseNameFiles.size, name, parentPath)
+        val baseNameFile = baseNameFiles.firstOrNull()
         if (baseNameFile != null) {
             log.warn(
                 "getMetadata: no exact name match for {}; falling back to baseName match (uuid={}, type={})",
@@ -233,6 +236,27 @@ class InternxtProvider(
 
         throw ProviderException("Item not found: $path")
     }
+
+    // #294 two-pass name logic shared by getMetadata and the #402 by-id probes:
+    // exact full-name (base + type recomposition) match.
+    private fun fileMatchesFullName(
+        file: InternxtFile,
+        name: String,
+    ): Boolean {
+        val baseName = sanitizeName(file.plainName ?: file.name ?: "")
+        val cleanType = file.type?.let { sanitizeName(it) }
+        val fullName = if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) "$baseName.$cleanType" else baseName
+        return fullName == name
+    }
+
+    private fun throwAmbiguous(
+        count: Int,
+        name: String,
+        parentPath: String,
+    ): Nothing = throw ProviderException(
+        "ambiguous: $count items named '$name' in $parentPath resolve by path; " +
+            "refusing to pick one (delete/move by remote id instead — see the wrong-twin issue #402)",
+    )
 
     override suspend fun downloadById(
         remoteId: String,
@@ -1032,6 +1056,40 @@ class InternxtProvider(
         api.trashItems(listOf(metadata.id to type))
     }
 
+    // #402: resolve an item's CloudItem by uuid instead of by path — same-name siblings
+    // make path-based lookup an arbitrary pick. Files are probed first; a 404 falls
+    // through to the folder probe. Any other status propagates unchanged: a transient
+    // 5xx must not surface as "Item not found" (the engine treats that as already-gone
+    // and would tombstone the row).
+    private suspend fun metadataById(
+        remoteId: String,
+        parentPath: String,
+        path: String,
+    ): CloudItem =
+        try {
+            api.getFileMeta(remoteId).toCloudItem(parentPath)
+        } catch (e: InternxtApiException) {
+            if (e.statusCode != 404) throw e
+            try {
+                api.getFolderMeta(remoteId).toCloudItem(parentPath)
+            } catch (e2: InternxtApiException) {
+                if (e2.statusCode != 404) throw e2
+                throw ProviderException("Item not found: $path (remoteId=$remoteId)")
+            }
+        }
+
+    override suspend fun deleteById(remoteId: String, remotePath: String) {
+        // The trash endpoint needs file-vs-folder; resolve it by uuid (see metadataById)
+        // so same-name siblings can't redirect the delete to the wrong twin.
+        val metadata = metadataById(remoteId, parentPathOf(remotePath), remotePath)
+        val type = if (metadata.isFolder) "folder" else "file"
+        api.trashItems(listOf(metadata.id to type))
+    }
+
+    // #402: all but the leaf segment of [path] — the parent the by-id probes build
+    // item paths against (error-message/path cosmetics only; the uuid is what selects).
+    private fun parentPathOf(path: String): String = "/" + pathSegments(path).dropLast(1).joinToString("/")
+
     override suspend fun createFolder(path: String): CloudItem {
         val segments = pathSegments(path)
         val parentPath = "/" + segments.dropLast(1).joinToString("/")
@@ -1133,6 +1191,24 @@ class InternxtProvider(
     override suspend fun move(
         fromPath: String,
         toPath: String,
+    ): CloudItem = moveResolved(getMetadata(fromPath), fromPath, toPath)
+
+    // #402: the engine routes here whenever the source row carries a real cloud uuid,
+    // so a same-named sibling cannot redirect the move to the wrong twin via
+    // getMetadata's path lookup. The destination parent still resolves by path; if IT
+    // is ambiguous, resolveFolder fails closed.
+    override suspend fun moveById(
+        remoteId: String,
+        fromPath: String,
+        toPath: String,
+    ): CloudItem = moveResolved(metadataById(remoteId, parentPathOf(fromPath), fromPath), fromPath, toPath)
+
+    // UD-369 / #417 move legs, shared by the path and by-id entry points. [metadata]
+    // is the already-resolved source item.
+    private suspend fun moveResolved(
+        metadata: CloudItem,
+        fromPath: String,
+        toPath: String,
     ): CloudItem {
         val fromSegments = pathSegments(fromPath)
         val toSegments = pathSegments(toPath)
@@ -1145,7 +1221,6 @@ class InternxtProvider(
         val toName = toSegments.last()
         val toParentPath = "/" + toParent.joinToString("/")
 
-        val metadata = getMetadata(fromPath)
         val sameParent = fromParent == toParent
         val sameName = fromName == toName
 
@@ -1777,10 +1852,16 @@ class InternxtProvider(
                 continue
             }
             val content = api.getFolderContents(currentUuid)
+            // #402: fail closed on two live same-named child folders — a first-match
+            // pick would be cached in folderCache and stick for the process lifetime,
+            // pinning every operation under this path to an arbitrary twin.
+            val children = content.children.filter { sanitizeName(it.plainName ?: it.name ?: "") == segment }
             val child =
-                // UD-317: sanitise child name before matching path segment.
-                content.children.find { sanitizeName(it.plainName ?: it.name ?: "") == segment }
-                    ?: throw ProviderException("Folder not found: $segment in $path")
+                when (children.size) {
+                    0 -> throw ProviderException("Folder not found: $segment in $path")
+                    1 -> children[0]
+                    else -> throwAmbiguous(children.size, segment, path)
+                }
             // UD-357: cache the discovered UUID too — subsequent resolveFolder
             // calls on the same parent skip the round-trip.
             folderCache.put(currentUuid, segment, child.uuid)

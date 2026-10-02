@@ -3,6 +3,7 @@ package org.krost.unidrive.sync
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.sync.model.EntryStatus
 import org.krost.unidrive.sync.model.SyncEntry
+import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
@@ -498,14 +499,43 @@ class StateDatabase(
         // block our INSERT. SQLite's INSERT OR REPLACE deletes the
         // conflicting row by PK only, not by other unique constraints, so
         // we explicitly delete the colliding-path alive row first.
+        //
+        // #401: capture what the delete evicts. Removing a pending-upload
+        // synthetic (`local:`) is the normal upload-completion swap; removing
+        // a row whose id is a REAL cloud uuid means a tracked remote item is
+        // being silently re-keyed (e.g. an incremental delta carrying only the
+        // other of two same-named items) — WARN so the row flip is visible.
+        val storedId = entry.remoteId ?: storedRemoteIdFor(entry)
+        val evictedIds = mutableListOf<String>()
         conn
             .prepareStatement(
-                "DELETE FROM sync_entries WHERE path=? AND status='EXISTS' AND remote_id<>?",
+                "SELECT remote_id FROM sync_entries WHERE path=? AND status='EXISTS' AND remote_id<>?",
             ).use { stmt ->
                 stmt.setString(1, entry.path)
-                stmt.setString(2, entry.remoteId ?: storedRemoteIdFor(entry))
-                stmt.executeUpdate()
+                stmt.setString(2, storedId)
+                val rs = stmt.executeQuery()
+                while (rs.next()) evictedIds.add(rs.getString(1))
             }
+        if (evictedIds.isNotEmpty()) {
+            conn
+                .prepareStatement(
+                    "DELETE FROM sync_entries WHERE path=? AND status='EXISTS' AND remote_id<>?",
+                ).use { stmt ->
+                    stmt.setString(1, entry.path)
+                    stmt.setString(2, storedId)
+                    stmt.executeUpdate()
+                }
+            for (evicted in evictedIds) {
+                if (evicted.startsWith("local:")) continue
+                log.warn(
+                    "#401: upsert of path {} evicted alive row remote_id={} (incoming remote_id={}) — " +
+                        "a tracked cloud item was re-keyed to a different remote id at the same path",
+                    entry.path,
+                    evicted,
+                    storedId,
+                )
+            }
+        }
         conn
             .prepareStatement(
                 """
@@ -516,7 +546,6 @@ class StateDatabase(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             ).use { stmt ->
-                val storedId = entry.remoteId ?: pickSyntheticIdForPath(entry.path)
                 stmt.setString(1, storedId)
                 stmt.setString(2, entry.parentUuid)
                 stmt.setString(3, entry.path)
@@ -1424,6 +1453,8 @@ class StateDatabase(
     }
 
     companion object {
+        private val log = LoggerFactory.getLogger(StateDatabase::class.java)
+
         private const val SNAPSHOT_DIR_PREFIX = "unidrive-dryrun-"
 
         /** Extra room required beyond the source size before a snapshot is attempted. */

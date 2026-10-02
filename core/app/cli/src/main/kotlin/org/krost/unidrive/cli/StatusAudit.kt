@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.sync.SyncEngine
 import java.util.Locale
 
 /**
@@ -24,6 +25,10 @@ data class AuditReport(
     val pendingCursor: String?,
     val lastFullScan: String?,
     val extraFields: List<org.krost.unidrive.StatusField> = emptyList(),
+    // #401: unresolved remote path collisions (two cloud items sharing one path).
+    // Zero/empty keeps the report shape unchanged for collision-free drives.
+    val remoteCollisions: Int = 0,
+    val remoteCollisionPaths: List<String> = emptyList(),
 )
 
 /**
@@ -108,6 +113,16 @@ object StatusAudit {
         }
 
         lines.add("Non-hydrated:     ${String.format(Locale.ROOT, "%,d", report.nonHydrated)} entries waiting for download")
+
+        if (report.remoteCollisions > 0) {
+            lines.add(
+                "Remote collisions: ${report.remoteCollisions} path(s) where two cloud items share one name " +
+                    "(one is kept, one suppressed) — resolve in the cloud:",
+            )
+            for (path in report.remoteCollisionPaths.take(SyncEngine.COLLISION_PATHS_STATUS_LIMIT)) {
+                lines.add("  $path")
+            }
+        }
 
         val cursorLine =
             if (report.pendingCursor != null) {
