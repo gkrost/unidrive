@@ -161,6 +161,7 @@ open class SyncEngine(
         // #115: wire real user-dirs.dirs content so the reconciler can map locale-
         // aliased local folder names to their cloud-canonical equivalents.
         xdgUserDirsOverrides = xdgUserDirsOverrides,
+        isHydrationCachePresent = { path -> Files.isRegularFile(resolveCachePath(path)) },
     )
 
     // Debounce state for remote-change wake hints (Internxt notifications WS).

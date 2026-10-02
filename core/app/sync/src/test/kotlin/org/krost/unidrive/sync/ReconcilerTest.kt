@@ -382,6 +382,24 @@ class ReconcilerTest {
         assertIs<SyncAction.DeleteRemote>(actions[0])
     }
 
+    @Test
+    fun `cache-backed hydrated row + local-missing does not delete remote`() {
+        db.upsertEntry(dbEntry("/mount-written.txt", isHydrated = true))
+        val cacheBacked = Reconciler(
+            db,
+            syncRoot,
+            ConflictPolicy.LAST_WRITER_WINS,
+            isHydrationCachePresent = { it == "/mount-written.txt" },
+        )
+
+        val actions = cacheBacked.reconcile(
+            mapOf("/mount-written.txt" to cloudItem("/mount-written.txt")),
+            mapOf("/mount-written.txt" to ChangeState.DELETED),
+        )
+
+        assertTrue(actions.none { it is SyncAction.DeleteRemote })
+    }
+
     // #160 — download-only rehydrate: hydrated-but-locally-missing rows must re-download
 
     @Test

@@ -41,6 +41,9 @@ class Reconciler(
     // / resolveSlice() call using the remote top-level names from that call's
     // remoteChanges argument (canonical name = existing cloud folder).
     private val xdgUserDirsOverrides: Map<String, String> = emptyMap(),
+    // Mount-write bytes live in the hydration cache until the platform client
+    // mirrors them into sync_root. Their absence from sync_root is not a delete.
+    private val isHydrationCachePresent: (String) -> Boolean = { false },
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
@@ -858,6 +861,9 @@ class Reconciler(
                 SyncAction.Upload(path, remoteId = entry?.remoteId, remoteTarget = aliasTarget(alias, path))
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
                 when {
+                    // A real mount unlink removes this cache file before sync;
+                    // only a cache-backed row is protected from a false delete.
+                    entry != null && entry.isHydrated && !entry.isFolder && isHydrationCachePresent(path) -> null
                     // UD-901: a pending-upload row (entry.remoteId == null) that vanished
                     // before its first upload has nothing to delete on the remote side —
                     // just drop the placeholder row.
