@@ -332,18 +332,25 @@ class HydrationKeepsSyncRootBaselineTest {
         }
 
     @Test
-    fun `uploadFromCache replay after a hydration read does not rebaseline the sync-root row`() =
+    fun `uploadFromCache replay after a hydration read converges the sync-root placeholder`() =
         runTest {
             // The crash-recovery scanner replays a cache file whose mtime exceeds the last_synced
             // watermark as an open_write. After an open_read on a freed placeholder that replay
-            // used to rebaseline the row to the cache copy's stats while the sync-root file is
+            // used to rebaseline the row to the cache copy's stats while the sync-root file was
             // still the zero-filled stub — the next sync then uploaded the stub (#420, one daemon
-            // restart later).
+            // restart later). #423: the replayed bytes (identical to the remote's) are now
+            // propagated into the sync root, so the placeholder is filled immediately and the
+            // row baselines the FILLED file — never the stub. The #420 invariant stands: the
+            // stub is never uploaded.
             syncRemoteFileDown("/doc.txt")
             val syncFile = syncRoot.resolve("doc.txt")
             val hydrated = assertNotNull(db.getEntry("/doc.txt"))
             PlaceholderManager(syncRoot).dehydrate("/doc.txt", hydrated.remoteSize, hydrated.remoteModified)
             db.upsertEntry(hydrated.copy(isHydrated = false, lastSynced = Instant.now()))
+            assertTrue(
+                Files.readAllBytes(syncFile).all { it == 0.toByte() },
+                "precondition: the sync-root file is a zero-filled placeholder",
+            )
 
             val cachePath = engine.ensureHydrated("/doc.txt")
             assertContentEquals(content, Files.readAllBytes(cachePath), "precondition: the cache copy was downloaded")
@@ -354,14 +361,19 @@ class HydrationKeepsSyncRootBaselineTest {
             engine.uploadFromCache("/doc.txt", cachePath)
             provider.uploadedPaths.clear()
 
+            assertContentEquals(
+                content,
+                Files.readAllBytes(syncFile),
+                "#423: the replay propagated the uploaded bytes into the sync root, filling the placeholder",
+            )
             val after = assertNotNull(db.getEntry("/doc.txt"))
-            assertFalse(after.isHydrated, "the sync-root file is still a placeholder")
-            assertEquals(hydrated.localMtime, after.localMtime, "the baseline must stay the sync-root file's")
-            assertEquals(hydrated.localSize, after.localSize)
+            assertTrue(after.isHydrated, "the sync-root file now holds real bytes")
+            assertEquals(mtimeOf(syncFile), after.localMtime, "the baseline is the filled sync-root file")
+            assertEquals(Files.size(syncFile), after.localSize)
 
-            assertTrue(LocalScanner(syncRoot, db).scan().isEmpty(), "the placeholder must not look like a local edit")
+            assertTrue(LocalScanner(syncRoot, db).scan().isEmpty(), "the filled file matches its baseline — no local edit")
             engine.syncOnce()
-            assertTrue(provider.uploadedPaths.isEmpty(), "the zero-filled placeholder must never be uploaded, got: ${provider.uploadedPaths}")
-            assertContentEquals(content, Files.readAllBytes(syncFile), "the next sync fills the placeholder with the real bytes")
+            assertTrue(provider.uploadedPaths.isEmpty(), "nothing is uploaded once converged, got: ${provider.uploadedPaths}")
+            assertContentEquals(content, provider.files["/doc.txt"], "the remote content must be untouched")
         }
 }

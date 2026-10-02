@@ -17,8 +17,12 @@ import kotlin.test.assertTrue
 /**
  * A write made through the hydration cache (the mount) is uploaded by `uploadFromCache`. On a profile that
  * also has a populated sync root, the sync-root file still holds the older bytes. The row must not adopt the
- * cache copy's mtime and size as the baseline of THAT sync-root file, or the next scan reads the untouched
- * sync-root file as modified and uploads the old content over the write.
+ * cache copy's mtime and size as the baseline of THAT sync-root file (#427), or the next scan reads the
+ * untouched sync-root file as modified and uploads the old content over the write.
+ *
+ * #423 decision: the sync root converges immediately — the uploaded bytes are propagated to the sync-root
+ * file and the row is rebaselined against that copy — so the row never claims local A == remote B while the
+ * sync root keeps stale bytes (which let a later sync-root edit upload over the newer remote content).
  */
 class UploadFromCacheKeepsWriteTest {
     private lateinit var syncRoot: Path
@@ -82,12 +86,24 @@ class UploadFromCacheKeepsWriteTest {
             Files.write(cacheCopy, newBytes)
             engine.uploadFromCache("/f.txt", cacheCopy)
             assertContentEquals(newBytes, provider.files["/f.txt"], "precondition: the write reached the remote")
+            assertContentEquals(
+                newBytes,
+                Files.readAllBytes(syncFile),
+                "#423: the sync root must adopt the uploaded bytes instead of holding stale content",
+            )
+            val rowAfterUpload = assertNotNull(db.getEntry("/f.txt"))
+            assertEquals(
+                Files.getLastModifiedTime(syncFile).toMillis(),
+                rowAfterUpload.localMtime,
+                "the row baselines the sync-root copy it now describes",
+            )
+            assertEquals(Files.size(syncFile), rowAfterUpload.localSize)
             provider.uploadedPaths.clear()
 
             engine.syncOnce()
 
             assertContentEquals(newBytes, provider.files["/f.txt"], "the next sync must not put content A back on the remote")
-            assertEquals(emptyList(), provider.uploadedPaths, "nothing in the sync root changed, so nothing is uploaded")
+            assertEquals(emptyList(), provider.uploadedPaths, "the sync root is converged, so nothing is uploaded")
             val row = assertNotNull(db.getEntry("/f.txt"))
             assertTrue(row.remoteSize == newBytes.size.toLong(), "the row describes the remote bytes, got ${row.remoteSize}")
         }

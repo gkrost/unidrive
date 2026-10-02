@@ -703,21 +703,67 @@ open class SyncEngine(
         if (rowDescribesSyncRootFile(existing, path)) {
             // The row describes the file in the sync root, not this cache copy (an open_read
             // hydrated the cache and the crash-recovery scanner replayed it as an open_write).
-            // The upload already landed remotely, so refresh the remote fields only and leave
-            // the sync-root baseline and hydration flag alone: rebaselining from the cache here
-            // makes the next scan read the untouched sync-root file (a freed placeholder
-            // included) as modified and upload it. The recovery loop fills the sync-root file
-            // from the now-current remote on a later pass.
-            db.upsertEntry(
-                existing.copy(
-                    remoteId = result.id,
-                    remoteHash = result.hash,
-                    remoteSize = result.size,
-                    remoteModified = result.modified,
-                    lastSynced = Instant.now(),
-                    lastErrorAt = existing.lastErrorAtAfterUpload(),
-                ),
-            )
+            //
+            // #423 decision: the sync root should hold the bytes that were written
+            // through the cache and just uploaded, so propagate them (echo-suppressed,
+            // best-effort) and rebaseline the row from the sync-root copy. #427's
+            // remote-fields-only write left the sync root holding stale bytes while the
+            // row claimed it was in step with the new remote — a later sync-root edit
+            // then uploaded over the newer remote content without a conflict.
+            // Copying the SAME bytes that landed remotely cannot revert anything; it
+            // converges all three copies (cache, sync root, remote) immediately, and
+            // covers the replay-over-a-placeholder case by filling the placeholder
+            // with exactly the remote's bytes.
+            val localPath = placeholder.resolveLocal(path)
+            val converged =
+                runCatching {
+                    withEchoSuppression(path) {
+                        Files.createDirectories(localPath.parent)
+                        Files.copy(cachePath, localPath, StandardCopyOption.REPLACE_EXISTING)
+                    }
+                }.onFailure { e ->
+                    log.warn(
+                        "uploadFromCache: could not propagate the cache write to the sync-root file {}: {}",
+                        path,
+                        e.message,
+                    )
+                }.isSuccess
+            if (converged) {
+                // Baseline the row against the sync-root copy it now describes, and
+                // hash THOSE bytes (post-copy stats, same #337 pattern as the else
+                // branch) so the touch shield covers the propagated write too.
+                val sentLocal = statBeforeUpload(localPath)
+                db.upsertEntry(
+                    withSentHash(
+                        existing.copy(
+                            remoteId = result.id,
+                            remoteHash = result.hash,
+                            remoteSize = result.size,
+                            remoteModified = result.modified,
+                            localMtime = sentLocal?.first,
+                            localSize = sentLocal?.second,
+                            isHydrated = true,
+                            lastSynced = Instant.now(),
+                            lastErrorAt = existing.lastErrorAtAfterUpload(),
+                        ),
+                        localPath,
+                        sentLocal,
+                    ),
+                )
+            } else {
+                // Propagation failed (locked file, ...): keep the row's remote fields
+                // at their pre-upload values so the next delta still reports the
+                // upload as a remote change and downloads the written bytes into the
+                // sync root, instead of the row claiming the stale sync-root content
+                // is in step with the new remote. lastSynced still moves so the
+                // recovery scanner does not replay this upload loop-wise.
+                db.upsertEntry(
+                    existing.copy(
+                        lastSynced = Instant.now(),
+                        lastErrorAt = existing.lastErrorAtAfterUpload(),
+                    ),
+                )
+            }
         } else {
             // #319: `existing` is non-null here (the vanished-row case returns above),
             // so the upload rebaselines the row that owns the bytes instead of
