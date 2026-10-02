@@ -382,6 +382,45 @@ class ReconcilerTest {
         assertIs<SyncAction.DeleteRemote>(actions[0])
     }
 
+    @Test
+    fun `cache-backed hydrated row + local-missing does not delete remote`() {
+        db.upsertEntry(dbEntry("/mount-written.txt", isHydrated = true))
+        val cacheBacked = Reconciler(
+            db,
+            syncRoot,
+            ConflictPolicy.LAST_WRITER_WINS,
+            isHydrationCachePresent = { it == "/mount-written.txt" },
+        )
+
+        val actions = cacheBacked.reconcile(
+            mapOf("/mount-written.txt" to cloudItem("/mount-written.txt")),
+            mapOf("/mount-written.txt" to ChangeState.DELETED),
+        )
+
+        assertTrue(actions.none { it is SyncAction.DeleteRemote })
+    }
+
+    @Test
+    fun `a row recorded without a hash is not remote-modified when the provider starts reporting one`() {
+        // Internxt rows were written with remote_hash = null (the provider had no hash). The version token that
+        // #464 puts on the listing must not make every existing row look remotely modified on the first sync after
+        // the upgrade: that would re-download the whole drive. A recorded hash that differs is still a change.
+        // Hydrated rows, so the UD-225 recovery of unhydrated rows does not add a download of its own.
+        db.upsertEntry(dbEntry("/old.txt", isHydrated = true).copy(remoteHash = null))
+        db.upsertEntry(dbEntry("/changed.txt", remoteHash = "uuid|1|100", isHydrated = true))
+
+        val actions = reconciler.reconcile(
+            mapOf(
+                "/old.txt" to cloudItem("/old.txt", hash = "uuid|1|100"),
+                "/changed.txt" to cloudItem("/changed.txt", hash = "uuid|2|100"),
+            ),
+            emptyMap(),
+        )
+
+        assertTrue(actions.none { it.path == "/old.txt" }, "a row with no recorded hash must stay unchanged: $actions")
+        assertTrue(actions.any { it.path == "/changed.txt" }, "a different recorded hash is still a remote change: $actions")
+    }
+
     // #160 — download-only rehydrate: hydrated-but-locally-missing rows must re-download
 
     @Test

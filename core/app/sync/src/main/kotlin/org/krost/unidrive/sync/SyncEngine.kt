@@ -161,6 +161,7 @@ open class SyncEngine(
         // #115: wire real user-dirs.dirs content so the reconciler can map locale-
         // aliased local folder names to their cloud-canonical equivalents.
         xdgUserDirsOverrides = xdgUserDirsOverrides,
+        isHydrationCachePresent = { path -> Files.isRegularFile(resolveCachePath(path)) },
     )
 
     // Debounce state for remote-change wake hints (Internxt notifications WS).
@@ -552,6 +553,7 @@ open class SyncEngine(
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
+        ifMatchETag: String? = null,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
         if (isExcluded(path)) {
@@ -599,7 +601,7 @@ open class SyncEngine(
         val sent = statBeforeUpload(cachePath)
         val result =
             try {
-                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId) { transferred, total ->
+                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
                     reporter.onTransferProgress(path, transferred, total)
                 }
             } catch (e: Exception) {

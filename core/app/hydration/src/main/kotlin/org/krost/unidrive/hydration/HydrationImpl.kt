@@ -181,7 +181,7 @@ class HydrationImpl(
         // from the co-daemon's paired close_handle call cleans it up normally.
         if (handleId.startsWith("recovery-")) {
             openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-            launchSerializedUpload(path, cachePath, handleId)
+            launchSerializedUpload(path, cachePath, handleId, baseEtag)
             return OpenResult.Ok(cachePath)
         }
 
@@ -194,7 +194,7 @@ class HydrationImpl(
         // co-daemon's cache_scanner replay (which fires recovery- handles on next mount).
         // On failure: stamp the row so `unidrive doctor` can surface the unsynced gap.
         openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = path
-        launchSerializedUpload(path, cachePath, handleId)
+        launchSerializedUpload(path, cachePath, handleId, baseEtag)
         return OpenResult.Ok(cachePath)
     }
 
@@ -215,6 +215,7 @@ class HydrationImpl(
         path: String,
         cachePath: Path,
         handleId: String,
+        baseEtag: String?,
     ) {
         // Atomically create-or-get the slot and bump its pending count. The bin lock
         // held by compute() ensures that no concurrent finally-block can remove the
@@ -231,7 +232,7 @@ class HydrationImpl(
                 slot.mutex.withLock {
                     try {
                         _events.emit(HydrationEvent.Hydrating(path))
-                        syncEngine.uploadFromCache(path, cachePath)
+                        syncEngine.uploadFromCache(path, cachePath, baseEtag)
                         val bytes = java.nio.file.Files.size(cachePath)
                         _events.emit(HydrationEvent.Hydrated(path, bytes))
                         completed = HydrationEvent.Completed(
@@ -242,7 +243,7 @@ class HydrationImpl(
                         )
                     } catch (e: Exception) {
                         runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                        val err = HydrationError.Generic(e.message ?: "upload failed")
+                        val err = if (e is org.krost.unidrive.RemoteConflictException) HydrationError.Conflict else HydrationError.Generic(e.message ?: "upload failed")
                         _events.emit(HydrationEvent.Failed(path, err))
                         completed = HydrationEvent.Completed(
                             path = path,

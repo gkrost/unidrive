@@ -78,6 +78,13 @@ open class PermanentDownloadFailureException(
     requestId: String? = null,
 ) : ProviderException(message, cause, requestId)
 
+/** A remote item changed after the caller captured its write token. */
+open class RemoteConflictException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
 /**
  * Signals that a folder cannot be removed because it still contains
  * entries — the provider refused the delete with its non-empty surface
