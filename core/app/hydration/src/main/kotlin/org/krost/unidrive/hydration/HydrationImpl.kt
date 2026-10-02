@@ -271,6 +271,13 @@ class HydrationImpl(
     override suspend fun closeHandle(connectionId: String, handleId: String) {
         openSets[connectionId]?.remove(handleId)
     }
+
+    // #301: whether a background upload of [path] is queued or in flight. The
+    // engine's enumerate-reap consults this (via the engine's uploadInFlight hook,
+    // wired by app:cli) before evicting a hydration-cache file, so a queued edit's
+    // only copy is never reaped out from under its upload.
+    fun hasUploadSlot(path: String): Boolean = uploadSlots.containsKey(path)
+
     override suspend fun hydrate(path: String): HydrateResult {
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
@@ -285,12 +292,25 @@ class HydrationImpl(
         }
     }
     override suspend fun dehydrate(path: String): DehydrateResult {
-        stateDb.getEntry(path)
+        val entry = stateDb.getEntry(path)
             ?: return DehydrateResult.Failed(HydrationError.UnknownPath)
 
         // Check the open-set across ALL connections
         val anyOpen = openSets.values.any { perConn -> perConn.containsValue(path) }
         if (anyOpen) return DehydrateResult.Busy
+
+        // #301: refuse while an upload of this path is queued or in flight — the
+        // FUSE handle is closed (so the open-set is empty) but the bytes have not
+        // landed on the remote yet; deleting the cache here destroyed them
+        // everywhere. Busy tells the client to retry once the upload's completed
+        // event has arrived.
+        if (uploadSlots.containsKey(path)) return DehydrateResult.Busy
+
+        // #301/#136: a pending upload (remoteId == null && isHydrated) has NO remote
+        // copy at all — the cache is the only copy of the file. Dehydrate is
+        // meaningless for it until the upload lands (which flips remoteId), so
+        // refuse rather than destroy the bytes.
+        if (entry.isPendingUpload) return DehydrateResult.Busy
 
         return try {
             val cachePath = syncEngine.resolveCachePath(path)

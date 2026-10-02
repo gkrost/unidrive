@@ -128,6 +128,14 @@ open class SyncEngine(
     // plain lambda avoids a circular import (HydrationEvent lives in app:hydration
     // which depends on app:sync, not the other way around).
     private val viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
+    // #301: whether a background hydration upload of [path] is queued or in flight
+    // (an open_write returned Ok but its upload has not landed yet). The
+    // enumerate-reap consults it before evicting a hydration-cache file, so a
+    // queued edit's only copy is never deleted out from under its upload. Wired by
+    // app:cli to HydrationImpl.hasUploadSlot (late-bound — the hydration layer is
+    // constructed after the engine); the no-op default keeps engine-only callers
+    // and tests unaffected.
+    private val uploadInFlight: (path: String) -> Boolean = { false },
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -891,8 +899,36 @@ open class SyncEngine(
                 val toReap =
                     if (bulk) missingNow.intersect(deferredMissing) else missingNow
                 for (path in toReap) {
+                    // #301: refuse to reap a path whose hydration cache may hold the
+                    // only copy of user bytes. A queued or in-flight upload means an
+                    // edit written through the mount has not landed yet; a cache file
+                    // newer than the row's last-synced watermark means the same for an
+                    // edit whose upload crashed or failed (the co-daemon's recovery
+                    // scanner replays exactly this watermark). Deleting the cache in
+                    // that window destroyed the bytes everywhere — the upload then hit
+                    // a missing cache path, and the remote copy (if any) was stale.
+                    // Defer the whole reap: the row stays alive and the next complete
+                    // enumeration re-evaluates once the upload has landed (or failed).
+                    val row = db.getEntry(path)
+                    val cachePath = resolveCachePath(path)
+                    val cacheDirty =
+                        if (row == null) {
+                            false
+                        } else {
+                            runCatching {
+                                Files.exists(cachePath) &&
+                                    Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
+                            }.getOrDefault(false)
+                        }
+                    if (uploadInFlight(path) || row?.isPendingUpload == true || cacheDirty) {
+                        log.warn(
+                            "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit",
+                            path,
+                        )
+                        continue
+                    }
                     db.markDeleted(path)
-                    runCatching { Files.deleteIfExists(resolveCachePath(path)) }
+                    runCatching { Files.deleteIfExists(cachePath) }
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }

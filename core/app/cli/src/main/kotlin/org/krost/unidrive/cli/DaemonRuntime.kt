@@ -135,9 +135,14 @@ class DaemonRuntime(
                 // without going through the HydrationImpl flow, which is intentional: the
                 // invalidation event originates outside the per-path hydration lifecycle.
                 var hydrationIpcRef: HydrationIpcHandler? = null
+                // #301: same late-binding shape as hydrationIpcRef — the engine's
+                // enumerate-reap asks the hydration layer whether an upload of a path
+                // is queued or in flight before it evicts that path's cache file.
+                var hydrationRef: HydrationImpl? = null
                 val engine = SyncEngine(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
                     standingScope = syncPaths, excludePatterns = excludePatterns,
+                    uploadInFlight = { path -> hydrationRef?.hasUploadSlot(path) ?: false },
                     viewInvalidationSink = { changedPaths, full ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
                         val event = if (full || changedPaths.size > cap) {
@@ -149,6 +154,7 @@ class DaemonRuntime(
                     },
                 )
                 val hydration = HydrationImpl(engine, db!!)
+                hydrationRef = hydration
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 hydrationIpcRef = hydrationIpc
 

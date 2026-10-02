@@ -438,6 +438,11 @@ open class SyncCommand : Runnable {
                 sentinel = streamingSentinel,
             )
 
+        // #301: late-binding, like DaemonRuntime's hydrationRef — the engine's
+        // enumerate-reap asks the hydration layer whether an upload of a path is
+        // queued or in flight before it evicts that path's cache file. The
+        // hydration instance only exists further down, inside runBlocking.
+        var hydrationRef: HydrationImpl? = null
         val engine =
             SyncEngine(
                 provider = provider,
@@ -482,6 +487,8 @@ open class SyncCommand : Runnable {
                 ignoreTopLevelGuard = ignoreTopLevelGuard,
                 skippedOpsLogPath = parent.providerConfigDir().resolve("skipped-ops.jsonl"),
                 streamingReconciliation = effectiveStreaming,
+                // #301: see hydrationRef above.
+                uploadInFlight = { path -> hydrationRef?.hasUploadSlot(path) ?: false },
             )
 
         // Webhook subscription store (shared DB file, separate table)
@@ -515,6 +522,7 @@ open class SyncCommand : Runnable {
                 // crash-recovery open_write calls run on the daemon's managed scope
                 // rather than a fire-and-forget orphan scope.
                 val hydration = HydrationImpl(engine, db, recoveryUploadScope = this)
+                hydrationRef = hydration
                 val hydrationIpc = HydrationIpcHandler(hydration)
                 for (verb in HydrationIpcHandler.VERBS) {
                     ipcServer.registerHandler(verb) { connId, json ->
