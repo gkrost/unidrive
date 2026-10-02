@@ -156,6 +156,35 @@ open class SyncEngine(
 
     private fun isTracked(remotePath: String): Boolean = SyncScope.contains(remotePath, trackScope) || remotePath in trackAncestors
 
+    /**
+     * True when [path] lies outside the standing sync scope (config
+     * `sync_path`); empty scope means the whole drive, so nothing is out of
+     * scope. The hydration write verbs use this to refuse writes that would
+     * create or move cloud data the mounted view can never show.
+     */
+    fun isOutOfScope(path: String): Boolean = !SyncScope.contains(path, trackScope)
+
+    // UD-263: per-provider transfer concurrency cap, computed once at
+    // construction. Audit values flow from docs/providers/<id>-robustness.md
+    // §5 → ProviderMetadata → here. One daemon-wide semaphore shared by the
+    // sync pass (Pass 2 + streaming-gather executor) and the hydration upload
+    // path, so an Explorer copy burst through the mount can never exceed the
+    // provider's cap (Internxt allows 2) no matter which path the transfers
+    // come from. Memory-pressure protection on big files is delegated to the
+    // provider's HttpRetryBudget (UD-232).
+    private val perProviderConcurrency: Int =
+        org.krost.unidrive.ProviderRegistry
+            .getMetadata(providerId)
+            ?.maxConcurrentTransfers ?: 4
+    private val transferBudget = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+
+    /**
+     * Run [block] holding one permit of the daemon-wide per-provider transfer
+     * budget. The hydration upload path goes through this so mount writes and
+     * sync passes share one cap instead of each running unbounded.
+     */
+    suspend fun <T> withTransferPermit(block: suspend () -> T): T = transferBudget.withPermit { block() }
+
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
     // (canonical→real-local reverse map for newly-arrived aliased rows).
@@ -755,16 +784,27 @@ open class SyncEngine(
             }
         }.getOrDefault(false)
 
-    private fun isExcluded(path: String): Boolean =
+    /**
+     * True when [path] matches the effective exclude patterns (configured
+     * excludes union the defaults). Keep-local rule: such paths are never
+     * uploaded. Shared by the upload path and the hydration write verbs, which
+     * must report an excluded write instead of letting it present as in-sync.
+     */
+    fun isExcludedPath(path: String): Boolean =
         effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
 
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
         ifMatchETag: String? = null,
+        // Byte progress of the transfer, (transferred, total). Optional: the
+        // hydration upload path threads it into `uploading` events; callers
+        // that don't need it leave it null (the sync-progress reporter below
+        // always runs).
+        onProgress: ((Long, Long) -> Unit)? = null,
     ) {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
-        if (isExcluded(path)) {
+        if (isExcludedPath(path)) {
             log.info("Skipping upload of excluded path (keep-local): {}", path)
             // Keep-local files are never uploaded, but the local watermark must still
             // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,
@@ -823,6 +863,7 @@ open class SyncEngine(
             try {
                 provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
                     reporter.onTransferProgress(path, transferred, total)
+                    onProgress?.invoke(transferred, total)
                 }
             } catch (e: Exception) {
                 auditLog?.emit(
@@ -1384,18 +1425,12 @@ open class SyncEngine(
         val executedPaths =
             java.util.concurrent.ConcurrentHashMap
                 .newKeySet<String>()
-        // UD-263: per-provider transfer concurrency cap. Lifted to the top
-        // of doSyncOnce so both Pass 2 AND the streaming-gather executor
-        // share one semaphore — they pick from a single concurrency
-        // budget rather than each having their own. Audit values flow
-        // from docs/providers/<id>-robustness.md §5 → ProviderMetadata
-        // → here. Memory-pressure protection on big files is delegated to
-        // the provider's HttpRetryBudget (UD-232).
-        val perProviderConcurrency =
-            org.krost.unidrive.ProviderRegistry
-                .getMetadata(providerId)
-                ?.maxConcurrentTransfers ?: 4
-        val transferSemaphore = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+        // UD-263: the per-provider transfer budget is a construction-time field
+        // ([transferBudget]) shared with the hydration upload path via
+        // [withTransferPermit] — one daemon-wide cap, not one per sync pass.
+        // The per-provider audit values (docs/providers/<id>-robustness.md §5
+        // → ProviderMetadata) still drive the cap.
+        val transferSemaphore = transferBudget
 
         // UD-299: detect sync_root drift between runs. state.db is per-profile
         // (not per-(profile, sync_root)), so editing sync_root in config.toml
@@ -2003,11 +2038,11 @@ open class SyncEngine(
             return
         }
 
-        // perProviderConcurrency + transferSemaphore are now declared at
-        // the top of doSyncOnce so the streaming-gather executor and Pass 2
-        // share one concurrency budget. The per-provider audit values
-        // (docs/providers/<id>-robustness.md §5 → ProviderMetadata) still
-        // drive the cap.
+        // perProviderConcurrency + transferBudget are declared at
+        // construction so the streaming-gather executor, Pass 2 and the
+        // hydration upload path all share one concurrency budget. The
+        // per-provider audit values (docs/providers/<id>-robustness.md §5
+        // → ProviderMetadata) still drive the cap.
         log.info(
             "Pass 2 transfer semaphore: provider={} maxConcurrentTransfers={}",
             providerId.ifBlank { "<unknown>" },

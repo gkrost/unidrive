@@ -51,6 +51,28 @@ internal class MinimalFakeProvider(
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
     var uploadGate: CompletableDeferred<Unit>? = null
 
+    // Upload failure injection: upload() throws while this is > 0 (decremented
+    // per call). Drives the retry tests: set to N for N transient failures,
+    // to a huge number for a permanent failure.
+    val uploadFailuresRemaining = AtomicInteger(0)
+
+    // Like [uploadFailuresRemaining] but the failure is a RemoteConflictException (the
+    // provider's "remote changed under the edit" refusal).
+    val uploadConflictRemaining = AtomicInteger(0)
+
+    // Upload progress emulation: progressSteps > 0 makes upload() report
+    // onProgress in [progressSteps] evenly spaced steps; progressPaceMs > 0
+    // additionally delays between steps (real-time coalescing tests).
+    var progressSteps: Int = 0
+    var progressPaceMs: Long = 0
+
+    // Total upload() invocations (attempt counting for the retry tests) and
+    // daemon-wide concurrency tracking for the transfer-cap test.
+    private val uploadAttempts = AtomicInteger(0)
+    private val activeUploadsTotal = AtomicInteger(0)
+    private val maxConcurrentUploadsTotal = AtomicInteger(0)
+    private val completedUploads = AtomicInteger(0)
+
     // Per-path concurrency tracking for the serialization test.
     // activeUploadsByPath: how many upload coroutines are currently inside upload() for each path.
     // maxConcurrentUploadsByPath: the peak observed value of activeUploadsByPath per path.
@@ -93,17 +115,35 @@ internal class MinimalFakeProvider(
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        uploadAttempts.incrementAndGet()
+        if (uploadFailuresRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p } > 0) {
+            throw IllegalStateException("injected upload failure")
+        }
+        uploadConflictRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p }.let { before ->
+            if (before > 0) throw org.krost.unidrive.RemoteConflictException("injected remote conflict: $remotePath")
+        }
         // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
         val active = activeUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
         val peak = maxConcurrentUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
         val currentActive = active.incrementAndGet()
         // Update peak if current active count exceeds the recorded maximum.
         peak.getAndUpdate { prev -> maxOf(prev, currentActive) }
+        val totalNow = activeUploadsTotal.incrementAndGet()
+        maxConcurrentUploadsTotal.getAndUpdate { prev -> maxOf(prev, totalNow) }
 
         try {
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
+            remoteFiles[remotePath] = bytes
+            if (progressSteps > 0 && onProgress != null) {
+                val total = bytes.size.toLong()
+                for (i in 1..progressSteps) {
+                    if (progressPaceMs > 0) kotlinx.coroutines.delay(progressPaceMs)
+                    onProgress(total * i / progressSteps, total)
+                }
+            }
             uploadedFiles[remotePath] = bytes
+            completedUploads.incrementAndGet()
             return CloudItem(
                 id = "uploaded-$remotePath",
                 name = remotePath.substringAfterLast('/'),
@@ -117,14 +157,55 @@ internal class MinimalFakeProvider(
             )
         } finally {
             active.decrementAndGet()
+            activeUploadsTotal.decrementAndGet()
         }
     }
 
-    override suspend fun delete(remotePath: String, ifMatchETag: String?) = error("delete not used")
+    // Real (recording) delete/move: the safe-save rename sequence deletes the
+    // replace destination and moves the uploaded source in the cloud.
+    val deletedPaths = mutableListOf<String>()
+    val movedPairs = mutableListOf<Pair<String, String>>()
 
-    override suspend fun createFolder(path: String): CloudItem = error("createFolder not used")
+    override suspend fun delete(remotePath: String, ifMatchETag: String?) {
+        deletedPaths.add(remotePath)
+        remoteFiles.remove(remotePath)
+    }
 
-    override suspend fun move(fromPath: String, toPath: String): CloudItem = error("move not used")
+    // Folders created through createRemoteFolder, recorded for the scope-guard
+    // tests (a refused mkdir must not reach the provider).
+    val createdFolders = mutableListOf<String>()
+
+    override suspend fun createFolder(path: String): CloudItem {
+        createdFolders.add(path)
+        return CloudItem(
+            id = "folder-$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 0L,
+            isFolder = true,
+            modified = java.time.Instant.now(),
+            created = null,
+            hash = null,
+            mimeType = null,
+        )
+    }
+
+    override suspend fun move(fromPath: String, toPath: String): CloudItem {
+        movedPairs.add(fromPath to toPath)
+        val bytes = remoteFiles.remove(fromPath) ?: ByteArray(0)
+        remoteFiles[toPath] = bytes
+        return CloudItem(
+            id = "uploaded-$toPath",
+            name = toPath.substringAfterLast('/'),
+            path = toPath,
+            size = bytes.size.toLong(),
+            isFolder = false,
+            modified = java.time.Instant.now(),
+            created = null,
+            hash = bytes.size.toString(),
+            mimeType = null,
+        )
+    }
 
     override suspend fun delta(
         cursor: String?,
@@ -142,6 +223,9 @@ internal class MinimalFakeProvider(
     /** Returns the content most recently uploaded to [path], or null if never uploaded. */
     fun uploadedContent(path: String): String? = uploadedFiles[path]?.toString(Charsets.UTF_8)
 
+    /** Live remote object content at [path] (reflects delete/move too). */
+    fun remoteContent(path: String): String? = remoteFiles[path]?.toString(Charsets.UTF_8)
+
     /** Configure the next downloadById call to throw the given exception. */
     fun makeNextDownloadThrow(throwable: Throwable) {
         nextThrowable = throwable
@@ -153,6 +237,15 @@ internal class MinimalFakeProvider(
      */
     fun maxConcurrentUploadsForPath(path: String): Int =
         maxConcurrentUploadsByPath[path]?.get() ?: 0
+
+    /** Total upload() invocations seen so far (attempt counter for retry tests). */
+    fun uploadAttempts(): Int = uploadAttempts.get()
+
+    /** Peak number of upload() calls in flight across ALL paths (cap test). */
+    fun maxConcurrentUploadsTotal(): Int = maxConcurrentUploadsTotal.get()
+
+    /** upload() calls that ran to completion (drain detection in the cap test). */
+    fun completedUploads(): Int = completedUploads.get()
 }
 
 /**
@@ -168,6 +261,16 @@ internal class HydrationTestEnv(
     /** Optional scope for recovery uploads. Pass the [runTest] scope to control
      *  background-job dispatch in recovery-path tests; null uses the default. */
     recoveryUploadScope: CoroutineScope? = null,
+    /** Standing sync scope (sync_path set) for the scope-guard tests; empty = whole drive. */
+    val syncPaths: List<String> = emptyList(),
+    /** Configured exclude patterns for the keep-local tests. */
+    val excludePatterns: List<String> = emptyList(),
+    /** Upload-queue tuning passed through to [HydrationImpl]. */
+    val uploadQueueDepth: Int = 256,
+    val maxUploadAttempts: Int = 3,
+    val uploadRetryDelaysMs: List<Long> = listOf(2_000L, 10_000L),
+    /** Coalescing gap for `uploading` progress events (0 = emit every callback). */
+    val uploadProgressMinIntervalMs: Long = 400,
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -178,7 +281,10 @@ internal class HydrationTestEnv(
 
     val stateDb: StateDatabaseFacade
     val syncEngine: SyncEngineFacade
-    val hydration: Hydration
+    val hydration: HydrationImpl
+
+    /** Direct access to the fake provider (upload gate, failure/counters). */
+    val providerForTest: MinimalFakeProvider get() = fakeProvider
 
     init {
         val db = StateDatabase(dbPath = dbPath, inMemory = true)
@@ -189,15 +295,22 @@ internal class HydrationTestEnv(
             db = db,
             syncRoot = Files.createTempDirectory("unidrive-hydration-sync"),
             cacheRoot = cacheRoot,
+            syncPaths = syncPaths,
+            standingScope = syncPaths,
+            excludePatterns = excludePatterns,
         )
 
         stateDb = StateDatabaseFacade(db)
         syncEngine = SyncEngineFacade(fakeProvider, engine)
-        hydration = if (recoveryUploadScope != null) {
-            HydrationImpl(syncEngine = engine, stateDb = db, recoveryUploadScope = recoveryUploadScope)
-        } else {
-            HydrationImpl(syncEngine = engine, stateDb = db)
-        }
+        hydration = HydrationImpl(
+            syncEngine = engine,
+            stateDb = db,
+            recoveryUploadScope = recoveryUploadScope ?: CoroutineScope(Dispatchers.IO),
+            uploadQueueDepth = uploadQueueDepth,
+            maxUploadAttempts = maxUploadAttempts,
+            uploadRetryDelaysMs = uploadRetryDelaysMs,
+            uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
+        )
     }
 
     internal inner class StateDatabaseFacade(private val db: StateDatabase) {
@@ -306,6 +419,12 @@ internal class HydrationTestEnv(
 
         fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
 
+        /** Drops the row outright (a rename-away / unlink / reap while an upload is queued). */
+        fun deleteRow(path: String) = db.deleteEntry(path)
+
+        /** The row's local-mtime watermark (what `hydration.last_synced` reports). */
+        fun localMtimeOf(path: String): Long? = db.getEntry(path)?.localMtime
+
         fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
 
         fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()
@@ -324,6 +443,31 @@ internal class HydrationTestEnv(
 
         /** Resolves a path to its cache location. */
         fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
+
+        /** Folders the provider was asked to create (scope-guard assertions). */
+        fun createdFolders(): List<String> = fakeProvider.createdFolders
+
+        /** Injects [count] RemoteConflictException refusals from upload() before the next success. */
+        fun conflictUploads(count: Int) {
+            fakeProvider.uploadConflictRemaining.set(count)
+        }
+
+        /** Injects [count] upload() failures before the next success. */
+        fun failUploads(count: Int) {
+            fakeProvider.uploadFailuresRemaining.set(count)
+        }
+
+        /** Total upload() attempts seen by the provider (retry tests). */
+        fun uploadAttempts(): Int = fakeProvider.uploadAttempts()
+
+        /** Peak concurrent upload() calls across all paths (transfer-cap test). */
+        fun maxConcurrentUploadsTotal(): Int = fakeProvider.maxConcurrentUploadsTotal()
+
+        /** Live remote object content at [path] (reflects delete/move too). */
+        fun remoteContent(path: String): String? = fakeProvider.remoteContent(path)
+
+        fun deletedPaths(): List<String> = fakeProvider.deletedPaths
+        fun movedPairs(): List<Pair<String, String>> = fakeProvider.movedPairs
 
         /**
          * Writes [content] to the cache file at the path [SyncEngine.resolveCachePath] would compute.

@@ -50,6 +50,7 @@ class HydrationSubscribeTest {
             override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: java.nio.file.Path, baseEtag: String?): OpenResult =
                 OpenResult.Failed(HydrationError.Generic("unused"))
             override suspend fun closeHandle(connectionId: String, handleId: String) {}
+            override suspend fun cancelUpload(path: String): Boolean = false
             override suspend fun hydrate(path: String): HydrateResult = HydrateResult.Failed(HydrationError.Generic("unused"))
             override suspend fun dehydrate(path: String): DehydrateResult = DehydrateResult.Failed(HydrationError.Generic("unused"))
             override suspend fun lastSynced(path: String): LastSyncedResult = LastSyncedResult.Unknown("unused")

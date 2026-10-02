@@ -30,7 +30,10 @@ import java.nio.file.Path
  *   3. Open StateDatabase. On failure: release lock (in cleanup), rethrow.
  *   4. Call provider.authenticateAndLog(). On failure: release lock, rethrow.
  *      NO socket is bound until this succeeds.
- *   5. Bind IpcServer + register handlers. On bind failure: release lock, rethrow.
+ *   5. Register handlers, then bind IpcServer LAST — a client that can
+ *      connect is guaranteed a reply for every documented verb; binding
+ *      earlier accepted requests into the unregistered window and hung
+ *      their senders. On bind failure: release lock, rethrow.
  *   6. SERVE until close() is called.
  *   7. On close: graceful shutdown bounded by SHUTDOWN_DEADLINE_MS (spec I7).
  *
@@ -122,9 +125,6 @@ class DaemonRuntime(
                 kotlin.coroutines.coroutineContext + serveJob,
             )
             try {
-                server.start(serveScope)
-                startedAtMs = System.currentTimeMillis()
-
                 // cacheKey = profileName keeps the daemon's hydration cache
                 // subtree per-account and consistent with MountCommand's
                 // co-daemon --cache root (also profile.name), so the FUSE
@@ -201,6 +201,20 @@ class DaemonRuntime(
                     hydrationIpc.onSubscriberDisconnect(connId)
                 }
                 serveScope.launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
+
+                // Engine-side upload recovery: re-enqueue rows written through the
+                // mount whose upload never landed (still queued or failed when the
+                // daemon last stopped). Runs before any client connects, so a
+                // restart alone drains the backlog; the uploads go through the
+                // same per-path serialization and daemon-wide transfer budget as
+                // client-submitted ones. The co-daemon's recovery-<n> scanner
+                // stays as the client-side complement for cache files the row
+                // scan cannot see.
+                serveScope.launch {
+                    runCatching { hydration.replayPendingUploads() }
+                        .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
+                        .onFailure { log.warn("pending-upload replay failed", it) }
+                }
 
                 // sync.subscribe — symmetric to SyncCommand's wiring.
                 server.registerHandler("sync.subscribe") { connId, _ ->
@@ -286,6 +300,17 @@ class DaemonRuntime(
                     server.scheduleAfterReply(connId) { close() }
                     """{"ok":true}"""
                 }
+
+                // Bind LAST, after every handler above is registered. The socket
+                // file appearing is what clients poll for before sending their
+                // first verb — starting the server any earlier opens a window in
+                // which a request is accepted and then silently dropped ("no
+                // handler"), hanging the client that sent it. With the bind here,
+                // a connect that succeeds is guaranteed a reply for every
+                // documented verb; authentication, engine construction and handler
+                // registration all complete before the socket exists.
+                server.start(serveScope)
+                startedAtMs = System.currentTimeMillis()
 
                 System.err.println(
                     "daemon ready, pid ${ProcessHandle.current().pid()}, socket $socketPath",

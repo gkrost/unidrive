@@ -150,6 +150,8 @@ class HydrationIpcHandlerJsonEscapeTest {
             return RenameResult.Ok
         }
 
+        override suspend fun cancelUpload(path: String): Boolean = false
+
         override val events: Flow<HydrationEvent> = emptyFlow()
 
         override fun onConnectionClosed(connectionId: String) {}

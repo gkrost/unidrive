@@ -11,7 +11,43 @@ sealed class HydrationEvent {
     data class Hydrating(override val path: String) : HydrationEvent()
     data class Hydrated(override val path: String, val bytes: Long) : HydrationEvent()
     data class Dehydrated(override val path: String) : HydrationEvent()
-    data class Failed(override val path: String, val error: HydrationError) : HydrationEvent()
+    data class Failed(
+        override val path: String,
+        val error: HydrationError,
+        /**
+         * Upload attempts only: whether the daemon will retry this upload on
+         * its own (true — the client can show "waiting/retrying" and need do
+         * nothing) or has given up for good (false — the row stays visibly
+         * failed until a client re-submit or a daemon restart replays it).
+         * Null (absent on the wire) for non-upload failures, keeping the
+         * pre-existing event shape byte-identical there.
+         */
+        val retryScheduled: Boolean? = null,
+    ) : HydrationEvent()
+
+    /**
+     * An upload submitted through `open_write` was accepted into the daemon's
+     * upload queue but has not started transferring yet (the daemon-wide
+     * per-provider transfer budget is busy). A client shows the file as
+     * waiting until hydrating/failed arrives. Always followed by one of those.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"queued","path":"/a/save.doc"}`
+     */
+    data class Queued(override val path: String) : HydrationEvent()
+
+    /**
+     * Emitted instead of the hydrating/hydrated pair when a write lands on a
+     * path matched by the profile's exclude_patterns: the content is accepted
+     * and kept local-only — it is deliberately never uploaded, so the row must
+     * never present as in-sync. Followed by a [Completed] with
+     * [HydrationError.Excluded] so the client's handle correlation still
+     * terminates.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"skipped","path":"/a/scratch.tmp"}`
+     */
+    data class Skipped(override val path: String) : HydrationEvent()
 
     /**
      * Correlated completion of a handle-scoped transfer. Emitted when the work
@@ -37,6 +73,22 @@ sealed class HydrationEvent {
     ) : HydrationEvent() {
         enum class Direction { DOWNLOAD, UPLOAD }
     }
+
+    /**
+     * Byte progress of a client-written upload, correlated to the open_write
+     * handle like [Completed]. Coalesced to at most a few per second per file
+     * (providers that cannot report progress simply never emit this — the
+     * stream only carries the hydrating/hydrated pair and the Completed).
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` stream):
+     *   `{"event":"uploading","path":"/a/save.doc","handle_id":"h1","bytes_done":4096,"bytes_total":65536}`
+     */
+    data class Uploading(
+        override val path: String,
+        val handleId: String,
+        val bytesDone: Long,
+        val bytesTotal: Long,
+    ) : HydrationEvent()
 
     /**
      * Emitted after [org.krost.unidrive.sync.SyncEngine.enumerateRemoteIntoState] mutates

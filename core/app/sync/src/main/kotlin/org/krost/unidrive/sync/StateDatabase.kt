@@ -969,6 +969,30 @@ class StateDatabase(
     }
 
     /**
+     * Paths of alive FILE rows holding local content that has never reached
+     * the cloud (`local:` synthetic remote_id, hydrated — created or written
+     * through the mount whose upload has not landed, whether or not an
+     * attempt has failed yet). This is the durable pending-upload set the
+     * daemon replays at startup: rows created by [org.krost.unidrive.sync.LocalScanner]
+     * (is_hydrated=0, content in the sync root, no cache copy) are excluded —
+     * the daemon serves a mount, and only hydration rows have a cache file to
+     * upload from. Ordered by path for deterministic replay.
+     */
+    @Synchronized
+    fun pendingUploadPaths(): List<String> {
+        val out = mutableListOf<String>()
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery(
+                "SELECT path FROM sync_entries WHERE status='EXISTS' " +
+                    "AND remote_id LIKE 'local:%' AND is_folder=0 AND is_hydrated<>0 " +
+                    "ORDER BY path",
+            )
+            while (rs.next()) out += rs.getString(1)
+        }
+        return out
+    }
+
+    /**
      * Clear the permanent-failure quarantine flag on a row. Called when a
      * fresh delta event reports the same `remote_id` as alive — that's the
      * cloud telling us "the object is back" (or "it was never gone, the

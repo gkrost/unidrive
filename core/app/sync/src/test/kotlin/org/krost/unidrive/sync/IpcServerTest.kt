@@ -154,6 +154,60 @@ class IpcServerTest {
             // No exception = pass
         }
 
+    // A request whose verb has no registered handler must be ANSWERED, not
+    // dropped: a dropped request is indistinguishable from a lost frame and the
+    // client hangs waiting for a reply line that never comes (the daemon-startup
+    // hang). runBlocking(IO) per the same runTest+real-UDS race as above.
+    @Test
+    fun `request for an unregistered verb is answered with unknown_verb`() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
+
+                val client = connectClient()
+                delay(100)
+                val req = """{"verb":"no.such.verb"}""" + "\n"
+                val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+                while (w.hasRemaining()) client.write(w)
+                val received = readFromClient(client)
+
+                val reply = Json.parseToJsonElement(received.trim()) as JsonObject
+                assertEquals("unknown_verb", reply["error"]?.jsonPrimitive?.content)
+                assertEquals("false", reply["ok"]?.jsonPrimitive?.content)
+                client.close()
+            } finally {
+                serverScope.cancel()
+            }
+        }
+
+    @Test
+    fun `request without a verb field is answered with missing_verb`() =
+        runBlocking(Dispatchers.IO) {
+            val serverScope = CoroutineScope(coroutineContext + SupervisorJob())
+            try {
+                server = IpcServer(socketPath)
+                server!!.start(serverScope)
+                delay(100)
+
+                val client = connectClient()
+                delay(100)
+                val req = """{"payload":"no verb here"}""" + "\n"
+                val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
+                while (w.hasRemaining()) client.write(w)
+                val received = readFromClient(client)
+
+                val reply = Json.parseToJsonElement(received.trim()) as JsonObject
+                assertEquals("missing_verb", reply["error"]?.jsonPrimitive?.content)
+                assertEquals("false", reply["ok"]?.jsonPrimitive?.content)
+                client.close()
+            } finally {
+                serverScope.cancel()
+            }
+        }
+
     @Test
     fun `max clients enforced`() =
         runTest {

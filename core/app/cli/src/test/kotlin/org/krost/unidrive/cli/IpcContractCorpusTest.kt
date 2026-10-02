@@ -226,7 +226,9 @@ class IpcContractCorpusTest {
      * HydrationIpcHandler emits every reply shape the corpus pins:
      * `/missing...` → the unknown_path / *_not_found family, `/docs/sub` →
      * the it's-a-folder family, `/docs/open.txt` → busy, `/docs/nonempty` →
-     * not_empty, `/docs/report.txt` → an existing file.
+     * not_empty, `/docs/report.txt` → an existing file, `/outside...` →
+     * outside_scope (sync_path guard), `/excluded/...` → accepted with
+     * excluded:true (keep-local rule).
      */
     private class ScriptedHydration : Hydration {
         override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult =
@@ -238,10 +240,15 @@ class IpcContractCorpusTest {
                 path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
                 // A stale base_etag refuses the write before any upload runs.
                 path == "/docs/report.txt" && baseEtag == "stale-etag" -> OpenResult.Failed(HydrationError.Conflict)
+                // keep-local: accepted, never uploaded, flagged on the reply.
+                path.startsWith("/excluded/") -> OpenResult.Ok(cachePath, excluded = true)
+                path.startsWith("/outside") -> OpenResult.Failed(HydrationError.OutOfScope)
                 else -> OpenResult.Ok(cachePath)
             }
 
         override suspend fun closeHandle(connectionId: String, handleId: String) {}
+
+        override suspend fun cancelUpload(path: String): Boolean = path == "/docs/open.txt"
 
         override suspend fun hydrate(path: String): HydrateResult =
             if (path.startsWith("/missing")) HydrateResult.Failed(HydrationError.UnknownPath)
@@ -278,6 +285,12 @@ class IpcContractCorpusTest {
                             remoteModifiedEpochMillis = null, remoteId = null, etag = null,
                             pendingUpload = true, hasError = true,
                         ),
+                        // keep-local: matches exclude_patterns, never uploaded.
+                        ListResult.Entry(
+                            "/docs/scratch.tmp", 3, FIXED_MTIME_MS, isHydrated = true, isFolder = false,
+                            remoteModifiedEpochMillis = null, remoteId = null, etag = null,
+                            pendingUpload = false, hasError = false, excluded = true,
+                        ),
                     ),
                 )
             } else {
@@ -285,7 +298,11 @@ class IpcContractCorpusTest {
             }
 
         override suspend fun mkdir(path: String): MkdirResult =
-            if (path.startsWith("/missing/")) MkdirResult.ParentNotFound else MkdirResult.Ok
+            when {
+                path.startsWith("/missing/") -> MkdirResult.ParentNotFound
+                path.startsWith("/outside") -> MkdirResult.Failed(HydrationError.OutOfScope)
+                else -> MkdirResult.Ok
+            }
 
         override suspend fun unlink(path: String): UnlinkResult =
             if (path == "/docs/sub") UnlinkResult.PathIsFolder else UnlinkResult.Ok
@@ -299,12 +316,17 @@ class IpcContractCorpusTest {
         override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult = when {
             path.startsWith("/missing/") -> CreateResult.ParentNotFound
             path == "/docs/report.txt" -> CreateResult.PathExists
+            // keep-local: the row and cache file exist; the upload never runs.
+            path.startsWith("/excluded/") -> CreateResult.Ok(cachePathFor(path), handleId, excluded = true)
+            path.startsWith("/outside") -> CreateResult.Failed(HydrationError.OutOfScope)
             else -> CreateResult.Ok(cachePathFor(path), handleId)
         }
 
         override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult = when {
             path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
             path == "/docs/sub" -> OpenResult.Failed(HydrationError.Generic("path_is_folder"))
+            path.startsWith("/excluded/") -> OpenResult.Ok(cachePathFor(path), excluded = true)
+            path.startsWith("/outside") -> OpenResult.Failed(HydrationError.OutOfScope)
             else -> OpenResult.Ok(cachePathFor(path))
         }
 
@@ -314,6 +336,7 @@ class IpcContractCorpusTest {
             // Without replace an existing destination refuses; with replace the
             // scripted fake succeeds (the delete-then-move sequence is opaque here).
             newPath == "/docs/sub" && !replace -> RenameResult.NewPathExists
+            oldPath.startsWith("/outside") || newPath.startsWith("/outside") -> RenameResult.Failed(HydrationError.OutOfScope)
             else -> RenameResult.Ok
         }
 
