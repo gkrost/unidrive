@@ -855,6 +855,51 @@ class HydrationImplTest {
         assertEquals("unknown_path", r.error.message)
     }
 
+    // #301: an upload queued by open_write holds the path's only unsynced copy in
+    // the cache. Dehydrate must refuse (busy) until that upload has landed — the
+    // open-set check alone misses this window, because the FUSE handle that wrote
+    // the bytes is already closed by the time the background upload runs.
+    @Test
+    fun `dehydrate refuses while the path's upload is queued and works once it lands`() = runTest {
+        val uploadGate = CompletableDeferred<Unit>()
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.syncEngine.setUploadGate(uploadGate)
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 4)
+        val cacheFile =
+            env.syncEngine.resolveCachePath("/foo.txt").also { parent ->
+                java.nio.file.Files.createDirectories(parent.parent)
+                java.nio.file.Files.writeString(parent, "data")
+            }
+        assertTrue(env.hydration.openForWrite("conn1", "h1", "/foo.txt", cacheFile) is OpenResult.Ok)
+
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/foo.txt"))
+        assertTrue(
+            java.nio.file.Files.exists(cacheFile),
+            "a refused dehydrate must not evict the queued upload's only copy",
+        )
+
+        uploadGate.complete(Unit)
+        advanceUntilIdle()
+        // The FUSE client closes its handle once the write is done; only then is
+        // the open-set check cleared and the upload-slot check decides.
+        env.hydration.closeHandle("conn1", "h1")
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/foo.txt"))
+    }
+
+    // #301/#136: a pending-upload row (remoteId == null && isHydrated) has no remote
+    // copy at all — its cache file IS the file. Dehydrate must refuse rather than
+    // destroy the only copy.
+    @Test
+    fun `dehydrate refuses a pending-upload row whose cache is the only copy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertLocalOnlyHydratedEntry("/new.txt")
+        env.syncEngine.seedCacheContent("/new.txt", "only copy")
+
+        assertEquals(DehydrateResult.Busy, env.hydration.dehydrate("/new.txt"))
+        assertTrue(java.nio.file.Files.exists(env.syncEngine.resolveCachePath("/new.txt")))
+        assertNotNull(env.stateDb.remoteSizeOf("/new.txt"), "a refused dehydrate must not touch the row")
+    }
+
     @Test
     fun `ipc disconnect clears that connection's open set entirely`() = runTest {
         val env = HydrationTestEnv()

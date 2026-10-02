@@ -314,8 +314,10 @@ class Reconciler(
         // the UD-225 download-recovery loop above.
         for (entry in allDbEntries) {
             if (entry.isFolder) continue
-            if (entry.remoteId != null) continue
-            if (!entry.isHydrated) continue
+            // #136: the whole UD-901 predicate, not halves — a sparse
+            // partial-download row (remoteId == null, isHydrated == false) has no
+            // real bytes to upload and belongs to the download-recovery lane above.
+            if (!entry.isPendingUpload) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             // UD-901a: same scope guard as the UD-225 loop above.
@@ -571,8 +573,9 @@ class Reconciler(
         // UD-901 recovery — pending-upload DB rows.
         for (entry in allDbEntries) {
             if (entry.isFolder) continue
-            if (entry.remoteId != null) continue
-            if (!entry.isHydrated) continue
+            // #136: whole predicate, not halves (sparse partial-download rows have
+            // no bytes to upload — see the first UD-901 loop).
+            if (!entry.isPendingUpload) continue
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             if (!SyncScope.contains(entry.path, syncPaths)) continue
@@ -874,7 +877,11 @@ class Reconciler(
                     entry != null && entry.isHydrated && !entry.isFolder && isHydrationCachePresent(path) -> null
                     // UD-901: a pending-upload row (entry.remoteId == null) that vanished
                     // before its first upload has nothing to delete on the remote side —
-                    // just drop the placeholder row.
+                    // just drop the placeholder row. #136: the remoteId half alone is
+                    // INTENTIONAL here — this is cleanup of any never-uploaded row whose
+                    // file is gone, including a sparse partial-download row
+                    // (isHydrated == false): nothing exists locally or remotely, so the
+                    // row goes regardless of hydration.
                     entry != null && entry.remoteId == null -> SyncAction.RemoveEntry(path)
                     // UD-225a: unhydrated file row where the local stub was never
                     // created (or was wiped before content arrived). isHydrated=false

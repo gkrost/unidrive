@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import org.krost.unidrive.AuthenticationException
@@ -15,10 +16,12 @@ import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
@@ -128,6 +131,14 @@ open class SyncEngine(
     // plain lambda avoids a circular import (HydrationEvent lives in app:hydration
     // which depends on app:sync, not the other way around).
     private val viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
+    // #301: whether a background hydration upload of [path] is queued or in flight
+    // (an open_write returned Ok but its upload has not landed yet). The
+    // enumerate-reap consults it before evicting a hydration-cache file, so a
+    // queued edit's only copy is never deleted out from under its upload. Wired by
+    // app:cli to HydrationImpl.hasUploadSlot (late-bound — the hydration layer is
+    // constructed after the engine); the no-op default keeps engine-only callers
+    // and tests unaffected.
+    private val uploadInFlight: (path: String) -> Boolean = { false },
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -376,6 +387,18 @@ open class SyncEngine(
     // state. A caller that loses the CAS is a no-op (skipped=true).
     private val enumerateInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // #318: per-path serialization for ensureHydrated's warm-cache check + download.
+    // Without it, a second open whose warm-cache size check fails re-downloads with
+    // TRUNCATE_EXISTING into the cache file while a first handle is still reading it
+    // (silent short/garbage reads on POSIX), and two concurrent cold opens
+    // double-download the same file. Entries persist for the daemon session — the
+    // same lifetime tradeoff as HydrationImpl.createMutexes, bounded by the number
+    // of distinct paths ever hydrated.
+    private val hydrateMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+    // #301: paths whose reap was deferred and already warned about (see the enumerate-reap).
+    private val deferredReapWarned: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
      * `NOTIFICATIONS_URL`) into the watch loop. The provider emits one
@@ -439,8 +462,15 @@ open class SyncEngine(
      * cache directly to userspace reads — a silently accepted corrupt file would
      * be immediately visible to the user, unlike [applyDownload]'s
      * local-placeholder path where a warning is recoverable on the next sync.
+     *
+     * #318: the whole check+download runs under a per-path mutex. Concurrent
+     * opens of the same path must not double-download, and a re-download must
+     * never truncate a cache file another handle is reading.
      */
-    suspend fun ensureHydrated(path: String): Path {
+    suspend fun ensureHydrated(path: String): Path =
+        hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock { ensureHydratedLocked(path) }
+
+    private suspend fun ensureHydratedLocked(path: String): Path {
         val entry = db.getEntry(path)
             ?: throw IllegalArgumentException("Unknown remote path: $path")
         val cachePath = resolveCachePath(path)
@@ -455,7 +485,10 @@ open class SyncEngine(
         // Local-only rows (remoteId == null: created/edited through the mount, not
         // yet uploaded — remoteSize is 0 while the cache holds the just-written
         // bytes) have NO remote to compare against or re-download from; the cache is
-        // the only copy, so always trust them on the warm path.
+        // the only copy, so always trust them on the warm path. #136: this
+        // remoteId == null is NOT the UD-901 pending-upload predicate — it means "no
+        // remote to compare against", and isHydrated here carries the warm-trust
+        // meaning, so the split check is intentional.
         if (entry.isHydrated && Files.exists(cachePath) &&
             (entry.remoteId == null ||
                 runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)
@@ -476,48 +509,67 @@ open class SyncEngine(
             mimeType = null,
         )
         Files.createDirectories(cachePath.parent)
-        val downloadedSize = downloadByIdOrPath(remoteItem, path, cachePath)
-        if (verifyIntegrity) {
-            val verified = HashVerifier.verify(cachePath, entry.remoteHash, algorithm = provider.hashAlgorithm())
-            if (!verified) {
-                Files.deleteIfExists(cachePath)
-                throw IllegalStateException("Integrity check failed for hydration cache: $path")
+        // #318: download to a temp sibling and atomically swap it in, so a handle
+        // already reading the old cache keeps its inode instead of having the file
+        // truncated under it by TRUNCATE_EXISTING (silent short/garbage reads).
+        val staged =
+            cachePath.resolveSibling(
+                cachePath.fileName.toString() + ".hydrating-" + java.util.UUID.randomUUID(),
+            )
+        try {
+            val downloadedSize = downloadByIdOrPath(remoteItem, path, staged)
+            if (verifyIntegrity) {
+                val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
+                if (!verified) {
+                    // The surviving old cache may be corrupt-but-right-sized; removing
+                    // it forces a clean re-download on the next open instead of
+                    // serving it warm.
+                    Files.deleteIfExists(cachePath)
+                    throw IllegalStateException("Integrity check failed for hydration cache: $path")
+                }
             }
+            try {
+                Files.move(staged, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(staged, cachePath, StandardCopyOption.REPLACE_EXISTING)
+            }
+            // Persist the freshly-downloaded size as remoteSize. The provider validated the
+            // download against the authoritative remote length (throwing on a short read), so
+            // this is the current truth. Without it a remote that changed size since the last
+            // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
+            // perfectly valid re-download.
+            val current = db.getEntry(path) ?: entry
+            if (rowDescribesSyncRootFile(current, path)) {
+                // #418: the download went to the cache, a different file from the one in the sync
+                // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
+                // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
+                // start claiming it does). Rewriting them from the cache copy made the next scan read an
+                // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
+                // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
+                // describes them.
+                db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
+            } else {
+                // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
+                // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
+                // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
+                val rebaselined = current.copy(
+                    isHydrated = true,
+                    remoteSize = downloadedSize,
+                    localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
+                    localSize = Files.size(cachePath),
+                    lastSynced = Instant.now(),
+                )
+                // The row just adopted the cache copy's stats, so the hash must describe the cache
+                // copy's bytes: keeping a hash recorded for the previous contents would pair stale
+                // bytes with a fresh mtime/size and let a later touch be absorbed as unchanged.
+                db.upsertEntry(
+                    withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
+                )
+            }
+            return cachePath
+        } finally {
+            runCatching { Files.deleteIfExists(staged) }
         }
-        // Persist the freshly-downloaded size as remoteSize. The provider validated the
-        // download against the authoritative remote length (throwing on a short read), so
-        // this is the current truth. Without it a remote that changed size since the last
-        // enumeration leaves remoteSize stale, and the openForRead size guard would EIO a
-        // perfectly valid re-download.
-        val current = db.getEntry(path) ?: entry
-        if (rowDescribesSyncRootFile(current, path)) {
-            // #418: the download went to the cache, a different file from the one in the sync
-            // root. localMtime/localSize are the baseline LocalScanner compares THAT file against,
-            // and isHydrated says whether THAT file holds real bytes (a freed placeholder must not
-            // start claiming it does). Rewriting them from the cache copy made the next scan read an
-            // untouched sync-root file as modified and upload it (a zero-filled placeholder included).
-            // localHash stays too: the sync-root bytes are unchanged, so the recorded hash still
-            // describes them.
-            db.upsertEntry(current.copy(remoteSize = downloadedSize, lastSynced = Instant.now()))
-        } else {
-            // No sync-root file the row describes (mount mode, or a hydrated row whose file changed
-            // since the row was written): the cache copy is the local file. HydrationImpl.lastSynced()
-            // and the co-daemon's crash-recovery scanner use this localMtime as their watermark.
-            val rebaselined = current.copy(
-                isHydrated = true,
-                remoteSize = downloadedSize,
-                localMtime = Files.getLastModifiedTime(cachePath).toMillis(),
-                localSize = Files.size(cachePath),
-                lastSynced = Instant.now(),
-            )
-            // The row just adopted the cache copy's stats, so the hash must describe the cache
-            // copy's bytes: keeping a hash recorded for the previous contents would pair stale
-            // bytes with a fresh mtime/size and let a later touch be absorbed as unchanged.
-            db.upsertEntry(
-                withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
-            )
-        }
-        return cachePath
     }
 
     // #418: true when [entry] is about the regular file in the sync root rather than about the
@@ -590,13 +642,23 @@ open class SyncEngine(
             return
         }
         val existingEntry = db.getEntry(path)
-        val prevHash = existingEntry?.remoteHash
-        val existingRemoteId = existingEntry?.remoteId
+            // #319/#301: no row means the file was renamed away, unlinked, or reaped
+            // (the remote vanished) while this upload sat queued. The old fallback
+            // created a fresh row and uploaded anyway, which resurrected the old
+            // remote path after a rename and let the reap race a queued edit.
+            // Refuse: the caller's client gets a failed Completed event, the bytes
+            // stay in the cache, and the recovery scanner re-targets them at the
+            // row's current path.
+            ?: throw IllegalStateException(
+                "uploadFromCache: row for $path vanished while the upload was queued; refusing to recreate it",
+            )
+        val prevHash = existingEntry.remoteHash
+        val existingRemoteId = existingEntry.remoteId
         // #115: if the existing row is a locale-aliased one, its content lives
         // at the canonical remote path; the FUSE write-back must upload there,
         // not at the alias `path`. Non-aliased rows have remotePath == null →
         // upload at `path`, byte-identical to pre-#115.
-        val remotePath = existingEntry?.remotePath ?: path
+        val remotePath = existingEntry.remotePath ?: path
         val sizeForLog = Files.size(cachePath)
         val sent = statBeforeUpload(cachePath)
         val result =
@@ -621,26 +683,95 @@ open class SyncEngine(
         val mtime = Files.getLastModifiedTime(cachePath).toMillis()
         val size = Files.size(cachePath)
         val existing = db.getEntry(path)
-        if (existing != null && rowDescribesSyncRootFile(existing, path)) {
+        if (existing == null) {
+            // #319: the row vanished while the bytes were in flight (a delete or
+            // reap raced the upload). The remote copy is current; writing a fresh
+            // row here resurrected a deleted path in state.db. Skip the row write —
+            // the next enumeration decides between adopting the remote item and
+            // re-reaping it.
+            log.warn(
+                "uploadFromCache: row for {} vanished mid-upload; remote copy is current, skipping row write",
+                path,
+            )
+            auditLog?.emit(
+                action = "Upload",
+                path = path,
+                size = size,
+                oldHash = prevHash,
+                newHash = result.hash,
+                result = "success",
+            )
+            return
+        }
+        if (rowDescribesSyncRootFile(existing, path)) {
             // The row describes the file in the sync root, not this cache copy (an open_read
             // hydrated the cache and the crash-recovery scanner replayed it as an open_write).
-            // The upload already landed remotely, so refresh the remote fields only and leave
-            // the sync-root baseline and hydration flag alone: rebaselining from the cache here
-            // makes the next scan read the untouched sync-root file (a freed placeholder
-            // included) as modified and upload it. The recovery loop fills the sync-root file
-            // from the now-current remote on a later pass.
-            db.upsertEntry(
-                existing.copy(
-                    remoteId = result.id,
-                    remoteHash = result.hash,
-                    remoteSize = result.size,
-                    remoteModified = result.modified,
-                    lastSynced = Instant.now(),
-                    lastErrorAt = existing.lastErrorAtAfterUpload(),
-                ),
-            )
+            //
+            // #423 decision: the sync root should hold the bytes that were written
+            // through the cache and just uploaded, so propagate them (echo-suppressed,
+            // best-effort) and rebaseline the row from the sync-root copy. #427's
+            // remote-fields-only write left the sync root holding stale bytes while the
+            // row claimed it was in step with the new remote — a later sync-root edit
+            // then uploaded over the newer remote content without a conflict.
+            // Copying the SAME bytes that landed remotely cannot revert anything; it
+            // converges all three copies (cache, sync root, remote) immediately, and
+            // covers the replay-over-a-placeholder case by filling the placeholder
+            // with exactly the remote's bytes.
+            val localPath = placeholder.resolveLocal(path)
+            val converged =
+                runCatching {
+                    withEchoSuppression(path) {
+                        Files.createDirectories(localPath.parent)
+                        Files.copy(cachePath, localPath, StandardCopyOption.REPLACE_EXISTING)
+                    }
+                }.onFailure { e ->
+                    log.warn(
+                        "uploadFromCache: could not propagate the cache write to the sync-root file {}: {}",
+                        path,
+                        e.message,
+                    )
+                }.isSuccess
+            if (converged) {
+                // Baseline the row against the sync-root copy it now describes, and
+                // hash THOSE bytes (post-copy stats, same #337 pattern as the else
+                // branch) so the touch shield covers the propagated write too.
+                val sentLocal = statBeforeUpload(localPath)
+                db.upsertEntry(
+                    withSentHash(
+                        existing.copy(
+                            remoteId = result.id,
+                            remoteHash = result.hash,
+                            remoteSize = result.size,
+                            remoteModified = result.modified,
+                            localMtime = sentLocal?.first,
+                            localSize = sentLocal?.second,
+                            isHydrated = true,
+                            lastSynced = Instant.now(),
+                            lastErrorAt = existing.lastErrorAtAfterUpload(),
+                        ),
+                        localPath,
+                        sentLocal,
+                    ),
+                )
+            } else {
+                // Propagation failed (locked file, ...): keep the row's remote fields
+                // at their pre-upload values so the next delta still reports the
+                // upload as a remote change and downloads the written bytes into the
+                // sync root, instead of the row claiming the stale sync-root content
+                // is in step with the new remote. lastSynced still moves so the
+                // recovery scanner does not replay this upload loop-wise.
+                db.upsertEntry(
+                    existing.copy(
+                        lastSynced = Instant.now(),
+                        lastErrorAt = existing.lastErrorAtAfterUpload(),
+                    ),
+                )
+            }
         } else {
-            val uploaded = existing?.copy(
+            // #319: `existing` is non-null here (the vanished-row case returns above),
+            // so the upload rebaselines the row that owns the bytes instead of
+            // minting an ownerless one.
+            val uploaded = existing.copy(
                 remoteId = result.id,
                 remoteHash = result.hash,
                 remoteSize = result.size,
@@ -650,18 +781,6 @@ open class SyncEngine(
                 isHydrated = true,
                 lastSynced = Instant.now(),
                 lastErrorAt = existing.lastErrorAtAfterUpload(),
-            ) ?: SyncEntry(
-                path = path,
-                remoteId = result.id,
-                remoteHash = result.hash,
-                remoteSize = result.size,
-                remoteModified = result.modified,
-                localMtime = mtime,
-                localSize = size,
-                isFolder = false,
-                isPinned = false,
-                isHydrated = true,
-                lastSynced = Instant.now(),
             )
             // The row just adopted the cache copy's stats, and these are exactly the bytes the
             // write-back sent: hash the cache copy (guarded against a writer landing mid-hash)
@@ -888,8 +1007,36 @@ open class SyncEngine(
                 val toReap =
                     if (bulk) missingNow.intersect(deferredMissing) else missingNow
                 for (path in toReap) {
+                    // #301: refuse to reap a path whose hydration cache may hold the
+                    // only copy of user bytes. A queued or in-flight upload means an
+                    // edit written through the mount has not landed yet; a cache file
+                    // newer than the row's last-synced watermark means the same for an
+                    // edit whose upload crashed or failed (the co-daemon's recovery
+                    // scanner replays exactly this watermark). Deleting the cache in
+                    // that window destroyed the bytes everywhere — the upload then hit
+                    // a missing cache path, and the remote copy (if any) was stale.
+                    // Defer the whole reap: the row stays alive and the next complete
+                    // enumeration re-evaluates once the upload has landed (or failed).
+                    val row = db.getEntry(path)
+                    val cachePath = resolveCachePath(path)
+                    val cacheDirty =
+                        if (row == null) {
+                            false
+                        } else {
+                            runCatching {
+                                Files.exists(cachePath) &&
+                                    Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
+                            }.getOrDefault(false)
+                        }
+                    if (uploadInFlight(path) || row?.isPendingUpload == true || cacheDirty) {
+                        // The daemon enumerates every poll interval: warn once per path, not once per poll.
+                        val msg = "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit"
+                        if (deferredReapWarned.add(path)) log.warn(msg, path) else log.debug(msg, path)
+                        continue
+                    }
+                    deferredReapWarned.remove(path)
                     db.markDeleted(path)
-                    runCatching { Files.deleteIfExists(resolveCachePath(path)) }
+                    runCatching { Files.deleteIfExists(cachePath) }
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }

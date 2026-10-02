@@ -109,18 +109,86 @@ class EnumerateRemoteIntoStateTest {
     fun `reaping a remotely-deleted hydrated path evicts its cache file`() =
         runTest {
             provider.putRemote("/big.bin", "X".repeat(10))
-            engine.enumerateRemoteIntoState(reset = false)
+            // #301: the cache file must predate the row the enumeration writes
+            // (whose lastSynced lands at gather time). A cache written AFTER the
+            // enumeration reads as an un-uploaded edit and defers the reap.
             val cache =
                 engine.resolveCachePath("/big.bin").also {
                     Files.createDirectories(it.parent)
                     Files.writeString(it, "X".repeat(10))
                 }
+            engine.enumerateRemoteIntoState(reset = false)
             assertTrue(Files.exists(cache))
 
             provider.removeRemote("/big.bin")
             engine.enumerateRemoteIntoState(reset = true)
 
             assertFalse(Files.exists(cache), "cache file must be evicted when the remote path is reaped")
+        }
+
+    // #301: the enumerate-reap must not evict (or tombstone) a path whose
+    // hydration upload is queued or in flight — the cache copy may be the only
+    // copy of the user's edit, and destroying it lost the bytes everywhere.
+    @Test
+    fun `reap is deferred while an upload of the path is in flight`() =
+        runTest {
+            provider.putRemote("/busy.bin", "B")
+            engine.enumerateRemoteIntoState(reset = false)
+            val cache =
+                engine.resolveCachePath("/busy.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "EDIT")
+                }
+
+            provider.removeRemote("/busy.bin")
+            val guarded =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    cacheKey = "enum-test",
+                    uploadInFlight = { it == "/busy.bin" },
+                )
+            val r = guarded.enumerateRemoteIntoState(reset = true)
+
+            assertEquals(0, r.reaped, "an in-flight upload must defer the reap")
+            assertNotNull(db.getEntry("/busy.bin"), "the row must stay alive while the upload is in flight")
+            assertTrue(Files.exists(cache), "the queued upload's cache copy must survive")
+        }
+
+    // #301: same protection without the hook — a cache file whose mtime exceeds the
+    // row's last-synced watermark is exactly what the co-daemon's recovery scanner
+    // replays as an un-uploaded edit, so the reap must defer to it. Once the
+    // watermark moves past the cache (the upload landed and rebaselined the row),
+    // the next complete enumeration reaps normally.
+    @Test
+    fun `reap is deferred while the cache file is newer than the row watermark`() =
+        runTest {
+            provider.putRemote("/edited.bin", "R")
+            engine.enumerateRemoteIntoState(reset = false)
+            val cache =
+                engine.resolveCachePath("/edited.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "UNSYNCED EDIT")
+                }
+            assertTrue(
+                Files.getLastModifiedTime(cache).toMillis() > db.getEntry("/edited.bin")!!.lastSynced.toEpochMilli(),
+                "precondition: the cache looks like an un-uploaded edit",
+            )
+
+            provider.removeRemote("/edited.bin")
+            val r = engine.enumerateRemoteIntoState(reset = true)
+
+            assertEquals(0, r.reaped, "a cache newer than the watermark may hold an un-uploaded edit")
+            assertNotNull(db.getEntry("/edited.bin"))
+            assertTrue(Files.exists(cache))
+
+            db.upsertEntry(db.getEntry("/edited.bin")!!.copy(lastSynced = Instant.now().plusSeconds(120)))
+            val r2 = engine.enumerateRemoteIntoState(reset = true)
+            assertEquals(1, r2.reaped, "once the watermark covers the cache, the reap proceeds")
+            assertFalse(Files.exists(cache))
         }
 
     @Test
