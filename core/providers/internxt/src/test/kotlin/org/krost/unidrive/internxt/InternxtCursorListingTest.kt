@@ -30,7 +30,8 @@ import kotlin.test.assertTrue
 /**
  * The full enumeration of the whole drive by the cursor listings (`/files/sync`, `/folders/sync`): the paging, the
  * query of every page, the resume from the persisted cursors, the fallback to the offset listing for a server that
- * has no such endpoints, the guards against a server that loops, and the progress it reports.
+ * has no such endpoints, the handover to the tree walk when the server fails the listing server-side, the guards
+ * against a server that loops, and the progress it reports.
  *
  * One fake drive serves the cursor endpoints and the offset endpoints from the same fixture, so what the two
  * strategies return can be compared.
@@ -119,6 +120,17 @@ class InternxtCursorListingTest {
             java.io.EOFException("Failed to parse HTTP response: the server prematurely closed the connection"),
         )
 
+    // The tree the fallback walk serves: root -> [w] with one file. Distinct from the cursor fixture's
+    // items, so a result can be attributed to the walk by its paths alone.
+    private val walkTree =
+        mapOf(
+            "root" to
+                """{"children":[{"uuid":"w","plainName":"w","status":"EXISTS"}],""" +
+                    """"files":[{"uuid":"wt","plainName":"wt","type":"txt","size":"9","status":"EXISTS"}]}""",
+            "w" to """{"children":[],"files":[]}""",
+        )
+    private val walkPaths = setOf("/w", "/wt.txt")
+
     private sealed interface Failure {
         data class Status(
             val code: Int,
@@ -139,13 +151,16 @@ class InternxtCursorListingTest {
     /**
      * The drive as a server: [folderPages] and [filePages] are served page by page by `/folders/sync` and `/files/sync`
      * (the cursor of page i is `cursorOf(stream, i)`, an opaque string with characters that need URL encoding), and in
-     * one piece by the offset endpoints when [offsetListing] is on. [failure] makes a page fail, [body] replaces one.
-     * Every cursor request is recorded in [seen], every other request in [other].
+     * one piece by the offset endpoints when [offsetListing] is on. [tree] serves `/folders/content/{uuid}` bodies for
+     * the fallback walk. [failure] makes a page fail, [body] replaces one. Every cursor request is recorded in [seen],
+     * every other request in [other].
      */
     private inner class DriveMock(
         val folderPages: List<List<String>> = standardFolderPages,
         val filePages: List<List<String>> = standardFilePages,
         val offsetListing: Boolean = false,
+        val tree: Map<String, String>? = null,
+        val contentStatus: Int? = null,
         val failure: (stream: String, page: Int) -> Failure? = { _, _ -> null },
         val body: (stream: String, cursor: String?) -> String? = { _, _ -> null },
     ) {
@@ -187,12 +202,24 @@ class InternxtCursorListingTest {
                     }
                 if (stream == null) {
                     other += request.url.toString()
-                    if (!offsetListing || !(path.endsWith("/drive/folders") || path.endsWith("/drive/files"))) {
-                        error("unexpected request: ${request.url}")
+                    when {
+                        contentStatus != null && path.contains("/folders/content/") ->
+                            respond("{}", HttpStatusCode.fromValue(contentStatus), jsonHeaders)
+                        tree != null && path.contains("/folders/content/") -> {
+                            val content =
+                                tree.entries.firstOrNull { path.endsWith("/drive/folders/content/${it.key}") }?.value
+                            if (content != null) respond(content, HttpStatusCode.OK, jsonHeaders)
+                            else error("unexpected request: ${request.url}")
+                        }
+                        !offsetListing || !(path.endsWith("/drive/folders") || path.endsWith("/drive/files")) -> {
+                            error("unexpected request: ${request.url}")
+                        }
+                        else -> {
+                            val offset = params["offset"]?.toInt() ?: 0
+                            val all = (if (path.endsWith("/drive/folders")) folderPages else filePages).flatten()
+                            respond(if (offset == 0) all.joinToString(",", "[", "]") else "[]", HttpStatusCode.OK, jsonHeaders)
+                        }
                     }
-                    val offset = params["offset"]?.toInt() ?: 0
-                    val all = (if (path.endsWith("/drive/folders")) folderPages else filePages).flatten()
-                    respond(if (offset == 0) all.joinToString(",", "[", "]") else "[]", HttpStatusCode.OK, jsonHeaders)
                 } else {
                     val cursor = params["cursor"]
                     seen += Seen(stream, params["updatedAt"], cursor, params["status"], params["limit"], request.url.encodedQuery)
@@ -543,39 +570,94 @@ class InternxtCursorListingTest {
         }
 
     @Test
-    fun `an overloaded server, a connection cut part way and a missing later page fail the gather and do not fall back`() =
+    fun `a server-side failure of a cursor stream hands the gather to the tree walk`() =
         runTest {
-            // 503 on the first page: the whole ladder, then the failure. Not "no such endpoint".
-            val overloaded = DriveMock(failure = { s, page -> if (s == "folders" && page == 0) Failure.Status(503) else null })
-            val unavailable = assertFailsWith<InternxtApiException> { provider(overloaded.engine).delta(null, null, quiet()) }
-            assertEquals(503, unavailable.statusCode)
-            assertEquals(3, overloaded.seen.count { it.stream == "folders" }, "the retry ladder of three attempts")
-            assertTrue(overloaded.other.isEmpty(), "no offset listing after a 503: ${overloaded.other}")
-
-            // A connection cut in the middle of the files stream: the marker stays after the last stored page.
+            // The live wall: the gateway answers 524 at its own cap at a deep page of the files stream,
+            // the folders stream already done. The gather carries on with the walk and completes; the
+            // offset listing, which cannot finish on a large drive, is not the fallback.
             val staging = FakeStaging()
-            val cut = DriveMock(failure = { s, page -> if (s == "files" && page == 2) Failure.Cut else null })
-            val cutOff = assertFailsWith<InternxtApiException> { provider(cut.engine).delta(null, null, staging.context()) }
-            assertEquals(503, cutOff.statusCode)
-            assertTrue(cut.other.isEmpty(), "no offset listing after a cut connection: ${cut.other}")
+            val walled =
+                DriveMock(
+                    tree = walkTree,
+                    failure = { s, page -> if (s == "files" && page == 2) Failure.Status(524) else null },
+                )
+            val walledPage = provider(walled.engine).delta(null, null, staging.context())
+            assertEquals(walkPaths, walledPage.items.map { it.path }.toSet())
+            assertTrue(walledPage.complete)
+            assertTrue(walled.other.any { it.contains("/folders/content/") }, "the walk listed the tree: ${walled.other}")
+            assertTrue(walled.other.none { it.contains("offset=") }, "the walk, not the offset listing: ${walled.other}")
             val marker = assertNotNull(decodeCursorMarker(staging.markers.last()))
-            assertEquals(cut.cursorOf("files", 2), marker.files.cursor, "the files stream stands after its last stored page")
+            assertEquals(walled.cursorOf("files", 2), marker.files.cursor, "the files stream stands after its last stored page")
             assertTrue(!marker.files.done)
 
-            // 404 on a later page is a failure, not "this server has no such endpoint".
+            // The same handover for an overloaded first page (503 after the ladder of three attempts) and
+            // for a connection cut part way (surfaced as a 503 of its own).
+            val overloaded = DriveMock(tree = walkTree, failure = { s, page -> if (s == "folders" && page == 0) Failure.Status(503) else null })
+            val overloadedPage = provider(overloaded.engine).delta(null, null, quiet())
+            assertEquals(walkPaths, overloadedPage.items.map { it.path }.toSet())
+            assertTrue(overloadedPage.complete)
+            assertEquals(3, overloaded.seen.count { it.stream == "folders" }, "the retry ladder of three attempts")
+            assertTrue(overloaded.other.none { it.contains("offset=") }, "no offset listing: ${overloaded.other}")
+
+            val cut = DriveMock(tree = walkTree, failure = { s, page -> if (s == "folders" && page == 1) Failure.Cut else null })
+            val cutPage = provider(cut.engine).delta(null, null, quiet())
+            assertEquals(walkPaths, cutPage.items.map { it.path }.toSet())
+            assertTrue(cutPage.complete)
+            assertTrue(cut.other.none { it.contains("offset=") }, "no offset listing: ${cut.other}")
+        }
+
+    @Test
+    fun `after a server-side fallback the next gather skips the cursor listing and walks straight away`() =
+        runTest {
+            // The R3 TTL the fallback sets: on the live account the folder stream hits its wall at the
+            // same page every run, so the gathers in between walk the tree without re-buying the attempt.
+            val drive =
+                DriveMock(
+                    tree = walkTree,
+                    failure = { s, page -> if (s == "files" && page == 2) Failure.Status(524) else null },
+                )
+            val provider = provider(drive.engine)
+            val first = provider.delta(null, null, quiet())
+            assertEquals(walkPaths, first.items.map { it.path }.toSet())
+
+            val syncRequests = drive.seen.size
+            val second = provider.delta(null, null, quiet())
+            assertEquals(walkPaths, second.items.map { it.path }.toSet())
+            assertEquals(syncRequests, drive.seen.size, "the second gather never touched the cursor listing")
+            assertTrue(drive.other.count { it.contains("/folders/content/") } >= 4, "both gathers walked the tree: ${drive.other}")
+        }
+
+    @Test
+    fun `a client error on a later page fails the gather and does not fall back`() =
+        runTest {
+            // 404 on a later page is neither "no such endpoint" (that is the first page's 404, which falls
+            // back to the offset listing) nor the server failing to serve: a request-shape problem the
+            // walk cannot fix. The attempt ends, the marker stands, no fallback runs.
             val vanished = DriveMock(failure = { s, page -> if (s == "files" && page == 1) Failure.Status(404) else null })
             val notFound = assertFailsWith<InternxtApiException> { provider(vanished.engine).delta(null, null, quiet()) }
             assertEquals(404, notFound.statusCode)
             assertEquals(2, vanished.seen.count { it.stream == "files" }, "asked once, not retried")
-            assertTrue(vanished.other.isEmpty(), "no offset listing after a 404 on a later page: ${vanished.other}")
+            assertTrue(vanished.other.isEmpty(), "no walk and no offset listing after a 404 on a later page: ${vanished.other}")
         }
 
     @Test
     fun `a failure after some pages leaves a marker that the next attempt resumes from, without the offset listing`() =
         runTest {
+            // The cursor attempt is cut part way and the fallback walk finds nothing either (every
+            // content call fails): the gather ends incomplete, and the marker stands after the last
+            // stored page for the next attempt to resume from.
             val staging = FakeStaging()
-            val cut = DriveMock(failure = { s, page -> if (s == "files" && page == 2) Failure.Cut else null })
-            assertFailsWith<InternxtApiException> { provider(cut.engine).delta(null, null, staging.context()) }
+            val cut =
+                DriveMock(
+                    contentStatus = 500,
+                    failure = { s, page -> if (s == "files" && page == 2) Failure.Cut else null },
+                )
+            val failed = provider(cut.engine).delta(null, null, staging.context())
+            assertTrue(!failed.complete)
+            assertTrue(failed.items.isEmpty())
+            val marker = assertNotNull(decodeCursorMarker(staging.markers.last()))
+            assertEquals(cut.cursorOf("files", 2), marker.files.cursor, "the files stream stands after its last stored page")
+            assertTrue(!marker.files.done)
 
             val healthy = DriveMock()
             val page = provider(healthy.engine).delta(null, null, staging.context())

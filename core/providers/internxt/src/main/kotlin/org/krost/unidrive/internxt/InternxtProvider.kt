@@ -1849,9 +1849,15 @@ class InternxtProvider(
     // (updatedAt, uuid), so an item that changes while the listing runs turns up again further on.
     //
     // Returns null when the server has no cursor endpoints (404, 405 or 501 on the first page of a stream):
-    // the caller carries on with the offset listing. Every other failure ends the attempt with an exception
-    // and leaves the marker intact; it does not fall back, because the offset listing is what cannot finish
-    // on a large drive.
+    // the caller carries on with the offset listing. A server-side failure — the 5xx family (live, the
+    // gateway answers Cloudflare 524 at its own cap of about 125 s when a cursor page runs long) or a
+    // connection that failed or was cut (surfaced as status 0 / 503) — hands the gather to the folder tree
+    // walk, the one listing that still finishes on a large drive, and skips the account-wide listings for
+    // the R3 TTL: on the live account the folder stream hits the same wall at the same page every time,
+    // and re-buying that attempt on every gather is minutes of load the walk replaces anyway. Both
+    // handovers leave the marker and the staged rows in place, so the next gather resumes from the cursors.
+    // A client error (a 404 on a later page, 401, 429) ends the attempt with an exception, marker intact:
+    // it is a request-shape problem a walk cannot fix.
     //
     // The cursor of the page is the instant the enumeration began (kept in the marker across a resume), not
     // the newest updatedAt seen: the two streams end at different times, so the next incremental delta has to
@@ -1955,6 +1961,22 @@ class InternxtProvider(
             } catch (e: CursorListingUnavailable) {
                 log.warn("{}; falling back to the offset listing", e.message)
                 return null
+            } catch (e: InternxtApiException) {
+                if (!isServerSideListingFailure(e.statusCode)) throw e
+                heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
+                log.warn(
+                    "The cursor listing failed server-side ({}: {}), falling back to the folder tree walk; " +
+                        "skipping the account-wide listings until {}",
+                    e.statusCode,
+                    e.message,
+                    heavyListingsUnavailableUntil.get(),
+                )
+                return scopedFullDelta(
+                    scanContext?.scopeRoots.orEmpty().ifEmpty { listOf("/") },
+                    onPageProgress,
+                    onProgress,
+                    folders.size + files.size,
+                )
             }
 
         log.info(
@@ -2257,6 +2279,16 @@ class InternxtProvider(
         // (gateway timing issues) should not trigger fallback — they should
         // honour Retry-After and retry the same call.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
+
+        // Whether a cursor listing's failure is the server's to answer for, and the tree walk — the one
+        // listing that still finishes on a large drive — takes the gather over. The whole 5xx family: live,
+        // the gateway answers Cloudflare 524 at its own cap (about 125 s) at the same deep page of the
+        // folder stream on every run — a deterministic wall, not a blip the next gather dodges, which is
+        // why this is wider than SERVER_UNAVAILABLE_STATUSES. Status 0 is a connection that never formed; a
+        // cut before the answer surfaces as 503. 429 stays out: the retry ladder honoured it already, and
+        // walking a throttled server is the wrong move. A client error (401, a 404 on a later page) is a
+        // request-shape problem a walk cannot fix: it ends the attempt with the marker intact.
+        private fun isServerSideListingFailure(statusCode: Int): Boolean = statusCode >= 500 || statusCode == 0
 
         // #517 R3: how long a gather remembers an unavailable account-wide listing
         // before it pays one attempt to re-learn. The live account cycled the doomed

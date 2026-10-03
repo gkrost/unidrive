@@ -258,12 +258,16 @@ class InternxtScopedDeltaTest {
     fun `a gather that ended in the walk skips the account-wide attempt on the next gather`() =
         runTest {
             val accountWide = java.util.concurrent.atomic.AtomicInteger(0)
+            val cursorWide = java.util.concurrent.atomic.AtomicInteger(0)
             val engine =
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
-                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
+                        isCursorListing(request.url.encodedPath) -> {
+                            cursorWide.incrementAndGet()
+                            respond("{}", HttpStatusCode.NotFound, json)
+                        }
                         isAccountWideListing(request.url.encodedPath) -> {
                             accountWide.incrementAndGet()
                             throw cutByTheGateway()
@@ -277,7 +281,9 @@ class InternxtScopedDeltaTest {
             val first = p.delta(null, null, scanContext)
             assertTrue(first.complete)
             val wideAfterFirst = accountWide.get()
-            assertTrue(wideAfterFirst > 0, "the first gather tried the account-wide listing: $accountWide")
+            val cursorAfterFirst = cursorWide.get()
+            assertTrue(cursorAfterFirst > 0, "the first gather tried the cursor listing: $cursorWide")
+            assertTrue(wideAfterFirst > 0, "the first gather tried the offset listing: $accountWide")
 
             val second = p.delta(null, null, scanContext)
             assertEquals(
@@ -289,6 +295,11 @@ class InternxtScopedDeltaTest {
                 wideAfterFirst,
                 accountWide.get(),
                 "the second gather skipped the doomed account-wide attempt and walked straight away",
+            )
+            assertEquals(
+                cursorAfterFirst,
+                cursorWide.get(),
+                "the second gather skipped the cursor listing too: both are account-wide listings",
             )
         }
 
