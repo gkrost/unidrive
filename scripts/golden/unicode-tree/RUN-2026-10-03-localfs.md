@@ -74,3 +74,41 @@ Consequence for the live profile: do not restart the live mount in place. Start 
 
 - Dehydrate and hydrate in place; the Explorer column and overlays (not scriptable); hazards that need names a cloud creates and Windows cannot (download direction, see #495).
 - The same run on the fixed builds (#116, #117, #118, #120, #492 and the engine fixes) once they are merged: the expected-deviation file has to move to the new build ids then.
+
+## 7. Runs with the runner (`run-localfs.ps1`), 2026-10-03
+
+### 7.1 Runs 2b and 2c: the installed builds again
+
+The same builds as run 2, one command each. Both stalled in the same place: 153 and 152 of 249 files uploaded (run 2: 137), then nothing,
+no error, healthy event stream; the runner reported `STUCK` (92 plain files with NFC names still waiting). The number differs from run to run
+(which two files take the slots depends on timing), the cause does not: a non-NFC name never matches the engine's NFC `completed` event
+(G1, unidrive-windows#115). Run 2b also showed a typo of mine in the runner. [V]
+
+### 7.2 Run 3: the integration builds of the fix PRs
+
+| | |
+|---|---|
+| engine | `1a00eaf` = main `1db480a` + #492 (exact prefix queries) #496 (empty files) #497 (create sends the time) #498 (Windows argv) #499 (replay failed uploads later) #501 (mirror empty folders); `check` green, 2298 tests |
+| client | `6ea4bf5` = main `b564eda` + #116 (settle, NFC) #117 (event stream) #118 (folder ensure) #120 (cache copy keeps the time) #122 (reasons in the log); tests green |
+| expectations | `expected/golden-unicode-v1@localfs@1a00eaf+6ea4bf5.tsv`: only the #491 rules (everything else has a fix in these builds, so it must not show up) |
+| result | uploads settled 156 s after the copy: 290 of 290 folders, 243 files uploaded, no stall; **12 findings per surface, 6 of them unexpected** |
+
+| surface | result |
+|---|---|
+| provider directory | 527 ok; 6 MISSING, 1 FORM, **5 SIZE**; **0 MTIME**, 0 EXTRA |
+| engine mirror | the same as the provider, **the 10 empty folders are there now** |
+| mount | 539 of 539 present, all hashes ok; 248 placeholders and 1 plain file, 290 of 290 folders are placeholders |
+| daemon view | 11 findings: 5 NFCMERGE (expected), 5 SIZE, 1 MISSING; **0 LEAK** |
+| fresh mount (round trip) | 527 ok, 6 MISSING, 1 FORM, 5 SIZE, **0 EXTRA**, 0 MTIME; size mismatches stop the hash check for those five files |
+
+Fixed, as the PRs claim: the stall (G1), the listing leak (G4, 0 of 16 leaks), the lost modification times (G5: **0 MTIME on every surface**, localfs and
+placeholders alike), the mirror's missing empty folders (G9), the 18 phantom entries of the fresh mount. [V]
+
+### 7.3 What run 3 found
+
+| # | finding | evidence | status |
+|---|---|---|---|
+| H1 | **Silent data loss in all five NFC-merging pairs.** With NFC matching in the client (#116) the NFD member is now uploaded; the engine maps it onto the NFC member's row, and the upload replaces that row's content. The provider's file under the NFC name holds the other member's bytes in 5 of 5 pairs (`café`, `Ångström`, Hangul, katakana with dakuten, `Å` against the angstrom sign): SHA-256 of the provider file equals the other member's manifest hash, compared ordinally. The NFC member still exists locally, and a fresh mount serves the wrong content under its name. In run 2 the same pairs were harmless only because the NFD members never got through the stalled queue | provider SIZE findings, hashes, fresh mount | gkrost/unidrive#491: the guard (option 1, detect and refuse) has to come with or before #116 |
+| H2 | a file whose name equals another file's name under case folding is never reported to the client: `hazards/case-fold/ς.txt` (final sigma) next to `Σ.txt` has no `notify-file-close` in the trace, no queue line, no row; `Σ` and the other five case-fold files are uploaded. It stays a plain, local-only file until the mount is restarted (the start scan finds it: in run 2 pass B it was uploaded). The runner reports it as `STUCK`, which is correct | client trace log (0 lines for the name, 6 for its neighbours) | not filed [V] |
+| H3 | the state column's push for an empty folder fails with `ArgumentException 0x80070057` (E_INVALIDARG), the same six folders as before; #122 made the reason visible | client log of run 3 | unidrive-windows#121 (root cause found in this log) |
+| H4 | the combining-mark name is still stored in NFC (`FORM`) | provider | by design (#171), see #491 |

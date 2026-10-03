@@ -56,12 +56,23 @@ $utf8 = [System.Text.UTF8Encoding]::new($false)
 
 function Step([string]$text) { Write-Host ''; Write-Host "== $text" -ForegroundColor Cyan }
 function To-Toml([string]$p) { $p.Replace('\', '/') }
+function To-Ascii([string]$s) {
+    $sb = [System.Text.StringBuilder]::new(); $i = 0
+    while ($i -lt $s.Length) { $cp = [char]::ConvertToUtf32($s, $i); if ($cp -ge 0x20 -and $cp -lt 0x7F) { [void]$sb.Append([char]$cp) } else { [void]$sb.Append(('{U+' + $cp.ToString('X4') + '}')) }; $i += if ($cp -gt 0xFFFF) { 2 } else { 1 } }
+    $sb.ToString()
+}
 
 # ---- preflight ---------------------------------------------------------------------------------------------------------------------
 Step 'preflight'
 & $pwsh -NoProfile -File (Join-Path $here 'generate.ps1') -Check | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'layout.json and manifest.tsv have drifted apart; fix that before a run.' }
-$others = @(Get-CimInstance Win32_Process | Where-Object {
+# WMI answers "unknown error" now and then (seen twice in a row): ask up to eight times before giving up
+$procs = $null
+for ($i = 1; $i -le 8 -and $null -eq $procs; $i++) {
+    try { $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
+    catch { if ($i -eq 8) { throw "cannot list processes (WMI): $($_.Exception.Message)" }; Start-Sleep -Seconds 3 }
+}
+$others = @($procs | Where-Object {
         $_.Name -eq 'unidrive-win.exe' -or ($_.Name -match '^javaw?\.exe$' -and $_.CommandLine -match 'unidrive[^ ]*\.jar' -and $_.CommandLine -match 'daemon run') })
 if ($others.Count -gt 0 -and -not $AllowOtherUnidrive) {
     $others | ForEach-Object { Write-Host ("  running: {0} {1}" -f $_.ProcessId, $_.Name) }
@@ -153,13 +164,13 @@ function Run-Verify([string]$name, [string]$root, [string[]]$more) {
 # every file is a placeholder, except names the client cannot match (non-NFC names, see the expected file). A plain file with an
 # NFC name that is still plain means the upload queue is stuck (gkrost/unidrive-windows#115).
 function Placeholder-Counts([string]$root) {
-    $phF = 0; $plF = 0; $phD = 0; $plD = 0; $stuck = 0
+    $phF = 0; $plF = 0; $phD = 0; $plD = 0; $stuck = 0; $names = [System.Collections.Generic.List[string]]::new()
     foreach ($e in [IO.Directory]::EnumerateFileSystemEntries($root, '*', [IO.SearchOption]::AllDirectories)) {
         $a = [IO.File]::GetAttributes($e); $rp = ($a -band [IO.FileAttributes]::ReparsePoint) -ne 0
         if (($a -band [IO.FileAttributes]::Directory) -ne 0) { if ($rp) { $phD++ } else { $plD++ } }
-        elseif ($rp) { $phF++ } else { $plF++; if ([IO.Path]::GetFileName($e).IsNormalized([Text.NormalizationForm]::FormC)) { $stuck++ } }
+        elseif ($rp) { $phF++ } else { $plF++; if ([IO.Path]::GetFileName($e).IsNormalized([Text.NormalizationForm]::FormC)) { $stuck++; if ($names.Count -lt 12) { $names.Add((To-Ascii $e.Substring($root.Length + 1).Replace('\', '/'))) } } }
     }
-    [pscustomobject]@{ FilesPlaceholder = $phF; FilesPlain = $plF; DirsPlaceholder = $phD; DirsPlain = $plD; PlainNfc = $stuck }
+    [pscustomobject]@{ FilesPlaceholder = $phF; FilesPlain = $plF; DirsPlaceholder = $phD; DirsPlain = $plD; PlainNfc = $stuck; PlainNfcNames = $names }
 }
 function Classify([string]$tool, [string]$file) {
     if (-not $Expected) { return $null }
@@ -207,7 +218,11 @@ try {
     $pc = Placeholder-Counts (Join-Path $mount '_INBOX\golden-unicode-v1')
     $mountState = "files: $($pc.FilesPlaceholder) placeholders, $($pc.FilesPlain) plain ($($pc.PlainNfc) of them with an NFC name); folders: $($pc.DirsPlaceholder) placeholders, $($pc.DirsPlain) plain"
     Write-Host "  $mountState"
-    if ($pc.PlainNfc -gt 0) { Write-Host '  STUCK: files with an NFC name are still plain: the upload queue did not finish them'; if ($exit -eq 0) { $exit = 2 } }
+    if ($pc.PlainNfc -gt 0) {
+        Write-Host '  STUCK: files with an NFC name are still plain: the upload queue did not finish them (or the platform never told the client about them):'
+        $pc.PlainNfcNames | ForEach-Object { Write-Host "    $_" }
+        if ($exit -eq 0) { $exit = 2 }
+    }
     Step 'verify the surfaces against the manifest'
     $files = [ordered]@{}
     $files['provider'] = @('verify', (Run-Verify 'provider' (Join-Path $remote '_INBOX\golden-unicode-v1') @()))
