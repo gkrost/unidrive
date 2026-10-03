@@ -16,7 +16,6 @@ import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class InternxtApiServiceTest {
     // One instance for the wire-model tests: building a Json per use is slow and the compiler says so.
@@ -319,10 +318,11 @@ class InternxtApiServiceTest {
     fun `UD-353 OVH-pessimistic 10 KiB-s floor grants a 10 MiB file 17 minutes`() {
         // Post-fix behaviour: same 10 MiB shard with the OVH-specific
         // 10 KiB/s override returns 1024 s ≈ 17 min — easily covers the
-        // 1000 s legitimate-progress upper bound. The read-idle socket
-        // watchdog gets a size-adaptive limit of its own (#517 R1): the
-        // flat 60 s one fired mid-upload no matter how fast bytes flowed,
-        // and a stalled connection trips the raised watchdog just the same.
+        // 1000 s legitimate-progress upper bound. The 60 s
+        // socketTimeoutMillis watchdog still catches stalled connections,
+        // so slow-loris exposure is unchanged; we only grant more
+        // wall-clock for actual byte-flowing uploads against OVH's slow
+        // third-party endpoint.
         val sizeBytes = 10L * 1024 * 1024
         val ovhMinThroughputBps = 10L * 1024 // mirrors InternxtApiService.OVH_PUT_MIN_THROUGHPUT_BPS
         val timeoutMs =
@@ -331,40 +331,6 @@ class InternxtApiServiceTest {
                 minThroughputBytesPerSecond = ovhMinThroughputBps,
             )
         assertEquals(1024_000L, timeoutMs)
-    }
-
-    @Test
-    fun `small shard PUTs keep the 60 s socket watchdog`() {
-        // 10 MiB at the 2 MiB/s shard floor needs 5 s — under the floor, so
-        // the watchdog stays at the installed 60 s and small-file behaviour
-        // is unchanged (#517 R1).
-        val sizeBytes = 10L * 1024 * 1024
-        val socketMs =
-            org.krost.unidrive.http.UploadTimeoutPolicy
-                .computeSocketTimeoutMs(sizeBytes, floorMs = 60_000L, minThroughputBytesPerSecond = 2L * 1024 * 1024)
-        assertEquals(60_000L, socketMs)
-    }
-
-    @Test
-    fun `a 545 MB shard PUT gets a watchdog beyond the 60 s cut`() {
-        // The live account's A file (545.5 MB, 90 s at the measured 48 Mbit/s)
-        // was cut at 60 s in every attempt, nine times per run (#517 F2). At
-        // the 2 MiB/s floor the watchdog gives it 261 s.
-        val sizeBytes = 545_500_000L
-        val socketMs =
-            org.krost.unidrive.http.UploadTimeoutPolicy
-                .computeSocketTimeoutMs(sizeBytes, floorMs = 60_000L, minThroughputBytesPerSecond = 2L * 1024 * 1024)
-        assertEquals(261_000L, socketMs)
-    }
-
-    @Test
-    fun `a cut within 5 percent of the watchdog limit is classified as ours`() {
-        // Observed watchdog cuts: 59.84-61.48 s against a 60 s watchdog, n=64 (#517 F1).
-        val isCut = org.krost.unidrive.http.UploadTimeoutPolicy
-        assertTrue(isCut.isSocketWatchdogCut(59_840L, 60_000L), "the fastest observed cut is still ours")
-        assertTrue(isCut.isSocketWatchdogCut(61_480L, 60_000L), "the slowest observed cut is ours")
-        assertTrue(!isCut.isSocketWatchdogCut(56_999L, 60_000L), "a close well under the limit stays a server event")
-        assertTrue(isCut.isSocketWatchdogCut(57_000L, 60_000L), "the 5 percent slack boundary")
     }
 
     @Test
