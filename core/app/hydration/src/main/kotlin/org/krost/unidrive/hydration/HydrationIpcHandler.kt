@@ -582,7 +582,7 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
     is HydrationEvent.Skipped    -> """{"event":"skipped","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Queued     -> """{"event":"queued","path":${jsonEsc(e.path)}}"""
     is HydrationEvent.Uploading -> {
-        """{"event":"uploading","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)}},""" +
+        """{"event":"uploading","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)},""" +
             """"bytes_done":${e.bytesDone},"bytes_total":${e.bytesTotal}}"""
     }
     is HydrationEvent.Failed -> {
