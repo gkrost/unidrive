@@ -205,6 +205,12 @@ tasks.shadowJar {
     archiveBaseName.set("unidrive")
     archiveClassifier.set("")
     mergeServiceFiles()
+    // Shadow prints one warning per resource a transformer handles (about 70 per build): with the default
+    // duplicates strategy (EXCLUDE) a second copy could be dropped before the transformer merges it. For
+    // exactly these resources the copies are wanted, so INCLUDE hands all of them to the transformers.
+    filesMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
 }
 
 // Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
