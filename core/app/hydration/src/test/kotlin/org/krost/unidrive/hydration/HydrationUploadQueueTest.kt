@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -337,5 +338,55 @@ class HydrationUploadQueueTest {
         assertNull(env.syncEngine.remoteContentSeen("/_INBOX/scratch.tmp"))
         assertNull(env.syncEngine.remoteContentSeen("/outside/x.txt"))
         assertNull(env.syncEngine.remoteContentSeen("/_INBOX/gone.txt"))
+    }
+
+    // #493: two uploads that kept failing were replayed at every start and held both transfer slots for their whole
+    // retry ladder; a row whose last attempt failed now waits, and fresh work goes first.
+    @Test
+    fun `a row whose last upload failed is replayed later, after the rows that can go now`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, failedReplayDelayMs = 60_000L)
+        for (p in listOf("/q/fresh.txt", "/q/failed-before.txt")) {
+            env.stateDb.insertCreatedRow(p)
+            writeCache(env, p, "bytes-$p")
+        }
+        env.stateDb.markUploadFailed("/q/failed-before.txt", java.time.Instant.now())
+
+        assertEquals(1, env.hydration.replayPendingUploads(), "only the row without a failure replays at once")
+        advanceTimeBy(30_000L)
+        runCurrent()
+        assertEquals("bytes-/q/fresh.txt", env.syncEngine.remoteContentSeen("/q/fresh.txt"))
+        assertNull(env.syncEngine.remoteContentSeen("/q/failed-before.txt"), "the failed row waits for its delay")
+
+        advanceUntilIdle()
+        assertEquals("bytes-/q/failed-before.txt", env.syncEngine.remoteContentSeen("/q/failed-before.txt"), "then it is replayed")
+    }
+
+    @Test
+    fun `a deferred replay is dropped when the row was uploaded meanwhile`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, failedReplayDelayMs = 60_000L)
+        env.stateDb.insertCreatedRow("/q/f.txt")
+        writeCache(env, "/q/f.txt", "bytes")
+        env.stateDb.markUploadFailed("/q/f.txt", java.time.Instant.now())
+
+        assertEquals(0, env.hydration.replayPendingUploads())
+        // The client writes the file again before the deferred replay's turn: that upload lands.
+        env.hydration.openForWrite("conn1", "h1", "/q/f.txt", env.syncEngine.resolveCachePath("/q/f.txt"))
+        runCurrent()
+        assertEquals(1, env.syncEngine.uploadAttempts())
+
+        advanceUntilIdle()
+        assertEquals(1, env.syncEngine.uploadAttempts(), "the deferred replay must not upload a row that has landed")
+    }
+
+    @Test
+    fun `with no delay a failed row replays at once, as before`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, failedReplayDelayMs = 0L)
+        env.stateDb.insertCreatedRow("/q/f.txt")
+        writeCache(env, "/q/f.txt", "bytes")
+        env.stateDb.markUploadFailed("/q/f.txt", java.time.Instant.now())
+
+        assertEquals(1, env.hydration.replayPendingUploads())
+        advanceUntilIdle()
+        assertEquals("bytes", env.syncEngine.remoteContentSeen("/q/f.txt"))
     }
 }

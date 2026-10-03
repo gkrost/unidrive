@@ -1,0 +1,540 @@
+#golden-unicode-v1 manifest: kind, size, sha256, mtime_utc, form, path_ascii, path (UTF-8, LF)
+D	-	-	-	both	african	african
+D	-	-	-	both	african/Afrikaans	african/Afrikaans
+D	-	-	-	both	african/Afrikaans/Dokumente	african/Afrikaans/Dokumente
+F	110	ad5ee9a5e13adbb0b1a2645dff9adc77a046d72ee2e0641816166c0338bce6bb	2026-01-01T12:00:00Z	NFC	african/Afrikaans/Dokumente/M{U+00F4}re vriend {U+00EA} {U+00EB} {U+00EF} {U+00F4} {U+00FB}.txt	african/Afrikaans/Dokumente/Môre vriend ê ë ï ô û.txt
+D	-	-	-	both	african/Hausa	african/Hausa
+D	-	-	-	both	african/Hausa/Takardu	african/Hausa/Takardu
+F	96	b832631a88fae85f55b42741409edfb17f99b36260092e79e8de350490e7e533	2026-01-01T12:00:00Z	both	african/Hausa/Takardu/Sannu duniya {U+0253} {U+0257} {U+0199} {U+01B4}.txt	african/Hausa/Takardu/Sannu duniya ɓ ɗ ƙ ƴ.txt
+D	-	-	-	both	african/Kiswahili	african/Kiswahili
+D	-	-	-	both	african/Kiswahili/Nyaraka	african/Kiswahili/Nyaraka
+F	76	69584e06f7751d0cd5befc87ef9258b7bc145dcae27684f10727be039d4bee3c	2026-01-01T12:00:00Z	both	african/Kiswahili/Nyaraka/Habari dunia.txt	african/Kiswahili/Nyaraka/Habari dunia.txt
+D	-	-	-	both	african/Malagasy-Somali	african/Malagasy-Somali
+D	-	-	-	both	african/Malagasy-Somali/Taratasy	african/Malagasy-Somali/Taratasy
+F	107	5fada6d57d0074b7ca15859257d297abcc9a044129564f1c420ad02a14a72543	2026-01-01T12:00:00Z	both	african/Malagasy-Somali/Taratasy/Salama izao tontolo izao.txt	african/Malagasy-Somali/Taratasy/Salama izao tontolo izao.txt
+D	-	-	-	NFC	african/Yor{U+00F9}b{U+00E1}	african/Yorùbá
+D	-	-	-	NFC	african/Yor{U+00F9}b{U+00E1}/{U+00C0}w{U+1ECD}n {U+00EC}w{U+00E9}	african/Yorùbá/Àwọn ìwé
+F	133	0421c4da292ea4a77c62e9e35f6f7acb11c6777a9b5a9c1f933f7a2eb55dd14c	2026-01-01T12:00:00Z	NFC	african/Yor{U+00F9}b{U+00E1}/{U+00C0}w{U+1ECD}n {U+00EC}w{U+00E9}/{U+1EB8} n l{U+1EB9}{U+0301} ay{U+00E9} {U+1ECD}{U+0300}r{U+1EB9}{U+0301} {U+1E63}.txt	african/Yorùbá/Àwọn ìwé/Ẹ n lẹ́ ayé ọ̀rẹ́ ṣ.txt
+D	-	-	-	both	african/isiZulu	african/isiZulu
+D	-	-	-	both	african/isiZulu/Imibhalo	african/isiZulu/Imibhalo
+F	81	82a5c07175f6bda4dcf198d51550a1481f7b0759b656dbe58064efb2e2a6e0dc	2026-01-01T12:00:00Z	both	african/isiZulu/Imibhalo/Sawubona mhlaba.txt	african/isiZulu/Imibhalo/Sawubona mhlaba.txt
+D	-	-	-	both	african/{U+07D2}{U+07DE}{U+07CF}	african/ߒߞߏ
+D	-	-	-	both	african/{U+07D2}{U+07DE}{U+07CF}/{U+07DE}{U+07D0}{U+07F2}{U+07E0}{U+07CA}	african/ߒߞߏ/ߞߐ߲ߠߊ
+F	88	e15183dbbd05290c46c96ec4c5ab988ec0cea89d1578bf8a87fa720b1a82b87b	2026-01-01T12:00:00Z	both	african/{U+07D2}{U+07DE}{U+07CF}/{U+07DE}{U+07D0}{U+07F2}{U+07E0}{U+07CA}/{U+07CA}{U+07F2} {U+07DE}{U+07CA}{U+07EC} {U+07D8}{U+07D0}{U+07EB}.txt	african/ߒߞߏ/ߞߐ߲ߠߊ/ߊ߲ ߞߊ߬ ߘߐ߫.txt
+D	-	-	-	both	african/{U+12A0}{U+121B}{U+122D}{U+129B}	african/አማርኛ
+D	-	-	-	both	african/{U+12A0}{U+121B}{U+122D}{U+129B}/{U+1230}{U+1290}{U+12F6}{U+127D}	african/አማርኛ/ሰነዶች
+D	-	-	-	both	african/{U+12A0}{U+121B}{U+122D}{U+129B}/{U+1230}{U+1290}{U+12F6}{U+127D}/{U+12F0}{U+1265}{U+12F3}{U+1264}{U+12CE}{U+127D}	african/አማርኛ/ሰነዶች/ደብዳቤዎች
+F	117	1779450b1fb09be8950b63568eee902704bc1dc34bc602afa7f7418ccb69f41f	2026-01-01T12:00:00Z	both	african/{U+12A0}{U+121B}{U+122D}{U+129B}/{U+1230}{U+1290}{U+12F6}{U+127D}/{U+12F0}{U+1265}{U+12F3}{U+1264}{U+12CE}{U+127D}/{U+1230}{U+120B}{U+121D} {U+12D3}{U+1208}{U+121D}.txt	african/አማርኛ/ሰነዶች/ደብዳቤዎች/ሰላም ዓለም.txt
+F	124	34e3845b5f1ee8ab11f73463e6a2f3a83a8d2edb7a7bf136c4b2fcb552455e49	2026-01-01T12:00:00Z	both	african/{U+12A0}{U+121B}{U+122D}{U+129B}/{U+1230}{U+1290}{U+12F6}{U+127D}/{U+12F0}{U+1265}{U+12F3}{U+1264}{U+12CE}{U+127D}/{U+130D}{U+12D5}{U+12DD} {U+1369}{U+136A}{U+136B}.txt	african/አማርኛ/ሰነዶች/ደብዳቤዎች/ግዕዝ ፩፪፫.txt
+D	-	-	-	both	african/{U+2D5C}{U+2D30}{U+2D4E}{U+2D30}{U+2D63}{U+2D49}{U+2D56}{U+2D5C}	african/ⵜⴰⵎⴰⵣⵉⵖⵜ
+D	-	-	-	both	african/{U+2D5C}{U+2D30}{U+2D4E}{U+2D30}{U+2D63}{U+2D49}{U+2D56}{U+2D5C}/{U+2D49}{U+2D59}{U+2D4F}{U+2D56}{U+2D4E}{U+2D49}{U+2D59}{U+2D4F}	african/ⵜⴰⵎⴰⵣⵉⵖⵜ/ⵉⵙⵏⵖⵎⵉⵙⵏ
+F	134	50a822690cf101a6781a5e22019de7b2992aa8cee40752a749ba1b5f0090d16c	2026-01-01T12:00:00Z	both	african/{U+2D5C}{U+2D30}{U+2D4E}{U+2D30}{U+2D63}{U+2D49}{U+2D56}{U+2D5C}/{U+2D49}{U+2D59}{U+2D4F}{U+2D56}{U+2D4E}{U+2D49}{U+2D59}{U+2D4F}/{U+2D30}{U+2D63}{U+2D53}{U+2D4D} {U+2D30}{U+2D3D}{U+2D30}{U+2D4D}.txt	african/ⵜⴰⵎⴰⵣⵉⵖⵜ/ⵉⵙⵏⵖⵎⵉⵙⵏ/ⴰⵣⵓⵍ ⴰⴽⴰⵍ.txt
+D	-	-	-	both	african/{U+A559}{U+A524}	african/ꕙꔤ
+D	-	-	-	both	african/{U+A559}{U+A524}/{U+A562}{U+A54C}	african/ꕙꔤ/ꕢꕌ
+F	71	890a7dc39d27d101c3112bace5cded8c7ab415cb106f2954c4b39184c42c4ec8	2026-01-01T12:00:00Z	both	african/{U+A559}{U+A524}/{U+A562}{U+A54C}/{U+A559}{U+A524} {U+A5DE}.txt	african/ꕙꔤ/ꕢꕌ/ꕙꔤ ꗞ.txt
+D	-	-	-	both	african/{U+1E900}{U+1E923}{U+1E924}{U+1E922}{U+1E925}	african/𞤀𞤣𞤤𞤢𞤥
+D	-	-	-	both	african/{U+1E900}{U+1E923}{U+1E924}{U+1E922}{U+1E925}/{U+1E901}{U+1E922}{U+1E931}{U+1E922}	african/𞤀𞤣𞤤𞤢𞤥/𞤁𞤢𞤱𞤢
+F	134	e3706b1f02c27115e40f753427daa6cbe0e1c6e378689252796365643129e0ad	2026-01-01T12:00:00Z	both	african/{U+1E900}{U+1E923}{U+1E924}{U+1E922}{U+1E925}/{U+1E901}{U+1E922}{U+1E931}{U+1E922}/{U+1E900}{U+1E924}{U+1E922}{U+1E925} {U+1E92B}{U+1E92F}{U+1E923}{U+1E92B}.txt	african/𞤀𞤣𞤤𞤢𞤥/𞤁𞤢𞤱𞤢/𞤀𞤤𞤢𞤥 𞤫𞤯𞤣𞤫.txt
+D	-	-	-	both	americas	americas
+D	-	-	-	NFC	americas/Din{U+00E9} bizaad	americas/Diné bizaad
+D	-	-	-	NFC	americas/Din{U+00E9} bizaad/Naaltsoos	americas/Diné bizaad/Naaltsoos
+F	92	1122ffe5616612dee24161697b1b91122f6e6f71be665d5131c26124754b96b6	2026-01-01T12:00:00Z	NFC	americas/Din{U+00E9} bizaad/Naaltsoos/Y{U+00E1}{U+2019}{U+00E1}t{U+2019}{U+00E9}{U+00E9}h.txt	americas/Diné bizaad/Naaltsoos/Yá’át’ééh.txt
+D	-	-	-	NFC	americas/Espa{U+00F1}ol-Am{U+00E9}rica	americas/Español-América
+D	-	-	-	NFC	americas/Espa{U+00F1}ol-Am{U+00E9}rica/Documentos	americas/Español-América/Documentos
+F	108	6c7733f325ef12f316759f714091b346071d96f82ca41e47010a15446e0573b8	2026-01-01T12:00:00Z	NFC	americas/Espa{U+00F1}ol-Am{U+00E9}rica/Documentos/Che, {U+00A1}qu{U+00E9} lindo! {U+00F1}and{U+00FA}.txt	americas/Español-América/Documentos/Che, ¡qué lindo! ñandú.txt
+D	-	-	-	NFC	americas/Guaran{U+00ED}	americas/Guaraní
+D	-	-	-	NFC	americas/Guaran{U+00ED}/{U+00D1}emombe{U+2019}u	americas/Guaraní/Ñemombe’u
+F	127	00179df546a486c1fd9c2b07eb87d28df8868a8a32bfda13aaefd4b9c4f6211e	2026-01-01T12:00:00Z	NFC	americas/Guaran{U+00ED}/{U+00D1}emombe{U+2019}u/Mba{U+2019}{U+00E9}ichapa {U+00F1}ande {U+1EBD} g{U+0303} {U+1EF9}.txt	americas/Guaraní/Ñemombe’u/Mba’éichapa ñande ẽ g̃ ỹ.txt
+D	-	-	-	NFC	americas/Krey{U+00F2}l ayisyen	americas/Kreyòl ayisyen
+D	-	-	-	NFC	americas/Krey{U+00F2}l ayisyen/Dokiman	americas/Kreyòl ayisyen/Dokiman
+F	89	1e956421aed95f045660a7dcbb1faabb5ba1013d7b31d3cb4797cd53116a3b60	2026-01-01T12:00:00Z	NFC	americas/Krey{U+00F2}l ayisyen/Dokiman/Bonjou mond lan.txt	americas/Kreyòl ayisyen/Dokiman/Bonjou mond lan.txt
+D	-	-	-	both	americas/K{U+2019}iche{U+2019}	americas/K’iche’
+D	-	-	-	both	americas/K{U+2019}iche{U+2019}/Wuj	americas/K’iche’/Wuj
+F	95	0c2581e3ad4a8ef1e1516e9c51b19ed6b53f7ed352f169350949fbd296b0c0b6	2026-01-01T12:00:00Z	both	americas/K{U+2019}iche{U+2019}/Wuj/Saqarik, ruwach{U+2019}ulew.txt	americas/K’iche’/Wuj/Saqarik, ruwach’ulew.txt
+D	-	-	-	both	americas/Mapudungun	americas/Mapudungun
+D	-	-	-	NFC	americas/Mapudungun/Kim{U+00FC}n	americas/Mapudungun/Kimün
+F	88	d889ff1080b9081626025c26566e78a328eeb6c26e27c7c27334f6c6efda5d03	2026-01-01T12:00:00Z	NFC	americas/Mapudungun/Kim{U+00FC}n/Mari mari pu che {U+00FC}.txt	americas/Mapudungun/Kimün/Mari mari pu che ü.txt
+D	-	-	-	NFC	americas/N{U+0101}huatl	americas/Nāhuatl
+D	-	-	-	NFC	americas/N{U+0101}huatl/Tlahcuil{U+014D}lli	americas/Nāhuatl/Tlahcuilōlli
+F	95	68bd512ff3af6bafe5f6e5410e467e0a645f316fbd7c57b36ddfa037f992c885	2026-01-01T12:00:00Z	NFC	americas/N{U+0101}huatl/Tlahcuil{U+014D}lli/Niltze tl{U+0101}lticpac.txt	americas/Nāhuatl/Tlahcuilōlli/Niltze tlālticpac.txt
+D	-	-	-	NFC	americas/Portugu{U+00EA}s-Brasil	americas/Português-Brasil
+D	-	-	-	NFC	americas/Portugu{U+00EA}s-Brasil/Documentos	americas/Português-Brasil/Documentos
+F	138	1140b4be4a5c4a9a4dfa72e6f37c56539ebcaff9864ace037d615b5d1c71dea6	2026-01-01T12:00:00Z	NFC	americas/Portugu{U+00EA}s-Brasil/Documentos/Ol{U+00E1}, voc{U+00EA} {U+2013} a{U+00E7}a{U+00ED} e p{U+00E3}o de queijo.txt	americas/Português-Brasil/Documentos/Olá, você – açaí e pão de queijo.txt
+D	-	-	-	both	americas/Runasimi	americas/Runasimi
+D	-	-	-	both	americas/Runasimi/Qillqa	americas/Runasimi/Qillqa
+F	128	ae3760f70da66444494c6ac7bf652c741d2eb46661aa02a1d1c4fc6830515d82	2026-01-01T12:00:00Z	NFC	americas/Runasimi/Qillqa/Allillanchu {U+00F1}uqanchik ch{U+2019} q{U+2019}.txt	americas/Runasimi/Qillqa/Allillanchu ñuqanchik ch’ q’.txt
+D	-	-	-	both	americas/{U+13E3}{U+13B3}{U+13A9}	americas/ᏣᎳᎩ
+D	-	-	-	both	americas/{U+13E3}{U+13B3}{U+13A9}/{U+13AA}{U+13EA}{U+13B5}	americas/ᏣᎳᎩ/ᎪᏪᎵ
+F	93	ff0a8b9c225f1003adc501da3b729b1447c3d986abc4f2d377269637fbb145ec	2026-01-01T12:00:00Z	both	americas/{U+13E3}{U+13B3}{U+13A9}/{U+13AA}{U+13EA}{U+13B5}/{U+13A3}{U+13CF}{U+13F2} {U+13A1}{U+13B6}{U+13AF}.txt	americas/ᏣᎳᎩ/ᎪᏪᎵ/ᎣᏏᏲ ᎡᎶᎯ.txt
+D	-	-	-	both	americas/{U+1403}{U+14C4}{U+1483}{U+144E}{U+1450}{U+1466}	americas/ᐃᓄᒃᑎᑐᑦ
+D	-	-	-	both	americas/{U+1403}{U+14C4}{U+1483}{U+144E}{U+1450}{U+1466}/{U+1403}{U+14D5}{U+1405}{U+1550}{U+1555}{U+1585}	americas/ᐃᓄᒃᑎᑐᑦ/ᐃᓕᐅᕐᕕᖅ
+F	123	ed4ac351f30870fb67bb99c91e6edfc5e9dd6a3175f05c0132a398cc820eb765	2026-01-01T12:00:00Z	both	americas/{U+1403}{U+14C4}{U+1483}{U+144E}{U+1450}{U+1466}/{U+1403}{U+14D5}{U+1405}{U+1550}{U+1555}{U+1585}/{U+140A}{U+1403} {U+1431}{U+14C7}{U+14F1}{U+1483}{U+144E}{U+1466}.txt	americas/ᐃᓄᒃᑎᑐᑦ/ᐃᓕᐅᕐᕕᖅ/ᐊᐃ ᐱᓇᓱᒃᑎᑦ.txt
+D	-	-	-	both	arabic-and-hebrew	arabic-and-hebrew
+D	-	-	-	both	arabic-and-hebrew/{U+05D9}{U+05D9}{U+05B4}{U+05D3}{U+05D9}{U+05E9}	arabic-and-hebrew/ייִדיש
+D	-	-	-	both	arabic-and-hebrew/{U+05D9}{U+05D9}{U+05B4}{U+05D3}{U+05D9}{U+05E9}/{U+05D3}{U+05D0}{U+05B8}{U+05E7}{U+05D5}{U+05DE}{U+05E2}{U+05E0}{U+05D8}{U+05DF}	arabic-and-hebrew/ייִדיש/דאָקומענטן
+F	116	280740cb0e7e3e3aa8d13a3647d298f892fb98262c4064cd4c8d5a7b89c039cf	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+05D9}{U+05D9}{U+05B4}{U+05D3}{U+05D9}{U+05E9}/{U+05D3}{U+05D0}{U+05B8}{U+05E7}{U+05D5}{U+05DE}{U+05E2}{U+05E0}{U+05D8}{U+05DF}/{U+05D4}{U+05E2}{U+05DC}{U+05D0} {U+05D5}{U+05D5}{U+05E2}{U+05DC}{U+05D8}.txt	arabic-and-hebrew/ייִדיש/דאָקומענטן/העלא וועלט.txt
+D	-	-	-	both	arabic-and-hebrew/{U+05E2}{U+05D1}{U+05E8}{U+05D9}{U+05EA}	arabic-and-hebrew/עברית
+D	-	-	-	both	arabic-and-hebrew/{U+05E2}{U+05D1}{U+05E8}{U+05D9}{U+05EA}/{U+05DE}{U+05E1}{U+05DE}{U+05DB}{U+05D9}{U+05DD}	arabic-and-hebrew/עברית/מסמכים
+D	-	-	-	both	arabic-and-hebrew/{U+05E2}{U+05D1}{U+05E8}{U+05D9}{U+05EA}/{U+05DE}{U+05E1}{U+05DE}{U+05DB}{U+05D9}{U+05DD}/{U+05DE}{U+05DB}{U+05EA}{U+05D1}{U+05D9}{U+05DD}	arabic-and-hebrew/עברית/מסמכים/מכתבים
+F	142	7987eb5cfc2f4b6e4237e27fc3c03e693ca48f25b79a23d65adb4e8bb812dafc	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+05E2}{U+05D1}{U+05E8}{U+05D9}{U+05EA}/{U+05DE}{U+05E1}{U+05DE}{U+05DB}{U+05D9}{U+05DD}/{U+05DE}{U+05DB}{U+05EA}{U+05D1}{U+05D9}{U+05DD}/{U+05E1}{U+05E4}{U+05E8} {U+05D8}{U+05D5}{U+05D1}.md	arabic-and-hebrew/עברית/מסמכים/מכתבים/ספר טוב.md
+F	115	3de254e87dce2ea265e0515ee791e54240e07e61b2bc4a50341933d800d451f4	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+05E2}{U+05D1}{U+05E8}{U+05D9}{U+05EA}/{U+05DE}{U+05E1}{U+05DE}{U+05DB}{U+05D9}{U+05DD}/{U+05DE}{U+05DB}{U+05EA}{U+05D1}{U+05D9}{U+05DD}/{U+05E9}{U+05DC}{U+05D5}{U+05DD} {U+05E2}{U+05D5}{U+05DC}{U+05DD}.txt	arabic-and-hebrew/עברית/מסמכים/מכתבים/שלום עולם.txt
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0631}{U+062F}{U+0648}	arabic-and-hebrew/اردو
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0631}{U+062F}{U+0648}/{U+062F}{U+0633}{U+062A}{U+0627}{U+0648}{U+06CC}{U+0632}{U+0627}{U+062A}	arabic-and-hebrew/اردو/دستاویزات
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0631}{U+062F}{U+0648}/{U+062F}{U+0633}{U+062A}{U+0627}{U+0648}{U+06CC}{U+0632}{U+0627}{U+062A}/{U+062E}{U+0637}{U+0648}{U+0637}	arabic-and-hebrew/اردو/دستاویزات/خطوط
+F	115	d0fa9e98dded86b61a312cfd11421633b654496eeccf3e9db348357f70c9df70	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+0627}{U+0631}{U+062F}{U+0648}/{U+062F}{U+0633}{U+062A}{U+0627}{U+0648}{U+06CC}{U+0632}{U+0627}{U+062A}/{U+062E}{U+0637}{U+0648}{U+0637}/{U+06C1}{U+06CC}{U+0644}{U+0648} {U+062F}{U+0646}{U+06CC}{U+0627}.txt	arabic-and-hebrew/اردو/دستاویزات/خطوط/ہیلو دنیا.txt
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}	arabic-and-hebrew/العربية
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0635}{U+0648}{U+0631}	arabic-and-hebrew/العربية/صور
+D	-	-	-	both	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}	arabic-and-hebrew/العربية/مستندات
+D	-	-	-	NFC	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}	arabic-and-hebrew/العربية/مستندات/رسائل
+F	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	2026-01-01T12:00:00Z	NFC	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}/{U+0641}{U+0627}{U+0631}{U+063A}.txt	arabic-and-hebrew/العربية/مستندات/رسائل/فارغ.txt
+F	172	a9110f92e7af97370502d9863ae823f022733fa607922a24e724129c18ef63b0	2026-01-01T12:00:00Z	NFC	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}/{U+0643}{U+062A}{U+0627}{U+0628} {U+062C}{U+0645}{U+064A}{U+0644}.md	arabic-and-hebrew/العربية/مستندات/رسائل/كتاب جميل.md
+F	135	8536e3ce90ef57d8ab001273f54986a6eaf2a0b819cd5719c641a5f19ad2344c	2026-01-01T12:00:00Z	NFC	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}/{U+0645}{U+0631}{U+062D}{U+0628}{U+0627} {U+0628}{U+0627}{U+0644}{U+0639}{U+0627}{U+0644}{U+0645}.txt	arabic-and-hebrew/العربية/مستندات/رسائل/مرحبا بالعالم.txt
+D	-	-	-	NFC	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}/{U+0645}{U+0633}{U+0648}{U+062F}{U+0627}{U+062A}	arabic-and-hebrew/العربية/مستندات/رسائل/مسودات
+D	-	-	-	both	arabic-and-hebrew/{U+0641}{U+0627}{U+0631}{U+0633}{U+06CC}	arabic-and-hebrew/فارسی
+D	-	-	-	both	arabic-and-hebrew/{U+0641}{U+0627}{U+0631}{U+0633}{U+06CC}/{U+0627}{U+0633}{U+0646}{U+0627}{U+062F}	arabic-and-hebrew/فارسی/اسناد
+F	145	166bad3c62f1a62ba8ae1d8f41aa616bf218e48f376cb50c061b5b4c9907a9e1	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+0641}{U+0627}{U+0631}{U+0633}{U+06CC}/{U+0627}{U+0633}{U+0646}{U+0627}{U+062F}/{U+0633}{U+0644}{U+0627}{U+0645} {U+062F}{U+0646}{U+06CC}{U+0627}.txt	arabic-and-hebrew/فارسی/اسناد/سلام دنیا.txt
+D	-	-	-	both	arabic-and-hebrew/{U+067E}{U+069A}{U+062A}{U+0648}	arabic-and-hebrew/پښتو
+D	-	-	-	both	arabic-and-hebrew/{U+067E}{U+069A}{U+062A}{U+0648}/{U+0627}{U+0633}{U+0646}{U+0627}{U+062F}	arabic-and-hebrew/پښتو/اسناد
+F	94	c8e88f94eb9c0a8e0297e42c1c18fc1172791cd96e0699f28f47a80306480de0	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+067E}{U+069A}{U+062A}{U+0648}/{U+0627}{U+0633}{U+0646}{U+0627}{U+062F}/{U+0633}{U+0644}{U+0627}{U+0645} {U+0646}{U+0693}{U+06CC}.txt	arabic-and-hebrew/پښتو/اسناد/سلام نړی.txt
+D	-	-	-	both	arabic-and-hebrew/{U+0723}{U+0718}{U+072A}{U+071D}{U+071D}{U+0710}	arabic-and-hebrew/ܣܘܪܝܝܐ
+D	-	-	-	both	arabic-and-hebrew/{U+0723}{U+0718}{U+072A}{U+071D}{U+071D}{U+0710}/{U+0721}{U+071F}{U+072C}{U+0712}{U+0722}{U+0718}{U+072C}{U+0710}	arabic-and-hebrew/ܣܘܪܝܝܐ/ܡܟܬܒܢܘܬܐ
+F	108	0fc20aceaaf2edbcc8ca1cbf1c10b3d554a688055b610ba2b75734365047a31e	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+0723}{U+0718}{U+072A}{U+071D}{U+071D}{U+0710}/{U+0721}{U+071F}{U+072C}{U+0712}{U+0722}{U+0718}{U+072C}{U+0710}/{U+072B}{U+0720}{U+0721}{U+0710} {U+0725}{U+0720}{U+0721}{U+0710}.txt	arabic-and-hebrew/ܣܘܪܝܝܐ/ܡܟܬܒܢܘܬܐ/ܫܠܡܐ ܥܠܡܐ.txt
+D	-	-	-	both	arabic-and-hebrew/{U+078B}{U+07A8}{U+0788}{U+07AC}{U+0780}{U+07A8}	arabic-and-hebrew/ދިވެހި
+D	-	-	-	both	arabic-and-hebrew/{U+078B}{U+07A8}{U+0788}{U+07AC}{U+0780}{U+07A8}/{U+078D}{U+07A8}{U+0794}{U+07AA}{U+0782}{U+07B0}{U+078C}{U+07A6}{U+0787}{U+07B0}	arabic-and-hebrew/ދިވެހި/ލިޔުންތައް
+F	120	a5560584574577b03daaf9489b5ecf6dbfd34b6d958c801a165a373df2f16343	2026-01-01T12:00:00Z	both	arabic-and-hebrew/{U+078B}{U+07A8}{U+0788}{U+07AC}{U+0780}{U+07A8}/{U+078D}{U+07A8}{U+0794}{U+07AA}{U+0782}{U+07B0}{U+078C}{U+07A6}{U+0787}{U+07B0}/{U+0780}{U+07AC}{U+078D}{U+07AF} {U+0788}{U+07AF}{U+078D}{U+07B0}{U+0791}{U+07B0}.txt	arabic-and-hebrew/ދިވެހި/ލިޔުންތައް/ހެލޯ ވޯލްޑް.txt
+D	-	-	-	both	binary	binary
+D	-	-	-	both	binary/sizes	binary/sizes
+F	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	2026-01-01T12:00:00Z	both	binary/sizes/b0000000.bin	binary/sizes/b0000000.bin
+F	1	ef6cbd2161eaea7943ce8693b9824d23d1793ffb1c0fca05b600d3899b44c977	2026-01-01T12:00:00Z	both	binary/sizes/b0000001.bin	binary/sizes/b0000001.bin
+F	255	54b7d4a50d4248dd6a84d3b3f6b38b1930f3b1b21ee109ab6da4c7bb0d2f4875	2026-01-01T12:00:00Z	both	binary/sizes/b0000255.bin	binary/sizes/b0000255.bin
+F	256	f813588b5f626e7c73047d9861f4b409685093b9d0226c1b8924409f449d45d4	2026-01-01T12:00:00Z	both	binary/sizes/b0000256.bin	binary/sizes/b0000256.bin
+F	1023	3642e1100d27e814b449835720cd8aa7161555e14d6c5ab6523c578ba5e32a18	2026-01-01T12:00:00Z	both	binary/sizes/b0001023.bin	binary/sizes/b0001023.bin
+F	1024	7b42b48ef2efa14ae3951cc30872bf9081abd558d1bd2fcab25a91ca57707fb7	2026-01-01T12:00:00Z	both	binary/sizes/b0001024.bin	binary/sizes/b0001024.bin
+F	1025	f0bab012fffdc5ad490816d2eb580de9ecc5d3c811164bb7800dcd47091a8f16	2026-01-01T12:00:00Z	both	binary/sizes/b0001025.bin	binary/sizes/b0001025.bin
+F	4095	e518a3a2ddb7b0d77fa04ad6fc5f7f81158eed19e272266d2f03596f17f10941	2026-01-01T12:00:00Z	both	binary/sizes/b0004095.bin	binary/sizes/b0004095.bin
+F	4096	63379cb28b5ca89e4884795bcc9a271c1697c912001943799ab144b807726a52	2026-01-01T12:00:00Z	both	binary/sizes/b0004096.bin	binary/sizes/b0004096.bin
+F	4097	fcb7ade80318ba18378ec3bea8e833f425497c1d85a435a7e0747f79a820e0ae	2026-01-01T12:00:00Z	both	binary/sizes/b0004097.bin	binary/sizes/b0004097.bin
+F	65535	6f60c2ded3d408bd1aab4a57db18bcdaf413f5c5f060f4f715b17c30456b3862	2026-01-01T12:00:00Z	both	binary/sizes/b0065535.bin	binary/sizes/b0065535.bin
+F	65536	0b464b55aa14a3ede4a232f177a6b844e123aa912cb3bf472f6ba9b4b668e737	2026-01-01T12:00:00Z	both	binary/sizes/b0065536.bin	binary/sizes/b0065536.bin
+F	65537	d2743dd9c67314190952210d06cd815ae1b2e046b0d2e0bce0d12be015a31a0b	2026-01-01T12:00:00Z	both	binary/sizes/b0065537.bin	binary/sizes/b0065537.bin
+F	262144	07e2db94d4aaa9d5f434973e96f326c67d54fcfa62fbc908c5be1d4441f7ea57	2026-01-01T12:00:00Z	both	binary/sizes/b0262144.bin	binary/sizes/b0262144.bin
+F	524289	20ebb4b33e8255dbd82e6a3305ce8c248461ec538436ebbf0ca789db38dac4a1	2026-01-01T12:00:00Z	both	binary/sizes/b0524289.bin	binary/sizes/b0524289.bin
+F	1000000	aaf25a1b93b23192e4c0eb32b8deb959ae6d13de6aa1e971252b1bea7743836d	2026-01-01T12:00:00Z	both	binary/sizes/b1000000.bin	binary/sizes/b1000000.bin
+D	-	-	-	both	binary/{U+4E8C}{U+8FDB}{U+5236}	binary/二进制
+D	-	-	-	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}	binary/二进制/бинарный
+D	-	-	-	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}/{U+062B}{U+0646}{U+0627}{U+0626}{U+064A}	binary/二进制/бинарный/ثنائي
+D	-	-	-	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}/{U+062B}{U+0646}{U+0627}{U+0626}{U+064A}/{U+092C}{U+093E}{U+0907}{U+0928}{U+0930}{U+0940}	binary/二进制/бинарный/ثنائي/बाइनरी
+D	-	-	-	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}/{U+062B}{U+0646}{U+0627}{U+0626}{U+064A}/{U+092C}{U+093E}{U+0907}{U+0928}{U+0930}{U+0940}/{U+1F431}	binary/二进制/бинарный/ثنائي/बाइनरी/🐱
+F	1000000	0d2ee59a80272f83b4cc383b1d74448636ed7c65117d93077bfd95539839637c	2026-01-01T12:00:00Z	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}/{U+062B}{U+0646}{U+0627}{U+0626}{U+064A}/{U+092C}{U+093E}{U+0907}{U+0928}{U+0930}{U+0940}/{U+1F431}/{U+0434}a{U+043D}{U+043D}{U+044B}e-1MB.bin	binary/二进制/бинарный/ثنائي/बाइनरी/🐱/дaнныe-1MB.bin
+F	123457	ebbe86e7b9e1454c000521c6d671231596468926ba80e4250d8928dc84c27485	2026-01-01T12:00:00Z	NFC	binary/{U+4E8C}{U+8FDB}{U+5236}/{U+0431}{U+0438}{U+043D}{U+0430}{U+0440}{U+043D}{U+044B}{U+0439}/{U+062B}{U+0646}{U+0627}{U+0626}{U+064A}/{U+092C}{U+093E}{U+0907}{U+0928}{U+0930}{U+0940}/{U+1F431}/{U+1F63A}-123457.bin	binary/二进制/бинарный/ثنائي/बाइनरी/🐱/😺-123457.bin
+D	-	-	-	both	cats	cats
+D	-	-	-	NFC	cats/Katze-{U+732B}-{U+043A}{U+043E}{U+0448}{U+043A}{U+0430}-{U+0642}{U+0637}{U+0629}-{U+092C}{U+093F}{U+0932}{U+094D}{U+0932}{U+0940}-{U+0E41}{U+0E21}{U+0E27}-{U+ACE0}{U+C591}{U+C774}-{U+03B3}{U+03AC}{U+03C4}{U+03B1}-{U+05D7}{U+05EA}{U+05D5}{U+05DC}	cats/Katze-猫-кошка-قطة-बिल्ली-แมว-고양이-γάτα-חתול
+D	-	-	-	NFC	cats/Katze-{U+732B}-{U+043A}{U+043E}{U+0448}{U+043A}{U+0430}-{U+0642}{U+0637}{U+0629}-{U+092C}{U+093F}{U+0932}{U+094D}{U+0932}{U+0940}-{U+0E41}{U+0E21}{U+0E27}-{U+ACE0}{U+C591}{U+C774}-{U+03B3}{U+03AC}{U+03C4}{U+03B1}-{U+05D7}{U+05EA}{U+05D5}{U+05DC}/{U+1F431}	cats/Katze-猫-кошка-قطة-बिल्ली-แมว-고양이-γάτα-חתול/🐱
+F	154	bb4c4193a57f1cde9869ce6e8a2e623b4a1d861399ed4aa5a48f4cef7cc4034d	2026-01-01T12:00:00Z	NFC	cats/Katze-{U+732B}-{U+043A}{U+043E}{U+0448}{U+043A}{U+0430}-{U+0642}{U+0637}{U+0629}-{U+092C}{U+093F}{U+0932}{U+094D}{U+0932}{U+0940}-{U+0E41}{U+0E21}{U+0E27}-{U+ACE0}{U+C591}{U+C774}-{U+03B3}{U+03AC}{U+03C4}{U+03B1}-{U+05D7}{U+05EA}{U+05D5}{U+05DC}/{U+1F431}/Katze.txt	cats/Katze-猫-кошка-قطة-बिल्ली-แมว-고양이-γάτα-חתול/🐱/Katze.txt
+D	-	-	-	both	cats/{U+1F408}	cats/🐈
+D	-	-	-	both	cats/{U+1F408}/{U+1F408}{U+200D}{U+2B1B}	cats/🐈/🐈‍⬛
+F	58	6375a2c048f189f3f41d92e2d7738b5be59b5952988c34996dd5accfe2f4d93d	2026-01-01T12:00:00Z	both	cats/{U+1F408}/{U+1F408}{U+200D}{U+2B1B}/nap.txt	cats/🐈/🐈‍⬛/nap.txt
+D	-	-	-	both	cats/{U+1F408}/{U+1F408}{U+200D}{U+2B1B}/{U+1F41F}	cats/🐈/🐈‍⬛/🐟
+D	-	-	-	both	cats/{U+1F408}/{U+1F408}{U+200D}{U+2B1B}/{U+1F43E}	cats/🐈/🐈‍⬛/🐾
+D	-	-	-	both	cats/{U+1F431}	cats/🐱
+D	-	-	-	both	cats/{U+1F431}/{U+1F63A}	cats/🐱/😺
+D	-	-	-	both	cats/{U+1F431}/{U+1F63A}/{U+1F4F7}	cats/🐱/😺/📷
+F	65537	de4b019f0b9d3e50693460d9edf076cfeb048e9f7097c733afc18310054ed748	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F4F7}/{U+1F431} photo.bin	cats/🐱/😺/📷/🐱 photo.bin
+D	-	-	-	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}	cats/🐱/😺/😸
+D	-	-	-	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}	cats/🐱/😺/😸/😹
+D	-	-	-	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}	cats/🐱/😺/😸/😹/😻
+F	80	386c4176de1f8724f1e97d0f09ab47e091c8306d429d0a0a507f4a0f6337e3db	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F408} Katze {U+1F43E}.txt	cats/🐱/😺/😸/😹/😻/🐈 Katze 🐾.txt
+F	119	7383a6f7f6108d43561c5877e9c04acb189dfc8387fe05dacc600c5602f3c5f0	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F408}{U+200D}{U+2B1B} schwarze Katze.txt	cats/🐱/😺/😸/😹/😻/🐈‍⬛ schwarze Katze.txt
+F	136	70cd8495305a466d4624ebe2dde4c07d06b8f555ec7089f1dcd02d0a9f05c392	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F431} Cat #1 {U+2013} {U+201C}Whiskers{U+201D} (v2) [final].txt	cats/🐱/😺/😸/😹/😻/🐱 Cat #1 – “Whiskers” (v2) [final].txt
+F	133	826be8fb70caba2d2cb1783241c70de73200da9775da8a5ffd14e0c0455137b3	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F431}{U+200D}{U+1F464} stunt cat {U+1F431}{U+200D}{U+1F3CD} {U+1F431}{U+200D}{U+1F680}.txt	cats/🐱/😺/😸/😹/😻/🐱‍👤 stunt cat 🐱‍🏍 🐱‍🚀.txt
+F	113	aa9b88dda71036bd1f317502a19df75a33752bb90a57b5cf10835df59b5b66a5	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431} ten cats.txt	cats/🐱/😺/😸/😹/😻/🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱 ten cats.txt
+F	1	7d8c5da7fd418379048e430b33dc8ffcda739e44326b8a5d647dc0ad81ed2157	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F43E}{U+1F43E}{U+1F43E}.bin	cats/🐱/😺/😸/😹/😻/🐾🐾🐾.bin
+F	117	a1ecfccbaf1278ac91c5aa29043f0dba80472f92475880f1617d298b07854786	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F638} grinsende Katze {U+1F639}.md	cats/🐱/😺/😸/😹/😻/😸 grinsende Katze 😹.md
+F	79	020e5c9f6bd588912e0e37d639087ba1d9f35049505400712d773f99ddc3f1c3	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F63A} Mieze.txt	cats/🐱/😺/😸/😹/😻/😺 Mieze.txt
+F	108	8b18855211432ecd51c3d24eae63dc328e6207621a518dcec8ba14bea9ccdd2c	2026-01-01T12:00:00Z	NFC	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F63B} Katzen & M{U+00E4}use {U+1F42D} und {U+1F41F}.txt	cats/🐱/😺/😸/😹/😻/😻 Katzen & Mäuse 🐭 und 🐟.txt
+F	165	ffb01ddf71b0708d037eca9915a304b6dc3c51e5cd7b44c2b4c4d8b8e47149c7	2026-01-01T12:00:00Z	NFC	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F63D} {U+041C}{U+0438}{U+0430}{U+0443} {U+1F431} {U+55B5} {U+1F431} {U+30CB}{U+30E3}{U+30FC} {U+1F431} {U+C57C}{U+C639} {U+1F431} {U+092E}{U+093F}{U+092F}{U+093E}{U+090A} {U+1F431} {U+0645}{U+064A}{U+0627}{U+0648}.txt	cats/🐱/😺/😸/😹/😻/😽 Миау 🐱 喵 🐱 ニャー 🐱 야옹 🐱 मियाऊ 🐱 مياو.txt
+F	112	c44ed1c84bea63fde44312f3e116c4c9a9ba915c62a6ededd36a189f8d85a414	2026-01-01T12:00:00Z	NFC	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F640} erschrocken {U+1F63F} traurig {U+1F63E} w{U+00FC}tend.txt	cats/🐱/😺/😸/😹/😻/🙀 erschrocken 😿 traurig 😾 wütend.txt
+F	100	d1e46160bd10972c2f147043ed069e0d75e52276d3abc1470975823ff04a776c	2026-01-01T12:00:00Z	both	cats/{U+1F431}/{U+1F63A}/{U+1F638}/{U+1F639}/{U+1F63B}/{U+1F981}{U+1F42F}{U+1F405}{U+1F406} big cats.txt	cats/🐱/😺/😸/😹/😻/🦁🐯🐅🐆 big cats.txt
+D	-	-	-	both	cjk	cjk
+D	-	-	-	both	cjk/{U+182E}{U+1823}{U+1829}{U+182D}{U+1823}{U+182F}	cjk/ᠮᠣᠩᠭᠣᠯ
+D	-	-	-	both	cjk/{U+182E}{U+1823}{U+1829}{U+182D}{U+1823}{U+182F}/{U+182A}{U+1822}{U+1834}{U+1822}{U+182D}	cjk/ᠮᠣᠩᠭᠣᠯ/ᠪᠢᠴᠢᠭ
+F	141	3ac324f5d9d07f91ce514a4acfead8e806085eae4f4ba0020c101f54a9c0fc89	2026-01-01T12:00:00Z	both	cjk/{U+182E}{U+1823}{U+1829}{U+182D}{U+1823}{U+182F}/{U+182A}{U+1822}{U+1834}{U+1822}{U+182D}/{U+1830}{U+1820}{U+1822}{U+1828} {U+182A}{U+1820}{U+1822}{U+1828}{U+180E}{U+1820} {U+1824}{U+1824}.txt	cjk/ᠮᠣᠩᠭᠣᠯ/ᠪᠢᠴᠢᠭ/ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ.txt
+D	-	-	-	both	cjk/{U+3105}{U+3106}{U+3107}{U+3108}	cjk/ㄅㄆㄇㄈ
+D	-	-	-	both	cjk/{U+3105}{U+3106}{U+3107}{U+3108}/{U+6CE8}{U+97F3}	cjk/ㄅㄆㄇㄈ/注音
+F	83	cbf1fa96888daea0a297fb8cd28a5bb9f1e51702c0b612b9c6423e921c0ac190	2026-01-01T12:00:00Z	both	cjk/{U+3105}{U+3106}{U+3107}{U+3108}/{U+6CE8}{U+97F3}/{U+310B}{U+3127}{U+02C7}{U+310F}{U+3120}{U+02C7}.txt	cjk/ㄅㄆㄇㄈ/注音/ㄋㄧˇㄏㄠˇ.txt
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}	cjk/中文
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}	cjk/中文/简体
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}	cjk/中文/简体/文档
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}/{U+4FE1}{U+4EF6}	cjk/中文/简体/文档/信件
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}/{U+4FE1}{U+4EF6}/{U+8349}{U+7A3F}	cjk/中文/简体/文档/信件/草稿
+F	95	8ca2951a0fd301941bcf28a09d5bff88afffc573c272a871e202b33ae0508d3a	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}/{U+4FE1}{U+4EF6}/{U+8349}{U+7A3F}/{U+4F60}{U+597D}{U+FF0C}{U+4E16}{U+754C}.txt	cjk/中文/简体/文档/信件/草稿/你好，世界.txt
+F	1000000	b6a17c9d231468a534f382a852dbc4e38900e06f8b06f3b5ed6ab890d9edd8bb	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}/{U+4FE1}{U+4EF6}/{U+8349}{U+7A3F}/{U+6570}{U+636E}-1MB.bin	cjk/中文/简体/文档/信件/草稿/数据-1MB.bin
+F	116	ef907107c95432301913424530278e175d87a551c7d44a12cf417b338e590d55	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7B80}{U+4F53}/{U+6587}{U+6863}/{U+4FE1}{U+4EF6}/{U+8349}{U+7A3F}/{U+6570}{U+636E}{U+8868}.csv	cjk/中文/简体/文档/信件/草稿/数据表.csv
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}	cjk/中文/繁體
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}/{U+6587}{U+4EF6}	cjk/中文/繁體/文件
+D	-	-	-	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}/{U+6587}{U+4EF6}/{U+66F8}{U+4FE1}	cjk/中文/繁體/文件/書信
+F	82	f04e0781b3966324fc7ee31d8e5f57fd9109bafdae8f0987926a57ae601c7f7b	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}/{U+6587}{U+4EF6}/{U+66F8}{U+4FE1}/{U+4F60}{U+597D}{U+4E16}{U+754C}.txt	cjk/中文/繁體/文件/書信/你好世界.txt
+F	85	fe525520c66c072c5b039f361541ad40e8b2448636a1e2b2efbcb0799814bd51	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}/{U+6587}{U+4EF6}/{U+66F8}{U+4FE1}/{U+20000}{U+20001}{U+20002}.txt	cjk/中文/繁體/文件/書信/𠀀𠀁𠀂.txt
+F	105	44649665552b970363bc27d4c44c8b7fb2dc92063822cce93c9e029e255e6aae	2026-01-01T12:00:00Z	both	cjk/{U+4E2D}{U+6587}/{U+7E41}{U+9AD4}/{U+6587}{U+4EF6}/{U+66F8}{U+4FE1}/{U+20BB7}{U+91CE}{U+5BB6}.txt	cjk/中文/繁體/文件/書信/𠮷野家.txt
+D	-	-	-	both	cjk/{U+65E5}{U+672C}{U+8A9E}	cjk/日本語
+D	-	-	-	NFC	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+3072}{U+3089}{U+304C}{U+306A}	cjk/日本語/ひらがな
+F	104	8498169409a7e144f78a5103493f0698b1c86e6f23822973ec9c58ae50460ef9	2026-01-01T12:00:00Z	NFC	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+3072}{U+3089}{U+304C}{U+306A}/{U+3072}{U+3089}{U+304C}{U+306A}{U+3060}{U+3051}.txt	cjk/日本語/ひらがな/ひらがなだけ.txt
+D	-	-	-	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}	cjk/日本語/漢字
+D	-	-	-	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}	cjk/日本語/漢字/文書
+D	-	-	-	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}/{U+624B}{U+7D19}	cjk/日本語/漢字/文書/手紙
+F	103	01e4243877c99bccbcb243819de7d3ee215eb8ca46f2af91cafeea49aec9cb0f	2026-01-01T12:00:00Z	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}/{U+624B}{U+7D19}/{U+3053}{U+3093}{U+306B}{U+3061}{U+306F}{U+4E16}{U+754C}.txt	cjk/日本語/漢字/文書/手紙/こんにちは世界.txt
+F	103	8c4bcb8f1ec1b4d0fdd34138e89a1aaf4b680c2236c32f9e830b8c3f315d71c6	2026-01-01T12:00:00Z	NFC	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}/{U+624B}{U+7D19}/{U+30CF}{U+30ED}{U+30FC}{U+30EF}{U+30FC}{U+30EB}{U+30C9}.txt	cjk/日本語/漢字/文書/手紙/ハローワールド.txt
+D	-	-	-	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}/{U+624B}{U+7D19}/{U+4E0B}{U+66F8}{U+304D}	cjk/日本語/漢字/文書/手紙/下書き
+F	103	f71fd83592c5a8b68fe758de0a678cf149f5b113eb8f03e637fd41b1dfc3af7d	2026-01-01T12:00:00Z	both	cjk/{U+65E5}{U+672C}{U+8A9E}/{U+6F22}{U+5B57}/{U+6587}{U+66F8}/{U+624B}{U+7D19}/{U+FF76}{U+FF80}{U+FF76}{U+FF85}{U+534A}{U+89D2}.txt	cjk/日本語/漢字/文書/手紙/ｶﾀｶﾅ半角.txt
+D	-	-	-	both	cjk/{U+7CB5}{U+8A9E}	cjk/粵語
+D	-	-	-	both	cjk/{U+7CB5}{U+8A9E}/{U+6587}{U+4EF6}	cjk/粵語/文件
+F	74	d8647426444cbca82b17cbe447cbd7b82d84cc91e6578c5ed53bcd8b0ba24be5	2026-01-01T12:00:00Z	both	cjk/{U+7CB5}{U+8A9E}/{U+6587}{U+4EF6}/{U+4F60}{U+597D}{U+4E16}{U+754C}{U+5587}.txt	cjk/粵語/文件/你好世界喇.txt
+D	-	-	-	both	cjk/{U+A188}{U+A320}	cjk/ꆈꌠ
+D	-	-	-	both	cjk/{U+A188}{U+A320}/{U+A009}{U+A00A}	cjk/ꆈꌠ/ꀉꀊ
+F	77	33240ba1aad488ac19640ff95cc63eb453c34b4a34a20c2791c3c2888ac96121	2026-01-01T12:00:00Z	both	cjk/{U+A188}{U+A320}/{U+A009}{U+A00A}/{U+A188}{U+A320}{U+A259}.txt	cjk/ꆈꌠ/ꀉꀊ/ꆈꌠꉙ.txt
+D	-	-	-	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}	cjk/한국어
+D	-	-	-	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}/{U+BB38}{U+C11C}	cjk/한국어/문서
+D	-	-	-	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}/{U+BB38}{U+C11C}/{U+D3B8}{U+C9C0}	cjk/한국어/문서/편지
+D	-	-	-	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}/{U+BB38}{U+C11C}/{U+D3B8}{U+C9C0}/{U+CD08}{U+C548}	cjk/한국어/문서/편지/초안
+F	105	0ee9056f1765498f3fb1b8bd69dd65ae1a8f3e668ff87a3a5d55eedc6530fc70	2026-01-01T12:00:00Z	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}/{U+BB38}{U+C11C}/{U+D3B8}{U+C9C0}/{U+CD08}{U+C548}/{U+C548}{U+B155}{U+D558}{U+C138}{U+C694} {U+C138}{U+ACC4}.txt	cjk/한국어/문서/편지/초안/안녕하세요 세계.txt
+F	129	781daae2f2adc9243791987209a651e837e1f37cbb619059a5ee0087c8ca27f6	2026-01-01T12:00:00Z	NFC	cjk/{U+D55C}{U+AD6D}{U+C5B4}/{U+BB38}{U+C11C}/{U+D3B8}{U+C9C0}/{U+CD08}{U+C548}/{U+D55C}{U+AE00} {U+C790}{U+BAA8} {U+314E}{U+314F}{U+3134}{U+3131}{U+3161}{U+3139}.txt	cjk/한국어/문서/편지/초안/한글 자모 ㅎㅏㄴㄱㅡㄹ.txt
+D	-	-	-	both	cyrillic	cyrillic
+D	-	-	-	both	cyrillic/{U+0411}{U+0435}{U+043B}{U+0430}{U+0440}{U+0443}{U+0441}{U+043A}{U+0430}{U+044F}	cyrillic/Беларуская
+D	-	-	-	both	cyrillic/{U+0411}{U+0435}{U+043B}{U+0430}{U+0440}{U+0443}{U+0441}{U+043A}{U+0430}{U+044F}/{U+0414}{U+0430}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}	cyrillic/Беларуская/Дакументы
+F	138	49e50bfc4f16965f7841a4c51a5a941eb45db99c319d576592dbbc3e637647d6	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0411}{U+0435}{U+043B}{U+0430}{U+0440}{U+0443}{U+0441}{U+043A}{U+0430}{U+044F}/{U+0414}{U+0430}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0440}{U+044B}{U+0432}{U+0456}{U+0442}{U+0430}{U+043D}{U+043D}{U+0435}, {U+0441}{U+0432}{U+0435}{U+0442} {U+045E}.txt	cyrillic/Беларуская/Дакументы/Прывітанне, свет ў.txt
+D	-	-	-	both	cyrillic/{U+0411}{U+044A}{U+043B}{U+0433}{U+0430}{U+0440}{U+0441}{U+043A}{U+0438}	cyrillic/Български
+D	-	-	-	both	cyrillic/{U+0411}{U+044A}{U+043B}{U+0433}{U+0430}{U+0440}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}	cyrillic/Български/Документи
+F	121	0168e5b9372cf0a59beea82f5f404e3aaccb03bc5a6f107c8cf93b6002e6ede0	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0411}{U+044A}{U+043B}{U+0433}{U+0430}{U+0440}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}/{U+0417}{U+0434}{U+0440}{U+0430}{U+0432}{U+0435}{U+0439}, {U+0441}{U+0432}{U+044F}{U+0442}.txt	cyrillic/Български/Документи/Здравей, свят.txt
+D	-	-	-	both	cyrillic/{U+041C}{U+0430}{U+043A}{U+0435}{U+0434}{U+043E}{U+043D}{U+0441}{U+043A}{U+0438}	cyrillic/Македонски
+D	-	-	-	both	cyrillic/{U+041C}{U+0430}{U+043A}{U+0435}{U+0434}{U+043E}{U+043D}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}	cyrillic/Македонски/Документи
+F	132	052b5376dafa332e79c7970036fd37f3ee477f4c239de86bbeb7ff5b26e99ef5	2026-01-01T12:00:00Z	NFC	cyrillic/{U+041C}{U+0430}{U+043A}{U+0435}{U+0434}{U+043E}{U+043D}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}/{U+0417}{U+0434}{U+0440}{U+0430}{U+0432}{U+043E}, {U+0441}{U+0432}{U+0435}{U+0442}{U+0443} {U+0453} {U+045C} {U+0455}.txt	cyrillic/Македонски/Документи/Здраво, свету ѓ ќ ѕ.txt
+D	-	-	-	both	cyrillic/{U+041C}{U+043E}{U+043D}{U+0433}{U+043E}{U+043B}	cyrillic/Монгол
+D	-	-	-	both	cyrillic/{U+041C}{U+043E}{U+043D}{U+0433}{U+043E}{U+043B}/{U+0411}{U+0438}{U+0447}{U+0438}{U+0433}	cyrillic/Монгол/Бичиг
+F	123	21621b0826a0f779363bfc65d64c26cf725843733e1d0da6aad8d27b24bb47f5	2026-01-01T12:00:00Z	NFC	cyrillic/{U+041C}{U+043E}{U+043D}{U+0433}{U+043E}{U+043B}/{U+0411}{U+0438}{U+0447}{U+0438}{U+0433}/{U+0421}{U+0430}{U+0439}{U+043D} {U+0443}{U+0443}, {U+0434}{U+044D}{U+043B}{U+0445}{U+0438}{U+0439} {U+04E9}{U+04E9} {U+04AF}{U+04AF}.txt	cyrillic/Монгол/Бичиг/Сайн уу, дэлхий өө үү.txt
+D	-	-	-	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}	cyrillic/Русский
+D	-	-	-	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}	cyrillic/Русский/Документы
+D	-	-	-	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0438}{U+0441}{U+044C}{U+043C}{U+0430}	cyrillic/Русский/Документы/Письма
+D	-	-	-	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0438}{U+0441}{U+044C}{U+043C}{U+0430}/{U+0427}{U+0435}{U+0440}{U+043D}{U+043E}{U+0432}{U+0438}{U+043A}{U+0438}	cyrillic/Русский/Документы/Письма/Черновики
+F	177	78c16d4393a12af5d6d6bc4f99d2e0f024132f427b312bc4531f4a25d34376de	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0438}{U+0441}{U+044C}{U+043C}{U+0430}/{U+0427}{U+0435}{U+0440}{U+043D}{U+043E}{U+0432}{U+0438}{U+043A}{U+0438}/{U+0401}{U+0436}{U+0438}{U+043A} {U+0432} {U+0442}{U+0443}{U+043C}{U+0430}{U+043D}{U+0435}.md	cyrillic/Русский/Документы/Письма/Черновики/Ёжик в тумане.md
+F	141	2a9242dde22f1060df225e1f9ac87555f2af48cdfa43334eb405e1c5027aeb6b	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0438}{U+0441}{U+044C}{U+043C}{U+0430}/{U+0427}{U+0435}{U+0440}{U+043D}{U+043E}{U+0432}{U+0438}{U+043A}{U+0438}/{U+041F}{U+0440}{U+0438}{U+0432}{U+0435}{U+0442}, {U+043C}{U+0438}{U+0440}.txt	cyrillic/Русский/Документы/Письма/Черновики/Привет, мир.txt
+F	276	59d0a5a68ababa83620419ba4041c19b4c9429c04818398c372895f79ab428f3	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0420}{U+0443}{U+0441}{U+0441}{U+043A}{U+0438}{U+0439}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+044B}/{U+041F}{U+0438}{U+0441}{U+044C}{U+043C}{U+0430}/{U+0427}{U+0435}{U+0440}{U+043D}{U+043E}{U+0432}{U+0438}{U+043A}{U+0438}/{U+0421}{U+044A}{U+0435}{U+0448}{U+044C} {U+0435}{U+0449}{U+0451} {U+044D}{U+0442}{U+0438}{U+0445} {U+043C}{U+044F}{U+0433}{U+043A}{U+0438}{U+0445} {U+0444}{U+0440}{U+0430}{U+043D}{U+0446}{U+0443}{U+0437}{U+0441}{U+043A}{U+0438}{U+0445} {U+0431}{U+0443}{U+043B}{U+043E}{U+043A}.txt	cyrillic/Русский/Документы/Письма/Черновики/Съешь ещё этих мягких французских булок.txt
+D	-	-	-	both	cyrillic/{U+0421}{U+0440}{U+043F}{U+0441}{U+043A}{U+0438}	cyrillic/Српски
+D	-	-	-	both	cyrillic/{U+0421}{U+0440}{U+043F}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}	cyrillic/Српски/Документи
+F	130	28e301d4e37756bc97e539753a4d92b4190470e59ee6c3f1d27de9565502b8ae	2026-01-01T12:00:00Z	both	cyrillic/{U+0421}{U+0440}{U+043F}{U+0441}{U+043A}{U+0438}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}/{U+0417}{U+0434}{U+0440}{U+0430}{U+0432}{U+043E}, {U+0441}{U+0432}{U+0435}{U+0442}{U+0435} {U+0459} {U+045A} {U+0452} {U+045B} {U+045F}.txt	cyrillic/Српски/Документи/Здраво, свете љ њ ђ ћ џ.txt
+D	-	-	-	NFC	cyrillic/{U+0423}{U+043A}{U+0440}{U+0430}{U+0457}{U+043D}{U+0441}{U+044C}{U+043A}{U+0430}	cyrillic/Українська
+D	-	-	-	NFC	cyrillic/{U+0423}{U+043A}{U+0440}{U+0430}{U+0457}{U+043D}{U+0441}{U+044C}{U+043A}{U+0430}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}	cyrillic/Українська/Документи
+F	159	ad554575c847cfbab6e7ece1efdf8fd00e7ef69a3439f980670e9313ecfad2ec	2026-01-01T12:00:00Z	NFC	cyrillic/{U+0423}{U+043A}{U+0440}{U+0430}{U+0457}{U+043D}{U+0441}{U+044C}{U+043A}{U+0430}/{U+0414}{U+043E}{U+043A}{U+0443}{U+043C}{U+0435}{U+043D}{U+0442}{U+0438}/{U+041F}{U+0440}{U+0438}{U+0432}{U+0456}{U+0442}, {U+0441}{U+0432}{U+0456}{U+0442}{U+0435} {U+0491}{U+0430}{U+043D}{U+043E}{U+043A} {U+0454}{U+0434}{U+043D}{U+0456}{U+0441}{U+0442}{U+044C}.txt	cyrillic/Українська/Документи/Привіт, світе ґанок єдність.txt
+D	-	-	-	both	cyrillic/{U+049A}{U+0430}{U+0437}{U+0430}{U+049B}{U+0448}{U+0430}	cyrillic/Қазақша
+D	-	-	-	both	cyrillic/{U+049A}{U+0430}{U+0437}{U+0430}{U+049B}{U+0448}{U+0430}/{U+049A}{U+04B1}{U+0436}{U+0430}{U+0442}{U+0442}{U+0430}{U+0440}	cyrillic/Қазақша/Құжаттар
+F	131	e082617e2c08fc082907f13d9714737c7d7bd96b0e9bcf014229b69b45d4fca2	2026-01-01T12:00:00Z	both	cyrillic/{U+049A}{U+0430}{U+0437}{U+0430}{U+049B}{U+0448}{U+0430}/{U+049A}{U+04B1}{U+0436}{U+0430}{U+0442}{U+0442}{U+0430}{U+0440}/{U+0421}{U+04D9}{U+043B}{U+0435}{U+043C}, {U+04D9}{U+043B}{U+0435}{U+043C} {U+0493} {U+049B} {U+04A3} {U+04E9} {U+04B1} {U+04AF} {U+04BB} {U+0456}.txt	cyrillic/Қазақша/Құжаттар/Сәлем, әлем ғ қ ң ө ұ ү һ і.txt
+D	-	-	-	both	european-latin	european-latin
+D	-	-	-	both	european-latin/Cymraeg-Gaeilge	european-latin/Cymraeg-Gaeilge
+D	-	-	-	both	european-latin/Cymraeg-Gaeilge/Dogfennau	european-latin/Cymraeg-Gaeilge/Dogfennau
+F	123	0a259aa00f435a09159c240301753f42eb476ba877cb9ce7ecdc4616aac1ae5a	2026-01-01T12:00:00Z	NFC	european-latin/Cymraeg-Gaeilge/Dogfennau/Dydd da {U+2013} {U+0175}y {U+0177} {U+00E1}{U+00E9}{U+00ED}{U+00F3}{U+00FA}.txt	european-latin/Cymraeg-Gaeilge/Dogfennau/Dydd da – ŵy ŷ áéíóú.txt
+D	-	-	-	both	european-latin/Dansk-Norsk-Svensk	european-latin/Dansk-Norsk-Svensk
+D	-	-	-	both	european-latin/Dansk-Norsk-Svensk/Dokument	european-latin/Dansk-Norsk-Svensk/Dokument
+F	139	076b65e0580eea7bf4fb167444109e31dcaee0863654d6d8623783678f264ef5	2026-01-01T12:00:00Z	NFC	european-latin/Dansk-Norsk-Svensk/Dokument/Bl{U+00E5}b{U+00E6}rsyltet{U+00F8}y och sm{U+00F6}rg{U+00E5}sbord.txt	european-latin/Dansk-Norsk-Svensk/Dokument/Blåbærsyltetøy och smörgåsbord.txt
+F	101	08f5ed3812ef349d9a7086942291a4ba188a8e7280e2556e0d0aa0a038027506	2026-01-01T12:00:00Z	NFC	european-latin/Dansk-Norsk-Svensk/Dokument/{U+00E6}{U+00F8}{U+00E5} {U+00C6}{U+00D8}{U+00C5}.txt	european-latin/Dansk-Norsk-Svensk/Dokument/æøå ÆØÅ.txt
+D	-	-	-	both	european-latin/Deutsch	european-latin/Deutsch
+D	-	-	-	both	european-latin/Deutsch/Dokumente	european-latin/Deutsch/Dokumente
+D	-	-	-	both	european-latin/Deutsch/Dokumente/Briefe	european-latin/Deutsch/Dokumente/Briefe
+D	-	-	-	NFC	european-latin/Deutsch/Dokumente/Briefe/Entw{U+00FC}rfe	european-latin/Deutsch/Dokumente/Briefe/Entwürfe
+F	110	0500a773d0d40edde2510da39c045686f4f599030e635d14d0d9db783002fa2f	2026-01-01T12:00:00Z	NFC	european-latin/Deutsch/Dokumente/Briefe/Entw{U+00FC}rfe/Gr{U+00FC}{U+00DF}e aus K{U+00F6}ln.txt	european-latin/Deutsch/Dokumente/Briefe/Entwürfe/Grüße aus Köln.txt
+F	146	c2f08684bf7c1bf579fc4af6e5d5850c1c8cf132d119e6ce5c78d57cff614a82	2026-01-01T12:00:00Z	NFC	european-latin/Deutsch/Dokumente/Briefe/Entw{U+00FC}rfe/Stra{U+00DF}enbahn Gr{U+00F6}{U+00DF}e.md	european-latin/Deutsch/Dokumente/Briefe/Entwürfe/Straßenbahn Größe.md
+F	125	90af70ea879e2f9b52035ba3b8a6a3cbfd63c70017019e7dee53625c578ceda2	2026-01-01T12:00:00Z	NFC	european-latin/Deutsch/Dokumente/Briefe/Entw{U+00FC}rfe/{U+00C4}rger {U+00FC}ber {U+00D6}l und {U+00DC}bermut.txt	european-latin/Deutsch/Dokumente/Briefe/Entwürfe/Ärger über Öl und Übermut.txt
+D	-	-	-	NFC	european-latin/Espa{U+00F1}ol	european-latin/Español
+D	-	-	-	NFC	european-latin/Espa{U+00F1}ol/Documentos	european-latin/Español/Documentos
+F	141	0a13f65399f93b2321ff5a43926d0f4a85b98a12b329869c47386f99e076086c	2026-01-01T12:00:00Z	NFC	european-latin/Espa{U+00F1}ol/Documentos/{U+00A1}Hola, se{U+00F1}or! Ping{U+00FC}ino {U+2013} ma{U+00F1}ana.txt	european-latin/Español/Documentos/¡Hola, señor! Pingüino – mañana.txt
+D	-	-	-	both	european-latin/Esperanto	european-latin/Esperanto
+D	-	-	-	both	european-latin/Esperanto/Dokumentoj	european-latin/Esperanto/Dokumentoj
+F	123	6dc3f5e0a96974c7a08fe10af2337cf6c48f5d65a8661b2c80d99599c7ab4544	2026-01-01T12:00:00Z	NFC	european-latin/Esperanto/Dokumentoj/{U+0108}u vi {U+015D}atas {U+011D}ardenojn {U+016D}.txt	european-latin/Esperanto/Dokumentoj/Ĉu vi ŝatas ĝardenojn ŭ.txt
+D	-	-	-	NFC	european-latin/Fran{U+00E7}ais	european-latin/Français
+D	-	-	-	NFC	european-latin/Fran{U+00E7}ais/Documents	european-latin/Français/Documents
+D	-	-	-	NFC	european-latin/Fran{U+00E7}ais/Documents/Lettres	european-latin/Français/Documents/Lettres
+F	133	6e3b05a76aeb5831106a403151403994431f6b8e09d331d8dbfc76b6893841ec	2026-01-01T12:00:00Z	NFC	european-latin/Fran{U+00E7}ais/Documents/Lettres/Bonjour le monde, {U+0153}uvres.txt	european-latin/Français/Documents/Lettres/Bonjour le monde, œuvres.txt
+F	154	5f0eb1bdafc6a697ac70e19ed51d6f2764d039db107e1c1a0cd7a0deefdfe40d	2026-01-01T12:00:00Z	NFC	european-latin/Fran{U+00E7}ais/Documents/Lettres/Cr{U+00E8}me br{U+00FB}l{U+00E9}e {U+00E0} la fa{U+00E7}on d'Zo{U+00EB}.md	european-latin/Français/Documents/Lettres/Crème brûlée à la façon d'Zoë.md
+D	-	-	-	both	european-latin/Italiano	european-latin/Italiano
+D	-	-	-	both	european-latin/Italiano/Documenti	european-latin/Italiano/Documenti
+F	121	1fd73282b9edaba4579fb831ec0d2e4fb3c96764df4ceb79fd19d76c3a5e0e57	2026-01-01T12:00:00Z	NFC	european-latin/Italiano/Documenti/Citt{U+00E0} universit{U+00E0} perch{U+00E9}.txt	european-latin/Italiano/Documenti/Città università perché.txt
+D	-	-	-	NFC	european-latin/Lietuvi{U+0173}-Latvie{U+0161}u	european-latin/Lietuvių-Latviešu
+D	-	-	-	NFC	european-latin/Lietuvi{U+0173}-Latvie{U+0161}u/Dokumenti	european-latin/Lietuvių-Latviešu/Dokumenti
+F	141	2307f5d4e2e86590d1eae2b8e0821cb5305c951482716bf1b54f9320b05fb8f3	2026-01-01T12:00:00Z	NFC	european-latin/Lietuvi{U+0173}-Latvie{U+0161}u/Dokumenti/{U+0104}{U+017E}uolas {U+010D}iuo{U+017E}ia {U+0113}{U+016B}{U+0123}{U+0137}{U+013C}{U+0146}.txt	european-latin/Lietuvių-Latviešu/Dokumenti/Ąžuolas čiuožia ēūģķļņ.txt
+D	-	-	-	both	european-latin/Magyar	european-latin/Magyar
+D	-	-	-	both	european-latin/Magyar/Dokumentumok	european-latin/Magyar/Dokumentumok
+F	129	eb441d5fbde469b2cf98449e189b13095bdcc813807e89b92637df02f3049781	2026-01-01T12:00:00Z	NFC	european-latin/Magyar/Dokumentumok/{U+00C1}rv{U+00ED}zt{U+0171}r{U+0151} t{U+00FC}k{U+00F6}rf{U+00FA}r{U+00F3}g{U+00E9}p.txt	european-latin/Magyar/Dokumentumok/Árvíztűrő tükörfúrógép.txt
+D	-	-	-	both	european-latin/Malti	european-latin/Malti
+D	-	-	-	both	european-latin/Malti/Dokumenti	european-latin/Malti/Dokumenti
+F	105	620698b0635e1566cf0488daa21ea4e465eb5139872a681d444b8b1be14d1dec	2026-01-01T12:00:00Z	NFC	european-latin/Malti/Dokumenti/{U+0126}abib {U+0121}ie{U+0127} {U+017C}g{U+0127}ir.txt	european-latin/Malti/Dokumenti/Ħabib ġieħ żgħir.txt
+D	-	-	-	both	european-latin/Polski	european-latin/Polski
+D	-	-	-	both	european-latin/Polski/Dokumenty	european-latin/Polski/Dokumenty
+F	110	7dd9538126b2c62d1b058a72a1a5be26ffa4ab5ec9cc44974687c9bc093c2102	2026-01-01T12:00:00Z	NFC	european-latin/Polski/Dokumenty/Za{U+017C}{U+00F3}{U+0142}{U+0107} g{U+0119}{U+015B}l{U+0105} ja{U+017A}{U+0144}.txt	european-latin/Polski/Dokumenty/Zażółć gęślą jaźń.txt
+D	-	-	-	NFC	european-latin/Portugu{U+00EA}s	european-latin/Português
+D	-	-	-	NFC	european-latin/Portugu{U+00EA}s/Documentos	european-latin/Português/Documentos
+F	122	8d6e68e3e236e1f850806f636c03a9510bd0b31a8228681d696f8fd9d44aa909	2026-01-01T12:00:00Z	NFC	european-latin/Portugu{U+00EA}s/Documentos/Ol{U+00E1}, cora{U+00E7}{U+00E3}o e a{U+00E7}{U+00E3}o.txt	european-latin/Português/Documentos/Olá, coração e ação.txt
+D	-	-	-	NFC	european-latin/Rom{U+00E2}n{U+0103}	european-latin/Română
+D	-	-	-	NFC	european-latin/Rom{U+00E2}n{U+0103}/Documente	european-latin/Română/Documente
+F	132	95865c6eed53f650882a323fca1e2f78f4881a43cbd3523a4b07637293d1544b	2026-01-01T12:00:00Z	NFC	european-latin/Rom{U+00E2}n{U+0103}/Documente/{U+0218}oricelul {U+021B}ese {U+00EE}n {U+0219}trumf.txt	european-latin/Română/Documente/Șoricelul țese în ștrumf.txt
+D	-	-	-	both	european-latin/Suomi	european-latin/Suomi
+D	-	-	-	both	european-latin/Suomi/Asiakirjat	european-latin/Suomi/Asiakirjat
+F	115	2db8776df8118cb27336e58e379382f5cf104bc159a6b21605d930370d1a63f2	2026-01-01T12:00:00Z	NFC	european-latin/Suomi/Asiakirjat/Hyv{U+00E4}{U+00E4} y{U+00F6}t{U+00E4} p{U+00E4}iv{U+00E4}{U+00E4}.txt	european-latin/Suomi/Asiakirjat/Hyvää yötä päivää.txt
+D	-	-	-	NFC	european-latin/Ti{U+1EBF}ng Vi{U+1EC7}t	european-latin/Tiếng Việt
+D	-	-	-	NFC	european-latin/Ti{U+1EBF}ng Vi{U+1EC7}t/T{U+00E0}i li{U+1EC7}u	european-latin/Tiếng Việt/Tài liệu
+F	145	73adb31142bcd547ab8bb3a7f472d020507e018707bf9b0fc6df838dbc999510	2026-01-01T12:00:00Z	NFC	european-latin/Ti{U+1EBF}ng Vi{U+1EC7}t/T{U+00E0}i li{U+1EC7}u/Ti{U+1EBF}ng Vi{U+1EC7}t {U+2013} {U+1EC7} {U+1EEF} {U+1EDF} {U+1EB7} {U+1EF3}.txt	european-latin/Tiếng Việt/Tài liệu/Tiếng Việt – ệ ữ ở ặ ỳ.txt
+D	-	-	-	NFC	european-latin/T{U+00FC}rk{U+00E7}e	european-latin/Türkçe
+D	-	-	-	NFC	european-latin/T{U+00FC}rk{U+00E7}e/Belgeler	european-latin/Türkçe/Belgeler
+F	127	a2ad171a3776082d510ab49ac2516a1965d60ec3b460c3da8444b5a6a970c06c	2026-01-01T12:00:00Z	NFC	european-latin/T{U+00FC}rk{U+00E7}e/Belgeler/{U+0130}stanbul {U+0131}{U+011F}d{U+0131}r {U+015F}i{U+015F} {U+00E7}{U+011F}.txt	european-latin/Türkçe/Belgeler/İstanbul ığdır şiş çğ.txt
+D	-	-	-	NFC	european-latin/{U+00CD}slenska	european-latin/Íslenska
+D	-	-	-	NFC	european-latin/{U+00CD}slenska/Skj{U+00F6}l	european-latin/Íslenska/Skjöl
+F	127	5061cf2fcdc254ac3f32a00d30f4631df65d77deaa826b20736478c545760fa0	2026-01-01T12:00:00Z	NFC	european-latin/{U+00CD}slenska/Skj{U+00F6}l/{U+00DE}{U+00F3}r{U+00F0}ur {U+00E6}{U+00F0}ir yfir hafi{U+00F0}.txt	european-latin/Íslenska/Skjöl/Þórður æðir yfir hafið.txt
+D	-	-	-	NFC	european-latin/{U+010C}e{U+0161}tina	european-latin/Čeština
+D	-	-	-	NFC	european-latin/{U+010C}e{U+0161}tina/Dokumenty	european-latin/Čeština/Dokumenty
+F	143	39dee92165b66423f776db5c92ab4d7d84e09ac68029062a5e0278c3cc03ec26	2026-01-01T12:00:00Z	NFC	european-latin/{U+010C}e{U+0161}tina/Dokumenty/P{U+0159}{U+00ED}li{U+0161} {U+017E}lu{U+0165}ou{U+010D}k{U+00FD} k{U+016F}{U+0148}.txt	european-latin/Čeština/Dokumenty/Příliš žluťoučký kůň.txt
+D	-	-	-	both	greek-and-caucasus	greek-and-caucasus
+D	-	-	-	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}	greek-and-caucasus/Ελληνικά
+D	-	-	-	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}/{U+0388}{U+03B3}{U+03B3}{U+03C1}{U+03B1}{U+03C6}{U+03B1}	greek-and-caucasus/Ελληνικά/Έγγραφα
+D	-	-	-	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}/{U+0388}{U+03B3}{U+03B3}{U+03C1}{U+03B1}{U+03C6}{U+03B1}/{U+0395}{U+03C0}{U+03B9}{U+03C3}{U+03C4}{U+03BF}{U+03BB}{U+03AD}{U+03C2}	greek-and-caucasus/Ελληνικά/Έγγραφα/Επιστολές
+F	148	8236177daaf8bf69b37cc5cf5efa88331f4c7161073ed424cc531bbe45927167	2026-01-01T12:00:00Z	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}/{U+0388}{U+03B3}{U+03B3}{U+03C1}{U+03B1}{U+03C6}{U+03B1}/{U+0395}{U+03C0}{U+03B9}{U+03C3}{U+03C4}{U+03BF}{U+03BB}{U+03AD}{U+03C2}/{U+0393}{U+03B5}{U+03B9}{U+03AC} {U+03C3}{U+03BF}{U+03C5} {U+039A}{U+03CC}{U+03C3}{U+03BC}{U+03B5}.txt	greek-and-caucasus/Ελληνικά/Έγγραφα/Επιστολές/Γειά σου Κόσμε.txt
+F	154	cb0c3a3f1b76ff6b9504927d7c043e032ccc9c8a8dfa6c4a63c929804aa733f7	2026-01-01T12:00:00Z	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}/{U+0388}{U+03B3}{U+03B3}{U+03C1}{U+03B1}{U+03C6}{U+03B1}/{U+0395}{U+03C0}{U+03B9}{U+03C3}{U+03C4}{U+03BF}{U+03BB}{U+03AD}{U+03C2}/{U+03A3}{U+03AF}{U+03C3}{U+03C5}{U+03C6}{U+03BF}{U+03C2} {U+03A3}{U+038A}{U+03A3}{U+03A5}{U+03A6}{U+039F}{U+03A3}.txt	greek-and-caucasus/Ελληνικά/Έγγραφα/Επιστολές/Σίσυφος ΣΊΣΥΦΟΣ.txt
+F	169	708f72340290a1043c81dc23f219cf4e2a598cea07054cb3240062113f6e296d	2026-01-01T12:00:00Z	NFC	greek-and-caucasus/{U+0395}{U+03BB}{U+03BB}{U+03B7}{U+03BD}{U+03B9}{U+03BA}{U+03AC}/{U+0388}{U+03B3}{U+03B3}{U+03C1}{U+03B1}{U+03C6}{U+03B1}/{U+0395}{U+03C0}{U+03B9}{U+03C3}{U+03C4}{U+03BF}{U+03BB}{U+03AD}{U+03C2}/{U+03C0}{U+03BF}{U+03BB}{U+03C5}{U+03C4}{U+03BF}{U+03BD}{U+03B9}{U+03BA}{U+03CC} {U+1F00}{U+03B3}{U+03B1}{U+03B8}{U+1F78}{U+03BD} {U+1F84}{U+03B4}{U+03C9}.txt	greek-and-caucasus/Ελληνικά/Έγγραφα/Επιστολές/πολυτονικό ἀγαθὸν ᾄδω.txt
+D	-	-	-	both	greek-and-caucasus/{U+0540}{U+0561}{U+0575}{U+0565}{U+0580}{U+0565}{U+0576}	greek-and-caucasus/Հայերեն
+D	-	-	-	both	greek-and-caucasus/{U+0540}{U+0561}{U+0575}{U+0565}{U+0580}{U+0565}{U+0576}/{U+0553}{U+0561}{U+057D}{U+057F}{U+0561}{U+0569}{U+0572}{U+0569}{U+0565}{U+0580}	greek-and-caucasus/Հայերեն/Փաստաթղթեր
+F	127	3d7ea16ab02366cdec04e04cd2912bde5ce34874144e856bd7b78033db397084	2026-01-01T12:00:00Z	both	greek-and-caucasus/{U+0540}{U+0561}{U+0575}{U+0565}{U+0580}{U+0565}{U+0576}/{U+0553}{U+0561}{U+057D}{U+057F}{U+0561}{U+0569}{U+0572}{U+0569}{U+0565}{U+0580}/{U+0532}{U+0561}{U+0580}{U+0565}{U+0582} {U+0561}{U+0577}{U+056D}{U+0561}{U+0580}{U+0570}.txt	greek-and-caucasus/Հայերեն/Փաստաթղթեր/Բարեւ աշխարհ.txt
+D	-	-	-	both	greek-and-caucasus/{U+10E5}{U+10D0}{U+10E0}{U+10D7}{U+10E3}{U+10DA}{U+10D8}	greek-and-caucasus/ქართული
+D	-	-	-	both	greek-and-caucasus/{U+10E5}{U+10D0}{U+10E0}{U+10D7}{U+10E3}{U+10DA}{U+10D8}/{U+10D3}{U+10DD}{U+10D9}{U+10E3}{U+10DB}{U+10D4}{U+10DC}{U+10E2}{U+10D4}{U+10D1}{U+10D8}	greek-and-caucasus/ქართული/დოკუმენტები
+F	199	498c7006c341ca58208170e0326cbdf6efe74f101c520db7192224d66232eeb0	2026-01-01T12:00:00Z	both	greek-and-caucasus/{U+10E5}{U+10D0}{U+10E0}{U+10D7}{U+10E3}{U+10DA}{U+10D8}/{U+10D3}{U+10DD}{U+10D9}{U+10E3}{U+10DB}{U+10D4}{U+10DC}{U+10E2}{U+10D4}{U+10D1}{U+10D8}/{U+10D2}{U+10D0}{U+10DB}{U+10D0}{U+10E0}{U+10EF}{U+10DD}{U+10D1}{U+10D0} {U+10DB}{U+10E1}{U+10DD}{U+10E4}{U+10DA}{U+10D8}{U+10DD}.txt	greek-and-caucasus/ქართული/დოკუმენტები/გამარჯობა მსოფლიო.txt
+D	-	-	-	both	hazards	hazards
+D	-	-	-	both	hazards/case-fold	hazards/case-fold
+F	103	d9628aee06fff766a0678b7971a9f44e0eabe4581dfd29b83b64b1b0b9bffc6b	2026-01-01T12:00:00Z	both	hazards/case-fold/STRASSE.txt	hazards/case-fold/STRASSE.txt
+F	58	706ee4cf41edb0f02d652e8c8ac822d3a7ecfc2c4531a74868ae2acecd14a500	2026-01-01T12:00:00Z	both	hazards/case-fold/Stra{U+00DF}e.txt	hazards/case-fold/Straße.txt
+F	72	051e2b8d2aae2986e48d233e47b82b37b3b9d879837a78e3758415666fc721d0	2026-01-01T12:00:00Z	NFC	hazards/case-fold/{U+00C5}.txt	hazards/case-fold/Å.txt
+F	72	56a1f0f09917168dc9b7f8a3c96edfda5369c75e7323097dfa6e2690c0d23332	2026-01-01T12:00:00Z	both	hazards/case-fold/{U+01C5}.txt	hazards/case-fold/ǅ.txt
+F	59	97eadc527e74faff699ff250a29a81fda9f822fe8f1f43f98e699aa9c32fc9fa	2026-01-01T12:00:00Z	both	hazards/case-fold/{U+03A3}.txt	hazards/case-fold/Σ.txt
+F	57	4fcb3068392f5bae4fc4069cfa48bf1a15edc684609afd1981158af993564efd	2026-01-01T12:00:00Z	both	hazards/case-fold/{U+03C2}.txt	hazards/case-fold/ς.txt
+F	69	d0e72648b84b21e7cf17c23cc09f6f5d77ed583cf31f9439b7ead36125ce5cbf	2026-01-01T12:00:00Z	other	hazards/case-fold/{U+212B}.txt	hazards/case-fold/Å.txt
+D	-	-	-	both	hazards/content-encodings	hazards/content-encodings
+F	94	061d71a09e6d03e58246ed3bbe5b4f0e46cb54a2f93d06b47c3486365f35430b	2026-01-01T12:00:00Z	both	hazards/content-encodings/crlf-lines.txt	hazards/content-encodings/crlf-lines.txt
+F	76	5903bb42f06d13ca01e9bc713b1659c94edeb4d1446e84e2243a52e165a6968c	2026-01-01T12:00:00Z	both	hazards/content-encodings/latin1.txt	hazards/content-encodings/latin1.txt
+F	22	fd92b925674b915781cff481f181f5ad157f83b55e1bea18c0f2e552a8d65f85	2026-01-01T12:00:00Z	both	hazards/content-encodings/no-trailing-newline.txt	hazards/content-encodings/no-trailing-newline.txt
+F	4097	93866f7add01225a9e862bd00d7cc592d68b28fd494763cc09d0e1c29cf9e0e9	2026-01-01T12:00:00Z	both	hazards/content-encodings/nul-bytes.bin	hazards/content-encodings/nul-bytes.bin
+F	188	462e98eaf7aa3f688553cb25fdb493fcacd65a83fd5b359823de0d11c4fbb63e	2026-01-01T12:00:00Z	both	hazards/content-encodings/utf16-be-bom.txt	hazards/content-encodings/utf16-be-bom.txt
+F	194	5e8b845d48c05d2d7f2b5802a238ec1f7664361119f31f6d5b3f9e160e2bfd89	2026-01-01T12:00:00Z	both	hazards/content-encodings/utf16-le-bom.txt	hazards/content-encodings/utf16-le-bom.txt
+F	113	fc569852a21cccd93166cf8d6024982eccc1442f829c4db78d24bfa3b17d3708	2026-01-01T12:00:00Z	both	hazards/content-encodings/utf8-with-bom.txt	hazards/content-encodings/utf8-with-bom.txt
+D	-	-	-	both	hazards/deep-and-long-path	hazards/deep-and-long-path
+D	-	-	-	NFC	hazards/deep-and-long-path/{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}	hazards/deep-and-long-path/ääääääääääääääääääää
+D	-	-	-	NFC	hazards/deep-and-long-path/{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}/{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}	hazards/deep-and-long-path/ääääääääääääääääääää/üüüüüüüüüüüüüüüüüüüü
+D	-	-	-	NFC	hazards/deep-and-long-path/{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}/{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}/{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}	hazards/deep-and-long-path/ääääääääääääääääääää/üüüüüüüüüüüüüüüüüüüü/öööööööööööööööööööö
+D	-	-	-	NFC	hazards/deep-and-long-path/{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}/{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}/{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}/{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}	hazards/deep-and-long-path/ääääääääääääääääääää/üüüüüüüüüüüüüüüüüüüü/öööööööööööööööööööö/ßßßßßßßßßßßßßßßßßßßß
+F	307	3ecea3082d3e762f160f9cc99d8c57e2268c4613b4480e1e4bba4e3b8c92aff8	2026-01-01T12:00:00Z	NFC	hazards/deep-and-long-path/{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}{U+00E4}/{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}{U+00FC}/{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}{U+00F6}/{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}{U+00DF}/deepest.txt	hazards/deep-and-long-path/ääääääääääääääääääää/üüüüüüüüüüüüüüüüüüüü/öööööööööööööööööööö/ßßßßßßßßßßßßßßßßßßßß/deepest.txt
+D	-	-	-	both	hazards/duplicates	hazards/duplicates
+F	5000	baeb10dc91f455a191c009e9f81d7841afab1f62636df1d87cd9508459a3f341	2026-01-01T12:00:00Z	both	hazards/duplicates/same-bytes-a.bin	hazards/duplicates/same-bytes-a.bin
+F	5000	baeb10dc91f455a191c009e9f81d7841afab1f62636df1d87cd9508459a3f341	2026-01-01T12:00:00Z	both	hazards/duplicates/same-bytes-b.bin	hazards/duplicates/same-bytes-b.bin
+F	30	ec77ad5789dfc0de203fb3a38f27130d6aca36da4107176cfaeac6a0631ebee5	2026-01-01T12:00:00Z	both	hazards/duplicates/{U+043A}{U+043E}{U+043F}{U+0438}{U+044F}.txt	hazards/duplicates/копия.txt
+F	30	ec77ad5789dfc0de203fb3a38f27130d6aca36da4107176cfaeac6a0631ebee5	2026-01-01T12:00:00Z	both	hazards/duplicates/{U+0646}{U+0633}{U+062E}{U+0629}.txt	hazards/duplicates/نسخة.txt
+F	30	ec77ad5789dfc0de203fb3a38f27130d6aca36da4107176cfaeac6a0631ebee5	2026-01-01T12:00:00Z	both	hazards/duplicates/{U+539F}{U+672C}.txt	hazards/duplicates/原本.txt
+D	-	-	-	both	hazards/emoji-sequences	hazards/emoji-sequences
+F	79	f0a530747e21a23bbcc18faceb5148cb5138d869917ced4348fa8ed2ae3752b1	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/1{U+FE0F}{U+20E3} keycap.txt	hazards/emoji-sequences/1️⃣ keycap.txt
+F	104	11a233ac45d690fd4a5c00661248c24d6d84e29b0b233d78880018aef8334a2b	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F1E9}{U+1F1EA}{U+1F1EF}{U+1F1F5}{U+1F1E7}{U+1F1F7} flags.txt	hazards/emoji-sequences/🇩🇪🇯🇵🇧🇷 flags.txt
+F	81	a0bbc0b1bd4aa0f44fb4618bc79eb9d4953458ca84e39c08656c7f1c8b5cefd8	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F3F3}{U+FE0F}{U+200D}{U+1F308} flag.txt	hazards/emoji-sequences/🏳️‍🌈 flag.txt
+F	98	cf3b6bbb0539f9a3afe449f60eef94dbf92dfb80f8e902dc39579ab75de6c0a3	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F3F4}{U+E0067}{U+E0062}{U+E0065}{U+E006E}{U+E0067}{U+E007F} england.txt	hazards/emoji-sequences/🏴󠁧󠁢󠁥󠁮󠁧󠁿 england.txt
+F	83	1066163ce60f519b4b7bcc482e5b9d892e4910197d890e1bb32f43d0345248fe	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F44D}{U+1F3FD} thumbs.txt	hazards/emoji-sequences/👍🏽 thumbs.txt
+F	92	a9c557b06277e7812b8861af8885f1e826d8e77eea08146bfc263d6440e1074a	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F469}{U+200D}{U+1F469}{U+200D}{U+1F467}{U+200D}{U+1F466} family.txt	hazards/emoji-sequences/👩‍👩‍👧‍👦 family.txt
+F	103	a8100761963e925cdedb97d19965d7ff759034cba74174e2f0e07222f5b958a7	2026-01-01T12:00:00Z	both	hazards/emoji-sequences/{U+1F9D1}{U+1F3FD}{U+200D}{U+1F680} astronaut.txt	hazards/emoji-sequences/🧑🏽‍🚀 astronaut.txt
+D	-	-	-	both	hazards/empty-things	hazards/empty-things
+F	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	2026-01-01T12:00:00Z	both	hazards/empty-things/empty-ascii.txt	hazards/empty-things/empty-ascii.txt
+D	-	-	-	both	hazards/empty-things/empty-dir	hazards/empty-things/empty-dir
+D	-	-	-	both	hazards/empty-things/{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}{U+0436}	hazards/empty-things/жжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжжж
+F	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	2026-01-01T12:00:00Z	both	hazards/empty-things/{U+7A7A}.txt	hazards/empty-things/空.txt
+D	-	-	-	NFC	hazards/empty-things/{U+7A7A}{U+306E}{U+30D5}{U+30A9}{U+30EB}{U+30C0}	hazards/empty-things/空のフォルダ
+F	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	2026-01-01T12:00:00Z	both	hazards/empty-things/{U+1F431} empty.txt	hazards/empty-things/🐱 empty.txt
+D	-	-	-	both	hazards/empty-things/{U+1F4ED}	hazards/empty-things/📭
+D	-	-	-	both	hazards/invisible-and-lookalike-twins	hazards/invisible-and-lookalike-twins
+F	76	1de399e238cabe35bf559f8c06a5df76d81d0c5d275c963f8eef8c958972bd99	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/ABC.txt	hazards/invisible-and-lookalike-twins/ABC.txt
+F	74	b75d687bf479a6a8a2a2eee9e85ca4b374da2d2361007586fd7a2863b29fcfc1	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/ab.txt	hazards/invisible-and-lookalike-twins/ab.txt
+F	78	8696399c296b0c0c48a0827cab2803b586dbf380e977a366daf154196fa1ce98	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/apple.txt	hazards/invisible-and-lookalike-twins/apple.txt
+F	88	0d7ed579696bfe9e665d15145024fbb56bf8527dcdedf21cdbbd5199ba64d443	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/a{U+00A0}b.txt	hazards/invisible-and-lookalike-twins/a b.txt
+F	110	50145d32ea931ce647a91a2517a62eed79168da9af1fc781d0c58b953ae02242	2026-01-01T12:00:00Z	NFD	hazards/invisible-and-lookalike-twins/a{U+0301}{U+0302}{U+0303}{U+0304}{U+0305}.txt	hazards/invisible-and-lookalike-twins/á̂̃̄̅.txt
+F	91	f50f1425eda560360abf5f2cb3a3a74ad0cc8fd8d0ead64c4c6aefc56daf22a8	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/a{U+200B}b.txt	hazards/invisible-and-lookalike-twins/a​b.txt
+F	92	b0f153947107760f123776199100097001509ff31410ef6458c56ff113ad01f0	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/a{U+200D}b.txt	hazards/invisible-and-lookalike-twins/a‍b.txt
+F	86	686533e1d2bff8629f6785db7054d30e10725be46e36fe01a203bcdc23a4c9c1	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/a{U+2060}b.txt	hazards/invisible-and-lookalike-twins/a⁠b.txt
+F	92	9a75bdb1dfd48e4cba7a894dc85a6c0f6931e8a711fc6cd9e3f7add122dd1303	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/a{U+3000}b.txt	hazards/invisible-and-lookalike-twins/a　b.txt
+F	111	26526716aa1aea00e018f87010d2e7b2f70c2f2578f1812189f79de23b7d42d2	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+0430}pple.txt	hazards/invisible-and-lookalike-twins/аpple.txt
+F	100	1066f8ad1cf4192d15aa75094615a66b7f924bdb12abd9d358e7025365f6a4b6	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+200E}LRM first.txt	hazards/invisible-and-lookalike-twins/‎LRM first.txt
+F	100	fafed473b966a77a7e5369dfbba863f40598301355b74a8d7ae2f58d7ca039a8	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+200F}RLM first.txt	hazards/invisible-and-lookalike-twins/‏RLM first.txt
+F	91	1a2eceb0662aa8835e48d5bd230697287153ab713458eea99994209265a5af6e	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+2764}.txt	hazards/invisible-and-lookalike-twins/❤.txt
+F	102	f1dbb638ceab15bbd82dd09a04e8b226db7af8640633bca4d5016303b08d8598	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+2764}{U+FE0F}.txt	hazards/invisible-and-lookalike-twins/❤️.txt
+F	86	d8ca1b47e951eadad3e672f7665318a97f8e2218bd48289e13544087e822b656	2026-01-01T12:00:00Z	both	hazards/invisible-and-lookalike-twins/{U+FF21}{U+FF22}{U+FF23}.txt	hazards/invisible-and-lookalike-twins/ＡＢＣ.txt
+D	-	-	-	both	hazards/long-names	hazards/long-names
+F	197	dc9dbef65db2a5e2e57be4202eb0e1052142c7da13cc01d431d4f0f3926aea47	2026-01-01T12:00:00Z	both	hazards/long-names/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt	hazards/long-names/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt
+F	332	955de7e621e04ff084d720128b6bcb4d7ce905a56b4d9c1f9fdbc8e655e22177	2026-01-01T12:00:00Z	both	hazards/long-names/{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}{U+9F20}.txt	hazards/long-names/鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠鼠.txt
+F	346	f67d47ee598f6e639ddb094507cabb137de270728c00213c874b7e02e1c04260	2026-01-01T12:00:00Z	both	hazards/long-names/{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}{U+1F431}.txt	hazards/long-names/🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱.txt
+D	-	-	-	both	hazards/nfc-nfd-twins	hazards/nfc-nfd-twins
+F	63	a56fc4654bb3b8648555564a5f1b4bcc03adccb02ded61c7793f35401c5f68be	2026-01-01T12:00:00Z	NFD	hazards/nfc-nfd-twins/A{U+030A}ngstro{U+0308}m.txt	hazards/nfc-nfd-twins/Ångström.txt
+F	86	22c44c6f37825653f67a2c37035e27f4c209eb7f75243fdf21af9c08bca306b3	2026-01-01T12:00:00Z	NFD	hazards/nfc-nfd-twins/cafe{U+0301}.txt	hazards/nfc-nfd-twins/café.txt
+F	88	383a466ec0e5fa06365920732374e747c45f00612bda3cf342bf88c6a5d4c8a9	2026-01-01T12:00:00Z	NFC	hazards/nfc-nfd-twins/caf{U+00E9}.txt	hazards/nfc-nfd-twins/café.txt
+F	61	7567649372b0ea9a6e2d0dc6f5e27a2f21f5dfd101d89df9d9b4ffc81093027d	2026-01-01T12:00:00Z	NFC	hazards/nfc-nfd-twins/{U+00C5}ngstr{U+00F6}m.txt	hazards/nfc-nfd-twins/Ångström.txt
+F	77	e9adf19437349800bafcc3eaad3e46e360028c50827d6565e5e7f0cd6a330618	2026-01-01T12:00:00Z	NFD	hazards/nfc-nfd-twins/{U+1112}{U+1161}{U+11AB}{U+1100}{U+1173}{U+11AF}.txt	hazards/nfc-nfd-twins/한글.txt
+F	104	263f760cb5a71d3052fd912b6c70ee874e03e2ff7eac466cbe694d1044a6f936	2026-01-01T12:00:00Z	NFD	hazards/nfc-nfd-twins/{U+30AB}{U+3099}{U+30AD}{U+3099}{U+30AF}{U+3099}{U+30B1}{U+3099}{U+30B3}{U+3099}.txt	hazards/nfc-nfd-twins/ガギグゲゴ.txt
+F	78	fcd78e29540ca9ac67b96415f4628371a5d85904eaa6421bcaf77be892af85e8	2026-01-01T12:00:00Z	NFC	hazards/nfc-nfd-twins/{U+30AC}{U+30AE}{U+30B0}{U+30B2}{U+30B4}.txt	hazards/nfc-nfd-twins/ガギグゲゴ.txt
+F	70	a0871ce19e8e308e4008600fff1414cc42e5ff29e72b8ec7044f46ada7745f96	2026-01-01T12:00:00Z	NFC	hazards/nfc-nfd-twins/{U+D55C}{U+AE00}.txt	hazards/nfc-nfd-twins/한글.txt
+D	-	-	-	both	hazards/timestamps	hazards/timestamps
+F	86	5aede59d88d19f6819eac04386c038120cf384fc0f2a356247c4d7896a79a166	1970-01-02T00:00:00Z	both	hazards/timestamps/mtime-1970-01-02.txt	hazards/timestamps/mtime-1970-01-02.txt
+F	70	c6899fcad206363ce5eb9f538dbba4b61dd26ed2db895f19a3d255fe6915e81d	1980-01-01T00:00:00Z	both	hazards/timestamps/mtime-1980-01-01.txt	hazards/timestamps/mtime-1980-01-01.txt
+F	69	2b52e39e57427a55415d66d345d1d0ee678ddbd1cbb8e23857325bcb3cbefb24	2000-02-29T12:34:56Z	both	hazards/timestamps/mtime-2000-02-29.txt	hazards/timestamps/mtime-2000-02-29.txt
+F	79	61ec9ae9f003cd94dad2817af3b6b00560169f64bc52221e636d8f2444748060	2038-01-19T03:14:08Z	both	hazards/timestamps/mtime-2038-01-19.txt	hazards/timestamps/mtime-2038-01-19.txt
+F	71	b62b73447fb4801c70721c8e1e76d5f0b8562aca63bbf313912a6cc937ce2eb3	2099-12-31T23:59:58Z	both	hazards/timestamps/mtime-2099-12-31.txt	hazards/timestamps/mtime-2099-12-31.txt
+D	-	-	-	both	hazards/windows-and-url-special-characters	hazards/windows-and-url-special-characters
+F	96	78a68e1740823728333e5b63deea095c0722ebb578d8634e7fa0080571123781	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/ leading space.txt	hazards/windows-and-url-special-characters/ leading space.txt
+F	117	dc4284ba9baf38ac1933adf5dbb2a2c59a3fc256ca0ce4d6d4b3e2bbb3c66b5e	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/%41%2F%2e%2e.txt	hazards/windows-and-url-special-characters/%41%2F%2e%2e.txt
+F	87	ebaf5e3ba431cdb4e412e865f622dfc7f2ed50403d3e635795a56c465c95fe41	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/..txt	hazards/windows-and-url-special-characters/..txt
+F	105	f7376632a8fa203e6800724f1eb268e1d9c69bfad5c004185af28249ef627531	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/.hidden-dotfile	hazards/windows-and-url-special-characters/.hidden-dotfile
+F	189	2f7948283a19278e8cb1be0c2a7aa88758de57752ac87178cce1f61f031e9a9b	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/100% #1 & 'a' + [b] {c} (d) @ ! $ ^ ~ ; , = .txt	hazards/windows-and-url-special-characters/100% #1 & 'a' + [b] {c} (d) @ ! $ ^ ~ ; , = .txt
+F	94	3beb94faabf0938763dcef863c48977f6d494a8a08ceb49ffd2b467f10543c5d	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/MiXeD.TxT	hazards/windows-and-url-special-characters/MiXeD.TxT
+F	94	502f984a075a3f7c9d9d5484de3090cff5683108c5463897c972685ce80aa06f	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/UPPER.TXT	hazards/windows-and-url-special-characters/UPPER.TXT
+F	90	43345bf684cbd703d3660e42cdffd6e347256710bf91e999474ed1cd454a18d4	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/a.b	hazards/windows-and-url-special-characters/a.b
+F	102	d1437fc778daa0168606002d9edbd41ca5356074f37f1b4d4b72768445ab437c	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/multi.dot.in.name.v1.2.3.txt	hazards/windows-and-url-special-characters/multi.dot.in.name.v1.2.3.txt
+F	89	bde8d65454afbad589ff16955acc5df56427125b25771eee4bfc12b3f323422f	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/no-extension	hazards/windows-and-url-special-characters/no-extension
+F	107	bea49a86d2f936d0b471ca801e8ee01c3cf5e7624f05329729b6dc60e31d3e3f	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/two  spaces   inside.txt	hazards/windows-and-url-special-characters/two  spaces   inside.txt
+F	100	628758257c49c0c60fd51f8dfb8650e58457e90a077114956b25f68920fdbede	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/{U+0434}{U+043E}c.{U+0442}{U+0435}{U+043A}{U+0441}{U+0442}	hazards/windows-and-url-special-characters/доc.текст
+F	91	72d056ce102c724fc2d8dc21a1fa97e1fb79caf0abbc9ba993c3ded6995f45e6	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/{U+6587}{U+4EF6}.{U+6587}{U+672C}	hazards/windows-and-url-special-characters/文件.文本
+F	161	fafc856bb42b73ad002b12b3cd59c5ea8becc77d57e9006a671e67051b822fe5	2026-01-01T12:00:00Z	both	hazards/windows-and-url-special-characters/{U+FF1C}{U+FF1E}{U+FF1A}{U+FF02}{U+FF0F}{U+FF3C}{U+FF5C}{U+FF1F}{U+FF0A} fullwidth.txt	hazards/windows-and-url-special-characters/＜＞：＂／＼｜？＊ fullwidth.txt
+D	-	-	-	both	historic-and-exotic	historic-and-exotic
+D	-	-	-	both	historic-and-exotic/IPA	historic-and-exotic/IPA
+D	-	-	-	both	historic-and-exotic/IPA/{U+02C8}ju{U+02D0}n{U+026A}{U+02CC}dra{U+026A}v	historic-and-exotic/IPA/ˈjuːnɪˌdraɪv
+F	125	857e0447ff84c340ca134a5552b9f61fada7bf22a75038eb1ac03792c26e0e6b	2026-01-01T12:00:00Z	both	historic-and-exotic/IPA/{U+02C8}ju{U+02D0}n{U+026A}{U+02CC}dra{U+026A}v/{U+02C8}ju{U+02D0}n{U+026A}{U+02CC}dra{U+026A}v {U+0283} {U+0292} {U+03B8} {U+00F0} {U+014B} {U+0279}.txt	historic-and-exotic/IPA/ˈjuːnɪˌdraɪv/ˈjuːnɪˌdraɪv ʃ ʒ θ ð ŋ ɹ.txt
+D	-	-	-	both	historic-and-exotic/{U+1681}{U+1682}{U+1683}{U+1684}{U+1685}	historic-and-exotic/ᚁᚂᚃᚄᚅ
+D	-	-	-	both	historic-and-exotic/{U+1681}{U+1682}{U+1683}{U+1684}{U+1685}/{U+1691}{U+168C}{U+1686}{U+1690}{U+168B}	historic-and-exotic/ᚁᚂᚃᚄᚅ/ᚑᚌᚆᚐᚋ
+F	101	51c270cb305f98f22c6c189201610ddc25427f7a7ab4018f4a3ed94f1aaba6ea	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+1681}{U+1682}{U+1683}{U+1684}{U+1685}/{U+1691}{U+168C}{U+1686}{U+1690}{U+168B}/{U+168B}{U+1691}{U+168F}{U+1694}{U+168B}{U+169B}.txt	historic-and-exotic/ᚁᚂᚃᚄᚅ/ᚑᚌᚆᚐᚋ/ᚋᚑᚏᚔᚋ᚛.txt
+D	-	-	-	both	historic-and-exotic/{U+16A0}{U+16A2}{U+16A6}{U+16A8}{U+16B1}{U+16B2}	historic-and-exotic/ᚠᚢᚦᚨᚱᚲ
+D	-	-	-	both	historic-and-exotic/{U+16A0}{U+16A2}{U+16A6}{U+16A8}{U+16B1}{U+16B2}/{U+16B1}{U+16A2}{U+16BE}{U+16D6}{U+16CB}	historic-and-exotic/ᚠᚢᚦᚨᚱᚲ/ᚱᚢᚾᛖᛋ
+F	143	e72292799da9f9a39a682c930ec2c78125b7f8894146029a43216fc7049bc0c1	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+16A0}{U+16A2}{U+16A6}{U+16A8}{U+16B1}{U+16B2}/{U+16B1}{U+16A2}{U+16BE}{U+16D6}{U+16CB}/{U+16BA}{U+16D6}{U+16DA}{U+16DA}{U+16DF} {U+16B9}{U+16DF}{U+16B1}{U+16DA}{U+16DE}.txt	historic-and-exotic/ᚠᚢᚦᚨᚱᚲ/ᚱᚢᚾᛖᛋ/ᚺᛖᛚᛚᛟ ᚹᛟᚱᛚᛞ.txt
+D	-	-	-	both	historic-and-exotic/{U+2803}{U+2817}{U+2801}{U+280A}{U+2807}{U+2807}{U+2811}	historic-and-exotic/⠃⠗⠁⠊⠇⠇⠑
+D	-	-	-	both	historic-and-exotic/{U+2803}{U+2817}{U+2801}{U+280A}{U+2807}{U+2807}{U+2811}/{U+2819}{U+2815}{U+2809}{U+2825}{U+280D}{U+2811}{U+281D}{U+281E}{U+280E}	historic-and-exotic/⠃⠗⠁⠊⠇⠇⠑/⠙⠕⠉⠥⠍⠑⠝⠞⠎
+F	158	9bb3a18a690b722b13017aa0d23d5d7493ea7fe9360c2b6b99845995128de232	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+2803}{U+2817}{U+2801}{U+280A}{U+2807}{U+2807}{U+2811}/{U+2819}{U+2815}{U+2809}{U+2825}{U+280D}{U+2811}{U+281D}{U+281E}{U+280E}/{U+2813}{U+2811}{U+2807}{U+2807}{U+2815} {U+283A}{U+2815}{U+2817}{U+2807}{U+2819}.txt	historic-and-exotic/⠃⠗⠁⠊⠇⠇⠑/⠙⠕⠉⠥⠍⠑⠝⠞⠎/⠓⠑⠇⠇⠕ ⠺⠕⠗⠇⠙.txt
+D	-	-	-	both	historic-and-exotic/{U+2C02}{U+2C03}{U+2C04}	historic-and-exotic/ⰂⰃⰄ
+D	-	-	-	both	historic-and-exotic/{U+2C02}{U+2C03}{U+2C04}/{U+2C05}{U+2C06}{U+2C07}	historic-and-exotic/ⰂⰃⰄ/ⰅⰆⰇ
+F	103	9af9dd7096f96ec48e0180f5cc5cac6aefaad76616741a6019453aca5f63414f	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+2C02}{U+2C03}{U+2C04}/{U+2C05}{U+2C06}{U+2C07}/{U+2C33}{U+2C3E}{U+2C30}{U+2C33}{U+2C41}{U+2C3E}{U+2C3B}{U+2C4C}{U+2C30}.txt	historic-and-exotic/ⰂⰃⰄ/ⰅⰆⰇ/ⰳⰾⰰⰳⱁⰾⰻⱌⰰ.txt
+D	-	-	-	both	historic-and-exotic/{U+2C99}{U+2C89}{U+2CA7}{U+2CA3}{U+2C89}{U+2C99}{U+2C9B}{U+0300}{U+2CAD}{U+2C8F}{U+2C99}{U+2C93}	historic-and-exotic/ⲙⲉⲧⲣⲉⲙⲛ̀ⲭⲏⲙⲓ
+D	-	-	-	both	historic-and-exotic/{U+2C99}{U+2C89}{U+2CA7}{U+2CA3}{U+2C89}{U+2C99}{U+2C9B}{U+0300}{U+2CAD}{U+2C8F}{U+2C99}{U+2C93}/{U+2C83}{U+2C93}{U+2C83}{U+2C97}{U+2C9F}{U+2CA5}	historic-and-exotic/ⲙⲉⲧⲣⲉⲙⲛ̀ⲭⲏⲙⲓ/ⲃⲓⲃⲗⲟⲥ
+F	134	481a6eec3afc868afbd9facd5c00560ba031dc86b0b829befceb24309f9c2d80	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+2C99}{U+2C89}{U+2CA7}{U+2CA3}{U+2C89}{U+2C99}{U+2C9B}{U+0300}{U+2CAD}{U+2C8F}{U+2C99}{U+2C93}/{U+2C83}{U+2C93}{U+2C83}{U+2C97}{U+2C9F}{U+2CA5}/{U+2C81}{U+2C97}{U+2C97}{U+2C8F}{U+2C97}{U+2C9F}{U+2CA9}{U+2C93}{U+2C81}.txt	historic-and-exotic/ⲙⲉⲧⲣⲉⲙⲛ̀ⲭⲏⲙⲓ/ⲃⲓⲃⲗⲟⲥ/ⲁⲗⲗⲏⲗⲟⲩⲓⲁ.txt
+D	-	-	-	both	historic-and-exotic/{U+10040}{U+10041}{U+10042}	historic-and-exotic/𐁀𐁁𐁂
+D	-	-	-	both	historic-and-exotic/{U+10040}{U+10041}{U+10042}/{U+10000}{U+10001}{U+10002}	historic-and-exotic/𐁀𐁁𐁂/𐀀𐀁𐀂
+F	96	1fdfe8de1e8e4b8e1b1e6e18e7f6382a839796a128ff7a592890d43c7470407a	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+10040}{U+10041}{U+10042}/{U+10000}{U+10001}{U+10002}/{U+10000}{U+10001}{U+10002}{U+10003}.txt	historic-and-exotic/𐁀𐁁𐁂/𐀀𐀁𐀂/𐀀𐀁𐀂𐀃.txt
+D	-	-	-	both	historic-and-exotic/{U+10332}{U+1033F}{U+10344}{U+10339}{U+10343}{U+1033A}	historic-and-exotic/𐌲𐌿𐍄𐌹𐍃𐌺
+D	-	-	-	both	historic-and-exotic/{U+10332}{U+1033F}{U+10344}{U+10339}{U+10343}{U+1033A}/{U+10331}{U+10349}{U+1033A}{U+10349}{U+10343}	historic-and-exotic/𐌲𐌿𐍄𐌹𐍃𐌺/𐌱𐍉𐌺𐍉𐍃
+F	118	882da5290f1424dad3a01f1d8780b832d2a8d35661ee458ac02192e57fe9008b	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+10332}{U+1033F}{U+10344}{U+10339}{U+10343}{U+1033A}/{U+10331}{U+10349}{U+1033A}{U+10349}{U+10343}/{U+10330}{U+1033F}{U+10339}{U+1033B}{U+10330}.txt	historic-and-exotic/𐌲𐌿𐍄𐌹𐍃𐌺/𐌱𐍉𐌺𐍉𐍃/𐌰𐌿𐌹𐌻𐌰.txt
+D	-	-	-	both	historic-and-exotic/{U+10463}{U+10467}{U+10464}{U+10474}	historic-and-exotic/𐑣𐑧𐑤𐑴
+D	-	-	-	both	historic-and-exotic/{U+10463}{U+10467}{U+10464}{U+10474}/{U+1041C}{U+10432}	historic-and-exotic/𐑣𐑧𐑤𐑴/𐐜𐐲
+F	140	30745e8525c4f89d66104ec85cb398ea6286c065fb35cc1fb5b9e3db3acd115c	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+10463}{U+10467}{U+10464}{U+10474}/{U+1041C}{U+10432}/{U+10456}{U+10471}{U+1045D}{U+1047E}{U+1046F} {U+1043C}{U+1042F}{U+10446}{U+10432}{U+10449}{U+1042F}{U+1043B}.txt	historic-and-exotic/𐑣𐑧𐑤𐑴/𐐜𐐲/𐑖𐑱𐑝𐑾𐑯 𐐼𐐯𐑆𐐲𐑉𐐯𐐻.txt
+D	-	-	-	both	historic-and-exotic/{U+10900}{U+10901}{U+10902}	historic-and-exotic/𐤀𐤁𐤂
+D	-	-	-	both	historic-and-exotic/{U+10900}{U+10901}{U+10902}/{U+10903}{U+10904}{U+10905}	historic-and-exotic/𐤀𐤁𐤂/𐤃𐤄𐤅
+F	94	f09c05e658ed47a6a33d1e180faa20370f97d8372090cb4f352742a94682cde2	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+10900}{U+10901}{U+10902}/{U+10903}{U+10904}{U+10905}/{U+1090C}{U+1090B}{U+1090A}.txt	historic-and-exotic/𐤀𐤁𐤂/𐤃𐤄𐤅/𐤌𐤋𐤊.txt
+D	-	-	-	both	historic-and-exotic/{U+12000}{U+12079}{U+12097}	historic-and-exotic/𒀀𒁹𒂗
+D	-	-	-	both	historic-and-exotic/{U+12000}{U+12079}{U+12097}/{U+12111}{U+12157}{U+121A0}	historic-and-exotic/𒀀𒁹𒂗/𒄑𒅗𒆠
+F	93	7d9e5f35fa2c66ac547fb5a224b99d69ec67084865777b604806fb528b221fea	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+12000}{U+12079}{U+12097}/{U+12111}{U+12157}{U+121A0}/{U+12000}{U+12001}{U+12002}.txt	historic-and-exotic/𒀀𒁹𒂗/𒄑𒅗𒆠/𒀀𒀁𒀂.txt
+D	-	-	-	both	historic-and-exotic/{U+13000}{U+13050}{U+13080}	historic-and-exotic/𓀀𓁐𓂀
+D	-	-	-	both	historic-and-exotic/{U+13000}{U+13050}{U+13080}/{U+130E0}{U+13153}{U+131A3}	historic-and-exotic/𓀀𓁐𓂀/𓃠𓅓𓆣
+F	121	b2395a80866326aaa66afa38647f77aa40a89ae9d42ceba805a919e371210eb2	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+13000}{U+13050}{U+13080}/{U+130E0}{U+13153}{U+131A3}/{U+13080}{U+130E0}{U+13153}.txt	historic-and-exotic/𓀀𓁐𓂀/𓃠𓅓𓆣/𓂀𓃠𓅓.txt
+D	-	-	-	both	historic-and-exotic/{U+1D11E}{U+1D122}	historic-and-exotic/𝄞𝄢
+D	-	-	-	both	historic-and-exotic/{U+1D11E}{U+1D122}/{U+1D158}{U+1D165}{U+1D16E}	historic-and-exotic/𝄞𝄢/𝅘𝅥𝅮
+F	99	ba612786c3815b3238c8f5451e4f6289e669e5e3a6f9871a24665d1b3109bd5c	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+1D11E}{U+1D122}/{U+1D158}{U+1D165}{U+1D16E}/{U+1D11E} sonata {U+1D122}.txt	historic-and-exotic/𝄞𝄢/𝅘𝅥𝅮/𝄞 sonata 𝄢.txt
+D	-	-	-	both	historic-and-exotic/{U+1D518}{U+1D52B}{U+1D526}{U+1D520}{U+1D52C}{U+1D521}{U+1D522}	historic-and-exotic/𝔘𝔫𝔦𝔠𝔬𝔡𝔢
+D	-	-	-	both	historic-and-exotic/{U+1D518}{U+1D52B}{U+1D526}{U+1D520}{U+1D52C}{U+1D521}{U+1D522}/{U+1D56E}{U+1D594}{U+1D593}{U+1D599}{U+1D58A}{U+1D593}{U+1D599}	historic-and-exotic/𝔘𝔫𝔦𝔠𝔬𝔡𝔢/𝕮𝖔𝖓𝖙𝖊𝖓𝖙
+F	187	79a96cb858de1c0d8ca75e13f6767f9d4ef97c5cba8da1df07837d801862e084	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+1D518}{U+1D52B}{U+1D526}{U+1D520}{U+1D52C}{U+1D521}{U+1D522}/{U+1D56E}{U+1D594}{U+1D593}{U+1D599}{U+1D58A}{U+1D593}{U+1D599}/{U+1D510}{U+1D51E}{U+1D531}{U+1D525} {U+1D56C}{U+1D591}{U+1D595}{U+1D58D}{U+1D586} {U+1D7D8}{U+1D7D9}{U+1D7DA}.txt	historic-and-exotic/𝔘𝔫𝔦𝔠𝔬𝔡𝔢/𝕮𝖔𝖓𝖙𝖊𝖓𝖙/𝔐𝔞𝔱𝔥 𝕬𝖑𝖕𝖍𝖆 𝟘𝟙𝟚.txt
+D	-	-	-	both	historic-and-exotic/{U+1F004}{U+1F005}{U+1F006}	historic-and-exotic/🀄🀅🀆
+D	-	-	-	both	historic-and-exotic/{U+1F004}{U+1F005}{U+1F006}/{U+1F0A1}{U+1F0B1}{U+1F0C1}{U+1F0D1}	historic-and-exotic/🀄🀅🀆/🂡🂱🃁🃑
+F	135	25bf639219a9b3a724b97f3350677da2fc4c6108ebf1e1ebb68c5a03b137c7e5	2026-01-01T12:00:00Z	both	historic-and-exotic/{U+1F004}{U+1F005}{U+1F006}/{U+1F0A1}{U+1F0B1}{U+1F0C1}{U+1F0D1}/{U+2654}{U+2655}{U+2656}{U+2657}{U+2658}{U+2659} chess.txt	historic-and-exotic/🀄🀅🀆/🂡🂱🃁🃑/♔♕♖♗♘♙ chess.txt
+D	-	-	-	both	indic	indic
+D	-	-	-	both	indic/{U+0928}{U+0947}{U+092A}{U+093E}{U+0932}{U+0940}	indic/नेपाली
+D	-	-	-	both	indic/{U+0928}{U+0947}{U+092A}{U+093E}{U+0932}{U+0940}/{U+0915}{U+093E}{U+0917}{U+091C}{U+093E}{U+0924}	indic/नेपाली/कागजात
+F	144	f11a87712121b68a53d128126e663d011a0e4de725e3abcd5704829dfc70baf1	2026-01-01T12:00:00Z	both	indic/{U+0928}{U+0947}{U+092A}{U+093E}{U+0932}{U+0940}/{U+0915}{U+093E}{U+0917}{U+091C}{U+093E}{U+0924}/{U+0928}{U+092E}{U+0938}{U+094D}{U+0915}{U+093E}{U+0930} {U+0938}{U+0902}{U+0938}{U+093E}{U+0930}.txt	indic/नेपाली/कागजात/नमस्कार संसार.txt
+D	-	-	-	both	indic/{U+092E}{U+0930}{U+093E}{U+0920}{U+0940}	indic/मराठी
+D	-	-	-	both	indic/{U+092E}{U+0930}{U+093E}{U+0920}{U+0940}/{U+0915}{U+093E}{U+0917}{U+0926}{U+092A}{U+0924}{U+094D}{U+0930}{U+0947}	indic/मराठी/कागदपत्रे
+F	132	47ef4b2e594a4c7071181d1b5d8e4e1879c20165122a563461afdeb79044e132	2026-01-01T12:00:00Z	both	indic/{U+092E}{U+0930}{U+093E}{U+0920}{U+0940}/{U+0915}{U+093E}{U+0917}{U+0926}{U+092A}{U+0924}{U+094D}{U+0930}{U+0947}/{U+0928}{U+092E}{U+0938}{U+094D}{U+0915}{U+093E}{U+0930} {U+091C}{U+0917}.txt	indic/मराठी/कागदपत्रे/नमस्कार जग.txt
+D	-	-	-	both	indic/{U+0938}{U+0902}{U+0938}{U+094D}{U+0915}{U+0943}{U+0924}{U+092E}{U+094D}	indic/संस्कृतम्
+D	-	-	-	both	indic/{U+0938}{U+0902}{U+0938}{U+094D}{U+0915}{U+0943}{U+0924}{U+092E}{U+094D}/{U+0917}{U+094D}{U+0930}{U+0928}{U+094D}{U+0925}{U+093E}{U+0903}	indic/संस्कृतम्/ग्रन्थाः
+F	127	e472d5a395d9fb3da031a329669901bbf4c39d7e777cc125d78a02d9559a3d84	2026-01-01T12:00:00Z	both	indic/{U+0938}{U+0902}{U+0938}{U+094D}{U+0915}{U+0943}{U+0924}{U+092E}{U+094D}/{U+0917}{U+094D}{U+0930}{U+0928}{U+094D}{U+0925}{U+093E}{U+0903}/{U+0928}{U+092E}{U+094B} {U+0928}{U+092E}{U+0903}.txt	indic/संस्कृतम्/ग्रन्थाः/नमो नमः.txt
+D	-	-	-	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}	indic/हिन्दी
+D	-	-	-	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}/{U+0926}{U+0938}{U+094D}{U+0924}{U+093E}{U+0935}{U+0947}{U+091C}{U+093C}	indic/हिन्दी/दस्तावेज़
+D	-	-	-	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}/{U+0926}{U+0938}{U+094D}{U+0924}{U+093E}{U+0935}{U+0947}{U+091C}{U+093C}/{U+092A}{U+0924}{U+094D}{U+0930}	indic/हिन्दी/दस्तावेज़/पत्र
+D	-	-	-	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}/{U+0926}{U+0938}{U+094D}{U+0924}{U+093E}{U+0935}{U+0947}{U+091C}{U+093C}/{U+092A}{U+0924}{U+094D}{U+0930}/{U+092E}{U+0938}{U+094C}{U+0926}{U+0947}	indic/हिन्दी/दस्तावेज़/पत्र/मसौदे
+F	238	02e942eb05e3129bb7d04f233e0c34d905b125b676454360e11901bd9c9d8d03	2026-01-01T12:00:00Z	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}/{U+0926}{U+0938}{U+094D}{U+0924}{U+093E}{U+0935}{U+0947}{U+091C}{U+093C}/{U+092A}{U+0924}{U+094D}{U+0930}/{U+092E}{U+0938}{U+094C}{U+0926}{U+0947}/{U+0915}{U+094D}{U+0937}{U+0924}{U+094D}{U+0930}{U+093F}{U+092F} {U+091C}{U+094D}{U+091E}{U+093E}{U+0928} {U+0936}{U+094D}{U+0930}{U+0940}.md	indic/हिन्दी/दस्तावेज़/पत्र/मसौदे/क्षत्रिय ज्ञान श्री.md
+F	182	0a2cf3cfb9b535b876759e6c1606d6d60a9eafbd7b6276c1e486312a91d5edf7	2026-01-01T12:00:00Z	both	indic/{U+0939}{U+093F}{U+0928}{U+094D}{U+0926}{U+0940}/{U+0926}{U+0938}{U+094D}{U+0924}{U+093E}{U+0935}{U+0947}{U+091C}{U+093C}/{U+092A}{U+0924}{U+094D}{U+0930}/{U+092E}{U+0938}{U+094C}{U+0926}{U+0947}/{U+0928}{U+092E}{U+0938}{U+094D}{U+0924}{U+0947} {U+0926}{U+0941}{U+0928}{U+093F}{U+092F}{U+093E}.txt	indic/हिन्दी/दस्तावेज़/पत्र/मसौदे/नमस्ते दुनिया.txt
+D	-	-	-	both	indic/{U+09AC}{U+09BE}{U+0982}{U+09B2}{U+09BE}	indic/বাংলা
+D	-	-	-	both	indic/{U+09AC}{U+09BE}{U+0982}{U+09B2}{U+09BE}/{U+09A8}{U+09A5}{U+09BF}	indic/বাংলা/নথি
+F	126	a03071e7f87ffd739e432182b76bf339591a9950126f96db2aee575a54a2abdd	2026-01-01T12:00:00Z	NFC	indic/{U+09AC}{U+09BE}{U+0982}{U+09B2}{U+09BE}/{U+09A8}{U+09A5}{U+09BF}/{U+09B9}{U+09CD}{U+09AF}{U+09BE}{U+09B2}{U+09CB} {U+09AC}{U+09BF}{U+09B6}{U+09CD}{U+09AC}.txt	indic/বাংলা/নথি/হ্যালো বিশ্ব.txt
+D	-	-	-	both	indic/{U+0A2A}{U+0A70}{U+0A1C}{U+0A3E}{U+0A2C}{U+0A40}	indic/ਪੰਜਾਬੀ
+D	-	-	-	both	indic/{U+0A2A}{U+0A70}{U+0A1C}{U+0A3E}{U+0A2C}{U+0A40}/{U+0A26}{U+0A38}{U+0A24}{U+0A3E}{U+0A35}{U+0A47}{U+0A1C}{U+0A3C}	indic/ਪੰਜਾਬੀ/ਦਸਤਾਵੇਜ਼
+F	172	580c5a8b1bf5dbf4471b69c6c07cd85816092b4d44ce8f7bd5eda7f52c0bc9d8	2026-01-01T12:00:00Z	both	indic/{U+0A2A}{U+0A70}{U+0A1C}{U+0A3E}{U+0A2C}{U+0A40}/{U+0A26}{U+0A38}{U+0A24}{U+0A3E}{U+0A35}{U+0A47}{U+0A1C}{U+0A3C}/{U+0A38}{U+0A24} {U+0A38}{U+0A4D}{U+0A30}{U+0A40} {U+0A05}{U+0A15}{U+0A3E}{U+0A32} {U+0A26}{U+0A41}{U+0A28}{U+0A40}{U+0A06}.txt	indic/ਪੰਜਾਬੀ/ਦਸਤਾਵੇਜ਼/ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਦੁਨੀਆ.txt
+D	-	-	-	both	indic/{U+0A97}{U+0AC1}{U+0A9C}{U+0AB0}{U+0ABE}{U+0AA4}{U+0AC0}	indic/ગુજરાતી
+D	-	-	-	both	indic/{U+0A97}{U+0AC1}{U+0A9C}{U+0AB0}{U+0ABE}{U+0AA4}{U+0AC0}/{U+0AA6}{U+0AB8}{U+0ACD}{U+0AA4}{U+0ABE}{U+0AB5}{U+0AC7}{U+0A9C}{U+0ACB}	indic/ગુજરાતી/દસ્તાવેજો
+F	156	de4dc292513b5a7cea6477fc0913c28d7c41914d8380063abe9eb69d878d5dbd	2026-01-01T12:00:00Z	both	indic/{U+0A97}{U+0AC1}{U+0A9C}{U+0AB0}{U+0ABE}{U+0AA4}{U+0AC0}/{U+0AA6}{U+0AB8}{U+0ACD}{U+0AA4}{U+0ABE}{U+0AB5}{U+0AC7}{U+0A9C}{U+0ACB}/{U+0AA8}{U+0AAE}{U+0AB8}{U+0ACD}{U+0AA4}{U+0AC7} {U+0AA6}{U+0AC1}{U+0AA8}{U+0ABF}{U+0AAF}{U+0ABE}.txt	indic/ગુજરાતી/દસ્તાવેજો/નમસ્તે દુનિયા.txt
+D	-	-	-	both	indic/{U+0B13}{U+0B21}{U+0B3C}{U+0B3F}{U+0B06}	indic/ଓଡ଼ିଆ
+D	-	-	-	both	indic/{U+0B13}{U+0B21}{U+0B3C}{U+0B3F}{U+0B06}/{U+0B26}{U+0B32}{U+0B3F}{U+0B32}	indic/ଓଡ଼ିଆ/ଦଲିଲ
+F	135	983c40cc84b694b970fcf573f1c1b28075e1bb173c28b375d0439cf5289f037b	2026-01-01T12:00:00Z	both	indic/{U+0B13}{U+0B21}{U+0B3C}{U+0B3F}{U+0B06}/{U+0B26}{U+0B32}{U+0B3F}{U+0B32}/{U+0B28}{U+0B2E}{U+0B38}{U+0B4D}{U+0B15}{U+0B3E}{U+0B30} {U+0B2C}{U+0B3F}{U+0B36}{U+0B4D}{U+0B71}.txt	indic/ଓଡ଼ିଆ/ଦଲିଲ/ନମସ୍କାର ବିଶ୍ୱ.txt
+D	-	-	-	both	indic/{U+0BA4}{U+0BAE}{U+0BBF}{U+0BB4}{U+0BCD}	indic/தமிழ்
+D	-	-	-	both	indic/{U+0BA4}{U+0BAE}{U+0BBF}{U+0BB4}{U+0BCD}/{U+0B86}{U+0BB5}{U+0BA3}{U+0B99}{U+0BCD}{U+0B95}{U+0BB3}{U+0BCD}	indic/தமிழ்/ஆவணங்கள்
+F	147	0d012d0c6b0b653bbb86680379edcc395e9e6e7dba86972e2bc27bb4791bff0b	2026-01-01T12:00:00Z	both	indic/{U+0BA4}{U+0BAE}{U+0BBF}{U+0BB4}{U+0BCD}/{U+0B86}{U+0BB5}{U+0BA3}{U+0B99}{U+0BCD}{U+0B95}{U+0BB3}{U+0BCD}/{U+0BB5}{U+0BA3}{U+0B95}{U+0BCD}{U+0B95}{U+0BAE}{U+0BCD} {U+0B89}{U+0BB2}{U+0B95}{U+0BAE}{U+0BCD}.txt	indic/தமிழ்/ஆவணங்கள்/வணக்கம் உலகம்.txt
+D	-	-	-	both	indic/{U+0C24}{U+0C46}{U+0C32}{U+0C41}{U+0C17}{U+0C41}	indic/తెలుగు
+D	-	-	-	both	indic/{U+0C24}{U+0C46}{U+0C32}{U+0C41}{U+0C17}{U+0C41}/{U+0C2A}{U+0C24}{U+0C4D}{U+0C30}{U+0C3E}{U+0C32}{U+0C41}	indic/తెలుగు/పత్రాలు
+F	135	eb4e169791ed53981e6d280c02003db41b34a5daa71d6f61252aac72e493ea1e	2026-01-01T12:00:00Z	both	indic/{U+0C24}{U+0C46}{U+0C32}{U+0C41}{U+0C17}{U+0C41}/{U+0C2A}{U+0C24}{U+0C4D}{U+0C30}{U+0C3E}{U+0C32}{U+0C41}/{U+0C39}{U+0C32}{U+0C4B} {U+0C2A}{U+0C4D}{U+0C30}{U+0C2A}{U+0C02}{U+0C1A}{U+0C02}.txt	indic/తెలుగు/పత్రాలు/హలో ప్రపంచం.txt
+D	-	-	-	both	indic/{U+0C95}{U+0CA8}{U+0CCD}{U+0CA8}{U+0CA1}	indic/ಕನ್ನಡ
+D	-	-	-	both	indic/{U+0C95}{U+0CA8}{U+0CCD}{U+0CA8}{U+0CA1}/{U+0CA6}{U+0CBE}{U+0C96}{U+0CB2}{U+0CC6}{U+0C97}{U+0CB3}{U+0CC1}	indic/ಕನ್ನಡ/ದಾಖಲೆಗಳು
+F	153	142f9d0cb60713a576c0f5130de1b02f6d6b410ae0cb2487d4208de6bd5e0858	2026-01-01T12:00:00Z	both	indic/{U+0C95}{U+0CA8}{U+0CCD}{U+0CA8}{U+0CA1}/{U+0CA6}{U+0CBE}{U+0C96}{U+0CB2}{U+0CC6}{U+0C97}{U+0CB3}{U+0CC1}/{U+0CA8}{U+0CAE}{U+0CB8}{U+0CCD}{U+0C95}{U+0CBE}{U+0CB0} {U+0C9C}{U+0C97}{U+0CA4}{U+0CCD}{U+0CA4}{U+0CC1}.txt	indic/ಕನ್ನಡ/ದಾಖಲೆಗಳು/ನಮಸ್ಕಾರ ಜಗತ್ತು.txt
+D	-	-	-	both	indic/{U+0D2E}{U+0D32}{U+0D2F}{U+0D3E}{U+0D33}{U+0D02}	indic/മലയാളം
+D	-	-	-	both	indic/{U+0D2E}{U+0D32}{U+0D2F}{U+0D3E}{U+0D33}{U+0D02}/{U+0D30}{U+0D47}{U+0D16}{U+0D15}{U+0D7E}	indic/മലയാളം/രേഖകൾ
+F	117	019c4ff1bd3256bf78511af5800da856137fa96cf9a01b44c6b0041b0b1a522f	2026-01-01T12:00:00Z	NFC	indic/{U+0D2E}{U+0D32}{U+0D2F}{U+0D3E}{U+0D33}{U+0D02}/{U+0D30}{U+0D47}{U+0D16}{U+0D15}{U+0D7E}/{U+0D39}{U+0D32}{U+0D4B} {U+0D35}{U+0D47}{U+0D7E}{U+0D21}{U+0D4D}.txt	indic/മലയാളം/രേഖകൾ/ഹലോ വേൾഡ്.txt
+D	-	-	-	both	indic/{U+0DC3}{U+0DD2}{U+0D82}{U+0DC4}{U+0DBD}	indic/සිංහල
+D	-	-	-	NFC	indic/{U+0DC3}{U+0DD2}{U+0D82}{U+0DC4}{U+0DBD}/{U+0DBD}{U+0DDA}{U+0D9B}{U+0DB1}	indic/සිංහල/ලේඛන
+F	135	5dc17152da859454f865e3b8914dba08da40a6b0f837e692c57f290b82cf7f22	2026-01-01T12:00:00Z	NFC	indic/{U+0DC3}{U+0DD2}{U+0D82}{U+0DC4}{U+0DBD}/{U+0DBD}{U+0DDA}{U+0D9B}{U+0DB1}/{U+0D86}{U+0DBA}{U+0DD4}{U+0DB6}{U+0DDD}{U+0DC0}{U+0DB1}{U+0DCA} {U+0DBD}{U+0DDD}{U+0D9A}{U+0DBA}.txt	indic/සිංහල/ලේඛන/ආයුබෝවන් ලෝකය.txt
+D	-	-	-	both	indic/{U+0F56}{U+0F7C}{U+0F51}{U+0F0B}{U+0F61}{U+0F72}{U+0F42}	indic/བོད་ཡིག
+D	-	-	-	both	indic/{U+0F56}{U+0F7C}{U+0F51}{U+0F0B}{U+0F61}{U+0F72}{U+0F42}/{U+0F61}{U+0F72}{U+0F42}{U+0F0B}{U+0F46}	indic/བོད་ཡིག/ཡིག་ཆ
+F	166	df20cb7994d93940ca3a0e0c57f9e686c9cdc10af72c357983e9511e7ab61c44	2026-01-01T12:00:00Z	both	indic/{U+0F56}{U+0F7C}{U+0F51}{U+0F0B}{U+0F61}{U+0F72}{U+0F42}/{U+0F61}{U+0F72}{U+0F42}{U+0F0B}{U+0F46}/{U+0F56}{U+0F40}{U+0FB2}{U+0F0B}{U+0F64}{U+0F72}{U+0F66}{U+0F0B}{U+0F56}{U+0F51}{U+0F7A}{U+0F0B}{U+0F63}{U+0F7A}{U+0F42}{U+0F66}.txt	indic/བོད་ཡིག/ཡིག་ཆ/བཀྲ་ཤིས་བདེ་ལེགས.txt
+D	-	-	-	both	indic/{U+1C65}{U+1C5F}{U+1C71}{U+1C5B}{U+1C5F}{U+1C72}{U+1C64}	indic/ᱥᱟᱱᱛᱟᱲᱤ
+D	-	-	-	both	indic/{U+1C65}{U+1C5F}{U+1C71}{U+1C5B}{U+1C5F}{U+1C72}{U+1C64}/{U+1C6A}{U+1C64}{U+1C5B}{U+1C77}{U+1C64}	indic/ᱥᱟᱱᱛᱟᱲᱤ/ᱪᱤᱛᱷᱤ
+F	138	c420067d58bfa0c1ea78ff35e5e0d018907be5b647fd691ef0ef587fa447620d	2026-01-01T12:00:00Z	both	indic/{U+1C65}{U+1C5F}{U+1C71}{U+1C5B}{U+1C5F}{U+1C72}{U+1C64}/{U+1C6A}{U+1C64}{U+1C5B}{U+1C77}{U+1C64}/{U+1C61}{U+1C5A}{U+1C66}{U+1C5F}{U+1C68} {U+1C6B}{U+1C69}{U+1C71}{U+1C64}{U+1C6D}{U+1C5F}.txt	indic/ᱥᱟᱱᱛᱟᱲᱤ/ᱪᱤᱛᱷᱤ/ᱡᱚᱦᱟᱨ ᱫᱩᱱᱤᱭᱟ.txt
+D	-	-	-	both	southeast-asia	southeast-asia
+D	-	-	-	both	southeast-asia/Bahasa Indonesia-Tagalog	southeast-asia/Bahasa Indonesia-Tagalog
+D	-	-	-	both	southeast-asia/Bahasa Indonesia-Tagalog/Dokumen	southeast-asia/Bahasa Indonesia-Tagalog/Dokumen
+F	127	a867be71413ed8bb53bb43dca28e2448f870ea2f60697fba1dc5c2794653779a	2026-01-01T12:00:00Z	both	southeast-asia/Bahasa Indonesia-Tagalog/Dokumen/Halo dunia {U+2013} Kumusta mundo.txt	southeast-asia/Bahasa Indonesia-Tagalog/Dokumen/Halo dunia – Kumusta mundo.txt
+D	-	-	-	both	southeast-asia/{U+0E44}{U+0E17}{U+0E22}	southeast-asia/ไทย
+D	-	-	-	both	southeast-asia/{U+0E44}{U+0E17}{U+0E22}/{U+0E40}{U+0E2D}{U+0E01}{U+0E2A}{U+0E32}{U+0E23}	southeast-asia/ไทย/เอกสาร
+D	-	-	-	both	southeast-asia/{U+0E44}{U+0E17}{U+0E22}/{U+0E40}{U+0E2D}{U+0E01}{U+0E2A}{U+0E32}{U+0E23}/{U+0E08}{U+0E14}{U+0E2B}{U+0E21}{U+0E32}{U+0E22}	southeast-asia/ไทย/เอกสาร/จดหมาย
+F	263	41ade1a271b676ac5f24d62b0a5851e900904e7dce9b31305cd36f1be6fdd186	2026-01-01T12:00:00Z	both	southeast-asia/{U+0E44}{U+0E17}{U+0E22}/{U+0E40}{U+0E2D}{U+0E01}{U+0E2A}{U+0E32}{U+0E23}/{U+0E08}{U+0E14}{U+0E2B}{U+0E21}{U+0E32}{U+0E22}/{U+0E20}{U+0E32}{U+0E29}{U+0E32}{U+0E44}{U+0E17}{U+0E22}{U+0E44}{U+0E21}{U+0E48}{U+0E21}{U+0E35}{U+0E0A}{U+0E48}{U+0E2D}{U+0E07}{U+0E27}{U+0E48}{U+0E32}{U+0E07}{U+0E23}{U+0E30}{U+0E2B}{U+0E27}{U+0E48}{U+0E32}{U+0E07}{U+0E04}{U+0E33}.txt	southeast-asia/ไทย/เอกสาร/จดหมาย/ภาษาไทยไม่มีช่องว่างระหว่างคำ.txt
+F	161	7c3820ea6f775b2c10fab827997a06132ac0f23ce11f3a1d742517aa9bed9a91	2026-01-01T12:00:00Z	both	southeast-asia/{U+0E44}{U+0E17}{U+0E22}/{U+0E40}{U+0E2D}{U+0E01}{U+0E2A}{U+0E32}{U+0E23}/{U+0E08}{U+0E14}{U+0E2B}{U+0E21}{U+0E32}{U+0E22}/{U+0E2A}{U+0E27}{U+0E31}{U+0E2A}{U+0E14}{U+0E35}{U+0E0A}{U+0E32}{U+0E27}{U+0E42}{U+0E25}{U+0E01}.txt	southeast-asia/ไทย/เอกสาร/จดหมาย/สวัสดีชาวโลก.txt
+D	-	-	-	both	southeast-asia/{U+0EA5}{U+0EB2}{U+0EA7}	southeast-asia/ລາວ
+D	-	-	-	both	southeast-asia/{U+0EA5}{U+0EB2}{U+0EA7}/{U+0EC0}{U+0EAD}{U+0E81}{U+0EB0}{U+0EAA}{U+0EB2}{U+0E99}	southeast-asia/ລາວ/ເອກະສານ
+F	151	dfe1028de9cf7f1e76fe9c9193adbe9ef381e9a57bf667dd0769390073ba4294	2026-01-01T12:00:00Z	both	southeast-asia/{U+0EA5}{U+0EB2}{U+0EA7}/{U+0EC0}{U+0EAD}{U+0E81}{U+0EB0}{U+0EAA}{U+0EB2}{U+0E99}/{U+0EAA}{U+0EB0}{U+0E9A}{U+0EB2}{U+0E8D}{U+0E94}{U+0EB5}{U+0E8A}{U+0EB2}{U+0EA7}{U+0EC2}{U+0EA5}{U+0E81}.txt	southeast-asia/ລາວ/ເອກະສານ/ສະບາຍດີຊາວໂລກ.txt
+D	-	-	-	both	southeast-asia/{U+1019}{U+103C}{U+1014}{U+103A}{U+1019}{U+102C}	southeast-asia/မြန်မာ
+D	-	-	-	both	southeast-asia/{U+1019}{U+103C}{U+1014}{U+103A}{U+1019}{U+102C}/{U+1005}{U+102C}{U+101B}{U+103D}{U+1000}{U+103A}{U+1005}{U+102C}{U+1010}{U+1019}{U+103A}{U+1038}	southeast-asia/မြန်မာ/စာရွက်စာတမ်း
+F	183	4abb18cddba9637d60b8b6e99af6b1efadc30364f93a8de61705a884903c6d4e	2026-01-01T12:00:00Z	both	southeast-asia/{U+1019}{U+103C}{U+1014}{U+103A}{U+1019}{U+102C}/{U+1005}{U+102C}{U+101B}{U+103D}{U+1000}{U+103A}{U+1005}{U+102C}{U+1010}{U+1019}{U+103A}{U+1038}/{U+1019}{U+1004}{U+103A}{U+1039}{U+1002}{U+101C}{U+102C}{U+1015}{U+102B} {U+1000}{U+1019}{U+1039}{U+1018}{U+102C}.txt	southeast-asia/မြန်မာ/စာရွက်စာတမ်း/မင်္ဂလာပါ ကမ္ဘာ.txt
+D	-	-	-	both	southeast-asia/{U+170A}{U+170C}{U+1714}{U+170A}{U+170C}{U+1712}{U+1708}{U+1714}	southeast-asia/ᜊᜌ᜔ᜊᜌᜒᜈ᜔
+D	-	-	-	both	southeast-asia/{U+170A}{U+170C}{U+1714}{U+170A}{U+170C}{U+1712}{U+1708}{U+1714}/{U+1710}{U+1713}{U+170E}{U+1706}{U+1714}	southeast-asia/ᜊᜌ᜔ᜊᜌᜒᜈ᜔/ᜐᜓᜎᜆ᜔
+F	111	4487b4223b721c7eeb515c6ee7bc837fc14a4997f96d43e3ab24075f06f56385	2026-01-01T12:00:00Z	both	southeast-asia/{U+170A}{U+170C}{U+1714}{U+170A}{U+170C}{U+1712}{U+1708}{U+1714}/{U+1710}{U+1713}{U+170E}{U+1706}{U+1714}/{U+1703}{U+1713}{U+170B}{U+1713}{U+1710}{U+1714}{U+1706}.txt	southeast-asia/ᜊᜌ᜔ᜊᜌᜒᜈ᜔/ᜐᜓᜎᜆ᜔/ᜃᜓᜋᜓᜐ᜔ᜆ.txt
+D	-	-	-	both	southeast-asia/{U+1781}{U+17D2}{U+1798}{U+17C2}{U+179A}	southeast-asia/ខ្មែរ
+D	-	-	-	both	southeast-asia/{U+1781}{U+17D2}{U+1798}{U+17C2}{U+179A}/{U+17AF}{U+1780}{U+179F}{U+17B6}{U+179A}	southeast-asia/ខ្មែរ/ឯកសារ
+F	151	9e8ba9a9d2870036f31484d3f272c6cc0fdaacc771d857cb5cdc7b043c8a5f38	2026-01-01T12:00:00Z	both	southeast-asia/{U+1781}{U+17D2}{U+1798}{U+17C2}{U+179A}/{U+17AF}{U+1780}{U+179F}{U+17B6}{U+179A}/{U+179F}{U+17BD}{U+179F}{U+17D2}{U+178F}{U+17B8}{U+1796}{U+17B7}{U+1797}{U+1796}{U+179B}{U+17C4}{U+1780}.txt	southeast-asia/ខ្មែរ/ឯកសារ/សួស្តីពិភពលោក.txt
+D	-	-	-	both	southeast-asia/{U+A9A7}{U+A9B1}{U+A997}{U+A9AE}	southeast-asia/ꦧꦱꦗꦮ
+D	-	-	-	both	southeast-asia/{U+A9A7}{U+A9B1}{U+A997}{U+A9AE}/{U+A9A2}{U+A9BA}{U+A9B4}{U+A98F}{U+A9B8}{U+A9A9}{U+A9BA}{U+A9A4}{U+A9C0}	southeast-asia/ꦧꦱꦗꦮ/ꦢꦺꦴꦏꦸꦩꦺꦤ꧀
+F	128	1d21f5e1eba20c2c26c7bfc71d2107c09684cf359f995e4eeb9da716d451560c	2026-01-01T12:00:00Z	both	southeast-asia/{U+A9A7}{U+A9B1}{U+A997}{U+A9AE}/{U+A9A2}{U+A9BA}{U+A9B4}{U+A98F}{U+A9B8}{U+A9A9}{U+A9BA}{U+A9A4}{U+A9C0}/{U+A9B1}{U+A9B8}{U+A992}{U+A9BC}{U+A981} {U+A9A2}{U+A9A4}{U+A9B8}{U+A9B1}{U+A9C0}.txt	southeast-asia/ꦧꦱꦗꦮ/ꦢꦺꦴꦏꦸꦩꦺꦤ꧀/ꦱꦸꦒꦼꦁ ꦢꦤꦸꦱ꧀.txt
+D	-	-	-	both	symbols	symbols
+D	-	-	-	both	symbols/{U+2605}	symbols/★
+D	-	-	-	both	symbols/{U+2605}/{U+2606}	symbols/★/☆
+D	-	-	-	both	symbols/{U+2605}/{U+2606}/{U+2665}	symbols/★/☆/♥
+D	-	-	-	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}	symbols/★/☆/♥/♦
+D	-	-	-	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}	symbols/★/☆/♥/♦/♣
+F	120	95eb77e763149c7ce73579624b6b7ff11738c7626e82428c6f49e9d677fb6fd4	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+00AB} {U+00BB} {U+2039} {U+203A} {U+201E} {U+201C} {U+201D} {U+2018} {U+2019}.txt	symbols/★/☆/♥/♦/♣/« » ‹ › „ “ ” ‘ ’.txt
+F	94	10fa608c54a0e5c82cec2fb306ae05ac40bcf269f355f37185188e04d79d2acf	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+00BD} {U+00BC} {U+00BE} {U+2153} {U+2154} {U+215B}.txt	symbols/★/☆/♥/♦/♣/½ ¼ ¾ ⅓ ⅔ ⅛.txt
+F	149	4d53814adc80fccda330d116106b9ae44c0916fd6e00738d567f1947fcca1788	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+20AC} {U+00A3} {U+00A5} {U+20B9} {U+20BF} {U+20BD} {U+20A9} {U+20AA} {U+20AB}.csv	symbols/★/☆/♥/♦/♣/€ £ ¥ ₹ ₿ ₽ ₩ ₪ ₫.csv
+F	98	957ec491a5bb2a52556c9612f4031e550d6988b54525d3ac1a720f89a2530e91	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2103} {U+2109} {U+2116} {U+2117} {U+2122} {U+00AE}.txt	symbols/★/☆/♥/♦/♣/℃ ℉ № ℗ ™ ®.txt
+F	112	ab6cd1a10e0278e0ce2ccb87b9aa6ae86d11c3a7e71d468d87d7571957083905	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2192} next {U+21D2} then {U+279C} later.txt	symbols/★/☆/♥/♦/♣/→ next ⇒ then ➜ later.txt
+F	116	698cdea2b3440533fc58dbf4e4552f547014d21c2b950f6530f6ab66cc61a4ed	2026-01-01T12:00:00Z	NFC	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2211} x{U+00B2} {U+2264} {U+221A}2 {U+222B} {U+03C0} {U+221E} {U+2260}.txt	symbols/★/☆/♥/♦/♣/∑ x² ≤ √2 ∫ π ∞ ≠.txt
+F	97	4c45254b07bb3d0a20c874c2b3d2f51679973eec723d6a98de03dd6d84ec5e86	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2318} {U+2325} {U+21E7} {U+238B} keys.txt	symbols/★/☆/♥/♦/♣/⌘ ⌥ ⇧ ⎋ keys.txt
+F	107	430a7494370879b8acbd8103a59b2f9336e333bb051dcae7c6b9dff1a3cf1084	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2460} {U+2461} {U+2462} {U+24B6} {U+24B7} {U+24B6}{U+24B7}.txt	symbols/★/☆/♥/♦/♣/① ② ③ Ⓐ Ⓑ ⒶⒷ.txt
+F	136	31132b5e7d67f9d250aa0208ab4018ca5e4a0cca6d83ea51a8614d211ad0a21d	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+250C}{U+2500}{U+252C}{U+2500}{U+2510} box {U+251C}{U+2500}{U+253C}{U+2500}{U+2524}.txt	symbols/★/☆/♥/♦/♣/┌─┬─┐ box ├─┼─┤.txt
+F	100	731c419a74842dd28c0cb39fc8021e925670e098bd809a67ee57147e6ebbe7d4	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2600} {U+2601} {U+2602} {U+2603} weather {U+2604}.txt	symbols/★/☆/♥/♦/♣/☀ ☁ ☂ ☃ weather ☄.txt
+F	107	d859d6610783a9a215b3b6dde4766cb1844029a5bba635a59cb34f03298aefbd	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+260E} {U+2709} {U+2702} {U+270F} {U+2708} {U+2699} office.txt	symbols/★/☆/♥/♦/♣/☎ ✉ ✂ ✏ ✈ ⚙ office.txt
+D	-	-	-	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2660}	symbols/★/☆/♥/♦/♣/♠
+F	86	f0832bc7698eeb30e494dd3d030260909bb9049610612129c5ab8b3a64ca7a6c	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+266B} {U+266A} music {U+266C}.txt	symbols/★/☆/♥/♦/♣/♫ ♪ music ♬.txt
+F	92	a6942d96eb9d9e91e8313a5555d6fb549647c165dac2e06c32e1cbb4c27ae6ba	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+26A0} {U+26D4} {U+2622} {U+2623} warning.txt	symbols/★/☆/♥/♦/♣/⚠ ⛔ ☢ ☣ warning.txt
+F	73	122a80ba2da83db61b4de2ee432e8fbe20390de503a95bc08e89241fd12c80b0	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2713} done.txt	symbols/★/☆/♥/♦/♣/✓ done.txt
+F	75	06ca46d4ef0ffcfeaebf2421eb1f52872e603147c20790c3dffeabeabebba175	2026-01-01T12:00:00Z	both	symbols/{U+2605}/{U+2606}/{U+2665}/{U+2666}/{U+2663}/{U+2717} failed.txt	symbols/★/☆/♥/♦/♣/✗ failed.txt
