@@ -1,13 +1,23 @@
 package org.krost.unidrive.cli
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.ScanProgress
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -591,12 +601,136 @@ class DaemonRuntimeTest {
         return collected.toString()
     }
 
+    // ---- the enumeration object of daemon.status -----------------------------------------------------------------------
+
+    private fun enumerationOf(reply: String): JsonObject = Json.parseToJsonElement(reply).jsonObject.getValue("enumeration").jsonObject
+
+    private fun startDaemon(provider: CloudProvider) =
+        DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { provider },
+        )
+
+    private suspend fun awaitSocket() {
+        repeat(100) {
+            if (Files.exists(socketPath)) return
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
+    }
+
+    // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
+    private suspend fun awaitEnumeration(
+        timeoutMs: Long = 10_000,
+        predicate: (JsonObject) -> Boolean,
+    ): JsonObject {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var last = ""
+        while (System.currentTimeMillis() < deadline) {
+            last = sendOneRequest("""{"verb":"daemon.status"}""")
+            enumerationOf(last).let { if (predicate(it)) return it }
+            delay(50)
+        }
+        error("the enumeration object never matched; last daemon.status reply: $last")
+    }
+
+    @Test
+    fun `daemon_status carries an enumeration object that is idle before any enumeration and leaves the other fields alone`() = runBlocking {
+        val runtime = startDaemon(StubProvider())
+        val daemonJob = launch { runtime.start() }
+        awaitSocket()
+        try {
+            val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+
+            val status = Json.parseToJsonElement(reply).jsonObject
+            assertEquals(DaemonRuntime.IPC_PROTOCOL_VERSION, status.getValue("protocol_version").jsonPrimitive.int)
+            assertEquals("stub", status.getValue("provider").jsonPrimitive.content)
+            assertEquals("Stub", status.getValue("provider_name").jsonPrimitive.content)
+            assertTrue(status.getValue("authenticated").jsonPrimitive.boolean)
+            assertFalse(status.getValue("refresh_in_flight").jsonPrimitive.boolean)
+            assertTrue(status.getValue("uptime_ms").jsonPrimitive.long >= 0)
+            val enumeration = status.getValue("enumeration").jsonObject
+            assertEquals(setOf("state", "first", "attempt"), enumeration.keys, "nothing else is known before a run: $reply")
+            assertEquals("idle", enumeration.getValue("state").jsonPrimitive.content)
+            assertTrue(enumeration.getValue("first").jsonPrimitive.boolean, "no enumeration has completed")
+            assertEquals(0, enumeration.getValue("attempt").jsonPrimitive.int)
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `daemon_status follows an enumeration from running to done`() = runBlocking {
+        val gate = CompletableDeferred<Unit>()
+        val runtime = startDaemon(ScriptedDeltaProvider(gate = gate))
+        val daemonJob = launch { runtime.start() }
+        awaitSocket()
+        try {
+            val started = sendOneRequest("""{"verb":"sync.enumerate"}""")
+            assertTrue(started.contains("\"ok\":true"), started)
+
+            val running = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "running" && "items" in it }
+            assertEquals("listing", running.getValue("phase").jsonPrimitive.content)
+            assertEquals("tree", running.getValue("listing").jsonPrimitive.content)
+            assertTrue(running.getValue("first").jsonPrimitive.boolean)
+            assertEquals(1, running.getValue("attempt").jsonPrimitive.int)
+            assertEquals(1_234, running.getValue("items").jsonPrimitive.int)
+            assertEquals(10, running.getValue("folders_done").jsonPrimitive.int)
+            assertEquals(40, running.getValue("folders_known").jsonPrimitive.int)
+            assertEquals(1, running.getValue("folders_skipped").jsonPrimitive.int)
+            assertTrue(running.getValue("started_at_ms").jsonPrimitive.long > 0)
+            assertTrue(running.getValue("elapsed_ms").jsonPrimitive.long >= 0)
+            assertFalse("last_success_at_ms" in running)
+
+            gate.complete(Unit)
+            val done = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "idle" && "last_success_at_ms" in it }
+            assertFalse(done.getValue("first").jsonPrimitive.boolean, "the cursor is promoted: the view is complete")
+            assertEquals(0, done.getValue("attempt").jsonPrimitive.int)
+            assertTrue(done.getValue("last_success_at_ms").jsonPrimitive.long > 0)
+            assertFalse("items" in done, "an idle enumeration shows no progress")
+            assertFalse("phase" in done)
+        } finally {
+            gate.complete(Unit)
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking {
+        val runtime = startDaemon(ScriptedDeltaProvider(failure = ProviderException("cannot list /Secret/Plans: boom")))
+        val daemonJob = launch { runtime.start() }
+        awaitSocket()
+        try {
+            sendOneRequest("""{"verb":"sync.enumerate"}""")
+            val failed = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "failed" }
+
+            assertEquals(1, failed.getValue("attempt").jsonPrimitive.int)
+            assertEquals("cannot list <path>: boom", failed.getValue("last_error").jsonPrimitive.content)
+            assertTrue(failed.getValue("first").jsonPrimitive.boolean, "the view is still incomplete")
+            assertFalse("next_attempt_at_ms" in failed, "no poller runs, so nothing is scheduled")
+            assertFalse("phase" in failed)
+
+            sendOneRequest("""{"verb":"sync.enumerate"}""")
+            val again = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "failed" && it.getValue("attempt").jsonPrimitive.int == 2 }
+            assertEquals(2, again.getValue("attempt").jsonPrimitive.int, "attempts since the last success")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
     /**
      * Minimal CloudProvider stub. Only authenticateAndLog() (via authenticate())
      * is exercised by T1's happy-path lifecycle; the rest must compile but never
      * runs in this test.
      */
-    private class StubProvider : CloudProvider {
+    private open class StubProvider : CloudProvider {
         override val id: String = "stub"
         override val displayName: String = "Stub"
         override var isAuthenticated: Boolean = true
@@ -637,6 +771,28 @@ class DaemonRuntimeTest {
         ): DeltaPage = DeltaPage(items = emptyList(), cursor = "x", hasMore = false)
 
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
+    }
+
+    /**
+     * A provider whose listing reports tree progress to the engine, then waits for [gate] and fails with
+     * [failure] or ends with an empty page: what a long first enumeration looks like from outside.
+     */
+    private class ScriptedDeltaProvider(
+        private val gate: CompletableDeferred<Unit>? = null,
+        private val failure: Exception? = null,
+    ) : StubProvider() {
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
+        ): DeltaPage {
+            scanContext?.onProgress?.invoke(
+                ScanProgress(items = 1_234, foldersDone = 10, foldersKnown = 40, foldersSkipped = 1, listing = ScanProgress.LISTING_TREE),
+            )
+            gate?.await()
+            failure?.let { throw it }
+            return DeltaPage(items = emptyList(), cursor = "cursor-1", hasMore = false)
+        }
     }
 
     /**

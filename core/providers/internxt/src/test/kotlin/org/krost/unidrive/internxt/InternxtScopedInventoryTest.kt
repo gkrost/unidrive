@@ -2,6 +2,7 @@ package org.krost.unidrive.internxt
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.ScanProgress
 import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
@@ -46,6 +47,7 @@ class InternxtScopedInventoryTest {
         contents: Map<String, FolderContentResponse> = tree,
         skipped: AtomicInteger = AtomicInteger(0),
         scanned: AtomicInteger = AtomicInteger(0),
+        onProgress: ((ScanProgress) -> Unit)? = null,
     ) = InternxtProvider.collectScopedInventoryImpl(
         getContents = { uuid ->
             synchronized(listed) { listed += uuid }
@@ -56,6 +58,7 @@ class InternxtScopedInventoryTest {
         scanned = scanned,
         skipped = skipped,
         log = log,
+        onProgress = onProgress,
     )
 
     private fun paths(inv: ScopedInventory): Set<String> {
@@ -212,4 +215,73 @@ class InternxtScopedInventoryTest {
         assertEquals(listOf("/_INBOX"), page.items.map { it.path })
         assertTrue(!page.complete)
     }
+
+    // ---- the progress the walk reports to the engine's status ------------------------------------------------------------
+
+    @Test
+    fun `the walk reports its folders as they are listed and ends with every folder counted`() =
+        runTest {
+            val reports = mutableListOf<ScanProgress>()
+
+            run(listOf("/"), onProgress = { reports += it })
+
+            assertEquals(
+                ScanProgress(items = 0, foldersDone = 0, foldersKnown = 0, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
+                reports.first(),
+                "the walk is named before the first folder is back",
+            )
+            assertEquals(
+                ScanProgress(items = 11, foldersDone = 6, foldersKnown = 6, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
+                reports.last(),
+                "root, _INBOX, _INBOXX, other, sub and many listed; 6 files and 5 folders found",
+            )
+            assertEquals(7, reports.size, "the start and one report per folder")
+            assertTrue(
+                reports.zipWithNext().all { (a, b) ->
+                    b.foldersDone!! >= a.foldersDone!! && b.foldersKnown!! >= a.foldersKnown!! && b.items >= a.items
+                },
+                "the counts only grow: $reports",
+            )
+            // A folder counts as known before its parent counts as done, so the queue is never empty while the walk goes on.
+            assertTrue(reports.drop(1).dropLast(1).all { it.foldersKnown!! > it.foldersDone!! }, "$reports")
+        }
+
+    @Test
+    fun `a folder that cannot be listed counts as done and as skipped`() =
+        runTest {
+            val reports = mutableListOf<ScanProgress>()
+
+            InternxtProvider.collectScopedInventoryImpl(
+                getContents = { uuid ->
+                    if (uuid == "sub") throw InternxtApiException("unavailable", 503)
+                    tree[uuid] ?: error("unexpected uuid $uuid")
+                },
+                driveRootUuid = "root",
+                scopeRoots = listOf("/_INBOX"),
+                scanned = AtomicInteger(0),
+                skipped = AtomicInteger(0),
+                log = log,
+                onProgress = { reports += it },
+            )
+
+            assertEquals(
+                ScanProgress(items = 3, foldersDone = 2, foldersKnown = 2, foldersSkipped = 1, listing = ScanProgress.LISTING_TREE),
+                reports.last(),
+                "_INBOX listed, sub skipped; a.txt, _INBOX and sub found, deep.txt never listed",
+            )
+        }
+
+    @Test
+    fun `the folders that lead to a nested scope root are not counted as folders of the walk`() =
+        runTest {
+            val reports = mutableListOf<ScanProgress>()
+
+            run(listOf("/other/many"), onProgress = { reports += it })
+
+            assertEquals(
+                ScanProgress(items = 3, foldersDone = 1, foldersKnown = 1, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
+                reports.last(),
+                "only many is walked; other is resolved on the way",
+            )
+        }
 }

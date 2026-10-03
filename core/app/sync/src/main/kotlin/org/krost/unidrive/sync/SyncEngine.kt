@@ -139,6 +139,9 @@ open class SyncEngine(
     // constructed after the engine); the no-op default keeps engine-only callers
     // and tests unaffected.
     private val uploadInFlight: (path: String) -> Boolean = { false },
+    // What a client may ask about the enumeration (see enumerationStatus). The daemon's poller
+    // records on the same tracker when it tries again after a failure.
+    val enumerationTracker: EnumerationTracker = EnumerationTracker(),
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
 ) {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -1328,18 +1331,85 @@ open class SyncEngine(
         }
     }
 
+    // Records the attempt for enumerationStatus: its start, its end, and a failure that escapes. The
+    // provider failures that end as an EnumerateResult are recorded where they are caught.
     private suspend fun enumerateRemoteIntoStateLocked(reset: Boolean): EnumerateResult {
+        enumerationTracker.begin()
+        try {
+            val result = runEnumeration(reset)
+            if (result.ok) enumerationTracker.succeeded()
+            return result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            enumerationTracker.failed(e.message ?: e.javaClass.simpleName)
+            throw e
+        } finally {
+            // A no-op once the attempt succeeded or failed; a cancelled one is neither.
+            enumerationTracker.aborted()
+        }
+    }
+
+    /**
+     * What a client may be told about the enumeration right now. A running attempt is answered from
+     * memory alone: state.db is held by the batch that saves the result, and a status request must
+     * not wait for it. Otherwise the cursor decides whether the view is still incomplete, and the
+     * last completed scan, when this process has not run one, comes from state.db.
+     */
+    fun enumerationStatus(): EnumerationStatus {
+        val status = enumerationTracker.snapshot()
+        if (status.state == EnumerationStatus.State.RUNNING) return status
+        return runCatching {
+            status.copy(
+                first = db.getSyncState("delta_cursor").isNullOrEmpty(),
+                lastSuccessAtMs =
+                    status.lastSuccessAtMs
+                        ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
+            )
+        }.getOrDefault(status)
+    }
+
+    // What the last complete full enumeration found, as the next full one's estimate.
+    private fun previousFullEnumeration(): EnumerationTracker.Expected? {
+        val items = db.getSyncState(FULL_ENUMERATION_ITEMS_KEY)?.toIntOrNull() ?: return null
+        return EnumerationTracker.Expected(
+            items = items,
+            folders = db.getSyncState(FULL_ENUMERATION_FOLDERS_KEY)?.toIntOrNull(),
+            durationMs = db.getSyncState(FULL_ENUMERATION_MS_KEY)?.toLongOrNull(),
+        )
+    }
+
+    private fun recordFullEnumeration(
+        remoteChanges: Map<String, CloudItem>,
+        listingMs: Long,
+    ) {
+        val live = remoteChanges.values.filter { !it.deleted }
+        db.setSyncState(FULL_ENUMERATION_ITEMS_KEY, live.size.toString())
+        db.setSyncState(FULL_ENUMERATION_FOLDERS_KEY, live.count { it.isFolder }.toString())
+        db.setSyncState(FULL_ENUMERATION_MS_KEY, listingMs.toString())
+    }
+
+    private suspend fun runEnumeration(reset: Boolean): EnumerateResult {
         // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
         // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
         // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
         applyScopeTransition()
         if (reset) db.setSyncState("delta_cursor", "")
+        // Only a full listing is measured against a previous one; a delta of a few items must not
+        // inherit the total of the whole drive.
+        val cursorEmpty = db.getSyncState("delta_cursor").isNullOrEmpty()
+        enumerationTracker.baseline(
+            first = cursorEmpty,
+            expected = if (cursorEmpty || provider.deltaIsFullListing) previousFullEnumeration() else null,
+        )
         val remoteChanges: Map<String, CloudItem> =
             try {
-                gatherRemoteChanges().filterKeys { isTracked(it) }
+                gatherRemoteChanges(progress = enumerationTracker).filterKeys { isTracked(it) }
             } catch (e: ProviderException) {
+                enumerationTracker.failed(e.message ?: e.javaClass.simpleName)
                 return EnumerateResult(ok = false, error = e.message)
             }
+        val listingMs = enumerationTracker.saving(remoteChanges.count { !it.value.deleted })
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
         val canonicalToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
@@ -1443,6 +1513,8 @@ open class SyncEngine(
         // deleted).
         deferredMissing = if (complete) nextDeferred else emptySet()
         promotePendingCursor()
+        // A complete full listing becomes the estimate for the next one (the gather recorded whether it was full).
+        if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
         // Notify the view-invalidation sink once, with all paths that changed in state.db
         // during this pass. Only fires when something actually changed so quiescent polls
         // do not produce spurious cache-invalidation traffic. The sink is a plain lambda so
@@ -2812,7 +2884,11 @@ open class SyncEngine(
     }
 
     // [readOnly]: a dry-run preview, told to the provider through ScanContext.readOnly so it persists nothing.
-    private suspend fun gatherRemoteChanges(readOnly: Boolean = false): Map<String, CloudItem> = withContext(Priority.Background) {
+    // [progress]: the tracker an enumeration reports to, fed by the page callbacks and by the provider.
+    private suspend fun gatherRemoteChanges(
+        readOnly: Boolean = false,
+        progress: EnumerationTracker? = null,
+    ): Map<String, CloudItem> = withContext(Priority.Background) {
         val storedCursor = db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         var isFullSync = cursor == null || provider.deltaIsFullListing
@@ -2824,6 +2900,12 @@ open class SyncEngine(
         fun admitChange(item: CloudItem) {
             admit(changes, keyToPath, collisions, item)
         }
+        // After every page the gather holds: the reporter's heartbeat and the enumeration's item count.
+        fun reportGathered() {
+            reporter.onScanProgress("remote", changes.size)
+            progress?.onItems(changes.size)
+        }
+        val providerProgress: ((org.krost.unidrive.ScanProgress) -> Unit)? = progress?.let { it::onProgress }
 
         // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
         // cursor without enumerating. Provider must declare FastBootstrap; otherwise
@@ -2911,6 +2993,7 @@ open class SyncEngine(
         // forwards it.
         val onPageProgress: (Int) -> Unit = { itemsSoFar ->
             reporter.onScanProgress("remote", itemsSoFar)
+            progress?.onItems(itemsSoFar)
         }
 
         // UD-360: providers signal partial gathers via DeltaPage.complete=false.
@@ -2947,6 +3030,7 @@ open class SyncEngine(
                 persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
                 scopeRoots = trackScope,
                 readOnly = readOnly,
+                onProgress = providerProgress,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -3007,7 +3091,7 @@ open class SyncEngine(
             // 2026-09-29), so a 113k-item drive emits ~113 update events — cheap,
             // and the reporter is responsible for throttling display
             // (CliProgressReporter overwrites the same line via printInline).
-            reporter.onScanProgress("remote", changes.size)
+            reportGathered()
 
             while (page.hasMore) {
                 page = nextPage(page.cursor)
@@ -3016,7 +3100,7 @@ open class SyncEngine(
                     admitChange(resolved)
                 }
                 persistPendingCursor(page.cursor)
-                reporter.onScanProgress("remote", changes.size)
+                reportGathered()
             }
         } catch (e: DeltaCursorExpiredException) {
             // The resumed cursor aged out / the drive re-keyed (Graph 410). Clear the
@@ -3038,6 +3122,7 @@ open class SyncEngine(
                     persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
                     scopeRoots = trackScope,
                     readOnly = readOnly,
+                    onProgress = providerProgress,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =
@@ -3068,7 +3153,7 @@ open class SyncEngine(
                 admitChange(resolved)
             }
             persistPendingCursor(rPage.cursor)
-            reporter.onScanProgress("remote", changes.size)
+            reportGathered()
             while (rPage.hasMore) {
                 rPage = nextPageRecovery(rPage.cursor)
                 for (item in rPage.items) {
@@ -3076,7 +3161,7 @@ open class SyncEngine(
                     admitChange(resolved)
                 }
                 persistPendingCursor(rPage.cursor)
-                reporter.onScanProgress("remote", changes.size)
+                reportGathered()
             }
             if (allComplete) {
                 db.completeScan(recoveryScanId)
@@ -5222,6 +5307,13 @@ open class SyncEngine(
         const val REMOTE_COLLISIONS_KEY: String = "remote_collisions"
         const val REMOTE_COLLISION_PATHS_KEY: String = "remote_collisions_paths"
         const val COLLISION_PATHS_STATUS_LIMIT: Int = 50
+
+        // sync_state keys: what the last complete full enumeration found (live items, live folders)
+        // and how long its listing took, the estimate behind the next one's ETA. Not the
+        // last_scan_*_remote hints: a sync pass writes those for deltas too, so they are no total.
+        const val FULL_ENUMERATION_ITEMS_KEY: String = "last_full_enumeration_items"
+        const val FULL_ENUMERATION_FOLDERS_KEY: String = "last_full_enumeration_folders"
+        const val FULL_ENUMERATION_MS_KEY: String = "last_full_enumeration_ms"
 
         internal fun formatSkippedOpJson(
             action: String,

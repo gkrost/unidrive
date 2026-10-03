@@ -269,7 +269,47 @@ If a refresh is running:
 }
 ```
 
-Read-only verb; takes no parameters; never returns `ok: false` (a daemon that can reply to verbs is by definition functional enough to answer this one). PID and profile name are deliberately NOT in the response — those come from `.lock.pid` and are knowable without the daemon being reachable (avoiding the chicken-and-egg case where "is the daemon up?" requires the daemon to be up). The verb adds value only for the data that cannot be derived from the file system: uptime, connected-clients count, refresh-in-flight state.
+Read-only verb; takes no parameters; never returns `ok: false` (a daemon that can reply to verbs is by definition functional enough to answer this one). PID and profile name are deliberately NOT in the response — those come from `.lock.pid` and are knowable without the daemon being reachable (avoiding the chicken-and-egg case where "is the daemon up?" requires the daemon to be up). The verb adds value only for the data that cannot be derived from the file system: uptime, connected-clients count, refresh-in-flight state, the progress of the remote enumeration.
+
+**The `enumeration` object.** The reply always carries an additive `enumeration` object (the protocol version does not change) that says whether the remote is being enumerated, how far that is, and how the last attempt ended. It covers every run of the engine's one-way remote enumeration (the poller, `sync.enumerate`, the mount-routed `refresh.run`, the enumerate after `hydration.subscribe`). Only `state`, `first` and `attempt` are always present; a field that is unknown is absent, never `null`, and clients must tolerate any other field missing. The engine reports numbers and codes only; the client words them.
+
+```json
+{
+  "state": "running",
+  "first": true,
+  "attempt": 2,
+  "phase": "listing",
+  "listing": "tree",
+  "started_at_ms": 1700000000000,
+  "elapsed_ms": 61500,
+  "items": 47000,
+  "folders_done": 310,
+  "folders_known": 4100,
+  "folders_skipped": 0,
+  "rate_per_s": 312.4,
+  "eta_s": 905,
+  "eta_kind": "lower_bound",
+  "last_error": "Server closed connection for GET <url>: the server prematurely closed the connection"
+}
+```
+
+| field | meaning |
+|---|---|
+| `state` | `idle`, `running` (an enumeration is in flight) or `failed` (the last attempt failed; a poller, if one runs, waits) |
+| `first` | true while no enumeration has completed for this profile (the delta cursor is empty): the view is incomplete until one does |
+| `attempt` | attempts since the last success, counting the running one; 0 after a success |
+| `phase` | while running: `listing` (gathering from the remote) or `saving` (writing the result to state.db) |
+| `listing` | `account` (account-wide offset pagination) or `tree` (folder walk); absent when the provider does not say |
+| `started_at_ms`, `elapsed_ms` | start of the running or the last attempt (epoch ms); elapsed time of the running one |
+| `items` | items gathered by the running (or the failed) attempt so far |
+| `folders_done`, `folders_known`, `folders_skipped` | folder walk only: folders listed or skipped, folders discovered so far (a lower bound of the total), folders that failed and were skipped |
+| `rate_per_s` | items per second, smoothed over the last minute; absent before ten seconds of data and while the listing stands still |
+| `eta_s`, `eta_kind` | seconds left while listing. `lower_bound`: only the known queue of the folder walk is counted, the real value can be larger. `estimate`: the totals of a previous complete full enumeration give the size of the whole. Absent when neither is known |
+| `last_success_at_ms` | end of the last completed enumeration (epoch ms) |
+| `last_error` | the reason the last attempt failed, until a success: one line, at most 200 characters, with paths, quoted names, addresses and URLs replaced by placeholders |
+| `next_attempt_at_ms` | while `failed` and the poller runs: when it tries again (epoch ms, the jittered sleep it takes) |
+
+A running enumeration is answered from memory, never from state.db, so a status request does not wait for the batch that saves the result.
 
 ### 4.4 `sync.subscribe` (existing, unchanged semantics)
 

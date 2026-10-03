@@ -278,7 +278,12 @@ class DaemonRuntime(
                 // assumed to back a mount view. Shares the sync.enumerate in-flight
                 // guard (never overlaps a manual refresh/enumerate). Launched on
                 // serveScope so it cancels with the daemon at shutdown.
-                EnumeratePoller(enumerateHandler, pollIntervalMs, serveScope).start()
+                EnumeratePoller(
+                    enumerateHandler,
+                    pollIntervalMs,
+                    serveScope,
+                    onNextAttempt = engine.enumerationTracker::nextAttemptAt,
+                ).start()
 
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
@@ -287,7 +292,8 @@ class DaemonRuntime(
                 // account/auth state a status UI needs; the SPI carries no account
                 // identity, so the provider type + name is what we can report
                 // truthfully, and `authenticated` only says that credentials are
-                // loaded (not that they are valid).
+                // loaded (not that they are valid). enumeration is the progress of
+                // the remote enumeration (additive, object always present).
                 server.registerHandler("daemon.status") { _, _ ->
                     val uptimeMs = System.currentTimeMillis() - startedAtMs
                     val clientCount = server.clientCount
@@ -301,7 +307,8 @@ class DaemonRuntime(
                     ).toString()
                     val providerJson = kotlinx.serialization.json.JsonPrimitive(provider.id).toString()
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated}}"""
+                    val enumerationJson = engine.enumerationStatus().toJson().toString()
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson}"""
                 }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every

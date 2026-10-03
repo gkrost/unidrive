@@ -15,7 +15,9 @@ import kotlin.random.Random
  * operation `sync.enumerate` runs — serialised by the shared in-flight guard so
  * a tick never overlaps a manual refresh/enumerate or another tick. On a
  * provider failure / 429 it extends the next interval (back-off) rather than
- * hammering. Cancelled cleanly when the serve scope is cancelled at shutdown.
+ * hammering, and reports through [onNextAttempt] when it will try again (the
+ * jittered sleep it really takes) until the next run starts. Cancelled cleanly
+ * when the serve scope is cancelled at shutdown.
  */
 class EnumeratePoller(
     private val handler: EnumerateRpcHandler,
@@ -29,6 +31,8 @@ class EnumeratePoller(
     },
     private val backoffMultiplier: Long = DEFAULT_BACKOFF_MULTIPLIER,
     private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val onNextAttempt: (epochMs: Long?) -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(EnumeratePoller::class.java)
 
@@ -37,10 +41,15 @@ class EnumeratePoller(
         log.info("auto-poll enabled: enumerate every ${intervalMs}ms (±10% jitter)")
         scope.launch {
             var nextMs = intervalMs
+            var afterFailure = false
             while (true) {
                 try {
-                    delay(jitter(nextMs))
+                    val sleepMs = jitter(nextMs)
+                    if (afterFailure) onNextAttempt(clock() + sleepMs)
+                    delay(sleepMs)
+                    onNextAttempt(null)
                     val result = handler.runGuarded(reset = false)
+                    afterFailure = result != null && !result.ok
                     nextMs =
                         when {
                             result == null -> intervalMs // busy: another enumerate held the guard, skip
@@ -55,6 +64,7 @@ class EnumeratePoller(
                     throw e
                 } catch (e: Exception) {
                     log.warn("auto-poll: tick error; backing off", e)
+                    afterFailure = true
                     nextMs = (intervalMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
                 }
             }

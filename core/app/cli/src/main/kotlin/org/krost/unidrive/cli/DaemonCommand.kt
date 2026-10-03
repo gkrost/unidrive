@@ -156,8 +156,13 @@ class DaemonStatusCommand : Runnable {
                         ("""{"verb":"daemon.status"}""" + "\n").toByteArray(),
                     ),
                 )
-                val buf = java.nio.ByteBuffer.allocate(1024)
-                channel.read(buf)
+                // The reply carries the enumeration object (up to a few hundred bytes more than the
+                // rest). The daemon newline-terminates every reply; a read may return before the
+                // whole line does, so read until the newline shows up.
+                val buf = java.nio.ByteBuffer.allocate(8192)
+                while (!buf.array().take(buf.position()).contains('\n'.code.toByte())) {
+                    if (channel.read(buf) <= 0) break
+                }
                 buf.flip()
                 val reply = String(buf.array(), 0, buf.limit()).substringBefore('\n')
                 println(reply)

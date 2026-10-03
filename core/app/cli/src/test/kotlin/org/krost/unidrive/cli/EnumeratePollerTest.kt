@@ -96,6 +96,108 @@ class EnumeratePollerTest {
         scope.cancel()
     }
 
+    // The status a client polls says when the poller tries again after a failure: the sleep it really takes
+    // (with its jitter), recorded when it begins, and gone as soon as the next run starts.
+    @Test
+    fun `the poller reports when it tries again after a failure and clears it when the next run starts`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller = EnumeratePoller(
+            handler = handler,
+            intervalMs = intervalMs,
+            scope = scope,
+            jitter = { it },
+            backoffMultiplier = 3,
+            clock = { testScheduler.currentTime },
+            onNextAttempt = { reported += it },
+        )
+        poller.start()
+
+        advanceTimeBy(stepOneInterval()) // the first run starts at 60 s and fails
+        runCurrent()
+        assertEquals(listOf(null, 240_000L), reported, "cleared at the start, then 60 s + the backed-off 180 s")
+
+        advanceTimeBy(180_000) // the retry starts at 240 s and fails too
+        runCurrent()
+        assertEquals(listOf(null, 240_000L, null, 420_000L), reported)
+        scope.cancel()
+    }
+
+    @Test
+    fun `the poller records the jittered sleep, not the nominal one`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller = EnumeratePoller(
+            handler = handler,
+            intervalMs = intervalMs,
+            scope = scope,
+            jitter = { it + 7_000 },
+            backoffMultiplier = 3,
+            clock = { testScheduler.currentTime },
+            onNextAttempt = { reported += it },
+        )
+        poller.start()
+
+        advanceTimeBy(intervalMs + 7_001)
+        runCurrent()
+
+        assertEquals(listOf(null, (intervalMs + 7_000) + (3 * intervalMs + 7_000)), reported)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a tick that throws also reports its next attempt`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val engine = RecordingEngine(enumerateFailure = IllegalStateException("db is gone"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller = EnumeratePoller(
+            handler = handler,
+            intervalMs = intervalMs,
+            scope = scope,
+            jitter = { it },
+            backoffMultiplier = 3,
+            clock = { testScheduler.currentTime },
+            onNextAttempt = { reported += it },
+        )
+        poller.start()
+
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+
+        assertEquals(listOf(null, 240_000L), reported)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a successful run schedules no next attempt`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller = EnumeratePoller(
+            handler = handler,
+            intervalMs = intervalMs,
+            scope = scope,
+            jitter = { it },
+            clock = { testScheduler.currentTime },
+            onNextAttempt = { reported += it },
+        )
+        poller.start()
+
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        advanceTimeBy(intervalMs)
+        runCurrent()
+
+        assertEquals(listOf<Long?>(null, null), reported, "each run start clears; a success leaves nothing scheduled")
+        scope.cancel()
+    }
+
     @Test
     fun `parseIntervalMs accepts bare seconds suffixed units and zero`() {
         assertEquals(0L, EnumeratePoller.parseIntervalMs("0"))

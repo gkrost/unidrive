@@ -22,6 +22,7 @@ import java.nio.file.Path
 class RecordingEngine(
     private val enumerateResult: EnumerateResult = EnumerateResult(ok = true),
     private val gate: CompletableDeferred<Unit>? = null,
+    private val enumerateFailure: Throwable? = null,
 ) : SyncEngine(
         provider = NoopProvider,
         db = freshDb(),
@@ -37,6 +38,7 @@ class RecordingEngine(
         enumerateCount.incrementAndGet()
         lastReset = reset
         gate?.await()
+        enumerateFailure?.let { throw it }
         return enumerateResult
     }
 

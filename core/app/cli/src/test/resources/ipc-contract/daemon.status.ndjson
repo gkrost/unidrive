@@ -1,2 +1,2 @@
 {"verb":"daemon.status"}
-{"ok":true,"protocol_version":1,"uptime_ms":0,"clients_connected":1,"refresh_in_flight":false,"refresh_job_id":null,"sync_paths":[],"provider":"stub","provider_name":"Stub","authenticated":true}
+{"ok":true,"protocol_version":1,"uptime_ms":0,"clients_connected":1,"refresh_in_flight":false,"refresh_job_id":null,"sync_paths":[],"provider":"stub","provider_name":"Stub","authenticated":true,"enumeration":{"state":"idle","first":true,"attempt":0}}
