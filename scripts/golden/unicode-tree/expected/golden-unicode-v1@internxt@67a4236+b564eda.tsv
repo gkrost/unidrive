@@ -1,0 +1,8 @@
+# Known deviations of golden-unicode-v1 on Internxt for engine 67a4236 (main 9f7864e + #484) and client b564eda, the first run (RUN-2026-10-03.md).
+# tool	class	path	issue	note
+verify	MTIME	*	gkrost/unidrive#486	new files lose their modification time (cloud, mirror, and some placeholders)
+daemon-view	ERROR	binary/sizes/b0000000.bin	gkrost/unidrive#485	empty files cannot be uploaded to Internxt
+daemon-view	ERROR	arabic-and-hebrew/{U+0627}{U+0644}{U+0639}{U+0631}{U+0628}{U+064A}{U+0629}/{U+0645}{U+0633}{U+062A}{U+0646}{U+062F}{U+0627}{U+062A}/{U+0631}{U+0633}{U+0627}{U+0626}{U+0644}/{U+0641}{U+0627}{U+0631}{U+063A}.txt	gkrost/unidrive#485	empty file
+daemon-view	NFCMERGE	hazards/nfc-nfd-twins/*	gkrost/unidrive#491	state.db keys paths in NFC; decision pending
+daemon-view	NFCMERGE	hazards/case-fold/{U+212B}.txt	gkrost/unidrive#491	the angstrom sign normalises to U+00C5
+daemon-view	LEAK	*	gkrost/unidrive#489	grandchild listed below a non-BMP folder name (fix: #492)

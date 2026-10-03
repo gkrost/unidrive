@@ -1,0 +1,14 @@
+# Expectations of golden-unicode-v1 on the localfs provider for run 4: engine 1a00eaf (as run 3), client 4a8f5ad = run 3's client
+# 6ea4bf5 + unidrive-windows#123 (the #491 guard: names that are one name for the cloud are refused) + #125 (watcher keys paths
+# ordinally: final sigma) + #122's diagnostics. These rules are NOT accepted deviations: they describe the REFUSAL the guard
+# performs while gkrost/unidrive#491 is undecided. Before the guard the same pairs lost data (run 3, H1); a SIZE or HASH finding on
+# any of these names is data loss and must stay unexpected.
+# tool	class	path	issue	note
+verify	MISSING	hazards/nfc-nfd-twins/*	gkrost/unidrive#491	refused by the guard: neither member of a pair reaches the provider (the mount keeps both, plain)
+verify	MISSING	hazards/case-fold/{U+00C5}.txt	gkrost/unidrive#491	refused: clashes with the angstrom sign
+verify	MISSING	hazards/case-fold/{U+212B}.txt	gkrost/unidrive#491	refused: clashes with U+00C5
+verify	FORM	hazards/invisible-and-lookalike-twins/a{U+0301}{U+0302}{U+0303}{U+0304}{U+0305}.txt	gkrost/unidrive#491	a lone non-NFC name is stored in NFC (#171)
+daemon-view	NFCMERGE	hazards/nfc-nfd-twins/*	gkrost/unidrive#491	state.db keys paths in NFC
+daemon-view	NFCMERGE	hazards/case-fold/{U+212B}.txt	gkrost/unidrive#491	the angstrom sign normalises to U+00C5
+daemon-view	MISSING	hazards/nfc-nfd-twins/*	gkrost/unidrive#491	refused by the guard: no row
+daemon-view	MISSING	hazards/case-fold/{U+00C5}.txt	gkrost/unidrive#491	refused by the guard: no row
