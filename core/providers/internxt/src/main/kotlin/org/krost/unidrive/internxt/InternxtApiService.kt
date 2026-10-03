@@ -46,6 +46,9 @@ class InternxtApiService(
         HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 500, stormSpacingMs = 1_000),
     private val bridgeBudget: HttpRetryBudget =
         HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
+    // The socket timeout of the listings, whose answers need minutes on a large account. A parameter so that
+    // loopback tests can run with a small one.
+    private val listingSocketTimeoutMs: Long = LISTING_SOCKET_TIMEOUT_MS,
     // Tests hand in a client on a MockEngine; production builds the default one.
     private val httpClient: HttpClient = defaultHttpClient(),
 ) : AutoCloseable {
@@ -64,6 +67,39 @@ class InternxtApiService(
             }
 
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
+
+        // The gateway's own answers for an origin that did not answer (Cloudflare): 520 unknown error, 521 down, 522
+        // connection timed out, 523 unreachable, 524 timed out. A GET treats them like 502/503/504: the same
+        // "the server is unavailable" the callers' fallbacks act on, which is the 503 they end as.
+        private val GATEWAY_ORIGIN_ERRORS = setOf(520, 521, 522, 523, 524)
+
+        // Answered after the gateway has waited for the origin for about two minutes: the same request gets the same answer.
+        private const val GATEWAY_ORIGIN_TIMEOUT = 524
+
+        private fun gatewayOriginErrorName(status: Int): String =
+            when (status) {
+                520 -> "the origin returned an unknown error"
+                521 -> "the origin is down"
+                522 -> "the connection to the origin timed out"
+                523 -> "the origin is unreachable"
+                else -> "the origin timed out"
+            }
+
+        // A gateway origin error as the synthetic 503 of "the server is unavailable". The gateway's own status and body stay
+        // in the cause, its Retry-After on the exception.
+        private fun gatewayUnavailable(
+            e: InternxtApiException,
+            url: String,
+            elapsedMs: Long?,
+        ): InternxtApiException =
+            InternxtApiException(
+                "the gateway answered ${e.statusCode} (${gatewayOriginErrorName(e.statusCode)}) for GET $url" +
+                    (elapsedMs?.let { " after ${String.format(java.util.Locale.ROOT, "%.1f s", it / 1000.0)}" } ?: ""),
+                503,
+                requestId = e.requestId,
+                retryAfterMs = e.retryAfterMs,
+                cause = e,
+            )
 
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
@@ -93,6 +129,8 @@ class InternxtApiService(
         // byte; the flat 60 s watchdog cut every one of them. 330 s = statement
         // timeout + 10 percent — past it the server errors on its own, which is
         // the answer we want, not a silent client cut.
+        // A folder's content is such a listing too: a flat folder of 29,000 files needed 106 s and 31 MB, so
+        // getFolderContents rides at this limit as well.
         internal const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
@@ -123,7 +161,7 @@ class InternxtApiService(
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
         folderContentsDedup.load(folderUuid, currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
+            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid", socketTimeoutMs = listingSocketTimeoutMs)
             json.decodeFromString<FolderContentResponse>(body)
         }
 
@@ -139,7 +177,7 @@ class InternxtApiService(
                 authenticatedGet(
                     "$baseUrl/files",
                     listingQueryParams(updatedAt, limit, offset, status, sort),
-                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                    socketTimeoutMs = listingSocketTimeoutMs,
                 )
             json.decodeFromString<List<InternxtFile>>(body)
         }
@@ -156,7 +194,7 @@ class InternxtApiService(
                 authenticatedGet(
                     "$baseUrl/folders",
                     listingQueryParams(updatedAt, limit, offset, status, sort),
-                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                    socketTimeoutMs = listingSocketTimeoutMs,
                 )
             json.decodeFromString<List<InternxtFolder>>(body)
         }
@@ -1003,7 +1041,14 @@ class InternxtApiService(
                     }
                 }
             } catch (e: InternxtApiException) {
-                if (e.statusCode in TRANSIENT_STATUSES) {
+                if (e.statusCode in GATEWAY_ORIGIN_ERRORS) {
+                    val elapsedMs = if (attemptStartNanos != 0L) (System.nanoTime() - attemptStartNanos) / 1_000_000 else null
+                    val unavailable = gatewayUnavailable(e, url, elapsedMs)
+                    // A 524 ends the call: the gateway had waited about two minutes, a repeat gets the same answer.
+                    if (e.statusCode == GATEWAY_ORIGIN_TIMEOUT) throw unavailable
+                    lastException = unavailable
+                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                } else if (e.statusCode in TRANSIENT_STATUSES) {
                     lastException = e
                     if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
                 } else {
