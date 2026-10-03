@@ -334,7 +334,18 @@ class InternxtProvider(
                     if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
                     throw e
                 }
-            val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
+            // #333 review: hexToBytes now fails loud on a malformed index. A bridge entry
+            // whose index is not hex can never decrypt, so quarantine it with a clear
+            // reason instead of letting the engine retry the same failure on every poll.
+            val indexBytes =
+                try {
+                    InternxtCrypto.hexToBytes(bridgeInfo.index)
+                } catch (e: IllegalArgumentException) {
+                    throw PermanentDownloadFailureException(
+                        "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
+                        cause = e,
+                    )
+                }
             val iv = indexBytes.copyOfRange(0, 16)
 
             val creds = authService.getValidCredentials()
@@ -632,6 +643,15 @@ class InternxtProvider(
                 localPath,
                 tomb.stage,
             )
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+            tomb = null
+        }
+
+        // #333 review: a tombstone whose index is not valid hex cannot be resumed (hexToBytes
+        // now throws). Treat it like the other unusable tombstones: discard and cold-restart
+        // with fresh indexBytes, instead of failing this upload on every retry.
+        if (tomb != null && runCatching { InternxtCrypto.hexToBytes(tomb.indexBytesHex) }.isFailure) {
+            log.warn("discarding upload tombstone for {} (malformed index bytes; rotating indexBytes)", localPath)
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             tomb = null
         }

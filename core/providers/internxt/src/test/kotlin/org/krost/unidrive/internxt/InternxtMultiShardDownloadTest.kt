@@ -126,6 +126,23 @@ class InternxtMultiShardDownloadTest {
         )
     }
 
+    // #333 review: a malformed (non-hex) index must quarantine the row, not retry forever.
+    @Test
+    fun `a malformed bridge index fails permanently without downloading`() {
+        bridgeInfoJson = bridgeInfoJsonWith(listOf(shardUrl1)).replace(index64, "zz".repeat(32))
+        val provider = newProvider()
+
+        val e =
+            assertFailsWith<PermanentDownloadFailureException> {
+                kotlinx.coroutines.test.runTest {
+                    provider.downloadById(fileUuid, "/badindex.bin", destination)
+                }
+            }
+
+        assertTrue("malformed encryption index" in (e.message ?: ""), "got: ${e.message}")
+        assertTrue(requestLog.none { it.contains("shard-host.invalid") }, "no download request may be made: $requestLog")
+    }
+
     @Test
     fun `single-shard bridge info still downloads`() =
         kotlinx.coroutines.test.runTest {
