@@ -112,4 +112,55 @@ class HydrationEventTest {
         val json = serialiseHydrationEvent(e)
         assertTrue(json.startsWith("""{"event":"view.invalidated","paths":["""))
     }
+
+    // The progress event is what a mounted client sees most often during a copy: its object
+    // must close exactly once, at the end. A stray brace after handle_id made every line
+    // unparseable and reset the client's event stream on each progress report.
+    @Test
+    fun `uploading serialises as one well-formed object`() {
+        val e = HydrationEvent.Uploading("/a/save.doc", "h1", bytesDone = 4096, bytesTotal = 65536)
+        assertEquals(
+            """{"event":"uploading","path":"/a/save.doc","handle_id":"h1","bytes_done":4096,"bytes_total":65536}""",
+            serialiseHydrationEvent(e),
+        )
+    }
+
+    @Test
+    fun `every event kind serialises with balanced braces and brackets`() {
+        val events = listOf(
+            HydrationEvent.Hydrating("/a"),
+            HydrationEvent.Hydrated("/a", 1),
+            HydrationEvent.Dehydrated("/a"),
+            HydrationEvent.Skipped("/a"),
+            HydrationEvent.Queued("/a"),
+            HydrationEvent.Uploading("/a", "h", 1, 2),
+            HydrationEvent.Failed("/a", HydrationError.Generic("x")),
+            HydrationEvent.Completed("/a", "h", HydrationEvent.Completed.Direction.UPLOAD, ok = true),
+            HydrationEvent.Completed("/a", "h", HydrationEvent.Completed.Direction.UPLOAD, ok = false, error = HydrationError.NotFound),
+            HydrationEvent.ViewInvalidated(paths = listOf("/a")),
+            HydrationEvent.ViewInvalidated(paths = emptyList(), full = true),
+        )
+        for (e in events) {
+            val json = serialiseHydrationEvent(e)
+            var depth = 0
+            var inString = false
+            var escaped = false
+            for ((i, c) in json.withIndex()) {
+                if (inString) {
+                    if (escaped) escaped = false else if (c == '\\') escaped = true else if (c == '"') inString = false
+                    continue
+                }
+                when (c) {
+                    '"' -> inString = true
+                    '{', '[' -> depth++
+                    '}', ']' -> {
+                        depth--
+                        assertTrue(depth >= 0, "closed more than opened at index $i: $json")
+                        assertTrue(depth > 0 || i == json.length - 1, "the top-level object closes before the end at index $i: $json")
+                    }
+                }
+            }
+            assertEquals(0, depth, "unbalanced: $json")
+        }
+    }
 }
