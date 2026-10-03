@@ -78,6 +78,18 @@ open class PermanentDownloadFailureException(
     requestId: String? = null,
 ) : ProviderException(message, cause, requestId)
 
+/**
+ * #493: a permanent upload failure — the provider rejected the request itself (a malformed or refused payload, e.g.
+ * Internxt's 400 "fileId must not be provided when size is 0", #485), so another attempt with the same bytes and the same
+ * call would be rejected the same way. The hydration upload queue does not run its retry ladder for it: it marks the row
+ * failed once and frees the transfer slot. Transient failures (5xx, 408, 429, network) must never be mapped to this.
+ */
+open class PermanentUploadFailureException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : ProviderException(message, cause, requestId)
+
 /** A remote item changed after the caller captured its write token. */
 open class RemoteConflictException(
     message: String,

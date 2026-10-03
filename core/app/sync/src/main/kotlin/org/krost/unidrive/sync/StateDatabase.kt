@@ -214,7 +214,8 @@ class StateDatabase(
                     download_quarantined INTEGER NOT NULL DEFAULT 0,
                     last_error_at        TEXT,
                     local_hash           TEXT,
-                    cache_backed         INTEGER
+                    cache_backed         INTEGER,
+                    upload_refused       TEXT
                 )
             """,
             )
@@ -364,6 +365,14 @@ class StateDatabase(
             if (!columnExists("sync_entries", "cache_backed")) {
                 stmt.executeUpdate(
                     "ALTER TABLE sync_entries ADD COLUMN cache_backed INTEGER",
+                )
+            }
+            // #493: the provider refused the upload of this row's content as a request (PermanentUploadFailureException),
+            // as `<cache mtime ms>|<cache size>|<reason>`. Same additive pattern, no schema_version bump: NULL = not refused,
+            // which is every older row. Any upsert of the row (INSERT OR REPLACE) clears it, a successful upload included.
+            if (!columnExists("sync_entries", "upload_refused")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN upload_refused TEXT",
                 )
             }
         }
@@ -951,6 +960,39 @@ class StateDatabase(
                 stmt.setString(2, path)
                 return stmt.executeUpdate() == 1
             }
+    }
+
+    /**
+     * #493: records that the provider refused the upload of this row's current content as a request (a permanent failure:
+     * the same bytes would be refused again). [stamp] is `<cache mtime ms>|<cache size>|<reason>`; the replay at daemon
+     * start and a later submission of unchanged content skip the provider while it matches. Any upsert of the row clears it.
+     */
+    @Synchronized
+    fun markUploadRefused(
+        pathRaw: String,
+        stamp: String,
+    ): Boolean {
+        beginWrite()
+        val path = PathNormalizer.nfc(pathRaw)
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET upload_refused=? WHERE path=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, stamp)
+                stmt.setString(2, path)
+                return stmt.executeUpdate() == 1
+            }
+    }
+
+    /** #493: the refusal recorded by [markUploadRefused] for this alive row, or null. */
+    @Synchronized
+    fun uploadRefusal(pathRaw: String): String? {
+        val path = PathNormalizer.nfc(pathRaw)
+        conn.prepareStatement("SELECT upload_refused FROM alive_entries WHERE path=?").use { stmt ->
+            stmt.setString(1, path)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString(1) else null
+        }
     }
 
     /**

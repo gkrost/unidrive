@@ -60,6 +60,10 @@ internal class MinimalFakeProvider(
     // provider's "remote changed under the edit" refusal).
     val uploadConflictRemaining = AtomicInteger(0)
 
+    // #493: like [uploadFailuresRemaining] but the failure is a PermanentUploadFailureException (the provider refused
+    // the request itself).
+    val uploadRefusedRemaining = AtomicInteger(0)
+
     // Upload progress emulation: progressSteps > 0 makes upload() report
     // onProgress in [progressSteps] evenly spaced steps; progressPaceMs > 0
     // additionally delays between steps (real-time coalescing tests).
@@ -121,6 +125,9 @@ internal class MinimalFakeProvider(
         }
         uploadConflictRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p }.let { before ->
             if (before > 0) throw org.krost.unidrive.RemoteConflictException("injected remote conflict: $remotePath")
+        }
+        uploadRefusedRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p }.let { before ->
+            if (before > 0) throw org.krost.unidrive.PermanentUploadFailureException("injected refusal: $remotePath")
         }
         // Track per-path concurrency: record entry, update peak, then suspend on gate if set.
         val active = activeUploadsByPath.computeIfAbsent(remotePath) { AtomicInteger(0) }
@@ -453,6 +460,11 @@ internal class HydrationTestEnv(
         /** Injects [count] RemoteConflictException refusals from upload() before the next success. */
         fun conflictUploads(count: Int) {
             fakeProvider.uploadConflictRemaining.set(count)
+        }
+
+        /** #493: injects [count] PermanentUploadFailureException refusals from upload() before the next success. */
+        fun refuseUploads(count: Int) {
+            fakeProvider.uploadRefusedRemaining.set(count)
         }
 
         /** Injects [count] upload() failures before the next success. */
