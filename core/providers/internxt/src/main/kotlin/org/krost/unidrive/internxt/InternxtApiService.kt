@@ -74,6 +74,22 @@ class InternxtApiService(
 
         private const val GET_BACKOFF_BASE_MS = 2_000L
 
+        // The gateway's own answers for an origin that did not answer (Cloudflare): 520 unknown error, 521 down, 522
+        // connection timed out, 523 unreachable, 524 timed out. A GET treats them like 502/503/504.
+        private val GATEWAY_ORIGIN_ERRORS = setOf(520, 521, 522, 523, 524)
+
+        // Answered after the gateway has waited for the origin for about two minutes: the same request gets the same answer.
+        private const val GATEWAY_ORIGIN_TIMEOUT = 524
+
+        private fun gatewayOriginErrorName(status: Int): String =
+            when (status) {
+                520 -> "the origin returned an unknown error"
+                521 -> "the origin is down"
+                522 -> "the connection to the origin timed out"
+                523 -> "the origin is unreachable"
+                else -> "the origin timed out"
+            }
+
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
@@ -133,6 +149,23 @@ class InternxtApiService(
         ): String =
             "timed out after ${seconds(elapsedMs)} waiting for the response of $method ${withoutQuery(url)}; " +
                 "this is the engine's own limit (socket timeout ${seconds(socketTimeoutMs)}), not a server close"
+
+        // A gateway origin error as what the callers map: the synthetic 503 of "the server is unavailable" (the account-wide
+        // listing falls back to the folder walk, a folder listing is skipped). The gateway's own status and body stay in
+        // the cause, its Retry-After on the exception.
+        internal fun gatewayUnavailable(
+            e: InternxtApiException,
+            url: String,
+            elapsedMs: Long?,
+        ): InternxtApiException =
+            InternxtApiException(
+                "the gateway answered ${e.statusCode} (${gatewayOriginErrorName(e.statusCode)}) for GET ${withoutQuery(url)}" +
+                    (elapsedMs?.let { " after ${seconds(it)}" } ?: ""),
+                503,
+                requestId = e.requestId,
+                retryAfterMs = e.retryAfterMs,
+                cause = e,
+            )
     }
 
     private val json = org.krost.unidrive.UnidriveJson
@@ -936,6 +969,10 @@ class InternxtApiService(
     // a whole timeout per attempt. It ends as the synthetic 503 the callers map (so the walk fallback and the folder
     // skip still work), flagged InternxtApiException.timedOutLocally. A real close by the peer is retried like a 5xx and
     // ends as the same 503 once the ladder is spent.
+    //
+    // The gateway's origin errors (GATEWAY_ORIGIN_ERRORS) go through the ladder like 502/503/504 and end as the same
+    // synthetic 503. A 524 does not: the gateway had waited about two minutes for the origin before it answered, and the
+    // same request meets the same 524, so it is one attempt, then the 503 for the callers' fallback decision.
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
@@ -951,7 +988,8 @@ class InternxtApiService(
         // 401 doesn't restart the full delay ladder — it consumes
         // only the current attempt's slot.
         for (attempt in 1..GET_MAX_ATTEMPTS) {
-            // How long the HTTP exchange of this attempt ran before it failed with an IOException; null while it has not.
+            // How long the HTTP exchange of this attempt ran before it failed (an answer that is no success, or an
+            // IOException); null while it has not. A 401 replay and a failure before the request leave it null.
             var failedAfterMs: Long? = null
             try {
                 return withAuthRetry { creds ->
@@ -971,6 +1009,7 @@ class InternxtApiService(
                         driveBudget.recordSuccess()
                         return@withAuthRetry response.bodyAsText()
                     } catch (e: InternxtApiException) {
+                        failedAfterMs = (System.nanoTime() - startedNs) / 1_000_000
                         if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
                         throw e
                     } catch (e: java.io.IOException) {
@@ -979,7 +1018,20 @@ class InternxtApiService(
                     }
                 }
             } catch (e: InternxtApiException) {
-                if (e.statusCode !in TRANSIENT_STATUSES) throw e
+                val gatewayError = e.statusCode in GATEWAY_ORIGIN_ERRORS
+                if (!gatewayError && e.statusCode !in TRANSIENT_STATUSES) throw e
+                if (gatewayError) {
+                    val retried = e.statusCode != GATEWAY_ORIGIN_TIMEOUT && attempt < GET_MAX_ATTEMPTS
+                    log.warn(
+                        "GET {}: the gateway answered {} ({}) after {} ms{}",
+                        withoutQuery(url),
+                        e.statusCode,
+                        gatewayOriginErrorName(e.statusCode),
+                        failedAfterMs ?: "?",
+                        if (retried) ", attempt $attempt/$GET_MAX_ATTEMPTS" else ", not retried",
+                    )
+                    if (!retried) throw gatewayUnavailable(e, url, failedAfterMs)
+                }
                 lastException = e
                 if (attempt < GET_MAX_ATTEMPTS) kotlinx.coroutines.delay(retryDelayMs(e, attempt, GET_BACKOFF_BASE_MS))
             } catch (e: java.io.IOException) {
