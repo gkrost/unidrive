@@ -1102,7 +1102,27 @@ open class SyncEngine(
     suspend fun createRemoteFolder(path: String): CloudItem {
         val item = provider.createFolder(path)
         db.insertFolder(path = path, remoteId = item.id, mtime = item.modified ?: Instant.now())
+        mirrorFolderIntoSyncRoot(path)
         return item
+    }
+
+    // #500: the sync root is the same tree as the mount (#449), empty folders included. A file's upload creates its
+    // parents there ([mirrorIntoSyncRoot]); a folder made through the mount that stays empty had no such step, so the
+    // mirror missed every empty folder. Same guards as for a file; a failure is logged, the folder exists in the cloud.
+    private fun mirrorFolderIntoSyncRoot(path: String) {
+        if (!isTracked(path) || localNameIssue(path) != null || !Files.isDirectory(syncRoot)) return
+        try {
+            val target = placeholder.resolveLocal(path)
+            val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+            if (Files.isDirectory(target, noFollow)) return
+            if (Files.exists(target, noFollow)) {
+                log.info("#500: not mirroring the folder {} into the sync root: a file is already there, the next sync decides", path)
+                return
+            }
+            withEchoSuppression(path) { Files.createDirectories(target) }
+        } catch (e: Exception) {
+            log.warn("#500: could not mirror the folder {} into the sync root: {}", path, e.message)
+        }
     }
 
     /**
