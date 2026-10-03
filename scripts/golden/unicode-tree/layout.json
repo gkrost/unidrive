@@ -1,0 +1,419 @@
+{
+  "id": "golden-unicode-v1",
+  "maxSegments": 7,
+  "notes": [
+    "Names are literal UTF-8 unless they use a token: {U+XXXX} is one code point, {rep:X:N} repeats X N times, \"nf\": \"NFD\" or \"NFC\" on a file or dir name normalises that name.",
+    "Every path below the golden root has at most maxSegments segments (directories plus the file name).",
+    "text files end with their own relative path unless plain is true; bytes files are deterministic pseudo-random; no file is larger than 1,000,000 bytes."
+  ],
+  "nodes": [
+    {
+      "dir": ["arabic-and-hebrew", "العربية", "مستندات", "رسائل"],
+      "files": [
+        { "name": "مرحبا بالعالم.txt", "text": "مرحبا بالعالم" },
+        { "name": "كتاب جميل.md", "text": "# كتاب جميل\nهذا ملف تجريبي للغة العربية." },
+        { "name": "فارغ.txt", "bytes": 0 }
+      ],
+      "emptyDirs": ["مسودات"]
+    },
+    { "dir": ["arabic-and-hebrew", "العربية", "صور"], "files": [] },
+    { "dir": ["arabic-and-hebrew", "فارسی", "اسناد"], "files": [ { "name": "سلام دنیا.txt", "text": "سلام دنیا، این یک فایل آزمایشی است" } ] },
+    { "dir": ["arabic-and-hebrew", "اردو", "دستاویزات", "خطوط"], "files": [ { "name": "ہیلو دنیا.txt", "text": "ہیلو دنیا" } ] },
+    { "dir": ["arabic-and-hebrew", "پښتو", "اسناد"], "files": [ { "name": "سلام نړی.txt", "text": "سلام نړی" } ] },
+    {
+      "dir": ["arabic-and-hebrew", "עברית", "מסמכים", "מכתבים"],
+      "files": [
+        { "name": "שלום עולם.txt", "text": "שלום עולם" },
+        { "name": "ספר טוב.md", "text": "# ספר טוב\nקובץ בדיקה בעברית." }
+      ]
+    },
+    { "dir": ["arabic-and-hebrew", "ייִדיש", "דאָקומענטן"], "files": [ { "name": "העלא וועלט.txt", "text": "העלא וועלט" } ] },
+    { "dir": ["arabic-and-hebrew", "ܣܘܪܝܝܐ", "ܡܟܬܒܢܘܬܐ"], "files": [ { "name": "ܫܠܡܐ ܥܠܡܐ.txt", "text": "ܫܠܡܐ ܥܠܡܐ" } ] },
+    { "dir": ["arabic-and-hebrew", "ދިވެހި", "ލިޔުންތައް"], "files": [ { "name": "ހެލޯ ވޯލްޑް.txt", "text": "ހެލޯ ވޯލްޑް" } ] },
+
+    {
+      "dir": ["cjk", "中文", "简体", "文档", "信件", "草稿"],
+      "files": [
+        { "name": "你好，世界.txt", "text": "你好，世界" },
+        { "name": "数据表.csv", "text": "编号,名称,数量\n1,苹果,3\n2,香蕉,5" },
+        { "name": "数据-1MB.bin", "bytes": 1000000 }
+      ]
+    },
+    {
+      "dir": ["cjk", "中文", "繁體", "文件", "書信"],
+      "files": [
+        { "name": "你好世界.txt", "text": "你好世界" },
+        { "name": "𠮷野家.txt", "text": "𠮷野家 (U+20BB7, outside the BMP)" },
+        { "name": "𠀀𠀁𠀂.txt", "text": "CJK extension B" }
+      ]
+    },
+    { "dir": ["cjk", "粵語", "文件"], "files": [ { "name": "你好世界喇.txt", "text": "你好世界喇" } ] },
+    {
+      "dir": ["cjk", "日本語", "漢字", "文書", "手紙"],
+      "files": [
+        { "name": "こんにちは世界.txt", "text": "こんにちは世界" },
+        { "name": "ハローワールド.txt", "text": "ハローワールド" },
+        { "name": "ｶﾀｶﾅ半角.txt", "text": "ﾊﾛｰﾜｰﾙﾄﾞ" }
+      ],
+      "emptyDirs": ["下書き"]
+    },
+    { "dir": ["cjk", "日本語", "ひらがな"], "files": [ { "name": "ひらがなだけ.txt", "text": "ひらがなだけのファイル" } ] },
+    {
+      "dir": ["cjk", "한국어", "문서", "편지", "초안"],
+      "files": [
+        { "name": "안녕하세요 세계.txt", "text": "안녕하세요 세계" },
+        { "name": "한글 자모 ㅎㅏㄴㄱㅡㄹ.txt", "text": "조합형 자모와 완성형 음절" }
+      ]
+    },
+    { "dir": ["cjk", "ㄅㄆㄇㄈ", "注音"], "files": [ { "name": "ㄋㄧˇㄏㄠˇ.txt", "text": "ㄋㄧˇ ㄏㄠˇ" } ] },
+    { "dir": ["cjk", "ꆈꌠ", "ꀉꀊ"], "files": [ { "name": "ꆈꌠꉙ.txt", "text": "ꆈꌠꉙ (Yi syllables)" } ] },
+    { "dir": ["cjk", "ᠮᠣᠩᠭᠣᠯ", "ᠪᠢᠴᠢᠭ"], "files": [ { "name": "ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ.txt", "text": "ᠰᠠᠢᠨ ᠪᠠᠢᠨ᠎ᠠ ᠤᠤ" } ] },
+
+    {
+      "dir": ["cyrillic", "Русский", "Документы", "Письма", "Черновики"],
+      "files": [
+        { "name": "Привет, мир.txt", "text": "Привет, мир" },
+        { "name": "Ёжик в тумане.md", "text": "# Ёжик в тумане\nТестовый файл." },
+        { "name": "Съешь ещё этих мягких французских булок.txt", "text": "Съешь же ещё этих мягких французских булок, да выпей чаю" }
+      ]
+    },
+    { "dir": ["cyrillic", "Українська", "Документи"], "files": [ { "name": "Привіт, світе ґанок єдність.txt", "text": "Привіт, світе! ї є ґ" } ] },
+    { "dir": ["cyrillic", "Български", "Документи"], "files": [ { "name": "Здравей, свят.txt", "text": "Здравей, свят" } ] },
+    { "dir": ["cyrillic", "Српски", "Документи"], "files": [ { "name": "Здраво, свете љ њ ђ ћ џ.txt", "text": "Здраво, свете" } ] },
+    { "dir": ["cyrillic", "Беларуская", "Дакументы"], "files": [ { "name": "Прывітанне, свет ў.txt", "text": "Прывітанне, свет" } ] },
+    { "dir": ["cyrillic", "Македонски", "Документи"], "files": [ { "name": "Здраво, свету ѓ ќ ѕ.txt", "text": "Здраво, свету" } ] },
+    { "dir": ["cyrillic", "Монгол", "Бичиг"], "files": [ { "name": "Сайн уу, дэлхий өө үү.txt", "text": "Сайн уу, дэлхий" } ] },
+    { "dir": ["cyrillic", "Қазақша", "Құжаттар"], "files": [ { "name": "Сәлем, әлем ғ қ ң ө ұ ү һ і.txt", "text": "Сәлем, әлем" } ] },
+
+    {
+      "dir": ["european-latin", "Deutsch", "Dokumente", "Briefe", "Entwürfe"],
+      "files": [
+        { "name": "Grüße aus Köln.txt", "text": "Grüße aus Köln" },
+        { "name": "Straßenbahn Größe.md", "text": "# Straßenbahn\nÜbergröße, Ärger, Öl, Übermut." },
+        { "name": "Ärger über Öl und Übermut.txt", "text": "ÄÖÜ äöü ß ẞ" }
+      ]
+    },
+    {
+      "dir": ["european-latin", "Français", "Documents", "Lettres"],
+      "files": [
+        { "name": "Bonjour le monde, œuvres.txt", "text": "Bonjour le monde — œuvres complètes" },
+        { "name": "Crème brûlée à la façon d'Zoë.md", "text": "# Crème brûlée\nÀ la façon d'Zoë, ÿ œ æ ç." }
+      ]
+    },
+    { "dir": ["european-latin", "Español", "Documentos"], "files": [ { "name": "¡Hola, señor! Pingüino – mañana.txt", "text": "¡Hola, señor! ¿Cómo está el pingüino?" } ] },
+    { "dir": ["european-latin", "Português", "Documentos"], "files": [ { "name": "Olá, coração e ação.txt", "text": "Olá, coração, ação, não, são" } ] },
+    { "dir": ["european-latin", "Italiano", "Documenti"], "files": [ { "name": "Città università perché.txt", "text": "Città, università, perché, così" } ] },
+    { "dir": ["european-latin", "Polski", "Dokumenty"], "files": [ { "name": "Zażółć gęślą jaźń.txt", "text": "Zażółć gęślą jaźń" } ] },
+    { "dir": ["european-latin", "Čeština", "Dokumenty"], "files": [ { "name": "Příliš žluťoučký kůň.txt", "text": "Příliš žluťoučký kůň úpěl ďábelské ódy" } ] },
+    { "dir": ["european-latin", "Türkçe", "Belgeler"], "files": [ { "name": "İstanbul ığdır şiş çğ.txt", "text": "İstanbul, ığdır, şiş, çğ, ö ü" } ] },
+    { "dir": ["european-latin", "Íslenska", "Skjöl"], "files": [ { "name": "Þórður æðir yfir hafið.txt", "text": "Þórður æðir yfir hafið, ð þ æ ö" } ] },
+    {
+      "dir": ["european-latin", "Dansk-Norsk-Svensk", "Dokument"],
+      "files": [
+        { "name": "Blåbærsyltetøy och smörgåsbord.txt", "text": "Blåbærsyltetøy och smörgåsbord" },
+        { "name": "æøå ÆØÅ.txt", "text": "æøå ÆØÅ ä ö" }
+      ]
+    },
+    { "dir": ["european-latin", "Magyar", "Dokumentumok"], "files": [ { "name": "Árvíztűrő tükörfúrógép.txt", "text": "Árvíztűrő tükörfúrógép ő ű" } ] },
+    { "dir": ["european-latin", "Română", "Documente"], "files": [ { "name": "Șoricelul țese în ștrumf.txt", "text": "Șoricelul țese în ștrumf, ă â î ș ț" } ] },
+    { "dir": ["european-latin", "Tiếng Việt", "Tài liệu"], "files": [ { "name": "Tiếng Việt – ệ ữ ở ặ ỳ.txt", "text": "Tiếng Việt: ệ ữ ở ặ ỳ ỵ" } ] },
+    { "dir": ["european-latin", "Suomi", "Asiakirjat"], "files": [ { "name": "Hyvää yötä päivää.txt", "text": "Hyvää yötä, hyvää päivää" } ] },
+    { "dir": ["european-latin", "Lietuvių-Latviešu", "Dokumenti"], "files": [ { "name": "Ąžuolas čiuožia ēūģķļņ.txt", "text": "Ąžuolas čiuožia, ē ū ģ ķ ļ ņ" } ] },
+    { "dir": ["european-latin", "Cymraeg-Gaeilge", "Dogfennau"], "files": [ { "name": "Dydd da – ŵy ŷ áéíóú.txt", "text": "Dydd da, ŵy, ŷ, séimhiú" } ] },
+    { "dir": ["european-latin", "Malti", "Dokumenti"], "files": [ { "name": "Ħabib ġieħ żgħir.txt", "text": "Ħabib, ġieħ, żgħir, ċ" } ] },
+    { "dir": ["european-latin", "Esperanto", "Dokumentoj"], "files": [ { "name": "Ĉu vi ŝatas ĝardenojn ŭ.txt", "text": "Ĉu vi ŝatas ĝardenojn? ĥ ĵ ŭ" } ] },
+
+    {
+      "dir": ["greek-and-caucasus", "Ελληνικά", "Έγγραφα", "Επιστολές"],
+      "files": [
+        { "name": "Γειά σου Κόσμε.txt", "text": "Γειά σου Κόσμε" },
+        { "name": "πολυτονικό ἀγαθὸν ᾄδω.txt", "text": "ἀγαθὸν ᾄδω ᾠδή" },
+        { "name": "Σίσυφος ΣΊΣΥΦΟΣ.txt", "text": "final sigma ς and capital Σ" }
+      ]
+    },
+    { "dir": ["greek-and-caucasus", "ქართული", "დოკუმენტები"], "files": [ { "name": "გამარჯობა მსოფლიო.txt", "text": "გამარჯობა მსოფლიო" } ] },
+    { "dir": ["greek-and-caucasus", "Հայերեն", "Փաստաթղթեր"], "files": [ { "name": "Բարեւ աշխարհ.txt", "text": "Բարեւ աշխարհ" } ] },
+
+    {
+      "dir": ["african", "አማርኛ", "ሰነዶች", "ደብዳቤዎች"],
+      "files": [ { "name": "ሰላም ዓለም.txt", "text": "ሰላም ዓለም" }, { "name": "ግዕዝ ፩፪፫.txt", "text": "Ge'ez numerals ፩ ፪ ፫" } ]
+    },
+    { "dir": ["african", "Yorùbá", "Àwọn ìwé"], "files": [ { "name": "Ẹ n lẹ́ ayé ọ̀rẹ́ ṣ.txt", "text": "Ẹ n lẹ́ ayé, ọ̀rẹ́, ṣ ẹ ọ" } ] },
+    { "dir": ["african", "Hausa", "Takardu"], "files": [ { "name": "Sannu duniya ɓ ɗ ƙ ƴ.txt", "text": "Sannu duniya ɓ ɗ ƙ ƴ" } ] },
+    { "dir": ["african", "Kiswahili", "Nyaraka"], "files": [ { "name": "Habari dunia.txt", "text": "Habari dunia" } ] },
+    { "dir": ["african", "isiZulu", "Imibhalo"], "files": [ { "name": "Sawubona mhlaba.txt", "text": "Sawubona mhlaba" } ] },
+    { "dir": ["african", "Afrikaans", "Dokumente"], "files": [ { "name": "Môre vriend ê ë ï ô û.txt", "text": "Môre, vriend: ê ë ï ô û" } ] },
+    { "dir": ["african", "ⵜⴰⵎⴰⵣⵉⵖⵜ", "ⵉⵙⵏⵖⵎⵉⵙⵏ"], "files": [ { "name": "ⴰⵣⵓⵍ ⴰⴽⴰⵍ.txt", "text": "ⴰⵣⵓⵍ ⴰⴽⴰⵍ" } ] },
+    { "dir": ["african", "ߒߞߏ", "ߞߐ߲ߠߊ"], "files": [ { "name": "ߊ߲ ߞߊ߬ ߘߐ߫.txt", "text": "ߊ߲ ߞߊ߬ ߘߐ߫" } ] },
+    { "dir": ["african", "𞤀𞤣𞤤𞤢𞤥", "𞤁𞤢𞤱𞤢"], "files": [ { "name": "𞤀𞤤𞤢𞤥 𞤫𞤯𞤣𞤫.txt", "text": "Adlam script, outside the BMP" } ] },
+    { "dir": ["african", "ꕙꔤ", "ꕢꕌ"], "files": [ { "name": "ꕙꔤ ꗞ.txt", "text": "Vai syllables" } ] },
+    { "dir": ["african", "Malagasy-Somali", "Taratasy"], "files": [ { "name": "Salama izao tontolo izao.txt", "text": "Salama izao tontolo izao" } ] },
+
+    { "dir": ["americas", "Español-América", "Documentos"], "files": [ { "name": "Che, ¡qué lindo! ñandú.txt", "text": "Che, ¡qué lindo!" } ] },
+    { "dir": ["americas", "Português-Brasil", "Documentos"], "files": [ { "name": "Olá, você – açaí e pão de queijo.txt", "text": "Olá, você, açaí, pão de queijo" } ] },
+    { "dir": ["americas", "Runasimi", "Qillqa"], "files": [ { "name": "Allillanchu ñuqanchik ch’ q’.txt", "text": "Allillanchu, ñuqanchik, ch’aska, q’illu" } ] },
+    { "dir": ["americas", "Guaraní", "Ñemombe’u"], "files": [ { "name": "Mba’éichapa ñande ẽ g̃ ỹ.txt", "text": "Mba’éichapa, ñande, ẽ, g̃, ỹ" } ] },
+    { "dir": ["americas", "Mapudungun", "Kimün"], "files": [ { "name": "Mari mari pu che ü.txt", "text": "Mari mari pu che" } ] },
+    { "dir": ["americas", "Nāhuatl", "Tlahcuilōlli"], "files": [ { "name": "Niltze tlālticpac.txt", "text": "Niltze, tlālticpac" } ] },
+    { "dir": ["americas", "ᏣᎳᎩ", "ᎪᏪᎵ"], "files": [ { "name": "ᎣᏏᏲ ᎡᎶᎯ.txt", "text": "ᎣᏏᏲ ᎡᎶᎯ" } ] },
+    { "dir": ["americas", "ᐃᓄᒃᑎᑐᑦ", "ᐃᓕᐅᕐᕕᖅ"], "files": [ { "name": "ᐊᐃ ᐱᓇᓱᒃᑎᑦ.txt", "text": "ᐊᐃ ᐱᓇᓱᒃᑎᑦ" } ] },
+    { "dir": ["americas", "Diné bizaad", "Naaltsoos"], "files": [ { "name": "Yá’át’ééh.txt", "text": "Yá’át’ééh" } ] },
+    { "dir": ["americas", "Kreyòl ayisyen", "Dokiman"], "files": [ { "name": "Bonjou mond lan.txt", "text": "Bonjou mond lan" } ] },
+    { "dir": ["americas", "K’iche’", "Wuj"], "files": [ { "name": "Saqarik, ruwach’ulew.txt", "text": "Saqarik, ruwach’ulew" } ] },
+
+    {
+      "dir": ["indic", "हिन्दी", "दस्तावेज़", "पत्र", "मसौदे"],
+      "files": [ { "name": "नमस्ते दुनिया.txt", "text": "नमस्ते दुनिया" }, { "name": "क्षत्रिय ज्ञान श्री.md", "text": "# संयुक्ताक्षर\nक्ष त्र ज्ञ श्र" } ]
+    },
+    { "dir": ["indic", "मराठी", "कागदपत्रे"], "files": [ { "name": "नमस्कार जग.txt", "text": "नमस्कार जग" } ] },
+    { "dir": ["indic", "संस्कृतम्", "ग्रन्थाः"], "files": [ { "name": "नमो नमः.txt", "text": "ॐ नमो नमः" } ] },
+    { "dir": ["indic", "नेपाली", "कागजात"], "files": [ { "name": "नमस्कार संसार.txt", "text": "नमस्कार संसार" } ] },
+    { "dir": ["indic", "বাংলা", "নথি"], "files": [ { "name": "হ্যালো বিশ্ব.txt", "text": "হ্যালো বিশ্ব" } ] },
+    { "dir": ["indic", "தமிழ்", "ஆவணங்கள்"], "files": [ { "name": "வணக்கம் உலகம்.txt", "text": "வணக்கம் உலகம்" } ] },
+    { "dir": ["indic", "తెలుగు", "పత్రాలు"], "files": [ { "name": "హలో ప్రపంచం.txt", "text": "హలో ప్రపంచం" } ] },
+    { "dir": ["indic", "ಕನ್ನಡ", "ದಾಖಲೆಗಳು"], "files": [ { "name": "ನಮಸ್ಕಾರ ಜಗತ್ತು.txt", "text": "ನಮಸ್ಕಾರ ಜಗತ್ತು" } ] },
+    { "dir": ["indic", "മലയാളം", "രേഖകൾ"], "files": [ { "name": "ഹലോ വേൾഡ്.txt", "text": "ഹലോ വേൾഡ്" } ] },
+    { "dir": ["indic", "ગુજરાતી", "દસ્તાવેજો"], "files": [ { "name": "નમસ્તે દુનિયા.txt", "text": "નમસ્તે દુનિયા" } ] },
+    { "dir": ["indic", "ਪੰਜਾਬੀ", "ਦਸਤਾਵੇਜ਼"], "files": [ { "name": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਦੁਨੀਆ.txt", "text": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਦੁਨੀਆ" } ] },
+    { "dir": ["indic", "ଓଡ଼ିଆ", "ଦଲିଲ"], "files": [ { "name": "ନମସ୍କାର ବିଶ୍ୱ.txt", "text": "ନମସ୍କାର ବିଶ୍ୱ" } ] },
+    { "dir": ["indic", "සිංහල", "ලේඛන"], "files": [ { "name": "ආයුබෝවන් ලෝකය.txt", "text": "ආයුබෝවන් ලෝකය" } ] },
+    { "dir": ["indic", "བོད་ཡིག", "ཡིག་ཆ"], "files": [ { "name": "བཀྲ་ཤིས་བདེ་ལེགས.txt", "text": "བཀྲ་ཤིས་བདེ་ལེགས" } ] },
+    { "dir": ["indic", "ᱥᱟᱱᱛᱟᱲᱤ", "ᱪᱤᱛᱷᱤ"], "files": [ { "name": "ᱡᱚᱦᱟᱨ ᱫᱩᱱᱤᱭᱟ.txt", "text": "ᱡᱚᱦᱟᱨ ᱫᱩᱱᱤᱭᱟ" } ] },
+
+    {
+      "dir": ["southeast-asia", "ไทย", "เอกสาร", "จดหมาย"],
+      "files": [ { "name": "สวัสดีชาวโลก.txt", "text": "สวัสดีชาวโลก" }, { "name": "ภาษาไทยไม่มีช่องว่างระหว่างคำ.txt", "text": "ภาษาไทยไม่มีช่องว่างระหว่างคำ" } ]
+    },
+    { "dir": ["southeast-asia", "ລາວ", "ເອກະສານ"], "files": [ { "name": "ສະບາຍດີຊາວໂລກ.txt", "text": "ສະບາຍດີຊາວໂລກ" } ] },
+    { "dir": ["southeast-asia", "ខ្មែរ", "ឯកសារ"], "files": [ { "name": "សួស្តីពិភពលោក.txt", "text": "សួស្តីពិភពលោក" } ] },
+    { "dir": ["southeast-asia", "မြန်မာ", "စာရွက်စာတမ်း"], "files": [ { "name": "မင်္ဂလာပါ ကမ္ဘာ.txt", "text": "မင်္ဂလာပါ ကမ္ဘာ" } ] },
+    { "dir": ["southeast-asia", "ꦧꦱꦗꦮ", "ꦢꦺꦴꦏꦸꦩꦺꦤ꧀"], "files": [ { "name": "ꦱꦸꦒꦼꦁ ꦢꦤꦸꦱ꧀.txt", "text": "Javanese script" } ] },
+    { "dir": ["southeast-asia", "ᜊᜌ᜔ᜊᜌᜒᜈ᜔", "ᜐᜓᜎᜆ᜔"], "files": [ { "name": "ᜃᜓᜋᜓᜐ᜔ᜆ.txt", "text": "Baybayin" } ] },
+    { "dir": ["southeast-asia", "Bahasa Indonesia-Tagalog", "Dokumen"], "files": [ { "name": "Halo dunia – Kumusta mundo.txt", "text": "Halo dunia, Kumusta mundo" } ] },
+
+    {
+      "dir": ["historic-and-exotic", "ᚠᚢᚦᚨᚱᚲ", "ᚱᚢᚾᛖᛋ"],
+      "files": [ { "name": "ᚺᛖᛚᛚᛟ ᚹᛟᚱᛚᛞ.txt", "text": "ᚺᛖᛚᛚᛟ ᚹᛟᚱᛚᛞ" } ]
+    },
+    { "dir": ["historic-and-exotic", "ᚁᚂᚃᚄᚅ", "ᚑᚌᚆᚐᚋ"], "files": [ { "name": "ᚋᚑᚏᚔᚋ᚛.txt", "text": "Ogham" } ] },
+    { "dir": ["historic-and-exotic", "⠃⠗⠁⠊⠇⠇⠑", "⠙⠕⠉⠥⠍⠑⠝⠞⠎"], "files": [ { "name": "⠓⠑⠇⠇⠕ ⠺⠕⠗⠇⠙.txt", "text": "⠓⠑⠇⠇⠕ ⠺⠕⠗⠇⠙" } ] },
+    { "dir": ["historic-and-exotic", "𓀀𓁐𓂀", "𓃠𓅓𓆣"], "files": [ { "name": "𓂀𓃠𓅓.txt", "text": "Egyptian hieroglyphs, outside the BMP" } ] },
+    { "dir": ["historic-and-exotic", "𐁀𐁁𐁂", "𐀀𐀁𐀂"], "files": [ { "name": "𐀀𐀁𐀂𐀃.txt", "text": "Linear B" } ] },
+    { "dir": ["historic-and-exotic", "𒀀𒁹𒂗", "𒄑𒅗𒆠"], "files": [ { "name": "𒀀𒀁𒀂.txt", "text": "Cuneiform" } ] },
+    { "dir": ["historic-and-exotic", "𐌲𐌿𐍄𐌹𐍃𐌺", "𐌱𐍉𐌺𐍉𐍃"], "files": [ { "name": "𐌰𐌿𐌹𐌻𐌰.txt", "text": "Gothic" } ] },
+    { "dir": ["historic-and-exotic", "𐤀𐤁𐤂", "𐤃𐤄𐤅"], "files": [ { "name": "𐤌𐤋𐤊.txt", "text": "Phoenician" } ] },
+    { "dir": ["historic-and-exotic", "ⰂⰃⰄ", "ⰅⰆⰇ"], "files": [ { "name": "ⰳⰾⰰⰳⱁⰾⰻⱌⰰ.txt", "text": "Glagolitic" } ] },
+    { "dir": ["historic-and-exotic", "ⲙⲉⲧⲣⲉⲙⲛ̀ⲭⲏⲙⲓ", "ⲃⲓⲃⲗⲟⲥ"], "files": [ { "name": "ⲁⲗⲗⲏⲗⲟⲩⲓⲁ.txt", "text": "Coptic" } ] },
+    { "dir": ["historic-and-exotic", "𐑣𐑧𐑤𐑴", "𐐜𐐲"], "files": [ { "name": "𐑖𐑱𐑝𐑾𐑯 𐐼𐐯𐑆𐐲𐑉𐐯𐐻.txt", "text": "Shavian and Deseret" } ] },
+    { "dir": ["historic-and-exotic", "𝔘𝔫𝔦𝔠𝔬𝔡𝔢", "𝕮𝖔𝖓𝖙𝖊𝖓𝖙"], "files": [ { "name": "𝔐𝔞𝔱𝔥 𝕬𝖑𝖕𝖍𝖆 𝟘𝟙𝟚.txt", "text": "Mathematical alphanumeric symbols" } ] },
+    { "dir": ["historic-and-exotic", "𝄞𝄢", "𝅘𝅥𝅮"], "files": [ { "name": "𝄞 sonata 𝄢.txt", "text": "Musical symbols" } ] },
+    { "dir": ["historic-and-exotic", "🀄🀅🀆", "🂡🂱🃁🃑"], "files": [ { "name": "♔♕♖♗♘♙ chess.txt", "text": "Mahjong tiles, playing cards, chess" } ] },
+    { "dir": ["historic-and-exotic", "IPA", "ˈjuːnɪˌdraɪv"], "files": [ { "name": "ˈjuːnɪˌdraɪv ʃ ʒ θ ð ŋ ɹ.txt", "text": "IPA: ˈjuːnɪˌdraɪv" } ] },
+
+    {
+      "dir": ["symbols", "★", "☆", "♥", "♦", "♣"],
+      "files": [
+        { "name": "✓ done.txt", "text": "✓ ✔ ☑" },
+        { "name": "✗ failed.txt", "text": "✗ ✘ ☒" },
+        { "name": "→ next ⇒ then ➜ later.txt", "text": "← → ↑ ↓ ⇐ ⇒ ➜ ↔" },
+        { "name": "∑ x² ≤ √2 ∫ π ∞ ≠.txt", "text": "∑ x² ≤ √2 ∫ π ∞ ≠" },
+        { "name": "€ £ ¥ ₹ ₿ ₽ ₩ ₪ ₫.csv", "text": "currency,symbol\neuro,€\npound,£\nyen,¥\nrupee,₹\nbitcoin,₿" },
+        { "name": "♫ ♪ music ♬.txt", "text": "♩ ♪ ♫ ♬" },
+        { "name": "⌘ ⌥ ⇧ ⎋ keys.txt", "text": "⌘ ⌥ ⇧ ⎋ ⌫ ⏎" },
+        { "name": "① ② ③ Ⓐ Ⓑ ⒶⒷ.txt", "text": "① ② ③ Ⓐ Ⓑ ⒜ ⒝" },
+        { "name": "┌─┬─┐ box ├─┼─┤.txt", "text": "┌─┬─┐\n├─┼─┤\n└─┴─┘" },
+        { "name": "⚠ ⛔ ☢ ☣ warning.txt", "text": "⚠ ⛔ ☢ ☣" },
+        { "name": "℃ ℉ № ℗ ™ ®.txt", "text": "℃ ℉ № ℗ ™ ®" },
+        { "name": "½ ¼ ¾ ⅓ ⅔ ⅛.txt", "text": "½ ¼ ¾ ⅓ ⅔ ⅛" },
+        { "name": "« » ‹ › „ “ ” ‘ ’.txt", "text": "« » ‹ › „ “ ” ‘ ’" },
+        { "name": "☀ ☁ ☂ ☃ weather ☄.txt", "text": "☀ ☁ ☂ ☃ ☄" },
+        { "name": "☎ ✉ ✂ ✏ ✈ ⚙ office.txt", "text": "☎ ✉ ✂ ✏ ✈ ⚙" }
+      ],
+      "emptyDirs": ["♠"]
+    },
+
+    {
+      "dir": ["cats", "🐱", "😺", "😸", "😹", "😻"],
+      "files": [
+        { "name": "😺 Mieze.txt", "text": "Mieze, Mieze!" },
+        { "name": "😸 grinsende Katze 😹.md", "text": "# 😸 grinsende Katze 😹\nCheshire." },
+        { "name": "🐈‍⬛ schwarze Katze.txt", "text": "ZWJ sequence: cat + black large square" },
+        { "name": "🐈 Katze 🐾.txt", "text": "🐈 🐾" },
+        { "name": "🙀 erschrocken 😿 traurig 😾 wütend.txt", "text": "🙀 😿 😾" },
+        { "name": "🐾🐾🐾.bin", "bytes": 1 },
+        { "name": "🐱 Cat #1 – “Whiskers” (v2) [final].txt", "text": "Cat #1, “Whiskers”, (v2), [final]" },
+        { "name": "😻 Katzen & Mäuse 🐭 und 🐟.txt", "text": "😻 & 🐭 + 🐟" },
+        { "name": "🦁🐯🐅🐆 big cats.txt", "text": "🦁 🐯 🐅 🐆" },
+        { "name": "😽 Миау 🐱 喵 🐱 ニャー 🐱 야옹 🐱 मियाऊ 🐱 مياو.txt", "text": "cat sounds in six scripts" },
+        { "name": "🐱‍👤 stunt cat 🐱‍🏍 🐱‍🚀.txt", "text": "ZWJ cats: ninja, bike, astronaut" },
+        { "name": "🐱🐱🐱🐱🐱🐱🐱🐱🐱🐱 ten cats.txt", "text": "ten cats" }
+      ]
+    },
+    { "dir": ["cats", "🐱", "😺", "📷"], "files": [ { "name": "🐱 photo.bin", "bytes": 65537 } ] },
+    {
+      "dir": ["cats", "🐈", "🐈‍⬛"],
+      "files": [ { "name": "nap.txt", "text": "zzz 😴" } ],
+      "emptyDirs": ["🐾", "🐟"]
+    },
+    { "dir": ["cats", "Katze-猫-кошка-قطة-बिल्ली-แมว-고양이-γάτα-חתול", "🐱"], "files": [ { "name": "Katze.txt", "text": "the word cat in many scripts" } ] },
+
+    {
+      "dir": ["hazards", "nfc-nfd-twins"],
+      "files": [
+        { "name": "café.txt", "nf": "NFC", "text": "NFC form: e-acute is one code point" },
+        { "name": "café.txt", "nf": "NFD", "text": "NFD form: e plus combining acute" },
+        { "name": "Ångström.txt", "nf": "NFC", "text": "NFC" },
+        { "name": "Ångström.txt", "nf": "NFD", "text": "NFD" },
+        { "name": "한글.txt", "nf": "NFC", "text": "Hangul syllables" },
+        { "name": "한글.txt", "nf": "NFD", "text": "Hangul jamo" },
+        { "name": "ガギグゲゴ.txt", "nf": "NFC", "text": "katakana voiced" },
+        { "name": "ガギグゲゴ.txt", "nf": "NFD", "text": "katakana base plus dakuten" }
+      ]
+    },
+    {
+      "dir": ["hazards", "invisible-and-lookalike-twins"],
+      "files": [
+        { "name": "ab.txt", "text": "plain ab" },
+        { "name": "a{U+200B}b.txt", "text": "a, zero width space, b" },
+        { "name": "a{U+200D}b.txt", "text": "a, zero width joiner, b" },
+        { "name": "a{U+2060}b.txt", "text": "a, word joiner, b" },
+        { "name": "a{U+00A0}b.txt", "text": "a, no-break space, b" },
+        { "name": "a{U+3000}b.txt", "text": "a, ideographic space, b" },
+        { "name": "{U+200F}RLM first.txt", "text": "right-to-left mark first" },
+        { "name": "{U+200E}LRM first.txt", "text": "left-to-right mark first" },
+        { "name": "❤.txt", "text": "heart, text presentation" },
+        { "name": "❤{U+FE0F}.txt", "text": "heart, emoji presentation (VS16)" },
+        { "name": "a{U+0301}{U+0302}{U+0303}{U+0304}{U+0305}.txt", "text": "a with five stacked combining marks" },
+        { "name": "{U+0430}pple.txt", "text": "first letter is CYRILLIC small a (U+0430)" },
+        { "name": "apple.txt", "text": "all Latin" },
+        { "name": "ＡＢＣ.txt", "text": "fullwidth ABC" },
+        { "name": "ABC.txt", "text": "ASCII ABC" }
+      ]
+    },
+    {
+      "dir": ["hazards", "emoji-sequences"],
+      "files": [
+        { "name": "👩{U+200D}👩{U+200D}👧{U+200D}👦 family.txt", "text": "ZWJ family" },
+        { "name": "🇩🇪🇯🇵🇧🇷 flags.txt", "text": "regional indicator pairs" },
+        { "name": "1{U+FE0F}{U+20E3} keycap.txt", "text": "keycap sequence" },
+        { "name": "👍🏽 thumbs.txt", "text": "skin tone modifier" },
+        { "name": "🏳{U+FE0F}{U+200D}🌈 flag.txt", "text": "rainbow flag" },
+        { "name": "🏴{U+E0067}{U+E0062}{U+E0065}{U+E006E}{U+E0067}{U+E007F} england.txt", "text": "tag sequence" },
+        { "name": "🧑🏽{U+200D}🚀 astronaut.txt", "text": "person + tone + ZWJ + rocket" }
+      ]
+    },
+    {
+      "dir": ["hazards", "windows-and-url-special-characters"],
+      "files": [
+        { "name": "＜＞：＂／＼｜？＊ fullwidth.txt", "text": "fullwidth look-alikes of the characters Windows forbids" },
+        { "name": "100% #1 & 'a' + [b] {c} (d) @ ! $ ^ ~ ; , = .txt", "text": "ASCII punctuation that is legal on NTFS and has a meaning in URLs and shells" },
+        { "name": " leading space.txt", "text": "leading space" },
+        { "name": "two  spaces   inside.txt", "text": "consecutive spaces" },
+        { "name": ".hidden-dotfile", "text": "dotfile without extension" },
+        { "name": "no-extension", "text": "no extension" },
+        { "name": "multi.dot.in.name.v1.2.3.txt", "text": "many dots" },
+        { "name": "%41%2F%2e%2e.txt", "text": "percent-encoded look-alike of A / .." },
+        { "name": "..txt", "text": "double dot prefix" },
+        { "name": "a.b", "text": "two letter extension b" },
+        { "name": "доc.текст", "text": "non-ASCII extension" },
+        { "name": "文件.文本", "text": "CJK extension" },
+        { "name": "UPPER.TXT", "text": "upper-case extension" },
+        { "name": "MiXeD.TxT", "text": "mixed-case extension" }
+      ]
+    },
+    {
+      "dir": ["hazards", "case-fold"],
+      "files": [
+        { "name": "Straße.txt", "text": "sharp s" },
+        { "name": "STRASSE.txt", "text": "folds to the same as Straße under full case folding" },
+        { "name": "{U+01C5}.txt", "text": "titlecase digraph (U+01C5)" },
+        { "name": "Σ.txt", "text": "capital sigma" },
+        { "name": "ς.txt", "text": "final sigma" },
+        { "name": "{U+00C5}.txt", "text": "A with ring above (U+00C5)" },
+        { "name": "{U+212B}.txt", "text": "angstrom sign (U+212B)" }
+      ]
+    },
+    {
+      "dir": ["hazards", "long-names"],
+      "files": [
+        { "name": "{rep:a:120}.txt", "text": "120 ASCII characters in the name" },
+        { "name": "{rep:鼠:80}.txt", "text": "80 CJK characters in the name (240 UTF-8 bytes)" },
+        { "name": "{rep:🐱:60}.txt", "text": "60 emoji in the name (120 UTF-16 code units, 240 UTF-8 bytes)" }
+      ]
+    },
+    {
+      "dir": ["hazards", "deep-and-long-path", "{rep:ä:20}", "{rep:ü:20}", "{rep:ö:20}", "{rep:ß:20}"],
+      "files": [ { "name": "deepest.txt", "text": "six directory levels, long segments, full path about 200 characters below the mount" } ]
+    },
+    {
+      "dir": ["hazards", "timestamps"],
+      "files": [
+        { "name": "mtime-1980-01-01.txt", "text": "FAT epoch", "mtime": "1980-01-01T00:00:00Z" },
+        { "name": "mtime-1970-01-02.txt", "text": "just after the Unix epoch", "mtime": "1970-01-02T00:00:00Z" },
+        { "name": "mtime-2000-02-29.txt", "text": "leap day", "mtime": "2000-02-29T12:34:56Z" },
+        { "name": "mtime-2038-01-19.txt", "text": "year 2038 boundary", "mtime": "2038-01-19T03:14:08Z" },
+        { "name": "mtime-2099-12-31.txt", "text": "far future", "mtime": "2099-12-31T23:59:58Z" }
+      ]
+    },
+    {
+      "dir": ["hazards", "content-encodings"],
+      "files": [
+        { "name": "utf8-with-bom.txt", "enc": "utf8bom", "text": "ünï©ödé with a byte order mark 日本語" },
+        { "name": "utf16-le-bom.txt", "enc": "utf16le", "text": "ünï©ödé UTF-16 little endian 日本語" },
+        { "name": "utf16-be-bom.txt", "enc": "utf16be", "text": "ünï©ödé UTF-16 big endian 日本語" },
+        { "name": "latin1.txt", "enc": "latin1", "text": "Grüße, café, señor" },
+        { "name": "crlf-lines.txt", "eol": "crlf", "text": "line one\nline two\nline three" },
+        { "name": "no-trailing-newline.txt", "plain": true, "raw": true, "text": "ends without a newline" },
+        { "name": "nul-bytes.bin", "bytes": 4097, "seed": "nul-heavy", "zeros": true }
+      ]
+    },
+    {
+      "dir": ["hazards", "duplicates"],
+      "files": [
+        { "name": "原本.txt", "plain": true, "text": "identical content, first name" },
+        { "name": "копия.txt", "plain": true, "text": "identical content, first name" },
+        { "name": "نسخة.txt", "plain": true, "text": "identical content, first name" },
+        { "name": "same-bytes-a.bin", "bytes": 5000, "seed": "dup-seed" },
+        { "name": "same-bytes-b.bin", "bytes": 5000, "seed": "dup-seed" }
+      ]
+    },
+    {
+      "dir": ["hazards", "empty-things"],
+      "files": [
+        { "name": "empty-ascii.txt", "bytes": 0 },
+        { "name": "空.txt", "bytes": 0 },
+        { "name": "🐱 empty.txt", "bytes": 0 }
+      ],
+      "emptyDirs": ["empty-dir", "空のフォルダ", "📭", "{rep:ж:50}"]
+    },
+
+    {
+      "dir": ["binary", "sizes"],
+      "files": [
+        { "name": "b0000000.bin", "bytes": 0 },
+        { "name": "b0000001.bin", "bytes": 1 },
+        { "name": "b0000255.bin", "bytes": 255 },
+        { "name": "b0000256.bin", "bytes": 256 },
+        { "name": "b0001023.bin", "bytes": 1023 },
+        { "name": "b0001024.bin", "bytes": 1024 },
+        { "name": "b0001025.bin", "bytes": 1025 },
+        { "name": "b0004095.bin", "bytes": 4095 },
+        { "name": "b0004096.bin", "bytes": 4096 },
+        { "name": "b0004097.bin", "bytes": 4097 },
+        { "name": "b0065535.bin", "bytes": 65535 },
+        { "name": "b0065536.bin", "bytes": 65536 },
+        { "name": "b0065537.bin", "bytes": 65537 },
+        { "name": "b0262144.bin", "bytes": 262144 },
+        { "name": "b0524289.bin", "bytes": 524289 },
+        { "name": "b1000000.bin", "bytes": 1000000 }
+      ]
+    },
+    {
+      "dir": ["binary", "二进制", "бинарный", "ثنائي", "बाइनरी", "🐱"],
+      "files": [
+        { "name": "дaнныe-1MB.bin", "bytes": 1000000 },
+        { "name": "😺-123457.bin", "bytes": 123457 }
+      ]
+    }
+  ]
+}
