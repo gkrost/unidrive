@@ -11,7 +11,10 @@ the same tree has to come out, and every difference is a finding.
 | `manifest.sha256` | SHA-256 of `manifest.tsv`: **this one value identifies the layout** |
 | `generate.ps1` | builds the tree and the manifest (`-Out <dir>`), or checks the committed manifest (`-Check`) |
 | `verify.ps1` | compares a directory (a mount, a download, a restore) with the manifest: missing, extra, renamed (NFC/NFD), case, size, hash, mtime |
-| `daemon-view.ps1` | asks the running daemon (`hydration.list` over its IPC socket) for the cloud-side view and compares it with the manifest; `-Watch` waits for the uploads to drain |
+| `daemon-view.ps1` | asks the running daemon (`hydration.list` over its IPC socket, one connection for the whole walk) for the cloud-side view and compares it with the manifest; `-Watch` waits for the uploads to drain |
+| `remote-live.ps1` | asks the provider itself (`unidrive ls --live`, folder by folder, bypassing state.db) and compares names with the manifest; limited to folders with an ASCII-only path (the Windows CLI cannot take other arguments, gkrost/unidrive#487) |
+| `probes/` | read-only probes behind the numbers of the run report: `subscribe-events.ps1` (the daemon's event stream, flags lines that are not JSON), `daemon-counts.ps1` (upload progress), `local-vs-cloud-mtime.ps1` (times of the placeholders against the cloud) |
+| `RUN-2026-10-03.md` | the first run through the whole chain: setup, procedure, interventions, results, findings (interim until it says otherwise) |
 
 PowerShell 7 (`pwsh`) is needed. The scripts are ASCII only.
 
@@ -85,8 +88,12 @@ Copy-Item C:\Users\me\unidrive-golden\golden-unicode-v1 <mount>\_INBOX\golden-un
 # cloud side, as the daemon sees it (waits for the uploads)
 pwsh scripts/golden/unicode-tree/daemon-view.ps1 -Profile <profile> -Watch
 
+# the provider's own listing (ASCII-only folders; one engine start per folder, minutes)
+pwsh scripts/golden/unicode-tree/remote-live.ps1 -Profile <profile> -Subtree hazards
+
 # local side after the round trip: names, sizes, hashes (reading hydrates every placeholder)
-pwsh scripts/golden/unicode-tree/verify.ps1 -Root <mount>\_INBOX\golden-unicode-v1
+# -StrictMtime makes a changed modification time a finding (the golden files carry fixed times on purpose)
+pwsh scripts/golden/unicode-tree/verify.ps1 -Root <mount>\_INBOX\golden-unicode-v1 -StrictMtime
 ```
 
 Findings of verify.ps1 and daemon-view.ps1 use `{U+XXXX}` for every non-ASCII character, so they survive terminals and loggers that mangle
