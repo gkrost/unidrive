@@ -46,17 +46,20 @@ class InternxtApiService(
         HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 500, stormSpacingMs = 1_000),
     private val bridgeBudget: HttpRetryBudget =
         HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
+    // The socket (read-idle) timeout of an ordinary call (the default client's too). A parameter so that loopback tests
+    // can run with a small one.
+    private val socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
     // Tests hand in a client on a MockEngine; production builds the default one.
-    private val httpClient: HttpClient = defaultHttpClient(),
+    private val httpClient: HttpClient = defaultHttpClient(socketTimeoutMs),
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
-        private fun defaultHttpClient(): HttpClient =
+        private fun defaultHttpClient(socketTimeoutMs: Long): HttpClient =
             HttpClient {
                 install(HttpTimeout) {
                     connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
-                    socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+                    socketTimeoutMillis = socketTimeoutMs
                     requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
                 }
                 // UD-255: per-request correlation id + DEBUG req/response logging.
@@ -93,6 +96,35 @@ class InternxtApiService(
         }
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
+
+        // Was the failure the engine's own socket timer rather than the peer closing the connection? The timer closes
+        // the client's read channel when no byte has arrived for socketTimeoutMs. Plain HTTP reports that as a
+        // SocketTimeoutException, but over TLS the very same close reads as an EOFException ("the server prematurely
+        // closed the connection"), the text of a real close by the peer. Only the elapsed time tells them apart: a
+        // failure of that shape after at least 90 % of the socket timeout was the timer, a quicker one the peer.
+        internal fun isOwnTimeout(
+            e: Throwable,
+            elapsedMs: Long,
+            socketTimeoutMs: Long,
+        ): Boolean =
+            elapsedMs >= socketTimeoutMs - socketTimeoutMs / 10 &&
+                generateSequence(e) { it.cause }.take(8).any {
+                    it is java.io.EOFException || it is java.net.SocketTimeoutException
+                }
+
+        // scheme://host/path of [url]. Never the query: on a presigned storage URL it carries the signature.
+        internal fun withoutQuery(url: String): String = url.substringBefore('?').substringBefore('#')
+
+        private fun seconds(ms: Long): String = String.format(java.util.Locale.ROOT, "%.1f s", ms / 1000.0)
+
+        internal fun ownTimeoutMessage(
+            method: String,
+            url: String,
+            elapsedMs: Long,
+            socketTimeoutMs: Long,
+        ): String =
+            "timed out after ${seconds(elapsedMs)} waiting for the response of $method ${withoutQuery(url)}; " +
+                "this is the engine's own limit (socket timeout ${seconds(socketTimeoutMs)}), not a server close"
     }
 
     private val json = org.krost.unidrive.UnidriveJson
@@ -849,7 +881,14 @@ class InternxtApiService(
     }
 
     // A Drive REST GET with a transient ladder: GET_MAX_ATTEMPTS attempts, a server hint (Retry-After header or JSON
-    // retry_after) or 2 s, then 4 s, between them.
+    // retry_after) or 2 s, then 4 s, between them. Every GET gets its socket timeout set here, so that the timeout the
+    // failure is judged by is the one that was in force.
+    //
+    // A failure that looks like the connection being closed before the answer is first told apart from the engine's own
+    // socket timer (isOwnTimeout). The timer is not retried: the same request runs into the same timer, at the price of
+    // a whole timeout per attempt. It ends as the synthetic 503 the callers map (so the walk fallback and the folder
+    // skip still work), flagged InternxtApiException.timedOutLocally. A real close by the peer is retried like a 5xx and
+    // ends as the same 503 once the ladder is spent.
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
@@ -862,20 +901,27 @@ class InternxtApiService(
         // 401 doesn't restart the full delay ladder — it consumes
         // only the current attempt's slot.
         for (attempt in 1..GET_MAX_ATTEMPTS) {
+            // How long the HTTP exchange of this attempt ran before it failed with an IOException; null while it has not.
+            var failedAfterMs: Long? = null
             try {
                 return withAuthRetry { creds ->
                     driveBudget.awaitSlot()
+                    val startedNs = System.nanoTime()
                     try {
                         val response =
                             httpClient.get(url) {
                                 applyAuth(creds)
                                 params.forEach { (k, v) -> parameter(k, v) }
+                                timeout { socketTimeoutMillis = socketTimeoutMs }
                             }
                         checkResponse(response)
                         driveBudget.recordSuccess()
                         return@withAuthRetry response.bodyAsText()
                     } catch (e: InternxtApiException) {
                         if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
+                        throw e
+                    } catch (e: java.io.IOException) {
+                        failedAfterMs = (System.nanoTime() - startedNs) / 1_000_000
                         throw e
                     }
                 }
@@ -884,13 +930,37 @@ class InternxtApiService(
                 lastException = e
                 if (attempt < GET_MAX_ATTEMPTS) kotlinx.coroutines.delay(retryDelayMs(e, attempt, GET_BACKOFF_BASE_MS))
             } catch (e: java.io.IOException) {
+                val elapsedMs = failedAfterMs
+                if (elapsedMs != null && isOwnTimeout(e, elapsedMs, socketTimeoutMs)) {
+                    log.warn(
+                        "GET {} timed out after {} ms: the engine's own timer fired (socket timeout {} ms), " +
+                            "not a server close; not retried with the same parameters",
+                        withoutQuery(url),
+                        elapsedMs,
+                        socketTimeoutMs,
+                    )
+                    throw InternxtApiException(
+                        ownTimeoutMessage("GET", url, elapsedMs, socketTimeoutMs),
+                        503,
+                        cause = e,
+                        timedOutLocally = true,
+                    )
+                }
                 // A network error without a status. The canonical retry matrix (see HttpRetryBudget) retries it
                 // like a 5xx. Ktor reports a connection that is closed before any response byte as a
                 // ClosedReadChannelException: an IOException that only WRAPS the EOFException. Catching the
-                // EOFException alone, as this did, never saw that commonest case: the gateway cuts a slow
-                // /drive/files request after a minute or two, the call gave up at once as "Connection error"
+                // EOFException alone never saw that commonest case: the call gave up at once as "Connection error"
                 // (status 0), and neither the retry nor the /files -> folder walk fallback (500/503 only) ran.
                 driveBudget.recordIoRetry()
+                log.warn(
+                    "GET {} failed after {} ms (socket timeout {} ms), attempt {}/{}: {}",
+                    withoutQuery(url),
+                    elapsedMs ?: "?",
+                    socketTimeoutMs,
+                    attempt,
+                    GET_MAX_ATTEMPTS,
+                    e.message?.substringBefore(" [url=") ?: e.javaClass.simpleName,
+                )
                 lastException =
                     if (e.closedBeforeResponse()) {
                         InternxtApiException("Server closed connection for GET $url: ${e.message}", 503, cause = e)
@@ -1079,4 +1149,7 @@ class InternxtApiException(
     requestId: String? = null,
     val retryAfterMs: Long? = null,
     cause: Throwable? = null,
+    // True for the synthetic 503 of a call that ended on the engine's own socket timer: the server neither answered
+    // nor closed the connection, and the same request would run into the same timer again.
+    val timedOutLocally: Boolean = false,
 ) : ProviderException(message, cause = cause, requestId = requestId)
