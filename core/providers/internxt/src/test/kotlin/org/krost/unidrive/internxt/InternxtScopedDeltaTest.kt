@@ -263,6 +263,7 @@ class InternxtScopedDeltaTest {
                     val url = request.url.toString()
                     when {
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         isAccountWideListing(request.url.encodedPath) -> {
                             accountWide.incrementAndGet()
                             throw cutByTheGateway()
