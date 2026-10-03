@@ -248,6 +248,40 @@ class InternxtGatewayOriginErrorTest {
             assertEquals(3, requested.count { it.contains("/folders/content/") }, "root, _INBOX and other: $requested")
         }
 
+    // The provider remembers an unavailable account-wide listing for 30 minutes and walks the tree straight away in the
+    // meantime. A 524 ends as the 503 that starts that window, like any other unavailable listing.
+    @Test
+    fun `a 524 on the account-wide listings starts the skip window, the next gather walks straight away`() =
+        runTest {
+            val accountWide = AtomicInteger(0)
+            val (code, headers) = answer(524, retryAfter = "120")
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    val path = request.url.encodedPath
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        path.endsWith("/drive/files") || path.endsWith("/drive/folders") -> {
+                            accountWide.incrementAndGet()
+                            respond(errorBody(524), code, headers)
+                        }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val provider = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val first = provider.delta(null, null, scanContext)
+            val attemptsOfTheFirst = accountWide.get()
+            val second = provider.delta(null, null, scanContext)
+
+            assertTrue(first.complete)
+            assertTrue(attemptsOfTheFirst in 1..4, "each listing page was asked once, no ladder: $attemptsOfTheFirst")
+            assertEquals(attemptsOfTheFirst, accountWide.get(), "the second gather did not ask the account-wide listings again")
+            assertEquals(first.items.map { it.path }.toSet(), second.items.map { it.path }.toSet(), "and walked the same tree")
+            assertTrue(second.complete)
+        }
+
     // ---- on a real socket ---------------------------------------------------------------------------------------------
 
     @Test
