@@ -337,6 +337,7 @@ class IpcContractCorpusTest {
             // scripted fake succeeds (the delete-then-move sequence is opaque here).
             newPath == "/docs/sub" && !replace -> RenameResult.NewPathExists
             oldPath.startsWith("/outside") || newPath.startsWith("/outside") -> RenameResult.Failed(HydrationError.OutOfScope)
+            newPath.startsWith("/excluded/") -> RenameResult.Failed(HydrationError.Excluded)
             else -> RenameResult.Ok
         }
 

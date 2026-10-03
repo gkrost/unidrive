@@ -1072,6 +1072,26 @@ class HydrationImpl(
         val sourceEntry = stateDb.getEntry(oldNorm)
             ?: return RenameResult.OldPathNotFound
 
+        // Excluded destination (#461 route guard): a rename MOVES the remote
+        // object. Exclusion means the sync engine never plans an action for the
+        // name — the Reconciler and LocalScanner skip it on every pass — so a
+        // synced file moved onto an excluded name silently leaves every sync
+        // action forever while its cloud copy keeps aging there: no re-download
+        // after eviction via enumeration, no conflict handling, no reaping, and
+        // a later edit through the mount is keep-local (never uploaded). The
+        // row itself would still list (flagged excluded) — the harm is the
+        // silent, one-way exit from sync, not a vanishing view. Refused with
+        // the typed `excluded` token; the row and the remote are untouched.
+        // (Creating an excluded name is the other case: create/open_write_begin
+        // accept it as keep-local — nothing exists in the cloud to strand. For
+        // the same reason a never-uploaded source (remoteId == null) may be
+        // renamed onto an excluded name: the move is purely local.) Placed after
+        // the source lookup so a missing source still answers old_path_not_found,
+        // and before the replace-destination deletion so a refusal destroys nothing.
+        if (sourceEntry.remoteId != null && syncEngine.isExcludedPath(newNorm)) {
+            return RenameResult.Failed(HydrationError.Excluded)
+        }
+
         // Pre-flight: destination parent must exist (or destination is at root).
         val newParent = newNorm.substringBeforeLast('/', missingDelimiterValue = "")
         if (newParent.isNotEmpty()) {
