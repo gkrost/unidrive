@@ -149,6 +149,13 @@ providers.gradleProperty("unidriveTestJvm").orNull?.let { jvmVersion ->
                 }
             tasks.withType<Test>().configureEach {
                 javaLauncher.set(runtimeLauncher)
+                // JEP 500 (JDK 26+): the first reflective write to a final field prints a three-line warning per
+                // test JVM, and a future JDK will refuse it. Many provider tests inject a mock HTTP client
+                // into a private val that way (follow-up: give those classes real test seams). Enabling it
+                // explicitly keeps the log readable and the intent visible. The option does not exist before 26.
+                if (runtimeJvm.asInt() >= 26) {
+                    jvmArgs("--enable-final-field-mutation=ALL-UNNAMED")
+                }
             }
         }
     }
