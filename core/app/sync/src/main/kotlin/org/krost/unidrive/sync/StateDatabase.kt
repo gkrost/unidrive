@@ -741,14 +741,13 @@ class StateDatabase(
     @Synchronized
     fun hasHydratedDescendant(topLevelRaw: String): Boolean {
         val topLevel = PathNormalizer.nfc(topLevelRaw)
-        val pattern = "${escapeLike(topLevel)}/%"
         conn
             .prepareStatement(
-                "SELECT 1 FROM alive_entries WHERE (path = ? OR path LIKE ? ESCAPE '\\') " +
+                "SELECT 1 FROM alive_entries WHERE (path = ? OR $UNDER_PREFIX) " +
                     "AND (is_hydrated = 1 OR local_mtime IS NOT NULL) LIMIT 1",
             ).use { stmt ->
                 stmt.setString(1, topLevel)
-                stmt.setString(2, pattern)
+                stmt.bindPrefix(2, "$topLevel/")
                 val rs = stmt.executeQuery()
                 return rs.next()
             }
@@ -764,13 +763,12 @@ class StateDatabase(
     @Synchronized
     fun countEntriesUnderTopLevel(topLevelRaw: String): Int {
         val topLevel = PathNormalizer.nfc(topLevelRaw)
-        val pattern = "${escapeLike(topLevel)}/%"
         conn
             .prepareStatement(
-                "SELECT COUNT(*) FROM alive_entries WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+                "SELECT COUNT(*) FROM alive_entries WHERE path = ? OR $UNDER_PREFIX",
             ).use { stmt ->
                 stmt.setString(1, topLevel)
-                stmt.setString(2, pattern)
+                stmt.bindPrefix(2, "$topLevel/")
                 val rs = stmt.executeQuery()
                 rs.next()
                 return rs.getInt(1)
@@ -788,14 +786,15 @@ class StateDatabase(
     @Synchronized
     fun listDirectChildren(parentPathRaw: String): List<SyncEntry> {
         val parentPath = PathNormalizer.nfc(parentPathRaw)
-        val likeBase = if (parentPath.isEmpty()) "/" else "${escapeLike(parentPath)}/"
-        val sliceFrom = if (parentPath.isEmpty()) 2 else parentPath.length + 2
+        val base = if (parentPath.isEmpty()) "/" else "$parentPath/"
+        // #489: the child test slices in SQL, with SQL's own length(): SQLite's substr and length count characters,
+        // Kotlin's String.length counts UTF-16 units, and mixing the two let grandchildren through below non-BMP names.
         conn.prepareStatement(
-            "SELECT * FROM alive_entries WHERE path LIKE ? ESCAPE '\\' " +
-                "AND instr(substr(path, ?), '/') = 0",
+            "SELECT * FROM alive_entries WHERE $UNDER_PREFIX " +
+                "AND instr(substr(path, length(?) + 1), '/') = 0",
         ).use { stmt ->
-            stmt.setString(1, "$likeBase%")
-            stmt.setInt(2, sliceFrom)
+            stmt.bindPrefix(1, base)
+            stmt.setString(3, base)
             val rs = stmt.executeQuery()
             val entries = mutableListOf<SyncEntry>()
             while (rs.next()) entries.add(rs.toSyncEntry())
@@ -806,8 +805,8 @@ class StateDatabase(
     @Synchronized
     fun getEntriesByPrefix(prefixRaw: String): List<SyncEntry> {
         val prefix = PathNormalizer.nfc(prefixRaw)
-        conn.prepareStatement("SELECT * FROM alive_entries WHERE path LIKE ? ESCAPE '\\'").use { stmt ->
-            stmt.setString(1, "${escapeLike(prefix)}%")
+        conn.prepareStatement("SELECT * FROM alive_entries WHERE $UNDER_PREFIX").use { stmt ->
+            stmt.bindPrefix(1, prefix)
             val rs = stmt.executeQuery()
             val entries = mutableListOf<SyncEntry>()
             while (rs.next()) entries.add(rs.toSyncEntry())
@@ -1064,6 +1063,8 @@ class StateDatabase(
         val newPrefix = PathNormalizer.nfc(newPrefixRaw)
         val old = if (oldPrefix.endsWith('/')) oldPrefix else "$oldPrefix/"
         val new = if (newPrefix.endsWith('/')) newPrefix else "$newPrefix/"
+        // A rename onto itself must not run the destination clean-up below: it would delete the subtree it means to keep.
+        if (old == new) return
         // UD-901c: clear any pre-existing destination rows BEFORE the UPDATE.
         // Pre-fix, when LocalScanner had already written UD-901 pending rows
         // at the destination prefix (because the user moved a folder locally
@@ -1077,21 +1078,22 @@ class StateDatabase(
             conn
                 .prepareStatement(
                     "DELETE FROM sync_entries WHERE status='EXISTS' " +
-                        "AND (path = ? OR path LIKE ? ESCAPE '\\')",
+                        "AND (path = ? OR $UNDER_PREFIX)",
                 ).use { stmt ->
                     // Match both the destination root itself AND its descendants.
                     stmt.setString(1, newPrefix.removeSuffix("/"))
-                    stmt.setString(2, "${escapeLike(new)}%")
+                    stmt.bindPrefix(2, new)
                     stmt.executeUpdate()
                 }
             conn
                 .prepareStatement(
-                    "UPDATE sync_entries SET path = ? || substr(path, ?) " +
-                        "WHERE status='EXISTS' AND path LIKE ? ESCAPE '\\'",
+                    // #489: SQL's length(), not Kotlin's (UTF-16 units): substr counts characters.
+                    "UPDATE sync_entries SET path = ? || substr(path, length(?) + 1) " +
+                        "WHERE status='EXISTS' AND $UNDER_PREFIX",
                 ).use { stmt ->
                     stmt.setString(1, new)
-                    stmt.setInt(2, old.length + 1)
-                    stmt.setString(3, "${escapeLike(old)}%")
+                    stmt.setString(2, old)
+                    stmt.bindPrefix(3, old)
                     stmt.executeUpdate()
                 }
             // A folder rename is one UPDATE on the folder row itself too
@@ -1443,7 +1445,16 @@ class StateDatabase(
         }
     }
 
-    private fun escapeLike(value: String): String = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    // #490: a path prefix is matched exactly, by code points. SQLite's LIKE folds ASCII case (so `/docs/%` also
+    // matched every row under `/Docs/`: a case-only folder rename deleted the folder's whole subtree), and substr and
+    // length both count characters, so the two sides agree for names outside the BMP too (#489). Binds two parameters.
+    private fun java.sql.PreparedStatement.bindPrefix(
+        index: Int,
+        prefix: String,
+    ) {
+        setString(index, prefix)
+        setString(index + 1, prefix)
+    }
 
     private fun ResultSet.toSyncEntry(): SyncEntry {
         val storedId = getString("remote_id")
@@ -1518,6 +1529,9 @@ class StateDatabase(
         private val log = LoggerFactory.getLogger(StateDatabase::class.java)
 
         private const val SNAPSHOT_DIR_PREFIX = "unidrive-dryrun-"
+
+        /** `path` starts with the bound prefix, exactly (see [bindPrefix]): two parameters, both the prefix. */
+        private const val UNDER_PREFIX = "substr(path, 1, length(?)) = ?"
 
         /** Extra room required beyond the source size before a snapshot is attempted. */
         private const val SNAPSHOT_SPACE_FACTOR = 1.2
