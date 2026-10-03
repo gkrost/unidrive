@@ -41,7 +41,7 @@ class HydrationOpenReadNotFoundTest {
         assertTrue(result is OpenResult.Failed, "a genuinely-gone read must fail: $result")
         assertEquals(
             "not_found",
-            (result as OpenResult.Failed).error.message,
+            result.error.message,
             "a genuinely-gone read must surface the stable not_found token",
         )
     }
@@ -59,7 +59,7 @@ class HydrationOpenReadNotFoundTest {
         assertTrue(result is OpenResult.Failed, "a 404 provider download must fail: $result")
         assertEquals(
             "not_found",
-            (result as OpenResult.Failed).error.message,
+            result.error.message,
             "a provider 404 must surface the stable not_found token",
         )
     }
@@ -77,7 +77,7 @@ class HydrationOpenReadNotFoundTest {
 
         assertTrue(result is OpenResult.Failed)
         assertTrue(
-            (result as OpenResult.Failed).error.message != "not_found",
+            result.error.message != "not_found",
             "a non-not-found failure must NOT be tagged not_found (it maps to EIO): ${result.error.message}",
         )
     }

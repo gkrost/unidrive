@@ -541,7 +541,7 @@ class HydrationImplTest {
         val result = env.hydration.openForRead("conn1", "h1", "/foo.txt")
 
         assertTrue(result is OpenResult.Ok)
-        val cachePath = (result as OpenResult.Ok).cachePath
+        val cachePath = result.cachePath
         assertEquals("hello", java.nio.file.Files.readString(cachePath))
         assertEquals(true, env.stateDb.isHydrated("/foo.txt"))
     }
@@ -553,7 +553,7 @@ class HydrationImplTest {
         val result = env.hydration.openForRead("conn1", "h2", "/does-not-exist.txt")
 
         assertTrue(result is OpenResult.Failed)
-        val error = (result as OpenResult.Failed).error
+        val error = result.error
         assertTrue(error is HydrationError.UnknownPath)
         assertEquals("unknown_path", error.message)
     }
@@ -571,7 +571,7 @@ class HydrationImplTest {
         val result = env.hydration.openForRead("conn1", "h1", "/foo.txt")
 
         assertTrue(result is OpenResult.Ok, "must re-download, not serve the truncated cache")
-        val cachePath = (result as OpenResult.Ok).cachePath
+        val cachePath = result.cachePath
         assertEquals("hello world", java.nio.file.Files.readString(cachePath))
         assertEquals(1, env.syncEngine.downloadCount(), "the size-mismatched cache must trigger a re-download")
     }
@@ -591,7 +591,7 @@ class HydrationImplTest {
         val result = env.hydration.openForRead("conn1", "h1", "/bar.txt")
 
         assertTrue(result is OpenResult.Failed, "a short hydration must fail, not serve truncated content")
-        assertTrue((result as OpenResult.Failed).error is HydrationError.Generic)
+        assertTrue(result.error is HydrationError.Generic)
     }
 
     // C1/C7: when the remote changed size since the last enumeration, ensureHydrated
@@ -607,7 +607,7 @@ class HydrationImplTest {
         val result = env.hydration.openForRead("conn1", "h1", "/big.txt")
 
         assertTrue(result is OpenResult.Ok, "a grown remote must hydrate, not EIO on the stale size")
-        assertEquals("hello world", java.nio.file.Files.readString((result as OpenResult.Ok).cachePath))
+        assertEquals("hello world", java.nio.file.Files.readString(result.cachePath))
         assertEquals(11L, env.stateDb.remoteSizeOf("/big.txt"), "remoteSize must be refreshed to the downloaded size")
     }
 
@@ -626,7 +626,7 @@ class HydrationImplTest {
         assertTrue(result is OpenResult.Ok, "local-only hydrated row must be served from cache")
         assertEquals(
             "just typed this",
-            java.nio.file.Files.readString((result as OpenResult.Ok).cachePath),
+            java.nio.file.Files.readString(result.cachePath),
         )
         assertEquals(0, env.syncEngine.downloadCount(), "must NOT re-download a local-only file")
     }
@@ -863,7 +863,7 @@ class HydrationImplTest {
         val r = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile, baseEtag = "hash-/doc.txt-old")
 
         assertTrue(r is OpenResult.Failed)
-        assertEquals("conflict", (r as OpenResult.Failed).error.message)
+        assertEquals("conflict", r.error.message)
         advanceUntilIdle()
         assertNull(env.syncEngine.remoteContentSeen("/doc.txt"), "the upload must never run — remote stays untouched")
         assertNull(env.stateDb.lastErrorAt("/doc.txt"), "a refused write is not a failed upload")
@@ -1114,7 +1114,7 @@ class HydrationImplTest {
         val r = env.hydration.lastSynced("/foo.txt")
 
         assertTrue(r is LastSyncedResult.Ok)
-        assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), (r as LastSyncedResult.Ok).mtimeEpochMillis)
+        assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), r.mtimeEpochMillis)
     }
 
     @Test
@@ -1124,7 +1124,7 @@ class HydrationImplTest {
         val r = env.hydration.lastSynced("/never-existed.txt")
 
         assertTrue(r is LastSyncedResult.Unknown)
-        assertEquals("unknown_path", (r as LastSyncedResult.Unknown).reason)
+        assertEquals("unknown_path", r.reason)
     }
 
     @Test
@@ -1152,7 +1152,7 @@ class HydrationImplTest {
         val r = env.hydration.list("/Documents")
 
         assertTrue(r is ListResult.Ok)
-        val paths = (r as ListResult.Ok).entries.map { it.path }.toSet()
+        val paths = r.entries.map { it.path }.toSet()
         assertEquals(setOf("/Documents/foo.txt", "/Documents/bar.txt", "/Documents/sub"), paths)
     }
 
@@ -1164,7 +1164,7 @@ class HydrationImplTest {
         val r = env.hydration.list("/Empty")
 
         assertTrue(r is ListResult.Ok)
-        assertEquals(emptyList(), (r as ListResult.Ok).entries)
+        assertEquals(emptyList(), r.entries)
     }
 
     @Test
@@ -1179,8 +1179,8 @@ class HydrationImplTest {
         assertTrue(withSlash is ListResult.Ok)
         assertTrue(withoutSlash is ListResult.Ok)
         assertEquals(
-            (withSlash as ListResult.Ok).entries.map { it.path },
-            (withoutSlash as ListResult.Ok).entries.map { it.path },
+            withSlash.entries.map { it.path },
+            withoutSlash.entries.map { it.path },
         )
     }
 
@@ -1194,7 +1194,7 @@ class HydrationImplTest {
         val r = env.hydration.list("/")
 
         assertTrue(r is ListResult.Ok)
-        val paths = (r as ListResult.Ok).entries.map { it.path }.toSet()
+        val paths = r.entries.map { it.path }.toSet()
         assertEquals(setOf("/a.txt", "/Documents"), paths)
     }
 
@@ -1208,7 +1208,7 @@ class HydrationImplTest {
         val r = env.hydration.list("/Documents")
 
         assertTrue(r is ListResult.Ok)
-        val byPath = (r as ListResult.Ok).entries.associateBy { it.path }
+        val byPath = r.entries.associateBy { it.path }
         assertEquals(false, byPath.getValue("/Documents/file.txt").isFolder)
         assertEquals(true, byPath.getValue("/Documents/subdir").isFolder)
     }
@@ -1222,7 +1222,7 @@ class HydrationImplTest {
         val r = env.hydration.list("/Documents")
 
         assertTrue(r is ListResult.Ok)
-        val e = (r as ListResult.Ok).entries.single { it.path == "/Documents/foo.txt" }
+        val e = r.entries.single { it.path == "/Documents/foo.txt" }
         assertEquals(42L, e.size)
         assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), e.mtimeEpochMillis)
         assertEquals(true, e.isHydrated)
@@ -1240,7 +1240,7 @@ class HydrationImplTest {
         val r = env.hydration.list("")
 
         assertTrue(r is ListResult.Ok)
-        val e = (r as ListResult.Ok).entries.single { it.path == "/gernot" }
+        val e = r.entries.single { it.path == "/gernot" }
         assertEquals(0L, e.size, "a negative remote size must clamp to 0, never reach the wire")
     }
 
@@ -1256,7 +1256,7 @@ class HydrationImplTest {
         val r = env.hydration.list("")
 
         assertTrue(r is ListResult.Ok)
-        val e = (r as ListResult.Ok).entries.single { it.path == "/cloud.txt" }
+        val e = r.entries.single { it.path == "/cloud.txt" }
         assertEquals(Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(), e.remoteModifiedEpochMillis)
         assertEquals("id-/cloud.txt", e.remoteId)
         assertEquals("hash-/cloud.txt", e.etag)
@@ -1272,7 +1272,7 @@ class HydrationImplTest {
         val r = env.hydration.list("")
 
         assertTrue(r is ListResult.Ok)
-        val e = (r as ListResult.Ok).entries.single { it.path == "/local.txt" }
+        val e = r.entries.single { it.path == "/local.txt" }
         assertTrue(e.pendingUpload, "a row without a remote id is still owed an upload")
         assertNull(e.remoteId)
         assertNull(e.remoteModifiedEpochMillis, "the provider never reported a modified time for it")
@@ -1288,7 +1288,7 @@ class HydrationImplTest {
         val r = env.hydration.list("")
 
         assertTrue(r is ListResult.Ok)
-        val e = (r as ListResult.Ok).entries.single { it.path == "/draft.txt" }
+        val e = r.entries.single { it.path == "/draft.txt" }
         assertTrue(e.pendingUpload)
         assertTrue(e.hasError, "last_error_at must surface as the error flag")
     }
@@ -1390,7 +1390,7 @@ class HydrationImplTest {
         val result = env.hydration.openWriteBegin("conn1", "/big.bin")
 
         assertTrue(result is OpenResult.Ok)
-        assertEquals(expectedCachePath, (result as OpenResult.Ok).cachePath)
+        assertEquals(expectedCachePath, result.cachePath)
         assertTrue(java.nio.file.Files.exists(expectedCachePath), "cache file must exist")
         assertEquals(0L, java.nio.file.Files.size(expectedCachePath), "cache file must be 0 bytes")
         assertEquals(0, env.syncEngine.downloadCount(), "no download must have occurred")
@@ -1403,7 +1403,7 @@ class HydrationImplTest {
         val result = env.hydration.openWriteBegin("conn1", "/nope")
 
         assertTrue(result is OpenResult.Failed)
-        assertEquals("unknown_path", (result as OpenResult.Failed).error.message)
+        assertEquals("unknown_path", result.error.message)
     }
 
     @Test
@@ -1414,7 +1414,7 @@ class HydrationImplTest {
         val result = env.hydration.openWriteBegin("conn1", "/dir")
 
         assertTrue(result is OpenResult.Failed)
-        assertEquals("path_is_folder", (result as OpenResult.Failed).error.message)
+        assertEquals("path_is_folder", result.error.message)
     }
 
     @Test
@@ -1427,7 +1427,7 @@ class HydrationImplTest {
         val result = env.hydration.openWriteBegin("conn1", "/big.bin")
 
         assertTrue(result is OpenResult.Ok)
-        val cachePath = (result as OpenResult.Ok).cachePath
+        val cachePath = result.cachePath
         assertEquals(0L, Files.size(cachePath), "TRUNCATE_EXISTING must discard all pre-existing bytes")
     }
 

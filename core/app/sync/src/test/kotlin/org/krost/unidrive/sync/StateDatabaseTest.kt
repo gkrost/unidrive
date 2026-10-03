@@ -1490,7 +1490,7 @@ class StateDatabaseTest {
 
         val entry = db.getEntry("/test_folder")
         assertNotNull(entry)
-        assertEquals(true, entry!!.isFolder)
+        assertEquals(true, entry.isFolder)
         assertEquals(false, entry.isHydrated)
         assertEquals("rid-1", entry.remoteId)
 

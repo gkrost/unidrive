@@ -211,7 +211,7 @@ class DaemonRuntimeTest {
                         // the socket bound before the handlers were registered every documented
                         // verb would still "get a reply" and this test would stay green. A
                         // documented verb must reach its handler; only the made-up one is unknown.
-                        val error = (json as kotlinx.serialization.json.JsonObject)["error"]
+                        val error = json["error"]
                             ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
                         if (request.contains("daemon.statusx")) {
                             assertTrue(error == "unknown_verb", "an unregistered verb must be answered unknown_verb, got: $reply")

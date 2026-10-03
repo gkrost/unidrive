@@ -35,7 +35,7 @@ class ConflictLogTest {
             )
 
         assertNotNull(entry.backupFile)
-        assertTrue(Files.exists(dir.resolve("backups").resolve(entry.backupFile!!)))
+        assertTrue(Files.exists(dir.resolve("backups").resolve(entry.backupFile)))
         assertEquals("Documents/report.pdf", entry.path)
         assertEquals("LAST_WRITER_WINS", entry.policy)
 

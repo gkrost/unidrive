@@ -109,6 +109,14 @@ subprojects {
                 compilerOptions {
                     jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
                 }
+                // kotlinx-coroutines-test (runTest, StandardTestDispatcher, advanceUntilIdle, currentTime, ...)
+                // is still marked experimental and the tests use it throughout: one opt-in for the test
+                // compilation instead of an annotation on every test class (76 warnings per build before).
+                target.compilations.named("test") {
+                    compileTaskProvider.configure {
+                        compilerOptions.optIn.add("kotlinx.coroutines.ExperimentalCoroutinesApi")
+                    }
+                }
             }
         }
     }
