@@ -17,6 +17,7 @@ the same tree has to come out, and every difference is a finding.
 | `daemon-view.ps1` | asks the running daemon (`hydration.list` over its IPC socket, one connection for the whole walk) for the cloud-side view and compares it with the manifest; `-Watch` waits for the uploads to drain. state.db keys paths in NFC (#171), so an NFD name that collapses onto another entry is reported as `NFCMERGE`, and an entry listed under the wrong parent as `LEAK` |
 | `remote-live.ps1` | asks the provider itself (`unidrive ls --live`, folder by folder, bypassing state.db) and compares names with the manifest; limited to folders with an ASCII-only path (the Windows CLI cannot take other arguments, gkrost/unidrive#487) |
 | `probes/` | read-only probes behind the numbers of the run report: `subscribe-events.ps1` (the daemon's event stream, flags lines that are not JSON), `daemon-counts.ps1` (upload progress), `local-vs-cloud-mtime.ps1` (times of the placeholders against the cloud) |
+| `run-localfs.ps1` | **the whole hermetic run in one command**: builds an isolated localfs profile (own config, provider directory, engine mirror, mount root), starts a daemon and a mount, copies the tree into the mount, waits until the uploads settle, verifies the provider directory, the mirror, the mount, the daemon's view and a fresh mount root (round trip, with hashes), sorts every result with `compare-expected.ps1` and prints one summary. Uses the installed builds or private ones (`-EngineJar`, `-ClientDir`); installs nothing; refuses to run next to another mount. Exit 1 = unexpected findings, 2 = the upload queue got stuck |
 | `RUN-2026-10-03.md` | the first run through the whole chain: setup, procedure, interventions, results, findings (interim until it says otherwise) |
 
 PowerShell 7 (`pwsh`) is needed. The scripts are ASCII only.
@@ -79,6 +80,16 @@ Things Windows cannot create through the normal API, or that would turn the run 
 UTF-8), and an actual case-only twin in one directory (NTFS merges them). Test those separately and deliberately.
 
 ## Use
+
+The quick way, no cloud account needed (stop any other unidrive mount first; about 5 minutes):
+
+```powershell
+pwsh scripts/golden/unicode-tree/run-localfs.ps1 -Expected "scripts/golden/unicode-tree/expected/golden-unicode-v1@localfs@<engine>+<client>.tsv"
+# private builds instead of the installed ones:
+pwsh scripts/golden/unicode-tree/run-localfs.ps1 -EngineJar <unidrive.jar> -ClientDir <folder with unidrive-win.exe> -Expected <file>
+```
+
+The steps by hand:
 
 ```powershell
 # build the tree somewhere outside the mount
