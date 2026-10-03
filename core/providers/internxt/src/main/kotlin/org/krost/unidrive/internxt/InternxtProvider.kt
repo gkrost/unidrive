@@ -1666,30 +1666,32 @@ class InternxtProvider(
                 )
             }
 
-        // Harvested by the /files-503 fallback walk; merged into allFolders
-        // after foldersDeferred completes. Empty on the happy path.
-        val fallbackFolderHarvest = mutableListOf<InternxtFolder>()
-        coroutineScope {
-            val foldersDeferred =
-                async {
-                    speculativeFetchPages(
-                        limit = limit,
-                        runningCount = foldersCount,
-                        heartbeat = heartbeat,
-                        combinedTotal = combinedTotal,
-                        label = "folders",
-                        startOffset = resume.foldersOffset,
-                        fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset, status, sort) },
-                        onPage = { page, nextOffset ->
-                            persister?.notifyFoldersPage(page, nextOffset)
-                        },
-                    )
-                }
-            // Files stream owns its own 500/503 fallback to the folder walk — the
-            // /folders endpoint has no equivalent fallback, so a folders failure
-            // propagates and cancels the files stream via structured concurrency.
-            val filesResult: List<InternxtFile> =
-                try {
+        // The two account-wide listings page through the whole account with an offset.
+        // On a large account the gateway cuts those calls (seen 2026-10-03, ~50k
+        // items: the connection is closed after about a minute, /files from offset 0
+        // and /folders from about offset 10,000), and after the retry ladder the call
+        // ends as 503. Either one failing that way means: list the folder tree
+        // instead (per-folder listings, up to 4 in flight), the walk a scoped profile
+        // does anyway. A failing /folders used to end the whole gather, and a failing
+        // /files fell back to a sequential walk that would take an hour.
+        try {
+            coroutineScope {
+                val foldersDeferred =
+                    async {
+                        speculativeFetchPages(
+                            limit = limit,
+                            runningCount = foldersCount,
+                            heartbeat = heartbeat,
+                            combinedTotal = combinedTotal,
+                            label = "folders",
+                            startOffset = resume.foldersOffset,
+                            fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset, status, sort) },
+                            onPage = { page, nextOffset ->
+                                persister?.notifyFoldersPage(page, nextOffset)
+                            },
+                        )
+                    }
+                val filesResult: List<InternxtFile> =
                     speculativeFetchPages(
                         limit = limit,
                         runningCount = filesCount,
@@ -1702,45 +1704,18 @@ class InternxtProvider(
                             persister?.notifyFilesPage(page, nextOffset)
                         },
                     )
-                } catch (e: InternxtApiException) {
-                    if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
-                    log.warn("/files endpoint unavailable ({}), falling back to folder-based listing", e.statusCode)
-                    // Discard the speculative partial counter: those pages
-                    // are dropped on the floor, the fallback walk will
-                    // re-count from scratch. Without this the heartbeat
-                    // sits at a stale-high value (speculative pre-503)
-                    // while the slow tree walk runs and /folders keeps
-                    // ticking — producing the up-then-down jump that's
-                    // alarmed users (208k → 261k → 218k).
-                    val baselineFilesCount = allFiles.size
-                    filesCount.set(baselineFilesCount)
-                    heartbeat?.tick(combinedTotal())
-                    val fallback = mutableListOf<InternxtFile>()
-                    collectFilesFromFolders(
-                        authService.getValidCredentials().rootFolderId,
-                        fallback,
-                        fallbackFolderHarvest,
-                        depth = 0,
-                        onProgress = {
-                            filesCount.set(baselineFilesCount + fallback.size)
-                            heartbeat?.tick(combinedTotal())
-                        },
-                    )
-                    fallback
-                }
-            allFiles.addAll(filesResult)
-            allFolders.addAll(foldersDeferred.await())
-        }
-        // Merge fallback-walk folders into allFolders so folderMap below
-        // contains the complete ancestor chain for every harvested file.
-        // associateBy keeps the last entry per uuid; the /folders delta
-        // entries arrive first (above) and the fallback's stamped copies
-        // win on collisions — fine since the harvest carries the same
-        // identity attributes plus an authoritative parentUuid.
-        if (fallbackFolderHarvest.isNotEmpty()) {
-            allFolders.addAll(fallbackFolderHarvest)
-            foldersCount.set(allFolders.size)
-            heartbeat?.tick(combinedTotal())
+                allFiles.addAll(filesResult)
+                allFolders.addAll(foldersDeferred.await())
+            }
+        } catch (e: InternxtApiException) {
+            if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
+            log.warn(
+                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}",
+                e.statusCode,
+                e.message,
+                if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
+            )
+            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress)
         }
 
         val creds = authService.getValidCredentials()
@@ -1981,31 +1956,12 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicInteger(0)
 
-    // UD-361: count of subtrees we skipped due to 500/503 during the recursive
-    // /files fallback. Inspected at the end of delta() to refuse partial gathers.
+    // UD-361: count of subtrees skipped due to 500/503 during a tree walk (the
+    // scoped bootstrap and the fallback of an unavailable account-wide listing).
+    // Inspected at the end of the walk to refuse partial gathers.
     private val foldersSkipped =
         java.util.concurrent.atomic
             .AtomicInteger(0)
-
-    private suspend fun collectFilesFromFolders(
-        folderUuid: String,
-        accumulator: MutableList<InternxtFile>,
-        folderAccumulator: MutableList<InternxtFolder>,
-        depth: Int,
-        onProgress: (() -> Unit)? = null,
-    ) {
-        collectFilesFromFoldersImpl(
-            getContents = api::getFolderContents,
-            folderUuid = folderUuid,
-            accumulator = accumulator,
-            folderAccumulator = folderAccumulator,
-            depth = depth,
-            scanned = foldersScanned,
-            skipped = foldersSkipped,
-            log = log,
-            onProgress = onProgress,
-        )
-    }
 
     private suspend fun resolveFolder(path: String): String {
         val creds = authService.getValidCredentials()
