@@ -1338,7 +1338,7 @@ open class SyncEngine(
         // #149: cache files are evicted AFTER the batch commits — a filesystem
         // delete is a non-transactional side effect and must not lengthen the
         // SQLite lock window.
-        val cacheEvictions = mutableListOf<Path>()
+        val cacheEvictions = mutableListOf<Triple<String, Path, Long?>>()
         db.batch {
             updateRemoteEntries(remoteChanges)
             if (complete) {
@@ -1382,7 +1382,9 @@ open class SyncEngine(
                     }
                     deferredReapWarned.remove(path)
                     db.markDeleted(path)
-                    cacheEvictions.add(cachePath)
+                    cacheEvictions.add(
+                        Triple(path, cachePath, runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull()),
+                    )
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }
@@ -1404,8 +1406,14 @@ open class SyncEngine(
         // #149: same per-file behaviour as before (errors swallowed — the row
         // flip is the truth and the cache copy is a disk-space concern), just
         // outside the transaction now.
-        for (cachePath in cacheEvictions) {
-            runCatching { Files.deleteIfExists(cachePath) }
+        // The lock window is gone, so a hydration write may have recreated the path
+        // in between (#301 class): skip the delete when an upload is queued for it or
+        // the cache file is no longer the one the reap decided on.
+        for ((path, cachePath, mtimeAtReap) in cacheEvictions) {
+            runCatching {
+                val unchanged = runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull() == mtimeAtReap
+                if (!uploadInFlight(path) && unchanged) Files.deleteIfExists(cachePath)
+            }
         }
         // A bulk disappearance must be corroborated by CONSECUTIVE complete enumerations.
         // On a complete pass, carry this pass's candidate set forward. On an INCOMPLETE
