@@ -289,6 +289,20 @@ class InternxtProvider(
                 if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
                 throw e
             }
+        // #485: an empty file is a drive entry with size 0 and no fileId (no bucket entry exists for it): there is nothing
+        // to fetch or decrypt. A size of 0 WITH a fileId is the older "size unknown" shape and still goes to the bridge.
+        if (fileMeta.fileId == null && fileMeta.size.toLongOrNull() == 0L) {
+            withContext(Dispatchers.IO) {
+                destination.parent?.let { Files.createDirectories(it) }
+                Files.newOutputStream(
+                    destination,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    java.nio.file.StandardOpenOption.WRITE,
+                ).close()
+            }
+            return 0L
+        }
         val bucket = fileMeta.bucket ?: throw ProviderException("File has no bucket: $remotePath")
         val fileId = fileMeta.fileId ?: throw ProviderException("File has no fileId: $remotePath")
 
@@ -580,6 +594,16 @@ class InternxtProvider(
             throw e
         }
         onProgress?.invoke(0L, fileSize)
+
+        // #485: an empty file has no bucket entry. The drive API refuses a fileId for size 0 (and requires one above), on
+        // create and on replace alike (drive-server's ValidateFileIdWithSize), so the bridge flow below must not run for it:
+        // its createFile answered 400 and every retry's second finish a 409 MissingUploadsError.
+        if (fileSize == 0L) {
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) } // nothing to resume for an empty file
+            val empty = uploadEmpty(segments, plainName, ext, parentPath, existingRemoteId, ifMatchETag, remotePath, localMtime)
+            onProgress?.invoke(0L, 0L)
+            return empty
+        }
 
         // Resume hook. A non-null tomb that still matches the call shape lets us
         // reuse the prior attempt's indexBytes / ciphertext / hash / shardUuid /
@@ -1068,6 +1092,86 @@ class InternxtProvider(
         // is covered by the UD-366 logic without needing a tombstone.
         withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
         return finalItem
+    }
+
+    // #485: an empty file is a drive entry with size 0 and no fileId; nothing goes to the bridge. The same decisions as the
+    // non-empty path: a replace keeps the prior content when keepOverwritten is on, and a create that collides adopts the
+    // remote only when it is provably the same content (here: also empty) and otherwise keeps both under a conflict name.
+    private suspend fun uploadEmpty(
+        segments: List<String>,
+        plainName: String,
+        ext: String?,
+        parentPath: String,
+        existingRemoteId: String?,
+        ifMatchETag: String?,
+        remotePath: String,
+        localMtime: Instant,
+    ): CloudItem {
+        val creds = authService.getValidCredentials()
+        val parentUuid = resolveFolder(parentPath)
+        val bucket =
+            creds.bucket.ifEmpty {
+                throw ProviderException("No bucket in credentials — re-authenticate with 'unidrive auth --provider internxt'")
+            }
+
+        suspend fun create(name: String) =
+            api.createFile(
+                bucket = bucket,
+                folderUuid = parentUuid,
+                plainName = name,
+                encryptedName = crypto.encryptName(name, "${creds.mnemonic}-$parentUuid"),
+                size = 0L,
+                type = ext,
+                fileId = null,
+            )
+
+        if (existingRemoteId != null) {
+            checkWriteToken(existingRemoteId, ifMatchETag, remotePath)
+            val archived = if (config.keepOverwritten) tryKeepOverwrittenRename(existingRemoteId, plainName) else false
+            val item =
+                if (archived) {
+                    create(plainName)
+                } else {
+                    api.replaceFile(uuid = existingRemoteId, size = 0L, fileId = null, modificationTime = localMtime).afterReplace(localMtime)
+                }
+            return item.toCloudItem(parentPath)
+        }
+
+        val created =
+            try {
+                create(plainName)
+            } catch (e: InternxtApiException) {
+                if (e.statusCode != 409) throw e
+                val folderContent = api.getFolderContents(parentUuid)
+                if (folderContent.children.any { sanitizeName(it.plainName ?: it.name ?: "") == segments.last() }) throw e
+                val remote = findFileByName(parentUuid, segments.last()) ?: throw e
+                if ((remote.size.toLongOrNull() ?: -1L) == 0L) {
+                    log.info("#485: remote {} is already an empty file (uuid={}); adopting", remotePath, remote.uuid)
+                    remote
+                } else {
+                    val today =
+                        java.time.format.DateTimeFormatter
+                            .ofPattern("yyyy-MM-dd")
+                            .withZone(java.time.ZoneOffset.UTC)
+                            .format(Instant.now())
+                    log.warn("#485: collision on {} with a non-empty remote; keeping it, uploading the empty file as a conflict copy", remotePath)
+                    var copy: org.krost.unidrive.internxt.model.InternxtFile? = null
+                    for (counter in 1..MAX_KEEP_OVERWRITTEN_RETRIES) {
+                        try {
+                            copy = create(conflictName(plainName, today, counter))
+                            break
+                        } catch (ce: InternxtApiException) {
+                            if (ce.statusCode == 409 && counter < MAX_KEEP_OVERWRITTEN_RETRIES) continue
+                            throw ce
+                        }
+                    }
+                    copy ?: throw InternxtApiException(
+                        message = "#485: exhausted $MAX_KEEP_OVERWRITTEN_RETRIES conflict-name attempts for $remotePath",
+                        statusCode = 409,
+                    )
+                }
+            }
+        return created.toCloudItem(parentPath)
     }
 
     // Re-resolve a file by name within its parent folder. Used to recover from a
