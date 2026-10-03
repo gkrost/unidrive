@@ -1594,7 +1594,7 @@ class InternxtProvider(
         val onProgress = scanContext?.onProgress
         if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress)
         // #517 R3: once a gather ended in an unavailable account-wide listing, later
-        // gathers skip the doomed attempt for a while — with the listing watchdog at
+        // gathers skip the doomed attempt for a while — with the listing timeout at
         // 330 s even one doomed attempt is minutes of heavy load the walk was going
         // to replace anyway (the live account re-bought it every ~7 min for 4 h).
         // In-process on purpose: a restart pays one attempt to re-learn what the
@@ -1693,15 +1693,17 @@ class InternxtProvider(
         // The two account-wide listings page through the whole account with an offset.
         // On a large account those calls are slow server-side (25-56 s per folder page,
         // more per file page, latency growing with the account's row count, not the
-        // offset, #517 F3) and the flat 60 s socket watchdog cut every one of them —
+        // offset, #517 F3) and the flat 60 s socket timer cut every one of them —
         // reported by Ktor-over-TLS as "the server prematurely closed the connection",
         // which looked like a gateway cap and was our own timer (#517 F1, loopback
-        // probe). R2 raised their watchdog to 330 s, so what remains here are real
-        // closes and pages past the server's own 300 s statement timeout. Either
-        // listing failing as 500/503 still means: list the folder tree instead
-        // (per-folder listings, up to 4 in flight), the walk a scoped profile does
-        // anyway. A failing /folders used to end the whole gather, and a failing
-        // /files fell back to a sequential walk that would take an hour.
+        // probe). The listings now run on the long timers of InternxtConfig (330 s
+        // socket, 360 s request), so what remains here are real closes, the gateway's
+        // own 524 after about two minutes and pages past the server's 300 s statement
+        // timeout; authenticatedGet ends each of them as 503. Either listing failing
+        // as 500/503 still means: list the folder tree instead (per-folder listings,
+        // up to 4 in flight), the walk a scoped profile does anyway. A failing
+        // /folders used to end the whole gather, and a failing /files fell back to a
+        // sequential walk that would take an hour.
         try {
             coroutineScope {
                 val foldersDeferred =
@@ -2109,7 +2111,11 @@ class InternxtProvider(
         // walk over the folder tree (line 518) or skip-this-folder (line 699).
         // Narrower than TRANSIENT_STATUSES: 429 (rate-limited) and 502/504
         // (gateway timing issues) should not trigger fallback — they should
-        // honour Retry-After and retry the same call.
+        // honour Retry-After and retry the same call. Cloudflare's origin errors
+        // 520 to 524 are the exception: authenticatedGet turns them into 503
+        // itself, a 524 after one attempt (a listing that took the gateway two
+        // minutes gets the same answer when it is retried), 520 to 523 after the
+        // ladder.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
 
         // #517 R3: how long a gather remembers an unavailable account-wide listing

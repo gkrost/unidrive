@@ -90,7 +90,7 @@ class InternxtScopedDeltaTest {
     // ---- the account-wide listings cut: the tree walk takes over ---------------------------------------------------------
     //
     // /files and /folders page through the whole account with an offset, and on a large account they are slow server-side
-    // enough (25-56 s per folder page, #517 F3) that the client's own read-idle watchdog used to cut them at 60 s — over
+    // enough (25-56 s per folder page, #517 F3) that the client's own read-idle socket timer used to cut them at 60 s — over
     // TLS indistinguishable from a server close (#517 F1). The mocks reproduce that close shape. After the retry ladder
     // that is a 503, and the gather used to end with it (a failing /folders) or to crawl the tree one folder at a time (a
     // failing /files).
