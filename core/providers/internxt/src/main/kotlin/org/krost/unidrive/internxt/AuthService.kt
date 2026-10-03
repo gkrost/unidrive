@@ -18,6 +18,8 @@ import java.io.InputStreamReader
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 open class AuthService(
     private val config: InternxtConfig,
@@ -315,11 +317,35 @@ open class AuthService(
     suspend fun getValidCredentials(forceRefresh: Boolean = false): InternxtCredentials {
         val current = credentials ?: throw AuthenticationException("Not authenticated")
         // Refresh both for already-expired tokens (UD-308 cold-start fast path)
-        // and for tokens within JWT_REFRESH_MARGIN_MS of expiry. The margin
-        // prevents the case where a long-running sync starts with a 5-minute-
-        // remaining token, then trips the un-replayed 401 path mid-stream and
-        // surfaces an interactive re-auth prompt to the user.
-        return if (forceRefresh || isJwtNearExpiry(JWT_REFRESH_MARGIN_MS)) refreshToken() else current
+        // and for tokens within the effective margin of expiry (see
+        // [effectiveRefreshMarginMs]). The margin prevents the case where a
+        // long-running sync starts with a 5-minute-remaining token, then trips
+        // the un-replayed 401 path mid-stream and surfaces an interactive
+        // re-auth prompt to the user.
+        return if (forceRefresh || isJwtNearExpiry(effectiveRefreshMarginMs())) refreshToken() else current
+    }
+
+    /**
+     * #334: the pre-expiry margin in effect for the stored JWT. The fixed
+     * [JWT_REFRESH_MARGIN_MS] assumes a token lifetime well above 24 h; if the
+     * vendor shortens the lifetime below it, every fresh token counts as near
+     * expiry and each [getValidCredentials] burns a sequential /users/refresh
+     * round-trip (the latch coalesces concurrent callers, not sequential ones)
+     * — a permanent refresh storm doubling latency and inviting 429s.
+     *
+     * The margin therefore clamps to a quarter of the observed lifetime
+     * (`exp - iat`, decoded from the JWT): min(24 h, lifetime / 4). Tokens
+     * without those claims (or unparseable ones) keep the fixed margin —
+     * today's behaviour. A quarter keeps the UD-308 shape: a long clean runway
+     * followed by a wide proactive-rotation window, scaled to the actual token.
+     */
+    private fun effectiveRefreshMarginMs(): Long {
+        val jwt = credentials?.jwt ?: return JWT_REFRESH_MARGIN_MS
+        val body = JwtExtractor.decodeBody(jwt) ?: return JWT_REFRESH_MARGIN_MS
+        val exp = body["exp"]?.jsonPrimitive?.longOrNull ?: return JWT_REFRESH_MARGIN_MS
+        val iat = body["iat"]?.jsonPrimitive?.longOrNull ?: return JWT_REFRESH_MARGIN_MS
+        val lifetimeMs = (exp - iat).coerceAtLeast(0L) * 1000L
+        return minOf(JWT_REFRESH_MARGIN_MS, lifetimeMs / 4)
     }
 
     /**
