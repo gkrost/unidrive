@@ -65,6 +65,10 @@ class InternxtApiService(
 
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 
+        private const val GET_MAX_ATTEMPTS = 3
+
+        private const val GET_BACKOFF_BASE_MS = 2_000L
+
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
@@ -844,19 +848,20 @@ class InternxtApiService(
         return json.decodeFromString<FileLimitsResponse>(body)
     }
 
+    // A Drive REST GET with a transient ladder: GET_MAX_ATTEMPTS attempts, a server hint (Retry-After header or JSON
+    // retry_after) or 2 s, then 4 s, between them.
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
     ): String {
         var lastException: InternxtApiException? = null
-        val delays = listOf(2_000L, 4_000L, 8_000L)
         // Budget acquisition is per-attempt (inside the retry loop) so a retrying
         // call doesn't hold a slot through its full backoff and starve other callers.
         // Composition order is `loop { withAuthRetry { budget.awaitSlot(); ... } }`:
         // the auth-replay sits inside one transient-retry iteration so a mid-call
-        // 401 doesn't restart the full 3-iteration delay ladder — it consumes
+        // 401 doesn't restart the full delay ladder — it consumes
         // only the current attempt's slot.
-        for ((index, delay) in delays.withIndex()) {
+        for (attempt in 1..GET_MAX_ATTEMPTS) {
             try {
                 return withAuthRetry { creds ->
                     driveBudget.awaitSlot()
@@ -875,12 +880,9 @@ class InternxtApiService(
                     }
                 }
             } catch (e: InternxtApiException) {
-                if (e.statusCode in TRANSIENT_STATUSES) {
-                    lastException = e
-                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
-                } else {
-                    throw e
-                }
+                if (e.statusCode !in TRANSIENT_STATUSES) throw e
+                lastException = e
+                if (attempt < GET_MAX_ATTEMPTS) kotlinx.coroutines.delay(retryDelayMs(e, attempt, GET_BACKOFF_BASE_MS))
             } catch (e: java.io.IOException) {
                 // A network error without a status. The canonical retry matrix (see HttpRetryBudget) retries it
                 // like a 5xx. Ktor reports a connection that is closed before any response byte as a
@@ -895,7 +897,7 @@ class InternxtApiService(
                     } else {
                         InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
                     }
-                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                if (attempt < GET_MAX_ATTEMPTS) kotlinx.coroutines.delay(GET_BACKOFF_BASE_MS shl (attempt - 1))
             }
         }
         throw lastException!!
@@ -984,16 +986,7 @@ class InternxtApiService(
                 if (e.statusCode !in TRANSIENT_STATUSES) throw e
                 attempt++
                 if (attempt >= maxAttempts) throw e
-                // Precedence: Retry-After HTTP header (captured at checkResponse
-                // time, see InternxtApiException.retryAfterMs) > JSON-body
-                // `retry_after` hint (parsed back out of the exception message)
-                // > exponential backoff. Header wins per RFC 7231 §7.1.3, which
-                // is the canonical place for the server to put this signal.
-                val retryAfterMs =
-                    e.retryAfterMs
-                        ?: parseRetryAfter(e.message)
-                        ?: (1000L shl (attempt - 1))
-                val cappedMs = retryAfterMs.coerceIn(500L, 60_000L)
+                val cappedMs = retryDelayMs(e, attempt, 1_000L)
                 log.warn(
                     "Internxt {} on attempt {}/{}, sleeping {}ms before retry",
                     e.statusCode,
@@ -1006,6 +999,16 @@ class InternxtApiService(
         }
     }
 
+
+    // How long to wait before attempt number [attempt] + 1. Precedence: Retry-After HTTP header (captured at
+    // checkResponse time, see InternxtApiException.retryAfterMs) > JSON-body `retry_after` hint (parsed back out of the
+    // exception message) > exponential backoff from [baseMs]. Header wins per RFC 7231 §7.1.3, which is the canonical
+    // place for the server to put this signal. Capped at 500 ms .. 60 s so a long hint cannot make the engine look hung.
+    private fun retryDelayMs(
+        e: InternxtApiException,
+        attempt: Int,
+        baseMs: Long,
+    ): Long = (e.retryAfterMs ?: parseRetryAfter(e.message) ?: (baseMs shl (attempt - 1))).coerceIn(500L, 60_000L)
 
     internal fun parseRetryAfter(message: String?): Long? {
         if (message == null) return null
