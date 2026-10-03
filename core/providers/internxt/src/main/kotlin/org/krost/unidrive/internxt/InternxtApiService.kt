@@ -88,7 +88,22 @@ class InternxtApiService(
             return params
         }
 
+        // #517 R2/F3: a whole-drive offset page can need 25-56 s and up to the
+        // server's statement_timeout of 300 s (public source) before the first
+        // byte; the flat 60 s watchdog cut every one of them. 330 s = statement
+        // timeout + 10 percent — past it the server errors on its own, which is
+        // the answer we want, not a silent client cut.
+        internal const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000
+
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
+
+        // #517 F1/F2: the socket watchdog is read-idle — during a PUT it measures the
+        // whole silent-upload window, so the flat 60 s cut every body at what 60 s
+        // carries (~362 MB at the measured 48 Mbit/s) and each retry restarted from
+        // byte 0 (~55 min of uplink a day on the live account). Give the watchdog the
+        // time the body needs at half the slowest answered shard PUT (41.8 Mbit/s
+        // ≈ 5.2 MB/s); a genuinely stalled connection still trips the raised watchdog.
+        private const val SHARD_PUT_MIN_THROUGHPUT_BPS: Long = 2L * 1024 * 1024
     }
 
     private val json = org.krost.unidrive.UnidriveJson
@@ -120,7 +135,12 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFile> =
         listFilesDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body =
+                authenticatedGet(
+                    "$baseUrl/files",
+                    listingQueryParams(updatedAt, limit, offset, status, sort),
+                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                )
             json.decodeFromString<List<InternxtFile>>(body)
         }
 
@@ -132,7 +152,12 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFolder> =
         listFoldersDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body =
+                authenticatedGet(
+                    "$baseUrl/folders",
+                    listingQueryParams(updatedAt, limit, offset, status, sort),
+                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                )
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 
@@ -764,18 +789,30 @@ class InternxtApiService(
         // in BACKLOG.md history).
         retryOnTransient {
             bridgeBudget.awaitSlot()
+            val socketTimeoutMs =
+                UploadTimeoutPolicy.computeSocketTimeoutMs(
+                    fileSize = data.size.toLong(),
+                    floorMs = HttpDefaults.SOCKET_TIMEOUT_MS,
+                    minThroughputBytesPerSecond = SHARD_PUT_MIN_THROUGHPUT_BPS,
+                )
+            val attemptStart = System.nanoTime()
             try {
                 val response =
                     httpClient.put(url) {
                         // UD-337 + UD-353: size-adaptive request timeout against
                         // OVH (Internxt's shard backend) with a pessimistic
                         // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
+                        // #517 R1: the socket watchdog gets its own size-adaptive
+                        // limit — requestTimeoutMillis stays far above it (10 KiB/s
+                        // floor), so the read-idle watchdog is what a stalled
+                        // upload trips, not the flat request cap.
                         timeout {
                             requestTimeoutMillis =
                                 UploadTimeoutPolicy.computeRequestTimeoutMs(
                                     fileSize = data.size.toLong(),
                                     minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
                                 )
+                            socketTimeoutMillis = socketTimeoutMs
                         }
                         header("Content-Type", "application/octet-stream")
                         setBody(data)
@@ -787,6 +824,8 @@ class InternxtApiService(
             } catch (e: InternxtApiException) {
                 if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
                 throw e
+            } catch (e: java.io.IOException) {
+                throw shardPutFailure(data.size.toLong(), socketTimeoutMs, attemptStart, e)
             }
         }
     }
@@ -797,15 +836,27 @@ class InternxtApiService(
         size: Long,
     ) {
         bridgeBudget.awaitSlot()
+        val socketTimeoutMs =
+            UploadTimeoutPolicy.computeSocketTimeoutMs(
+                fileSize = size,
+                floorMs = HttpDefaults.SOCKET_TIMEOUT_MS,
+                minThroughputBytesPerSecond = SHARD_PUT_MIN_THROUGHPUT_BPS,
+            )
+        val attemptStart = System.nanoTime()
         try {
             val response =
                 httpClient.put(url) {
+                    // Size-adaptive request timeout (UD-337/UD-353) plus a
+                    // size-adaptive socket watchdog (#517 R1): the flat 60 s
+                    // read-idle watchdog cut every upload longer than what 60 s
+                    // carries and every retry restarted from byte 0.
                     timeout {
                         requestTimeoutMillis =
                             UploadTimeoutPolicy.computeRequestTimeoutMs(
                                 fileSize = size,
                                 minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
                             )
+                        socketTimeoutMillis = socketTimeoutMs
                     }
                     header("Content-Type", "application/octet-stream")
                     setBody(streamingFileBody(file, size))
@@ -817,6 +868,33 @@ class InternxtApiService(
         } catch (e: InternxtApiException) {
             if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
             throw e
+        } catch (e: java.io.IOException) {
+            throw shardPutFailure(size, socketTimeoutMs, attemptStart, e)
+        }
+    }
+
+    // #517 R1: report a fired socket watchdog as what it is. Ktor-over-TLS surfaces
+    // it as "the server prematurely closed the connection" — indistinguishable from
+    // a real close — which sent the RCA after a phantom gateway cap. Rewrap the
+    // elapsed≈limit cuts with the numbers that identify them; other IOExceptions
+    // pass through unchanged. Stays an IOException so retryShardCommit keeps
+    // retrying it and no throttle signal is recorded.
+    private fun shardPutFailure(
+        sizeBytes: Long,
+        socketTimeoutMs: Long,
+        attemptStartNanos: Long,
+        e: java.io.IOException,
+    ): java.io.IOException {
+        val elapsedMs = (System.nanoTime() - attemptStartNanos) / 1_000_000
+        return if (UploadTimeoutPolicy.isSocketWatchdogCut(elapsedMs, socketTimeoutMs)) {
+            java.io.IOException(
+                "Shard PUT of $sizeBytes bytes cut after ${elapsedMs}ms — the socket watchdog " +
+                    "(limit ${socketTimeoutMs}ms), not the server; over TLS the two are " +
+                    "indistinguishable and a cut at the limit is ours (#517 F1)",
+                e,
+            )
+        } else {
+            e
         }
     }
 
@@ -847,6 +925,7 @@ class InternxtApiService(
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
+        socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
     ): String {
         var lastException: InternxtApiException? = null
         val delays = listOf(2_000L, 4_000L, 8_000L)
@@ -857,14 +936,30 @@ class InternxtApiService(
         // 401 doesn't restart the full 3-iteration delay ladder — it consumes
         // only the current attempt's slot.
         for ((index, delay) in delays.withIndex()) {
+            // Per-attempt start, taken after the budget slot is granted so the
+            // elapsed time matches what the socket watchdog measures (connect +
+            // send + wait for the first response byte). 0 = no attempt started.
+            var attemptStartNanos = 0L
             try {
                 return withAuthRetry { creds ->
                     driveBudget.awaitSlot()
+                    attemptStartNanos = System.nanoTime()
                     try {
                         val response =
                             httpClient.get(url) {
                                 applyAuth(creds)
                                 params.forEach { (k, v) -> parameter(k, v) }
+                                // Only an elevated limit gets a per-request block; at the
+                                // installed default the request stays byte-identical.
+                                if (socketTimeoutMs != HttpDefaults.SOCKET_TIMEOUT_MS) {
+                                    timeout {
+                                        socketTimeoutMillis = socketTimeoutMs
+                                        // The whole-request cap rides above the watchdog so
+                                        // the read-idle timer, not the flat cap, is what a
+                                        // stalled call trips.
+                                        requestTimeoutMillis = socketTimeoutMs + 60_000
+                                    }
+                                }
                             }
                         checkResponse(response)
                         driveBudget.recordSuccess()
@@ -888,6 +983,23 @@ class InternxtApiService(
                 // EOFException alone, as this did, never saw that commonest case: the gateway cuts a slow
                 // /drive/files request after a minute or two, the call gave up at once as "Connection error"
                 // (status 0), and neither the retry nor the /files -> folder walk fallback (500/503 only) ran.
+                val elapsedMs = (System.nanoTime() - attemptStartNanos) / 1_000_000
+                if (attemptStartNanos != 0L &&
+                    e.closedBeforeResponse() &&
+                    UploadTimeoutPolicy.isSocketWatchdogCut(elapsedMs, socketTimeoutMs)
+                ) {
+                    // #517 R3/F1: a cut whose elapsed matches the request's own read-idle watchdog is not a
+                    // server event, and the ladder proved it: retrying with identical parameters won 2 of 26
+                    // folder pairs and 0 of 22 file pairs, at ~62 s each. Surface 503 at once so the caller's
+                    // fallback (the tree walk) starts now.
+                    throw InternxtApiException(
+                        "Socket watchdog fired for GET $url after ${elapsedMs}ms (limit ${socketTimeoutMs}ms) — " +
+                            "a cut at the limit is our own read-idle timer, not the server; " +
+                            "not retrying with identical parameters",
+                        503,
+                        cause = e,
+                    )
+                }
                 driveBudget.recordIoRetry()
                 lastException =
                     if (e.closedBeforeResponse()) {

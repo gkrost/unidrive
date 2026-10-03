@@ -119,9 +119,40 @@ class EnumeratePollerTest {
         runCurrent()
         assertEquals(listOf(null, 240_000L), reported, "cleared at the start, then 60 s + the backed-off 180 s")
 
-        advanceTimeBy(180_000) // the retry starts at 240 s and fails too
+        // The retry starts at 240 s and fails too; the backoff escalates (180 s x 3 = 540 s,
+        // not a flat 180 s again, #517 R3), so the reported next attempt is 240 s + 540 s.
+        advanceTimeBy(180_000)
         runCurrent()
-        assertEquals(listOf(null, 240_000L, null, 420_000L), reported)
+        assertEquals(listOf(null, 240_000L, null, 780_000L), reported)
+        scope.cancel()
+    }
+
+    // #517 R3: a flat first step repeated forever re-ran a doomed enumerate every ~7 min
+    // for hours on the live account. The injected jitter records every sleep before it
+    // is taken, so the recorded values ARE the schedule.
+
+    @Test
+    fun `backoff escalates with consecutive failures to the cap`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+            )
+        poller.start()
+
+        // Ticks at 60s, 300s (60+240) and 900s (300+600): one flat step, then the cap.
+        advanceTimeBy(900_001L)
+        runCurrent()
+        assertEquals(listOf(60_000L, 240_000L, 600_000L), sleeps.take(3), "240s once, then the cap — not 240s forever")
         scope.cancel()
     }
 
@@ -146,6 +177,33 @@ class EnumeratePollerTest {
         runCurrent()
 
         assertEquals(listOf(null, (intervalMs + 7_000) + (3 * intervalMs + 7_000)), reported)
+        scope.cancel()
+    }
+
+    @Test
+    fun `backoff starts escalated from the prior run's failure streak`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+                consecutiveFailuresAtStart = 2,
+            )
+        poller.start()
+
+        // Seeded 60k → 240k → 600k cap; the first tick waits 600s, failures keep it there.
+        advanceTimeBy(1_200_001L)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get())
+        assertEquals(listOf(600_000L, 600_000L), sleeps.take(2), "a streak of 2 starts the schedule at the cap")
         scope.cancel()
     }
 
@@ -195,6 +253,33 @@ class EnumeratePollerTest {
         runCurrent()
 
         assertEquals(listOf<Long?>(null, null), reported, "each run start clears; a success leaves nothing scheduled")
+        scope.cancel()
+    }
+
+    @Test
+    fun `a success returns an escalated schedule to the plain interval`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+                consecutiveFailuresAtStart = 2,
+            )
+        poller.start()
+
+        // First tick at the seeded 600s succeeds; the next sleep is the plain interval.
+        advanceTimeBy(600_000L + 60_000L + 1)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get())
+        assertEquals(listOf(600_000L, 60_000L), sleeps.take(2), "recovery drops the escalation")
         scope.cancel()
     }
 

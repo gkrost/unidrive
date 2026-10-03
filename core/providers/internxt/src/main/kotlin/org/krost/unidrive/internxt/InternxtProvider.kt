@@ -1593,6 +1593,20 @@ class InternxtProvider(
         val scopeRoots = scanContext?.scopeRoots.orEmpty()
         val onProgress = scanContext?.onProgress
         if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress)
+        // #517 R3: once a gather ended in an unavailable account-wide listing, later
+        // gathers skip the doomed attempt for a while — with the listing watchdog at
+        // 330 s even one doomed attempt is minutes of heavy load the walk was going
+        // to replace anyway (the live account re-bought it every ~7 min for 4 h).
+        // In-process on purpose: a restart pays one attempt to re-learn what the
+        // engine's enumerate_failure_streak already covers on the poll cadence.
+        if (Instant.now().isBefore(heavyListingsUnavailableUntil.get())) {
+            log.warn(
+                "Account-wide listings unavailable until {}; walking the folder tree directly{}",
+                heavyListingsUnavailableUntil.get(),
+                if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
+            )
+            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress)
+        }
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val limit = InternxtConfig.LISTING_PAGE_SIZE
         // drive-desktop parity: fresh full enum (cursor=null) uses sort=uuid
@@ -1633,15 +1647,16 @@ class InternxtProvider(
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Parallel listing pagination. Files and folders streams run concurrently;
-        // inside each stream up to 2 page fetches stay in flight at a time — the
-        // same width as the Drive HttpRetryBudget every listing call passes
-        // through (driveBudget maxConcurrency = 2, InternxtApiService), so a
-        // speculative fetch never queues behind another page call for a budget
-        // slot. The API itself tolerates more (measured on a live account
-        // 2026-09-29, #392: throughput still scaled at concurrency 8, 8.7
-        // calls/s, zero throttling; /folders/content p50 ~0.3s, p99 ~2-4s,
-        // max ~8s) — the overlap exists to absorb the p99 tail instead of
-        // stalling the stream behind one slow page.
+        // inside each stream up to 2 page fetches stay in flight at a time. (The
+        // Drive HttpRetryBudget every listing call passes through does NOT bound
+        // this: awaitSlot gates on breaker, priority lane and spacing only —
+        // maxConcurrency seeds a storm-halving counter nothing enforces — so four
+        // heavy listing calls can be in flight at once, as observed on the live
+        // account, #517 F4. R7 tracks turning that into a real permit.) The API
+        // itself tolerates more (measured on a live account 2026-09-29, #392:
+        // throughput still scaled at concurrency 8, 8.7 calls/s, zero throttling;
+        // /folders/content p50 ~0.3s, p99 ~2-4s, max ~8s) — the overlap exists to
+        // absorb the p99 tail instead of stalling the stream behind one slow page.
         // Running counts via AtomicInteger so the heartbeat reports monotonically
         // non-decreasing totals as pages arrive on either stream. The resumed-row
         // contribution is baked in up front so the heartbeat total is monotonic
@@ -1676,12 +1691,16 @@ class InternxtProvider(
             }
 
         // The two account-wide listings page through the whole account with an offset.
-        // On a large account the gateway cuts those calls (seen 2026-10-03, ~50k
-        // items: the connection is closed after about a minute, /files from offset 0
-        // and /folders from about offset 10,000), and after the retry ladder the call
-        // ends as 503. Either one failing that way means: list the folder tree
-        // instead (per-folder listings, up to 4 in flight), the walk a scoped profile
-        // does anyway. A failing /folders used to end the whole gather, and a failing
+        // On a large account those calls are slow server-side (25-56 s per folder page,
+        // more per file page, latency growing with the account's row count, not the
+        // offset, #517 F3) and the flat 60 s socket watchdog cut every one of them —
+        // reported by Ktor-over-TLS as "the server prematurely closed the connection",
+        // which looked like a gateway cap and was our own timer (#517 F1, loopback
+        // probe). R2 raised their watchdog to 330 s, so what remains here are real
+        // closes and pages past the server's own 300 s statement timeout. Either
+        // listing failing as 500/503 still means: list the folder tree instead
+        // (per-folder listings, up to 4 in flight), the walk a scoped profile does
+        // anyway. A failing /folders used to end the whole gather, and a failing
         // /files fell back to a sequential walk that would take an hour.
         try {
             coroutineScope {
@@ -1720,11 +1739,14 @@ class InternxtProvider(
             }
         } catch (e: InternxtApiException) {
             if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
+            heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
             log.warn(
-                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}",
+                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}; " +
+                    "skipping the account-wide attempt until {}",
                 e.statusCode,
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
+                heavyListingsUnavailableUntil.get(),
             )
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
@@ -1990,6 +2012,13 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicInteger(0)
 
+    // #517 R3: until when a gather should skip the account-wide listings and walk
+    // the folder tree straight away. Set for LISTING_UNAVAILABLE_TTL when a gather
+    // ends in an unavailable account-wide listing; nothing reads it before then.
+    private val heavyListingsUnavailableUntil =
+        java.util.concurrent.atomic
+            .AtomicReference(java.time.Instant.MIN)
+
     private suspend fun resolveFolder(path: String): String {
         val creds = authService.getValidCredentials()
         val segments = pathSegments(path)
@@ -2082,6 +2111,12 @@ class InternxtProvider(
         // (gateway timing issues) should not trigger fallback — they should
         // honour Retry-After and retry the same call.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
+
+        // #517 R3: how long a gather remembers an unavailable account-wide listing
+        // before it pays one attempt to re-learn. The live account cycled the doomed
+        // attempt every ~7 min for over 4 h; 30 min cuts that to ~8 attempts a day
+        // while still re-trying often enough to notice a recovery.
+        private val LISTING_UNAVAILABLE_TTL: java.time.Duration = java.time.Duration.ofMinutes(30)
 
         // Cap on consecutive 409 collisions tolerated when the destructive-
         // overwrite guard tries to rename the prior cloud file to an archive

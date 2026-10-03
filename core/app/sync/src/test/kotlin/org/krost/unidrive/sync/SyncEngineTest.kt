@@ -1480,6 +1480,33 @@ class SyncEngineTest {
             )
         }
 
+    // #517 R3: the daemon's enumerate poller seeds its backoff at start from the
+    // consecutive-failure streak in sync_state. Pin both halves of the contract.
+
+    @Test
+    fun `a failed gather bumps the enumerate failure streak`() =
+        runTest {
+            provider.deltaFailCount = 2
+
+            engine.enumerateRemoteIntoState(reset = false)
+            assertEquals("1", db.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY))
+            engine.enumerateRemoteIntoState(reset = false)
+            assertEquals("2", db.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY))
+        }
+
+    @Test
+    fun `a gather that comes back resets the enumerate failure streak`() =
+        runTest {
+            provider.deltaFailCount = 1
+
+            engine.enumerateRemoteIntoState(reset = false)
+            assertEquals("1", db.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY))
+
+            // The fail count is spent; this gather returns and must clear the streak.
+            engine.enumerateRemoteIntoState(reset = false)
+            assertEquals("0", db.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY))
+        }
+
     // UD-264 — top-level-never-hydrated del-remote guard
 
     /**

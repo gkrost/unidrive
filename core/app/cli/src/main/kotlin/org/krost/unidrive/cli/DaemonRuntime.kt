@@ -277,12 +277,17 @@ class DaemonRuntime(
                 // no-change incremental delta and a profile served by the daemon is
                 // assumed to back a mount view. Shares the sync.enumerate in-flight
                 // guard (never overlaps a manual refresh/enumerate). Launched on
-                // serveScope so it cancels with the daemon at shutdown.
+                // serveScope so it cancels with the daemon at shutdown. The backoff
+                // starts escalated when the previous run ended in enumerate
+                // failures (#517 R3): a restart into a known-bad remote doesn't
+                // re-run the doomed cycle at full cadence.
                 EnumeratePoller(
                     enumerateHandler,
                     pollIntervalMs,
                     serveScope,
                     onNextAttempt = engine.enumerationTracker::nextAttemptAt,
+                    consecutiveFailuresAtStart =
+                        db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
                 ).start()
 
                 // daemon.status verb (spec §4.3). protocol_version is the

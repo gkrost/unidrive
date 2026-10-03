@@ -87,10 +87,11 @@ class InternxtScopedDeltaTest {
             assertTrue(requested.none { it.endsWith("/folders") || it.contains("/folders?") }, "no account-wide /folders call")
         }
 
-    // ---- the account-wide listings cut by the gateway: the tree walk takes over ----------------------------------------
+    // ---- the account-wide listings cut: the tree walk takes over ---------------------------------------------------------
     //
-    // /files and /folders page through the whole account with an offset. On a large account the gateway closes those calls
-    // after about a minute (live, 2026-10-03: /files from offset 0, /folders from about offset 10,000). After the retry ladder
+    // /files and /folders page through the whole account with an offset, and on a large account they are slow server-side
+    // enough (25-56 s per folder page, #517 F3) that the client's own read-idle watchdog used to cut them at 60 s — over
+    // TLS indistinguishable from a server close (#517 F1). The mocks reproduce that close shape. After the retry ladder
     // that is a 503, and the gather used to end with it (a failing /folders) or to crawl the tree one folder at a time (a
     // failing /files).
 
@@ -242,6 +243,43 @@ class InternxtScopedDeltaTest {
             assertTrue(
                 ticks.zipWithNext().all { (before, after) -> after >= before },
                 "the handover to the walk never reports a lower total: $ticks",
+            )
+        }
+
+    @Test
+    fun `a gather that ended in the walk skips the account-wide attempt on the next gather`() =
+        runTest {
+            val accountWide = java.util.concurrent.atomic.AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) -> {
+                            accountWide.incrementAndGet()
+                            throw cutByTheGateway()
+                        }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val p = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val first = p.delta(null, null, scanContext)
+            assertTrue(first.complete)
+            val wideAfterFirst = accountWide.get()
+            assertTrue(wideAfterFirst > 0, "the first gather tried the account-wide listing: $accountWide")
+
+            val second = p.delta(null, null, scanContext)
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                second.items.map { it.path }.toSet(),
+            )
+            assertTrue(second.complete)
+            assertEquals(
+                wideAfterFirst,
+                accountWide.get(),
+                "the second gather skipped the doomed account-wide attempt and walked straight away",
             )
         }
 
