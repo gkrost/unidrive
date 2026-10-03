@@ -46,9 +46,11 @@ class InternxtApiService(
         HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 500, stormSpacingMs = 1_000),
     private val bridgeBudget: HttpRetryBudget =
         HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
-    // The socket (read-idle) timeout of an ordinary call (the default client's too). A parameter so that loopback tests
-    // can run with a small one.
+    // The socket (read-idle) timeout of an ordinary call (the default client's too), and the socket and request timeouts
+    // of the account-wide listings (InternxtConfig.LISTING_*). Parameters so that loopback tests can run with small ones.
     private val socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
+    private val listingSocketTimeoutMs: Long = InternxtConfig.LISTING_SOCKET_TIMEOUT_MS,
+    private val listingRequestTimeoutMs: Long = InternxtConfig.LISTING_REQUEST_TIMEOUT_MS,
     // Tests hand in a client on a MockEngine; production builds the default one.
     private val httpClient: HttpClient = defaultHttpClient(socketTimeoutMs),
 ) : AutoCloseable {
@@ -156,7 +158,7 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFile> =
         listFilesDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status, sort), heavy = true)
             json.decodeFromString<List<InternxtFile>>(body)
         }
 
@@ -168,7 +170,7 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFolder> =
         listFoldersDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status, sort), heavy = true)
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 
@@ -881,8 +883,9 @@ class InternxtApiService(
     }
 
     // A Drive REST GET with a transient ladder: GET_MAX_ATTEMPTS attempts, a server hint (Retry-After header or JSON
-    // retry_after) or 2 s, then 4 s, between them. Every GET gets its socket timeout set here, so that the timeout the
-    // failure is judged by is the one that was in force.
+    // retry_after) or 2 s, then 4 s, between them. [heavy] marks an account-wide listing, which runs with the long
+    // listing timeouts instead of the default ones; every GET gets its socket timeout set here, so that the timeout
+    // the failure is judged by is the one that was in force.
     //
     // A failure that looks like the connection being closed before the answer is first told apart from the engine's own
     // socket timer (isOwnTimeout). The timer is not retried: the same request runs into the same timer, at the price of
@@ -892,7 +895,10 @@ class InternxtApiService(
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
+        heavy: Boolean = false,
     ): String {
+        val socketMs = if (heavy) listingSocketTimeoutMs else socketTimeoutMs
+        val requestMs = if (heavy) listingRequestTimeoutMs else null
         var lastException: InternxtApiException? = null
         // Budget acquisition is per-attempt (inside the retry loop) so a retrying
         // call doesn't hold a slot through its full backoff and starve other callers.
@@ -912,7 +918,10 @@ class InternxtApiService(
                             httpClient.get(url) {
                                 applyAuth(creds)
                                 params.forEach { (k, v) -> parameter(k, v) }
-                                timeout { socketTimeoutMillis = socketTimeoutMs }
+                                timeout {
+                                    socketTimeoutMillis = socketMs
+                                    if (requestMs != null) requestTimeoutMillis = requestMs
+                                }
                             }
                         checkResponse(response)
                         driveBudget.recordSuccess()
@@ -931,16 +940,17 @@ class InternxtApiService(
                 if (attempt < GET_MAX_ATTEMPTS) kotlinx.coroutines.delay(retryDelayMs(e, attempt, GET_BACKOFF_BASE_MS))
             } catch (e: java.io.IOException) {
                 val elapsedMs = failedAfterMs
-                if (elapsedMs != null && isOwnTimeout(e, elapsedMs, socketTimeoutMs)) {
+                if (elapsedMs != null && isOwnTimeout(e, elapsedMs, socketMs)) {
                     log.warn(
-                        "GET {} timed out after {} ms: the engine's own timer fired (socket timeout {} ms), " +
+                        "GET {} timed out after {} ms: the engine's own timer fired (socket timeout {} ms{}), " +
                             "not a server close; not retried with the same parameters",
                         withoutQuery(url),
                         elapsedMs,
-                        socketTimeoutMs,
+                        socketMs,
+                        requestMs?.let { ", request timeout $it ms" } ?: "",
                     )
                     throw InternxtApiException(
-                        ownTimeoutMessage("GET", url, elapsedMs, socketTimeoutMs),
+                        ownTimeoutMessage("GET", url, elapsedMs, socketMs),
                         503,
                         cause = e,
                         timedOutLocally = true,
@@ -956,7 +966,7 @@ class InternxtApiService(
                     "GET {} failed after {} ms (socket timeout {} ms), attempt {}/{}: {}",
                     withoutQuery(url),
                     elapsedMs ?: "?",
-                    socketTimeoutMs,
+                    socketMs,
                     attempt,
                     GET_MAX_ATTEMPTS,
                     e.message?.substringBefore(" [url=") ?: e.javaClass.simpleName,

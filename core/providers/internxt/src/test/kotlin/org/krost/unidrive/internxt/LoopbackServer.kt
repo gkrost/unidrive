@@ -210,10 +210,12 @@ internal class ServiceWarnings : AutoCloseable {
     }
 }
 
-/** The service on [client], with a socket timeout of a few hundred milliseconds instead of the production minute. */
+/** The service on [client], with socket timeouts of a few hundred milliseconds instead of the production minute. */
 internal fun loopbackService(
     client: HttpClient,
     socketMs: Long,
+    listingSocketMs: Long = socketMs,
+    listingRequestMs: Long = 600_000,
 ): InternxtApiService =
     InternxtApiService(
         InternxtConfig(),
@@ -223,6 +225,8 @@ internal fun loopbackService(
         driveBudget = HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 0, stormSpacingMs = 0),
         bridgeBudget = HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
         socketTimeoutMs = socketMs,
+        listingSocketTimeoutMs = listingSocketMs,
+        listingRequestTimeoutMs = listingRequestMs,
         httpClient = client,
     )
 
