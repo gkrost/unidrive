@@ -161,6 +161,39 @@ class InternxtApiService(
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 
+    // The cursor listings of a full enumeration (see InternxtCursorListing.kt). The first page names
+    // [updatedAt], every later page only the [cursor] the page before it returned, with the same
+    // status and limit. A page's nextCursor is null on the last page. They are account-wide
+    // listings: the read-idle watchdog rides at the listing limit like the offset ones above, so a
+    // slow page is never cut by the engine's own default timer.
+    suspend fun getFoldersSync(
+        updatedAt: String?,
+        cursor: String?,
+        status: String = SYNC_LISTING_STATUS,
+        limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
+    ): SyncPage<InternxtFolder> =
+        parseFoldersSyncPage(
+            authenticatedGet(
+                "$baseUrl/folders/sync",
+                syncQueryParams(updatedAt, cursor, status, limit),
+                socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+            ),
+        )
+
+    suspend fun getFilesSync(
+        updatedAt: String?,
+        cursor: String?,
+        status: String = SYNC_LISTING_STATUS,
+        limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
+    ): SyncPage<InternxtFile> =
+        parseFilesSyncPage(
+            authenticatedGet(
+                "$baseUrl/files/sync",
+                syncQueryParams(updatedAt, cursor, status, limit),
+                socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+            ),
+        )
+
     suspend fun getFileMeta(uuid: String): InternxtFile =
         fileMetaDedup.load(uuid, currentPriority()) {
             val body = authenticatedGet("$baseUrl/files/$uuid/meta")

@@ -85,6 +85,7 @@ class InternxtScopedDeltaTest {
             assertEquals(3, requested.size, "root, _INBOX and sub only: $requested")
             assertTrue(requested.none { it.contains("/files") && !it.contains("/folders/content/") }, "no account-wide /files call")
             assertTrue(requested.none { it.endsWith("/folders") || it.contains("/folders?") }, "no account-wide /folders call")
+            assertTrue(requested.none { it.contains("/sync") }, "no cursor listing either: it always walks the whole account")
         }
 
     // ---- the account-wide listings cut: the tree walk takes over ---------------------------------------------------------
@@ -113,6 +114,10 @@ class InternxtScopedDeltaTest {
 
     private fun isAccountWideListing(path: String) = path.endsWith("/drive/files") || path.endsWith("/drive/folders")
 
+    // The tests that exercise the offset listing and its fallbacks run against a server without the cursor listings (an
+    // older or a self-hosted one): the cursor endpoints answer 404, which sends the gather to the offset listing.
+    private fun isCursorListing(path: String) = path.endsWith("/drive/files/sync") || path.endsWith("/drive/folders/sync")
+
     private fun cutByTheGateway() =
         io.ktor.utils.io.ClosedReadChannelException(
             java.io.EOFException("Failed to parse HTTP response: the server prematurely closed the connection"),
@@ -127,6 +132,7 @@ class InternxtScopedDeltaTest {
                     val url = request.url.toString()
                     requested += url
                     when {
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
                         isAccountWideListing(request.url.encodedPath) -> throw cutByTheGateway()
                         else -> error("unexpected request: $url")
@@ -152,6 +158,7 @@ class InternxtScopedDeltaTest {
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
                         request.url.encodedPath.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
                         request.url.encodedPath.endsWith("/drive/files") -> throw cutByTheGateway()
@@ -207,6 +214,7 @@ class InternxtScopedDeltaTest {
                 MockEngine { request ->
                     val path = request.url.encodedPath
                     when {
+                        isCursorListing(path) -> respond("{}", HttpStatusCode.NotFound, json)
                         path.endsWith("/drive/files") -> {
                             val offset = request.url.parameters["offset"]?.toInt() ?: 0
                             if (offset < 6 * 999) {
@@ -250,11 +258,16 @@ class InternxtScopedDeltaTest {
     fun `a gather that ended in the walk skips the account-wide attempt on the next gather`() =
         runTest {
             val accountWide = java.util.concurrent.atomic.AtomicInteger(0)
+            val cursorWide = java.util.concurrent.atomic.AtomicInteger(0)
             val engine =
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isCursorListing(request.url.encodedPath) -> {
+                            cursorWide.incrementAndGet()
+                            respond("{}", HttpStatusCode.NotFound, json)
+                        }
                         isAccountWideListing(request.url.encodedPath) -> {
                             accountWide.incrementAndGet()
                             throw cutByTheGateway()
@@ -268,7 +281,9 @@ class InternxtScopedDeltaTest {
             val first = p.delta(null, null, scanContext)
             assertTrue(first.complete)
             val wideAfterFirst = accountWide.get()
-            assertTrue(wideAfterFirst > 0, "the first gather tried the account-wide listing: $accountWide")
+            val cursorAfterFirst = cursorWide.get()
+            assertTrue(cursorAfterFirst > 0, "the first gather tried the cursor listing: $cursorWide")
+            assertTrue(wideAfterFirst > 0, "the first gather tried the offset listing: $accountWide")
 
             val second = p.delta(null, null, scanContext)
             assertEquals(
@@ -281,6 +296,11 @@ class InternxtScopedDeltaTest {
                 accountWide.get(),
                 "the second gather skipped the doomed account-wide attempt and walked straight away",
             )
+            assertEquals(
+                cursorAfterFirst,
+                cursorWide.get(),
+                "the second gather skipped the cursor listing too: both are account-wide listings",
+            )
         }
 
     @Test
@@ -292,6 +312,7 @@ class InternxtScopedDeltaTest {
                     val url = request.url.toString()
                     requested += url
                     when {
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         request.url.encodedPath.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
                         request.url.encodedPath.endsWith("/drive/files") -> respond("{}", HttpStatusCode.NotFound, json)
                         else -> error("unexpected request: $url")
@@ -321,6 +342,7 @@ class InternxtScopedDeltaTest {
                 MockEngine { request ->
                     val offset = request.url.parameters["offset"]?.toInt() ?: 0
                     when {
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         request.url.encodedPath.endsWith("/drive/files") -> respond(if (offset == 0) filesPage(1..3) else "[]", HttpStatusCode.OK, json)
                         request.url.encodedPath.endsWith("/drive/folders") -> respond(if (offset == 0) foldersPage(1..2) else "[]", HttpStatusCode.OK, json)
                         else -> error("unexpected request: ${request.url}")
@@ -336,15 +358,18 @@ class InternxtScopedDeltaTest {
                 )
 
             assertEquals(5, page.items.size)
-            assertTrue(reports.all { it.listing == ScanProgress.LISTING_ACCOUNT }, "$reports")
+            // The cursor listing is tried first and names itself at its start; the 404 sends the gather here.
+            assertEquals(ScanProgress.LISTING_CURSOR, reports.first().listing)
+            val account = reports.filter { it.listing == ScanProgress.LISTING_ACCOUNT }
+            assertEquals(reports.drop(1), account, "everything after the cursor listing's start is the offset listing's: $reports")
             assertTrue(
-                reports.all { it.foldersDone == null && it.foldersKnown == null && it.foldersSkipped == null },
+                account.all { it.foldersDone == null && it.foldersKnown == null && it.foldersSkipped == null },
                 "an offset pagination has no folder walk to report: $reports",
             )
-            assertEquals(0, reports.first().items, "the listing is named before the first page is back")
-            assertEquals(5, reports.last().items, "files and folders together")
-            assertEquals(3, reports.size, "the start and one report per page")
-            assertTrue(reports.zipWithNext().all { (a, b) -> b.items >= a.items }, "the count only grows: $reports")
+            assertEquals(0, account.first().items, "the listing is named before the first page is back")
+            assertEquals(5, account.last().items, "files and folders together")
+            assertEquals(3, account.size, "the start and one report per page")
+            assertTrue(account.zipWithNext().all { (a, b) -> b.items >= a.items }, "the count only grows: $reports")
         }
 
     @Test
@@ -354,6 +379,7 @@ class InternxtScopedDeltaTest {
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
+                        isCursorListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.NotFound, json)
                         contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
                         isAccountWideListing(request.url.encodedPath) -> throw cutByTheGateway()
                         else -> error("unexpected request: $url")
@@ -367,7 +393,11 @@ class InternxtScopedDeltaTest {
                 ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList(), onProgress = { reports += it }),
             )
 
-            assertEquals(ScanProgress.LISTING_ACCOUNT, reports.first().listing, "the account-wide listing was tried first")
+            assertEquals(
+                listOf(ScanProgress.LISTING_CURSOR, ScanProgress.LISTING_ACCOUNT, ScanProgress.LISTING_TREE),
+                reports.map { it.listing }.distinct(),
+                "the cursor listing was tried first, then the account-wide offset listing, then the walk",
+            )
             assertEquals(
                 ScanProgress(items = 5, foldersDone = 3, foldersKnown = 3, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
                 reports.last(),

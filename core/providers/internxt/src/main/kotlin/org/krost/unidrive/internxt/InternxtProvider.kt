@@ -6,6 +6,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
@@ -1607,6 +1609,10 @@ class InternxtProvider(
             )
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress)
         }
+        // A full enumeration of the whole drive pages through the cursor listings: the offset listing below
+        // needs 25-56 s per page on a large account and the gateway cuts it at about two minutes. Only a server
+        // without those endpoints (older or self-hosted) carries on with the offset listing.
+        if (cursor == null) cursorFullDelta(onPageProgress, scanContext, onProgress)?.let { return it }
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val limit = InternxtConfig.LISTING_PAGE_SIZE
         // drive-desktop parity: fresh full enum (cursor=null) uses sort=uuid
@@ -1751,6 +1757,24 @@ class InternxtProvider(
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
 
+        // Cursor = max(updatedAt) seen across successfully-fetched pages.
+        // Skipped (500/503 fallback) folders contribute nothing — their items
+        // never made it into allFiles/allFolders.
+        val seenMax =
+            (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
+                .maxOrNull()
+        return assembleFullDelta(allFiles, allFolders, advanceCursor(seenMax, cursor))
+    }
+
+    // The DeltaPage of a full gather: the folder graph from the folders, a path for every item, the items
+    // whose ancestors cannot be resolved dropped and counted. The offset listing and the cursor listing both
+    // end here, so the same drive gives the same items whichever of them listed it. [cursor] is what the
+    // page hands the engine for the next incremental delta.
+    private suspend fun assembleFullDelta(
+        allFiles: Collection<InternxtFile>,
+        allFolders: Collection<InternxtFolder>,
+        cursor: String,
+    ): DeltaPage {
         val creds = authService.getValidCredentials()
         // Mutable so the self-healing ancestor re-fetch can splice missing
         // ancestors in as it resolves; `associateBy` keeps the last entry per
@@ -1789,14 +1813,6 @@ class InternxtProvider(
         val foldersDropped = rawFolders.count { it == null }
         val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
 
-        // Cursor = max(updatedAt) seen across successfully-fetched pages.
-        // Skipped (500/503 fallback) folders contribute nothing — their items
-        // never made it into allFiles/allFolders.
-        val seenMax =
-            (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
-                .maxOrNull()
-        val latestUpdatedAt = advanceCursor(seenMax, cursor)
-
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
             log.warn(
@@ -1820,10 +1836,162 @@ class InternxtProvider(
 
         return DeltaPage(
             items = items,
-            cursor = latestUpdatedAt,
+            cursor = cursor,
             hasMore = false,
             complete = skipped == 0 && ancestorDrops == 0,
         )
+    }
+
+    // The full enumeration of the whole drive by the cursor listings. The folders and the files stream run
+    // at once, each strictly one request at a time (a cursor names the page before it). Every page is staged
+    // with a marker that holds both cursors, so a failed or killed attempt continues from the cursors and not
+    // from the start. Items are deduplicated by uuid, the later version winning: the listing is a keyset on
+    // (updatedAt, uuid), so an item that changes while the listing runs turns up again further on.
+    //
+    // Returns null when the server has no cursor endpoints (404, 405 or 501 on the first page of a stream):
+    // the caller carries on with the offset listing. A server-side failure — the 5xx family (live, the
+    // gateway answers Cloudflare 524 at its own cap of about 125 s when a cursor page runs long) or a
+    // connection that failed or was cut (surfaced as status 0 / 503) — hands the gather to the folder tree
+    // walk, the one listing that still finishes on a large drive, and skips the account-wide listings for
+    // the R3 TTL: on the live account the folder stream hits the same wall at the same page every time,
+    // and re-buying that attempt on every gather is minutes of load the walk replaces anyway. Both
+    // handovers leave the marker and the staged rows in place, so the next gather resumes from the cursors.
+    // A client error (a 404 on a later page, 401, 429) ends the attempt with an exception, marker intact:
+    // it is a request-shape problem a walk cannot fix.
+    //
+    // The cursor of the page is the instant the enumeration began (kept in the marker across a resume), not
+    // the newest updatedAt seen: the two streams end at different times, so the next incremental delta has to
+    // ask for everything since the beginning. A stream that a guard cut short makes the page incomplete.
+    //
+    // Scoped profiles do not come here: their cost is bounded by the scope (the walk), the cursor listing
+    // always walks the whole account and cannot be narrowed to a subtree.
+    private suspend fun cursorFullDelta(
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        scanContext: ScanContext?,
+        onProgress: ((ScanProgress) -> Unit)?,
+    ): DeltaPage? {
+        val begun = System.nanoTime()
+        val rootUuid = authService.getValidCredentials().rootFolderId
+        val staged = scanContext?.resumedItems.orEmpty()
+        val resume = cursorResumeOf(scanContext?.resumeMarker, staged)
+        val startedAt = resume?.marker?.startedAt ?: Instant.now().toString()
+        var foldersAt = resume?.marker?.folders ?: StreamPosition()
+        var filesAt = resume?.marker?.files ?: StreamPosition()
+        val folders = LinkedHashMap<String, InternxtFolder>()
+        val files = LinkedHashMap<String, InternxtFile>()
+        if (resume == null) {
+            // An offset listing's marker or rows, a damaged marker, a cursor of another status, a marker whose
+            // rows are gone: none of it is this strategy's to resume. The engine clears the staging when the
+            // enumeration completes.
+            if (scanContext?.resumeMarker != null || staged.isNotEmpty()) {
+                log.info(
+                    "The stored scan (marker {}, {} staged rows) is not one the cursor listing can resume; " +
+                        "listing from the start",
+                    scanContext?.resumeMarker?.take(60),
+                    staged.size,
+                )
+            } else {
+                log.info("Listing the whole drive by cursor: folders and files, one request at a time each")
+            }
+        } else {
+            for (row in resume.rows) {
+                if (row.isFolder) folders[row.id] = row.toResumedFolder() else files[row.id] = row.toResumedFile()
+            }
+            log.info(
+                "Resuming the cursor listing begun {}: folders {}, files {}, {} staged rows",
+                startedAt,
+                if (foldersAt.done) "done" else if (foldersAt.cursor == null) "not started" else "from its cursor",
+                if (filesAt.done) "done" else if (filesAt.cursor == null) "not started" else "from its cursor",
+                folders.size + files.size,
+            )
+        }
+
+        val persist = scanContext?.persistPage
+        val lock = Mutex()
+        val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
+
+        // Read under the lock, after every page and at the start: the count never goes down (the staged rows
+        // are counted from the beginning) and the reports arrive in the order of the counts.
+        fun report() {
+            val total = folders.size + files.size
+            heartbeat?.tick(total)
+            onProgress?.invoke(ScanProgress(items = total, listing = ScanProgress.LISTING_CURSOR))
+        }
+        report()
+
+        val cutShort =
+            try {
+                coroutineScope {
+                    val foldersEnd =
+                        async {
+                            pageCursorStream(
+                                stream = "folders",
+                                start = foldersAt,
+                                fetch = { c -> api.getFoldersSync(updatedAt = SYNC_LISTING_START.takeIf { c == null }, cursor = c) },
+                                onPage = { page, at ->
+                                    lock.withLock {
+                                        for (f in page) folders[f.uuid] = f
+                                        foldersAt = at
+                                        val rows = page.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
+                                        persist?.invoke(rows, cursorMarker(startedAt, foldersAt, filesAt))
+                                        report()
+                                    }
+                                },
+                            )
+                        }
+                    val filesEnd =
+                        async {
+                            pageCursorStream(
+                                stream = "files",
+                                start = filesAt,
+                                fetch = { c -> api.getFilesSync(updatedAt = SYNC_LISTING_START.takeIf { c == null }, cursor = c) },
+                                onPage = { page, at ->
+                                    lock.withLock {
+                                        for (f in page) files[f.uuid] = f
+                                        filesAt = at
+                                        val rows = page.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
+                                        persist?.invoke(rows, cursorMarker(startedAt, foldersAt, filesAt))
+                                        report()
+                                    }
+                                },
+                            )
+                        }
+                    StreamEnd.CUT_SHORT in listOf(foldersEnd.await(), filesEnd.await())
+                }
+            } catch (e: CursorListingUnavailable) {
+                log.warn("{}; falling back to the offset listing", e.message)
+                return null
+            } catch (e: InternxtApiException) {
+                if (!isServerSideListingFailure(e.statusCode)) throw e
+                heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
+                log.warn(
+                    "The cursor listing failed server-side ({}: {}), falling back to the folder tree walk; " +
+                        "skipping the account-wide listings until {}",
+                    e.statusCode,
+                    e.message,
+                    heavyListingsUnavailableUntil.get(),
+                )
+                return scopedFullDelta(
+                    scanContext?.scopeRoots.orEmpty().ifEmpty { listOf("/") },
+                    onPageProgress,
+                    onProgress,
+                    folders.size + files.size,
+                )
+            }
+
+        log.info(
+            "Cursor listing finished in {} s: {} folders, {} files",
+            (System.nanoTime() - begun) / 1_000_000_000L,
+            folders.size,
+            files.size,
+        )
+        val page = assembleFullDelta(files.values.toList(), folders.values.toList(), startedAt)
+        if (!cutShort) return page
+        log.warn(
+            "A cursor stream was cut short by a guard; returning DeltaPage(complete=false). " +
+                "detectMissingAfterFullSync will be suppressed.",
+        )
+        return page.copy(complete = false)
     }
 
     // Cursor = the walk's start time, not the newest in-scope updatedAt: the next
@@ -2111,6 +2279,16 @@ class InternxtProvider(
         // (gateway timing issues) should not trigger fallback — they should
         // honour Retry-After and retry the same call.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
+
+        // Whether a cursor listing's failure is the server's to answer for, and the tree walk — the one
+        // listing that still finishes on a large drive — takes the gather over. The whole 5xx family: live,
+        // the gateway answers Cloudflare 524 at its own cap (about 125 s) at the same deep page of the
+        // folder stream on every run — a deterministic wall, not a blip the next gather dodges, which is
+        // why this is wider than SERVER_UNAVAILABLE_STATUSES. Status 0 is a connection that never formed; a
+        // cut before the answer surfaces as 503. 429 stays out: the retry ladder honoured it already, and
+        // walking a throttled server is the wrong move. A client error (401, a 404 on a later page) is a
+        // request-shape problem a walk cannot fix: it ends the attempt with the marker intact.
+        private fun isServerSideListingFailure(statusCode: Int): Boolean = statusCode >= 500 || statusCode == 0
 
         // #517 R3: how long a gather remembers an unavailable account-wide listing
         // before it pays one attempt to re-learn. The live account cycled the doomed

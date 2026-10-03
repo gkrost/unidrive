@@ -15,6 +15,7 @@ Plus mandatory client-side encryption between Drive metadata (carries the IV) an
 | `POST /auth/login*` | login + 2FA | `AuthService.authenticateInteractive` (undocumented endpoint; not in vendor Swagger) |
 | `POST /users/refresh` | JWT refresh | `AuthService.fetchRefreshedJwt` |
 | `GET /folders/{uuid}/files`, `/folders` | list folder contents | `listFiles`, `listFolders` (sorted by uuid for stable pagination) |
+| `GET /files/sync`, `GET /folders/sync` | cursor listing, keyset `(updatedAt, uuid)`, 1000 per page | `getFilesSync`, `getFoldersSync` — a full enumeration of the whole drive pages both streams to the end and resumes from the cursor of its last page (`InternxtCursorListing.kt`); the offset listing above is the fallback of a server without these endpoints |
 | `POST /files`, `POST /folders` | create | `createFile`, `createFolder` (409 conflict → existing-by-name lookup) |
 | `PUT /files/{uuid}/meta`, `PUT /folders/{uuid}/meta` | rename | `moveFile`, `moveFolder` — updates `plainName` only; encrypted `name` left stale (sync uses `plainName`) |
 | `PUT /files/{uuid}` | replace-in-place | `replaceFile` — for MODIFIED uploads |

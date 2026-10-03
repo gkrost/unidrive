@@ -9,8 +9,10 @@ package org.krost.unidrive
  * crash.
  *
  * [resumeMarker] is opaque to the engine. The provider parses it back into its
- * native pagination cursor (Internxt: comma-separated stream offsets; OneDrive
- * uses delta tokens that subsume this and may legitimately ignore the marker).
+ * native pagination cursor (Internxt: the stream offsets of its offset listing or
+ * the stream cursors of its cursor listing, and a marker one strategy wrote is
+ * never resumed by the other; OneDrive uses delta tokens that subsume this and
+ * may legitimately ignore the marker).
  *
  * [resumedItems] are the engine's rehydration of the previously-staged rows.
  * Only the cloud-identity fields (id, parentId, name, isFolder, size, modified,
@@ -57,7 +59,7 @@ data class ScanContext(
  * The folder counts describe a folder walk and stay null for any other listing:
  * [foldersDone] folders listed or skipped, [foldersKnown] folders discovered so far
  * (a lower bound of the total), [foldersSkipped] folders that failed and were skipped.
- * [listing] names the strategy, [LISTING_ACCOUNT] or [LISTING_TREE].
+ * [listing] names the strategy, [LISTING_ACCOUNT], [LISTING_CURSOR] or [LISTING_TREE].
  */
 data class ScanProgress(
     val items: Int,
@@ -69,6 +71,9 @@ data class ScanProgress(
     companion object {
         /** Account-wide offset pagination. */
         const val LISTING_ACCOUNT: String = "account"
+
+        /** Account-wide cursor pagination: each stream resumes from the cursor of its last page. */
+        const val LISTING_CURSOR: String = "cursor"
 
         /** Folder-by-folder walk of the tree. */
         const val LISTING_TREE: String = "tree"
