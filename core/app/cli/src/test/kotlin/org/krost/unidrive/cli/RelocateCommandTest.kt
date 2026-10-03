@@ -258,4 +258,35 @@ class RelocateCommandTest {
             MDC.remove("scan")
         }
     }
+
+    // -- delete-source loop ----------------------------------------------------------
+    //
+    // DeltaPage.cursor is a non-null String, so the old loop condition `page.cursor == null` was
+    // never true (the compiler said "Condition is always 'false'") and `relocate --delete-source`
+    // kept asking the provider for the next page for ever after the last file. A provider says
+    // "that was the last page" with hasMore = false.
+
+    @Test
+    fun `deleteSourceRecursive ends after the last page and deletes the files below the prefix`() {
+        val root = java.nio.file.Files.createTempDirectory("ud-relocate-src")
+        try {
+            java.nio.file.Files.createDirectories(root.resolve("docs/sub"))
+            java.nio.file.Files.writeString(root.resolve("docs/a.txt"), "a")
+            java.nio.file.Files.writeString(root.resolve("docs/sub/b.txt"), "b")
+            java.nio.file.Files.writeString(root.resolve("keep.txt"), "outside the prefix")
+            val provider = org.krost.unidrive.localfs.LocalFsProvider(root)
+
+            val deleted =
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeout(10_000) { RelocateCommand().deleteSourceRecursive(provider, "/docs") }
+                }
+
+            assertEquals(2, deleted, "both files below /docs are deleted, counted once")
+            assertTrue(java.nio.file.Files.exists(root.resolve("keep.txt")), "a file outside the prefix stays")
+            assertTrue(!java.nio.file.Files.exists(root.resolve("docs/a.txt")))
+            assertTrue(!java.nio.file.Files.exists(root.resolve("docs/sub/b.txt")))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }
