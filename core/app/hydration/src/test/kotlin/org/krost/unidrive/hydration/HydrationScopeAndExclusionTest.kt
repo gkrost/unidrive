@@ -89,11 +89,13 @@ class HydrationScopeAndExclusionTest {
 
     @Test
     fun `rename onto an excluded destination is refused with excluded and moves nothing`() = runTest {
-        // A rename MOVES the remote object: a destination that matches exclude_patterns would strand
-        // cloud content at a name the sync engine's enumeration skips — the object stays in the cloud
-        // but never shows in any view again (the exclusion-side twin of the outside_scope failure).
-        // Creating an excluded name is different (accepted keep-local: nothing exists in the cloud to
-        // strand); the rename destination is where cloud content must not be moved INTO exclusion.
+        // A rename MOVES the remote object. Exclusion means the sync engine never plans an
+        // action for the name (Reconciler and LocalScanner skip it), so a synced file moved
+        // onto an excluded name silently leaves every sync action forever — no re-download,
+        // no conflict handling, no reaping, and later mount edits stay keep-local. The row
+        // itself would still list (flagged excluded); the harm is the silent one-way exit
+        // from sync, not a vanishing view. Creating an excluded name is the other case
+        // (accepted keep-local: nothing exists in the cloud to strand).
         val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
         env.stateDb.insertFolderEntry("/new")
         env.stateDb.insertUnhydratedEntry("/new/keep.txt", 100)
@@ -105,6 +107,26 @@ class HydrationScopeAndExclusionTest {
         assertEquals(0, env.syncEngine.movedPairs().size, "a refused rename must not move anything in the cloud")
         assertEquals(100L, env.stateDb.remoteSizeOf("/new/keep.txt"), "the source row must be untouched")
         assertNull(env.stateDb.remoteSizeOf("/new/scratch.tmp"), "nothing may be written to the excluded path")
+    }
+
+    @Test
+    fun `a replace-rename onto an excluded destination is refused before the destination is deleted`() = runTest {
+        // Ordering pin: the excluded guard sits BEFORE the replace-destination deletion. If it
+        // ever moves below deleteReplaceDestination, a replace=true rename onto an excluded
+        // name would first destroy the existing destination (row + cloud copy) and THEN
+        // refuse — losing cloud content to a refusal.
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+        env.stateDb.insertUnhydratedEntry("/new/keep.txt", 100)
+        env.stateDb.insertUnhydratedEntry("/new/target.tmp", 200)
+
+        val r = env.hydration.rename("/new/keep.txt", "/new/target.tmp", replace = true)
+
+        assertIs<RenameResult.Failed>(r)
+        assertEquals(HydrationError.EXCLUDED_TOKEN, r.error.message)
+        assertEquals(0, env.syncEngine.deletedPaths().size, "the replace destination must NOT be deleted")
+        assertEquals(200L, env.stateDb.remoteSizeOf("/new/target.tmp"), "the destination row must survive the refusal")
+        assertEquals(100L, env.stateDb.remoteSizeOf("/new/keep.txt"), "the source row must be untouched")
     }
 
     @Test

@@ -1069,9 +1069,14 @@ class HydrationImpl(
         }
 
         // Excluded destination (#461 route guard): a rename MOVES the remote
-        // object, so a destination matching exclude_patterns would strand cloud
-        // content at a name the sync engine's enumeration skips — the object
-        // stays in the cloud but never shows in any view again. Refused with
+        // object. Exclusion means the sync engine never plans an action for the
+        // name — the Reconciler and LocalScanner skip it on every pass — so a
+        // synced file moved onto an excluded name silently leaves every sync
+        // action forever while its cloud copy keeps aging there: no re-download
+        // after eviction via enumeration, no conflict handling, no reaping, and
+        // a later edit through the mount is keep-local (never uploaded). The
+        // row itself would still list (flagged excluded) — the harm is the
+        // silent, one-way exit from sync, not a vanishing view. Refused with
         // the typed `excluded` token; the row and the remote are untouched.
         // (Creating an excluded name is the other case: create/open_write_begin
         // accept it as keep-local — nothing exists in the cloud to strand.)

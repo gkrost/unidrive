@@ -62,13 +62,16 @@ sealed interface HydrationError {
     }
 
     /**
-     * The path matches the profile's exclude_patterns. Not a refusal: the
-     * local write is accepted and the content stays local-only — it is
-     * deliberately never uploaded (the same keep-local rule the sync engine's
-     * upload path applies). Carried as [Completed.error] so a client marking
-     * in-sync on a Completed event cannot mark an excluded file as uploaded.
-     * Its [message] is the STABLE wire token `excluded`. Changing this string
-     * breaks that cross-repo contract.
+     * The path matches the profile's exclude_patterns. Two uses, one token:
+     * on create/open_write/open_write_begin it is NOT a refusal — the local
+     * write is accepted and the content stays local-only, deliberately never
+     * uploaded (carried as [Completed.error] so a client marking in-sync on a
+     * Completed event cannot mark an excluded file as uploaded). On rename it
+     * IS a refusal: moving cloud content onto an excluded name would take a
+     * synced object out of every sync action silently (the Reconciler and
+     * LocalScanner skip excluded names), so the move is refused and both
+     * paths stay untouched. Its [message] is the STABLE wire token `excluded`.
+     * Changing this string breaks that cross-repo contract.
      */
     data object Excluded : HydrationError {
         override val message: String = EXCLUDED_TOKEN
