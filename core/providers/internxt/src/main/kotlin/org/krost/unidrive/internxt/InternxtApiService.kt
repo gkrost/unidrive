@@ -185,7 +185,7 @@ class InternxtApiService(
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
         folderContentsDedup.load(folderUuid, currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
+            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid", heavy = true)
             json.decodeFromString<FolderContentResponse>(body)
         }
 
@@ -960,9 +960,10 @@ class InternxtApiService(
     }
 
     // A Drive REST GET with a transient ladder: GET_MAX_ATTEMPTS attempts, a server hint (Retry-After header or JSON
-    // retry_after) or 2 s, then 4 s, between them. [heavy] marks an account-wide listing, which runs with the long
-    // listing timeouts instead of the default ones; every GET gets its socket timeout set here, so that the timeout
-    // the failure is judged by is the one that was in force.
+    // retry_after) or 2 s, then 4 s, between them. [heavy] marks a listing whose cost grows with what it lists (the
+    // account-wide ones and a folder's content), which runs with the long listing timeouts instead of the default ones;
+    // every GET gets its socket timeout set here, so that the timeout the failure is judged by is the one that was in
+    // force.
     //
     // A failure that looks like the connection being closed before the answer is first told apart from the engine's own
     // socket timer (isOwnTimeout). The timer is not retried: the same request runs into the same timer, at the price of
