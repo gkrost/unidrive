@@ -15,9 +15,12 @@ import kotlin.random.Random
  * operation `sync.enumerate` runs — serialised by the shared in-flight guard so
  * a tick never overlaps a manual refresh/enumerate or another tick. On a
  * provider failure / 429 it extends the next interval (back-off) rather than
- * hammering, and reports through [onNextAttempt] when it will try again (the
- * jittered sleep it really takes) until the next run starts. Cancelled cleanly
- * when the serve scope is cancelled at shutdown.
+ * hammering, the back-off ESCALATES with consecutive failures (each failure
+ * multiplies the previous interval, capped at [maxBackoffMs]) — a flat first
+ * step repeated forever re-ran a doomed cycle every ~7 min for hours on the
+ * live account (#517 R3) — and it reports through [onNextAttempt] when it will
+ * try again (the jittered sleep it really takes) until the next run starts.
+ * Cancelled cleanly when the serve scope is cancelled at shutdown.
  */
 class EnumeratePoller(
     private val handler: EnumerateRpcHandler,
@@ -33,6 +36,13 @@ class EnumeratePoller(
     private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS,
     private val clock: () -> Long = System::currentTimeMillis,
     private val onNextAttempt: (epochMs: Long?) -> Unit = {},
+    // Consecutive enumerate failures already on record when the daemon starts
+    // (SyncEngine.ENUMERATE_FAILURE_STREAK_KEY in sync_state): the first sleep
+    // is escalated as if those failures had just happened, so a restart into a
+    // known-bad remote doesn't re-run the doomed cycle a fresh process would
+    // otherwise pay for immediately. The escalated first sleep is reported
+    // through [onNextAttempt] like any post-failure one.
+    private val consecutiveFailuresAtStart: Int = 0,
 ) {
     private val log = LoggerFactory.getLogger(EnumeratePoller::class.java)
 
@@ -41,7 +51,15 @@ class EnumeratePoller(
         log.info("auto-poll enabled: enumerate every ${intervalMs}ms (±10% jitter)")
         scope.launch {
             var nextMs = intervalMs
-            var afterFailure = false
+            repeat(consecutiveFailuresAtStart.coerceAtMost(8)) {
+                nextMs = (nextMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
+            }
+            if (nextMs != intervalMs) {
+                log.warn("auto-poll: starting at escalated backoff ${nextMs}ms ($consecutiveFailuresAtStart prior failure(s))")
+            }
+            // The seeded schedule is reported like a post-failure one: a status
+            // client sees when the first try of a restarted daemon actually is.
+            var afterFailure = consecutiveFailuresAtStart > 0
             while (true) {
                 try {
                     val sleepMs = jitter(nextMs)
@@ -55,7 +73,7 @@ class EnumeratePoller(
                             result == null -> intervalMs // busy: another enumerate held the guard, skip
                             result.ok -> intervalMs
                             else -> {
-                                val backed = (intervalMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
+                                val backed = (nextMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
                                 log.warn("auto-poll: enumerate failed (${result.error}); backing off to ${backed}ms")
                                 backed
                             }
@@ -65,7 +83,7 @@ class EnumeratePoller(
                 } catch (e: Exception) {
                     log.warn("auto-poll: tick error; backing off", e)
                     afterFailure = true
-                    nextMs = (intervalMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
+                    nextMs = (nextMs * backoffMultiplier).coerceAtMost(maxBackoffMs)
                 }
             }
         }

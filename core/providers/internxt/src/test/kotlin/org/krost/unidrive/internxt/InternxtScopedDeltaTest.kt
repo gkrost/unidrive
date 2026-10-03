@@ -247,6 +247,43 @@ class InternxtScopedDeltaTest {
         }
 
     @Test
+    fun `a gather that ended in the walk skips the account-wide attempt on the next gather`() =
+        runTest {
+            val accountWide = java.util.concurrent.atomic.AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) -> {
+                            accountWide.incrementAndGet()
+                            throw cutByTheGateway()
+                        }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val p = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val first = p.delta(null, null, scanContext)
+            assertTrue(first.complete)
+            val wideAfterFirst = accountWide.get()
+            assertTrue(wideAfterFirst > 0, "the first gather tried the account-wide listing: $accountWide")
+
+            val second = p.delta(null, null, scanContext)
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                second.items.map { it.path }.toSet(),
+            )
+            assertTrue(second.complete)
+            assertEquals(
+                wideAfterFirst,
+                accountWide.get(),
+                "the second gather skipped the doomed account-wide attempt and walked straight away",
+            )
+        }
+
+    @Test
     fun `a listing that fails for another reason than the gateway's unavailability still fails the gather`() =
         runTest {
             val requested = Collections.synchronizedList(mutableListOf<String>())
