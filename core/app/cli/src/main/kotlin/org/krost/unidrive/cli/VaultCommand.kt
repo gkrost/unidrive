@@ -103,14 +103,14 @@ class VaultEncryptCommand : Runnable {
             val match = sectionPattern.matchEntire(line.trim())
             if (match != null) {
                 if (currentSection != null) {
-                    sectionRanges[currentSection!!] = currentStart until idx
+                    sectionRanges[currentSection] = currentStart until idx
                 }
                 currentSection = match.groupValues[1]
                 currentStart = idx
             }
         }
         if (currentSection != null) {
-            sectionRanges[currentSection!!] = currentStart until configLines.size
+            sectionRanges[currentSection] = currentStart until configLines.size
         }
 
         for ((profileName, rp) in raw.providers) {

@@ -135,12 +135,12 @@ class IpcServer(
         get() = droppedBroadcastEvents.get()
 
     fun emit(json: String) {
-        if (!channel.isClosedForSend) {
-            val r = channel.trySend(json)
-            if (r.isFailure && !r.isClosed) {
-                droppedBroadcastEvents.incrementAndGet()
-                log.warn("sync-progress broadcast event dropped (channel full, cap=256) — subscriber too slow")
-            }
+        // trySend on a closed channel reports "closed" instead of throwing, so no isClosedForSend
+        // pre-check (a delicate API) is needed: a closed channel is neither sent to nor counted as a drop.
+        val r = channel.trySend(json)
+        if (r.isFailure && !r.isClosed) {
+            droppedBroadcastEvents.incrementAndGet()
+            log.warn("sync-progress broadcast event dropped (channel full, cap=256) — subscriber too slow")
         }
     }
 
@@ -422,7 +422,7 @@ class IpcServer(
                     "scan_progress",
                     state.profile,
                     ts,
-                    """"phase":${escapeJson(state.phase ?: "")},"count":${state.scanCount}""",
+                    """"phase":${escapeJson(state.phase)},"count":${state.scanCount}""",
                 ),
             )
         }
@@ -442,7 +442,7 @@ class IpcServer(
                     "action_progress",
                     state.profile,
                     ts,
-                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":${escapeJson(state.lastAction ?: "")},"path":${escapeJson(state.lastPath ?: "")}""",
+                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":${escapeJson(state.lastAction)},"path":${escapeJson(state.lastPath ?: "")}""",
                 ),
             )
         }
