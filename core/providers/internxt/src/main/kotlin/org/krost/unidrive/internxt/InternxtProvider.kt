@@ -1591,7 +1591,8 @@ class InternxtProvider(
         // incremental delta stays account-wide: it is one cheap updatedAt-filtered
         // query and the engine drops what falls outside the scope.
         val scopeRoots = scanContext?.scopeRoots.orEmpty()
-        if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress)
+        val onProgress = scanContext?.onProgress
+        if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress)
         val adjustedCursor = cursor?.let { rewindCursor(it) }
         val limit = InternxtConfig.LISTING_PAGE_SIZE
         // drive-desktop parity: fresh full enum (cursor=null) uses sort=uuid
@@ -1650,6 +1651,14 @@ class InternxtProvider(
 
         val combinedTotal: () -> Int = { filesCount.get() + foldersCount.get() }
 
+        // Progress for the engine's status: one report per page of either stream, from whichever
+        // coroutine received it, so both counters are read at the moment of the report.
+        val reportAccountProgress: (() -> Unit)? =
+            onProgress?.let { cb ->
+                { cb(ScanProgress(items = combinedTotal(), listing = ScanProgress.LISTING_ACCOUNT)) }
+            }
+        reportAccountProgress?.invoke()
+
         // Per-page persistence is gated behind the scanContext + the
         // PageBoundaryPersister helper, which coalesces files+folders page
         // arrivals into a single sync_state marker write per page (the engine
@@ -1683,6 +1692,7 @@ class InternxtProvider(
                             runningCount = foldersCount,
                             heartbeat = heartbeat,
                             combinedTotal = combinedTotal,
+                            reportProgress = reportAccountProgress,
                             label = "folders",
                             startOffset = resume.foldersOffset,
                             fetchPage = { offset -> api.listFolders(adjustedCursor, limit, offset, status, sort) },
@@ -1697,6 +1707,7 @@ class InternxtProvider(
                         runningCount = filesCount,
                         heartbeat = heartbeat,
                         combinedTotal = combinedTotal,
+                        reportProgress = reportAccountProgress,
                         label = "files",
                         startOffset = resume.filesOffset,
                         fetchPage = { offset -> api.listFiles(adjustedCursor, limit, offset, status, sort) },
@@ -1715,7 +1726,7 @@ class InternxtProvider(
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
             )
-            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, combinedTotal())
+            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
 
         val creds = authService.getValidCredentials()
@@ -1803,9 +1814,13 @@ class InternxtProvider(
     // total never jumps down mid-gather — the up-then-down movement that has
     // alarmed users before (208k → 261k → 218k). Zero on the direct scoped-full
     // path, where nothing was counted before the walk.
+    //
+    // [onProgress] is not seeded: it names the listing it reports on, and the items it
+    // reports are the walk's own, the ones the gather keeps.
     private suspend fun scopedFullDelta(
         scopeRoots: List<String>,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        onProgress: ((ScanProgress) -> Unit)?,
         progressBaseline: Int = 0,
     ): DeltaPage {
         val startedAt = Instant.now()
@@ -1819,7 +1834,10 @@ class InternxtProvider(
                 scanned = foldersScanned,
                 skipped = foldersSkipped,
                 log = log,
-                onProgress = { items -> heartbeat?.tick(items + progressBaseline) },
+                onProgress = { progress ->
+                    heartbeat?.tick(progress.items + progressBaseline)
+                    onProgress?.invoke(progress)
+                },
             )
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
@@ -1904,12 +1922,13 @@ class InternxtProvider(
     // [runningCount] is incremented as pages arrive; [combinedTotal] reads it
     // alongside the sibling stream's counter so the heartbeat fires with a
     // monotonic file+folder total without cross-coroutine list synchronization
-    // on the merge path.
+    // on the merge path. [reportProgress] fires after every page, unthrottled.
     private suspend fun <T> speculativeFetchPages(
         limit: Int,
         runningCount: AtomicInteger,
         heartbeat: ScanHeartbeat?,
         combinedTotal: () -> Int,
+        reportProgress: (() -> Unit)?,
         label: String,
         startOffset: Int = 0,
         fetchPage: suspend (offset: Int) -> List<T>,
@@ -1932,6 +1951,7 @@ class InternxtProvider(
                 runningCount.addAndGet(batch.size)
                 log.debug("Scanning {}: {}", label, runningCount.get())
                 heartbeat?.tick(combinedTotal())
+                reportProgress?.invoke()
                 // Per-page persistence runs after we have a known-good batch but
                 // before we top up the pipeline, so a transient failure on the
                 // staging write rolls the page back without losing the offset
@@ -2179,6 +2199,11 @@ class InternxtProvider(
         // Measured on a live account 2026-09-29 (#392): the listing carries both
         // fields on every child, so the stamp is defensive and idempotent, kept
         // because the endpoint has been observed without them.
+        //
+        // [onProgress] gets one report per folder whose listing finished or was skipped, from
+        // whichever coroutine that was. A folder counts as known before the folder that holds it
+        // counts as done, so known - done is the queue (listed, waiting or in flight) and is never
+        // zero while the walk goes on.
         internal suspend fun collectScopedInventoryImpl(
             getContents: suspend (String) -> FolderContentResponse,
             driveRootUuid: String,
@@ -2187,13 +2212,31 @@ class InternxtProvider(
             skipped: java.util.concurrent.atomic.AtomicInteger,
             log: org.slf4j.Logger,
             concurrency: Int = 4,
-            onProgress: ((items: Int) -> Unit)? = null,
+            onProgress: ((ScanProgress) -> Unit)? = null,
         ): ScopedInventory {
             val files = java.util.Collections.synchronizedList(mutableListOf<InternxtFile>())
             val folders = java.util.Collections.synchronizedMap(linkedMapOf<String, InternxtFolder>())
             val permits = kotlinx.coroutines.sync.Semaphore(concurrency)
+            val known = AtomicInteger(0)
+            val done = AtomicInteger(0)
 
             fun live(f: InternxtFolder) = f.status == "EXISTS" && !f.removed && !f.deleted
+
+            // done is read before known: known only grows, so the pair never shows more done than known.
+            fun report() {
+                onProgress ?: return
+                val foldersDone = done.get()
+                val foldersKnown = known.get()
+                onProgress(
+                    ScanProgress(
+                        items = files.size + folders.size,
+                        foldersDone = foldersDone,
+                        foldersKnown = foldersKnown,
+                        foldersSkipped = skipped.get(),
+                        listing = ScanProgress.LISTING_TREE,
+                    ),
+                )
+            }
 
             suspend fun listing(uuid: String): FolderContentResponse = permits.withPermit { getContents(uuid) }
 
@@ -2205,6 +2248,8 @@ class InternxtProvider(
                         if (e.statusCode in SERVER_UNAVAILABLE_STATUSES) {
                             log.warn("Skipping folder {} ({})", folderUuid, e.statusCode, e)
                             skipped.incrementAndGet()
+                            done.incrementAndGet()
+                            report()
                             return
                         }
                         throw e
@@ -2213,15 +2258,19 @@ class InternxtProvider(
                     .filter { it.status == "EXISTS" && !it.removed && !it.deleted }
                     .mapTo(files) { if (it.folderUuid != null) it else it.copy(folderUuid = folderUuid) }
                 scanned.incrementAndGet()
-                onProgress?.invoke(files.size + folders.size)
-                kotlinx.coroutines.coroutineScope {
-                    for (child in content.children.filter(::live)) {
-                        val stamped = if (child.parentUuid != null) child else child.copy(parentUuid = folderUuid)
-                        folders[stamped.uuid] = stamped
-                        launch { walk(stamped.uuid) }
+                val children =
+                    content.children.filter(::live).map { child ->
+                        (if (child.parentUuid != null) child else child.copy(parentUuid = folderUuid)).also { folders[it.uuid] = it }
                     }
+                known.addAndGet(children.size)
+                done.incrementAndGet()
+                report()
+                kotlinx.coroutines.coroutineScope {
+                    for (child in children) launch { walk(child.uuid) }
                 }
             }
+
+            report()
 
             for (root in scopeRoots) {
                 var current = driveRootUuid
@@ -2233,6 +2282,7 @@ class InternxtProvider(
                     folders[stamped.uuid] = stamped
                     current = stamped.uuid
                 }
+                known.incrementAndGet()
                 walk(current)
             }
             return ScopedInventory(files.toList(), folders.values.toList())

@@ -59,8 +59,9 @@ import kotlin.test.assertTrue
 class IpcContractCorpusTest {
     // The non-hydration verbs DaemonRuntime registers inline (see the
     // server.registerHandler calls in DaemonRuntime.start). daemon.status is
-    // listed first so its refresh_in_flight:false expectation is checked
-    // before this test launches a refresh job; daemon.shutdown is listed last
+    // listed first so its refresh_in_flight:false and idle-enumeration
+    // expectations are checked before this test launches a refresh job or an
+    // enumeration; daemon.shutdown is listed last
     // because it stops the daemon the other verbs are replayed against.
     private val daemonVerbs = listOf("daemon.status", "sync.subscribe", "refresh.run", "sync.enumerate", "daemon.shutdown")
 

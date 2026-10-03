@@ -7,6 +7,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.ScanContext
+import org.krost.unidrive.ScanProgress
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.time.Instant
 import java.util.Base64
@@ -266,5 +267,100 @@ class InternxtScopedDeltaTest {
 
             assertEquals(404, failure.statusCode)
             assertTrue(requested.none { it.contains("/folders/content/") }, "no tree walk for a 404: $requested")
+        }
+
+    // ---- the progress a running listing reports to the engine's status --------------------------------------------------------
+
+    private fun filesPage(range: IntRange) =
+        range.joinToString(",", "[", "]") { """{"uuid":"f$it","plainName":"f$it","type":"txt","size":"1","status":"EXISTS"}""" }
+
+    private fun foldersPage(range: IntRange) = range.joinToString(",", "[", "]") { """{"uuid":"d$it","plainName":"d$it","status":"EXISTS"}""" }
+
+    @Test
+    fun `an account-wide listing reports the items of both streams after every page and names the listing`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val offset = request.url.parameters["offset"]?.toInt() ?: 0
+                    when {
+                        request.url.encodedPath.endsWith("/drive/files") -> respond(if (offset == 0) filesPage(1..3) else "[]", HttpStatusCode.OK, json)
+                        request.url.encodedPath.endsWith("/drive/folders") -> respond(if (offset == 0) foldersPage(1..2) else "[]", HttpStatusCode.OK, json)
+                        else -> error("unexpected request: ${request.url}")
+                    }
+                }
+            val reports = Collections.synchronizedList(mutableListOf<ScanProgress>())
+
+            val page =
+                provider(engine).delta(
+                    cursor = null,
+                    onPageProgress = null,
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, onProgress = { reports += it }),
+                )
+
+            assertEquals(5, page.items.size)
+            assertTrue(reports.all { it.listing == ScanProgress.LISTING_ACCOUNT }, "$reports")
+            assertTrue(
+                reports.all { it.foldersDone == null && it.foldersKnown == null && it.foldersSkipped == null },
+                "an offset pagination has no folder walk to report: $reports",
+            )
+            assertEquals(0, reports.first().items, "the listing is named before the first page is back")
+            assertEquals(5, reports.last().items, "files and folders together")
+            assertEquals(3, reports.size, "the start and one report per page")
+            assertTrue(reports.zipWithNext().all { (a, b) -> b.items >= a.items }, "the count only grows: $reports")
+        }
+
+    @Test
+    fun `when the account-wide listing is cut the reports turn into the folder walk's and end with every folder done`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) -> throw cutByTheGateway()
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val reports = Collections.synchronizedList(mutableListOf<ScanProgress>())
+
+            provider(engine).delta(
+                null,
+                null,
+                ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList(), onProgress = { reports += it }),
+            )
+
+            assertEquals(ScanProgress.LISTING_ACCOUNT, reports.first().listing, "the account-wide listing was tried first")
+            assertEquals(
+                ScanProgress(items = 5, foldersDone = 3, foldersKnown = 3, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
+                reports.last(),
+                "root, _INBOX and other listed; 3 files and 2 folders found",
+            )
+        }
+
+    @Test
+    fun `a scoped full listing reports the walk of the scope only`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val reports = Collections.synchronizedList(mutableListOf<ScanProgress>())
+
+            provider(engine).delta(
+                null,
+                null,
+                ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/_INBOX"), onProgress = { reports += it }),
+            )
+
+            assertTrue(reports.all { it.listing == ScanProgress.LISTING_TREE }, "$reports")
+            assertEquals(
+                ScanProgress(items = 2, foldersDone = 1, foldersKnown = 1, foldersSkipped = 0, listing = ScanProgress.LISTING_TREE),
+                reports.last(),
+                "_INBOX listed; a.txt and _INBOX found",
+            )
         }
 }
