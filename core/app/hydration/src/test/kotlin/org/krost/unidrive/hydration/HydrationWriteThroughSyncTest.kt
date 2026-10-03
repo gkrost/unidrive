@@ -163,6 +163,28 @@ class HydrationWriteThroughSyncTest {
             assertNull(env.db.getEntry("/doomed.txt"))
         }
 
+    // #500: a folder made through the mount that stays empty never reached the sync root (a file's upload makes only
+    // its own parents there): the golden run's mirror missed all 10 empty folders of the tree.
+    @Test
+    fun `an empty folder made through the mount is mirrored, and its removal takes the mirror with it`() =
+        runTest {
+            val env = freshEnv()
+            val hydration = HydrationImpl(env.engine, env.db, recoveryUploadScope = this)
+            env.engine.syncOnce()
+
+            val made = hydration.mkdir("/empty folder")
+            assertTrue(made is MkdirResult.Ok, "mkdir: $made")
+            assertTrue(Files.isDirectory(env.syncRoot.resolve("empty folder")), "the sync root must hold the empty folder")
+
+            env.engine.syncOnce()
+            assertEquals(emptyList(), env.provider.deleted, "a plain sync after the mkdir must not delete the folder")
+
+            assertTrue(hydration.rmdir("/empty folder") is RmdirResult.Ok)
+            assertFalse(Files.exists(env.syncRoot.resolve("empty folder")), "the mirror goes with the folder")
+            env.engine.syncOnce()
+            assertNull(env.db.getEntry("/empty folder"), "and the folder is not resurrected")
+        }
+
     // Review fix: the rename moved the remote item, the row and the cache file, but left
     // the mirror at the old path — the next sync re-uploaded the old name (resurrection).
     @Test

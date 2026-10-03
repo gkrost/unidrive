@@ -93,7 +93,23 @@ internal class MemProvider : CloudProvider {
         items.remove(remotePath)
     }
 
-    override suspend fun createFolder(path: String): CloudItem = error("not used")
+    override suspend fun createFolder(path: String): CloudItem {
+        val at = java.time.Instant.parse("2026-03-28T12:00:00Z")
+        val item =
+            CloudItem(
+                id = "id-$path",
+                name = path.substringAfterLast('/'),
+                path = path,
+                size = 0,
+                isFolder = true,
+                modified = at,
+                created = at,
+                hash = null,
+                mimeType = null,
+            )
+        items[path] = item
+        return item
+    }
 
     override suspend fun move(fromPath: String, toPath: String): CloudItem {
         val bytes = remote.remove(fromPath) ?: error("not found: $fromPath")
