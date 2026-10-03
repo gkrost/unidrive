@@ -1715,7 +1715,7 @@ class InternxtProvider(
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
             )
-            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress)
+            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, combinedTotal())
         }
 
         val creds = authService.getValidCredentials()
@@ -1797,9 +1797,16 @@ class InternxtProvider(
     // incremental delta then asks for changes since the walk began. The newest
     // in-scope timestamp can be years old, which would make that first delta list
     // the whole account. No resume marker is kept; an interrupted walk restarts.
+    //
+    // [progressBaseline] seeds the heartbeat with the items the account-wide
+    // listings had already counted before the walk took over, so the reported
+    // total never jumps down mid-gather — the up-then-down movement that has
+    // alarmed users before (208k → 261k → 218k). Zero on the direct scoped-full
+    // path, where nothing was counted before the walk.
     private suspend fun scopedFullDelta(
         scopeRoots: List<String>,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        progressBaseline: Int = 0,
     ): DeltaPage {
         val startedAt = Instant.now()
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
@@ -1812,7 +1819,7 @@ class InternxtProvider(
                 scanned = foldersScanned,
                 skipped = foldersSkipped,
                 log = log,
-                onProgress = { items -> heartbeat?.tick(items) },
+                onProgress = { items -> heartbeat?.tick(items + progressBaseline) },
             )
         val skipped = foldersSkipped.get()
         if (skipped > 0) {

@@ -193,6 +193,58 @@ class InternxtScopedDeltaTest {
         }
 
     @Test
+    fun `the handover to the fallback walk never reports a lower progress total`() =
+        runTest {
+            // Six full /files pages cross the heartbeat's 5,000-item interval, so the speculative phase reports 5,994
+            // before page seven is cut. A walk heartbeat seeded with nothing would report its own count from 1 —
+            // progress jumping down at the exact moment the gather just failed (the jump that alarmed users before,
+            // 208k → 261k → 218k). Seeded with the items already counted, the walk's first report clears the 5,000
+            // threshold at once and the reported sequence never steps down.
+            val ticks = Collections.synchronizedList(mutableListOf<Int>())
+            val engine =
+                MockEngine { request ->
+                    val path = request.url.encodedPath
+                    when {
+                        path.endsWith("/drive/files") -> {
+                            val offset = request.url.parameters["offset"]?.toInt() ?: 0
+                            if (offset < 6 * 999) {
+                                val page =
+                                    (0 until 999).joinToString(",", "[", "]") { i ->
+                                        val n = offset + i
+                                        """{"uuid":"f$n","plainName":"f$n","type":"txt","size":"1","status":"EXISTS"}"""
+                                    }
+                                respond(page, HttpStatusCode.OK, json)
+                            } else {
+                                throw cutByTheGateway()
+                            }
+                        }
+                        path.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
+                        contentOf(request.url.toString()) != null ->
+                            respond(contentOf(request.url.toString())!!, HttpStatusCode.OK, json)
+                        else -> error("unexpected request: $path")
+                    }
+                }
+
+            val page =
+                provider(engine).delta(
+                    cursor = null,
+                    onPageProgress = { itemsSoFar -> ticks += itemsSoFar },
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList()),
+                )
+
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                page.items.map { it.path }.toSet(),
+            )
+            assertTrue(page.complete)
+            assertTrue(ticks.size >= 2, "the walk reports progress of its own: $ticks")
+            assertTrue(
+                ticks.zipWithNext().all { (before, after) -> after >= before },
+                "the handover to the walk never reports a lower total: $ticks",
+            )
+        }
+
+    @Test
     fun `a listing that fails for another reason than the gateway's unavailability still fails the gather`() =
         runTest {
             val requested = Collections.synchronizedList(mutableListOf<String>())
