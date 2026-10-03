@@ -43,5 +43,8 @@ data class InternxtConfig(
         const val RESUME_TTL_MS: Long = 7L * 24L * 60L * 60L * 1000L
 
         const val URL_TTL_MS: Long = 10L * 60L * 1000L
+
+        /** Page size of the cursor listings `/files/sync` and `/folders/sync`; 1000 is the most they take. */
+        const val SYNC_PAGE_SIZE: Int = 1000
     }
 }

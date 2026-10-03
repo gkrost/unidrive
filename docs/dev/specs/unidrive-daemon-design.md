@@ -299,7 +299,7 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 | `first` | true while no enumeration has completed for this profile (the delta cursor is empty): the view is incomplete until one does |
 | `attempt` | attempts since the last success, counting the running one; 0 after a success |
 | `phase` | while running: `listing` (gathering from the remote) or `saving` (writing the result to state.db) |
-| `listing` | `account` (account-wide offset pagination) or `tree` (folder walk); absent when the provider does not say |
+| `listing` | `account` (account-wide offset pagination), `cursor` (account-wide cursor pagination, resumable from the cursor of the last page) or `tree` (folder walk); absent when the provider does not say |
 | `started_at_ms`, `elapsed_ms` | start of the running or the last attempt (epoch ms); elapsed time of the running one |
 | `items` | items gathered by the running (or the failed) attempt so far |
 | `folders_done`, `folders_known`, `folders_skipped` | folder walk only: folders listed or skipped, folders discovered so far (a lower bound of the total), folders that failed and were skipped |
