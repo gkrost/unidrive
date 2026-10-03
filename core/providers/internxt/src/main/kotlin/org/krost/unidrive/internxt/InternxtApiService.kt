@@ -68,6 +68,39 @@ class InternxtApiService(
 
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 
+        // The gateway's own answers for an origin that did not answer (Cloudflare): 520 unknown error, 521 down, 522
+        // connection timed out, 523 unreachable, 524 timed out. A GET treats them like 502/503/504: the same
+        // "the server is unavailable" the callers' fallbacks act on, which is the 503 they end as.
+        private val GATEWAY_ORIGIN_ERRORS = setOf(520, 521, 522, 523, 524)
+
+        // Answered after the gateway has waited for the origin for about two minutes: the same request gets the same answer.
+        private const val GATEWAY_ORIGIN_TIMEOUT = 524
+
+        private fun gatewayOriginErrorName(status: Int): String =
+            when (status) {
+                520 -> "the origin returned an unknown error"
+                521 -> "the origin is down"
+                522 -> "the connection to the origin timed out"
+                523 -> "the origin is unreachable"
+                else -> "the origin timed out"
+            }
+
+        // A gateway origin error as the synthetic 503 of "the server is unavailable". The gateway's own status and body stay
+        // in the cause, its Retry-After on the exception.
+        private fun gatewayUnavailable(
+            e: InternxtApiException,
+            url: String,
+            elapsedMs: Long?,
+        ): InternxtApiException =
+            InternxtApiException(
+                "the gateway answered ${e.statusCode} (${gatewayOriginErrorName(e.statusCode)}) for GET $url" +
+                    (elapsedMs?.let { " after ${String.format(java.util.Locale.ROOT, "%.1f s", it / 1000.0)}" } ?: ""),
+                503,
+                requestId = e.requestId,
+                retryAfterMs = e.retryAfterMs,
+                cause = e,
+            )
+
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
         // Internxt JSON error bodies. Returns the integer seconds.
         private val RETRY_AFTER_REGEX = Regex(""""retry_after"\s*:\s*(\d+)""")
@@ -1008,7 +1041,14 @@ class InternxtApiService(
                     }
                 }
             } catch (e: InternxtApiException) {
-                if (e.statusCode in TRANSIENT_STATUSES) {
+                if (e.statusCode in GATEWAY_ORIGIN_ERRORS) {
+                    val elapsedMs = if (attemptStartNanos != 0L) (System.nanoTime() - attemptStartNanos) / 1_000_000 else null
+                    val unavailable = gatewayUnavailable(e, url, elapsedMs)
+                    // A 524 ends the call: the gateway had waited about two minutes, a repeat gets the same answer.
+                    if (e.statusCode == GATEWAY_ORIGIN_TIMEOUT) throw unavailable
+                    lastException = unavailable
+                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                } else if (e.statusCode in TRANSIENT_STATUSES) {
                     lastException = e
                     if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
                 } else {
