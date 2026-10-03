@@ -46,10 +46,23 @@ class InternxtApiService(
         HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 500, stormSpacingMs = 1_000),
     private val bridgeBudget: HttpRetryBudget =
         HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
+    // Tests hand in a client on a MockEngine; production builds the default one.
+    private val httpClient: HttpClient = defaultHttpClient(),
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
+        private fun defaultHttpClient(): HttpClient =
+            HttpClient {
+                install(HttpTimeout) {
+                    connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
+                    socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
+                    requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
+                }
+                // UD-255: per-request correlation id + DEBUG req/response logging.
+                install(org.krost.unidrive.http.RequestId)
+            }
+
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 
         // UD-335: capture `"retry_after": <seconds>` from Cloudflare /
@@ -77,17 +90,6 @@ class InternxtApiService(
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
     }
-
-    private val httpClient =
-        HttpClient {
-            install(HttpTimeout) {
-                connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
-                socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
-                requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
-            }
-            // UD-255: per-request correlation id + DEBUG req/response logging.
-            install(org.krost.unidrive.http.RequestId)
-        }
 
     private val json = org.krost.unidrive.UnidriveJson
     private val baseUrl = InternxtConfig.API_BASE_URL
@@ -879,16 +881,28 @@ class InternxtApiService(
                 } else {
                     throw e
                 }
-            } catch (e: java.io.EOFException) {
-                driveBudget.recordIoRetry()
-                lastException = InternxtApiException("Server closed connection for GET $url: ${e.message}", 503, cause = e)
-                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
             } catch (e: java.io.IOException) {
-                throw InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
+                // A network error without a status. The canonical retry matrix (see HttpRetryBudget) retries it
+                // like a 5xx. Ktor reports a connection that is closed before any response byte as a
+                // ClosedReadChannelException: an IOException that only WRAPS the EOFException. Catching the
+                // EOFException alone, as this did, never saw that commonest case: the gateway cuts a slow
+                // /drive/files request after a minute or two, the call gave up at once as "Connection error"
+                // (status 0), and neither the retry nor the /files -> folder walk fallback (500/503 only) ran.
+                driveBudget.recordIoRetry()
+                lastException =
+                    if (e.closedBeforeResponse()) {
+                        InternxtApiException("Server closed connection for GET $url: ${e.message}", 503, cause = e)
+                    } else {
+                        InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
+                    }
+                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
             }
         }
         throw lastException!!
     }
+
+    // The server closed the connection before it answered: the EOFException, or what Ktor wraps around it.
+    private fun Throwable.closedBeforeResponse(): Boolean = generateSequence(this) { it.cause }.take(8).any { it is java.io.EOFException }
 
     private fun HttpRequestBuilder.applyAuth(creds: InternxtCredentials) {
         bearerAuth(creds.jwt)
