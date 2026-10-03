@@ -453,6 +453,13 @@ class HydrationImpl(
         onProgress: (Long, Long) -> Unit,
         onPermitAcquired: () -> Unit,
     ): HydrationEvent.Completed {
+        // #493: the provider refused exactly these bytes before; asking again would be refused again.
+        refusedEarlier(path, cachePath)?.let { reason ->
+            val err = HydrationError.Generic("refused earlier: $reason")
+            _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
+            log.info("upload of {} not attempted: the provider refused this content before ({})", path, reason)
+            return HydrationEvent.Completed(path = path, handleId = handleId, direction = HydrationEvent.Completed.Direction.UPLOAD, ok = false, error = err)
+        }
         var lastError: HydrationError = HydrationError.Generic("upload failed")
         for (attempt in 1..maxUploadAttempts) {
             try {
@@ -490,6 +497,9 @@ class HydrationImpl(
                 // #493: the provider refused the request itself; the same bytes and the same call would be refused again,
                 // so the retry ladder would only hold a transfer slot through its whole backoff schedule.
                 runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                // Persisted with the content's stamp: the replay at the next start and a resubmission of the same bytes skip the
+                // provider (#493). New content, or any rewrite of the row, clears it.
+                refusalStamp(cachePath)?.let { stamp -> runCatching { stateDb.markUploadRefused(path, "$stamp|${e.message ?: "refused"}") } }
                 val err = HydrationError.Generic(e.message ?: "upload refused")
                 _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
                 log.warn("upload of {} refused by the provider, not retrying: {}", path, e.message ?: "upload refused")
@@ -564,8 +574,11 @@ class HydrationImpl(
     suspend fun replayPendingUploads(): Int {
         var queued = 0
         var deferred = 0
+        var refused = 0
         for (path in stateDb.pendingUploadPaths()) {
             if (!replayable(path)) continue
+            val cachePath = syncEngine.resolveCachePath(path)
+            if (refusedEarlier(path, cachePath) != null) { refused++; continue } // #493: not replayed at every start
             if (failedReplayDelayMs > 0 && stateDb.getEntry(path)?.lastErrorAt != null) {
                 deferred++
                 val handleId = "engine-replay-late-$deferred"
@@ -574,11 +587,12 @@ class HydrationImpl(
                     val entry = stateDb.getEntry(path)
                     if (entry == null || entry.remoteId != null || !entry.isHydrated) return@launch // gone or uploaded
                     if (uploadSlots.containsKey(path) || !replayable(path)) return@launch
+                    if (refusedEarlier(path, syncEngine.resolveCachePath(path)) != null) return@launch // refused meanwhile
                     launchSerializedUpload(path, syncEngine.resolveCachePath(path), handleId, baseEtag = null)
                 }
                 continue
             }
-            launchSerializedUpload(path, syncEngine.resolveCachePath(path), "engine-replay-${queued + 1}", baseEtag = null)
+            launchSerializedUpload(path, cachePath, "engine-replay-${queued + 1}", baseEtag = null)
             queued++
         }
         if (deferred > 0) {
@@ -588,6 +602,7 @@ class HydrationImpl(
                 failedReplayDelayMs / 1000,
             )
         }
+        if (refused > 0) log.info("not replaying {} upload(s) the provider refused for their current content (#493)", refused)
         return queued
     }
 
@@ -595,6 +610,17 @@ class HydrationImpl(
         !syncEngine.isExcludedPath(path) &&
             !syncEngine.isOutOfScope(path) &&
             Files.exists(syncEngine.resolveCachePath(path))
+
+    // #493: <cache mtime ms>|<cache size> of the bytes an upload sends; null when the cache copy is gone.
+    private fun refusalStamp(cachePath: Path): String? =
+        runCatching { "${Files.getLastModifiedTime(cachePath).toMillis()}|${Files.size(cachePath)}" }.getOrNull()
+
+    // The reason the provider refused this path's upload, when the refusal was for exactly the content the cache holds now.
+    private fun refusedEarlier(path: String, cachePath: Path): String? {
+        val refusal = runCatching { stateDb.uploadRefusal(path) }.getOrNull() ?: return null
+        val stamp = refusalStamp(cachePath) ?: return null
+        return if (refusal.startsWith("$stamp|")) refusal.substring(stamp.length + 1) else null
+    }
 
     override suspend fun cancelUpload(path: String): Boolean {
         val slot = uploadSlots[path] ?: return false

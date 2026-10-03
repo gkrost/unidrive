@@ -143,6 +143,38 @@ class HydrationUploadQueueTest {
         collector.cancel()
     }
 
+    // #493: the refusal is persisted with the content's stamp: the replay at the next daemon start and a resubmission of
+    // the same bytes do not ask the provider again; new content does.
+    @Test
+    fun `a refused upload is not replayed at the next start, nor resubmitted unchanged, but new content goes`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 3,
+            uploadRetryDelaysMs = listOf(1L, 1L),
+            failedReplayDelayMs = 60_000L,
+        )
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        writeCache(env, "/docs/f.txt", "refused")
+        env.syncEngine.refuseUploads(1)
+        env.hydration.openForWrite("conn1", "h1", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        advanceUntilIdle()
+        assertEquals(1, env.syncEngine.uploadAttempts())
+
+        assertEquals(0, env.hydration.replayPendingUploads(), "the refused row is not replayed at a start")
+        env.hydration.openForWrite("conn1", "h2", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        advanceUntilIdle()
+        assertEquals(1, env.syncEngine.uploadAttempts(), "unchanged content is not sent again")
+
+        // New bytes are not what was refused. The row still carries its failure mark, so since #499 it is replayed like
+        // any failed row: after the delay, not at once.
+        writeCache(env, "/docs/f.txt", "different bytes now")
+        assertEquals(0, env.hydration.replayPendingUploads(), "new content is replayed, after the delay of failed rows")
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+        assertEquals(2, env.syncEngine.uploadAttempts())
+        assertEquals("different bytes now", env.syncEngine.remoteContentSeen("/docs/f.txt"))
+    }
+
     @Test
     fun `an upload whose row vanished while queued is not retried`() = runTest {
         val env = HydrationTestEnv(
