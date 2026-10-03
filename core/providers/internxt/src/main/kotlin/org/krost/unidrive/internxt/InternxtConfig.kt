@@ -32,11 +32,12 @@ data class InternxtConfig(
         const val LISTING_PAGE_SIZE: Int = 999
 
         /**
-         * Socket (read-idle) and request timeouts of the account-wide `/files` and `/folders` listings. A page of a
-         * whole-drive enumeration needs from 25 s to more than a minute on a large account, far beyond the 60 s every
-         * other call runs with. These are upper bounds: the gateway ends a request that took about two minutes with its
-         * own 524, and the server's public configuration sets a database `statement_timeout` of 300 s, so both answer
-         * before this timer fires.
+         * Socket (read-idle) and request timeouts of the listings whose cost grows with what they list: the
+         * account-wide `/files` and `/folders`, a page of which needs from 25 s to more than a minute on a large
+         * account, and a folder's `/folders/content/{uuid}`, which needed 106 s for a flat folder of 29,000 files
+         * (31 MB). That is far beyond the 60 s every other call runs with. These are upper bounds: the gateway ends a
+         * request that took about two minutes with its own 524, and the server's public configuration sets a database
+         * `statement_timeout` of 300 s, so both answer before this timer fires.
          */
         const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000L
         const val LISTING_REQUEST_TIMEOUT_MS: Long = 360_000L
