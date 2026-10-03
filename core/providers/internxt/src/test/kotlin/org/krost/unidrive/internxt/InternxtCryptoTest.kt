@@ -140,7 +140,7 @@ class InternxtCryptoTest {
     @Test
     fun `file key derivation is deterministic`() {
         val mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-        val bucket = "test-bucket-id"
+        val bucket = "6928426c1a2316b856c9ab81"
         val index = ByteArray(32) { it.toByte() }
 
         val seed = crypto.mnemonicToSeed(mnemonic)
@@ -150,5 +150,38 @@ class InternxtCryptoTest {
 
         assertTrue(key1.contentEquals(key2))
         assertEquals(32, key1.size)
+    }
+
+    // --- #333: hexToBytes must fail loud on non-hex input, not derive garbage keys ---
+
+    @Test
+    fun `hexToBytes rejects odd-length input`() {
+        val e =
+            assertFailsWith<IllegalArgumentException> {
+                InternxtCrypto.hexToBytes("abc")
+            }
+        assertTrue("even length" in e.message!!, "message must name the even-length rule; got: ${e.message}")
+    }
+
+    @Test
+    fun `hexToBytes rejects a non-hex character`() {
+        val e =
+            assertFailsWith<IllegalArgumentException> {
+                // What a corrupted bridgeInfo.index / tombstone indexBytesHex could look like.
+                InternxtCrypto.hexToBytes("6928426c1a2316b856c9abg1")
+            }
+        assertTrue("hex" in e.message!!.lowercase(), "message must name the hex charset; got: ${e.message}")
+    }
+
+    @Test
+    fun `hexToBytes accepts uppercase hex`() {
+        val lower = InternxtCrypto.hexToBytes("6928426c1a2316b856c9ab81".take(20))
+        val upper = InternxtCrypto.hexToBytes("6928426C1A2316B856C9AB81".take(20))
+        assertTrue(lower.contentEquals(upper), "uppercase hex must decode to the same bytes")
+    }
+
+    @Test
+    fun `hexToBytes empty string stays valid`() {
+        assertTrue(InternxtCrypto.hexToBytes("").contentEquals(ByteArray(0)))
     }
 }
