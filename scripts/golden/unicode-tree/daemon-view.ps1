@@ -59,42 +59,68 @@ function Invoke-Ipc([hashtable]$request) {
     }
 }
 
+# hydration.list answers the direct children of a prefix. An entry whose parent is not the listed prefix is an engine fault (a
+# grandchild leaking into the listing of a folder whose path has code points outside the BMP); it is reported as LEAK and not counted,
+# so it cannot show up twice.
+$script:leaks = [System.Collections.Generic.List[string]]::new()
 function Get-Tree([string]$prefix) {
-    $out = [System.Collections.Generic.List[object]]::new()
+    $out = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $stack = [System.Collections.Generic.Stack[string]]::new(); $stack.Push($prefix)
     while ($stack.Count -gt 0) {
         $p = $stack.Pop()
         $r = Invoke-Ipc @{ verb = 'hydration.list'; prefix = $p }
         if (-not $r.ok) { throw "hydration.list $(To-Ascii $p) failed: $($r.error)" }
-        foreach ($e in $r.entries) { $out.Add($e); if ($e.folder) { $stack.Push($e.path) } }
+        foreach ($e in $r.entries) {
+            $parent = $e.path.Substring(0, $e.path.LastIndexOf('/'))
+            if (-not [string]::Equals($parent, $p, [StringComparison]::Ordinal)) { $script:leaks.Add("$(To-Ascii $e.path)  listed under  $(To-Ascii $p)"); continue }
+            $out[$e.path] = $e
+            if ($e.folder) { $stack.Push($e.path) }
+        }
     }
-    $out
+    , @($out.Values)
 }
 
+# state.db keys every path in NFC (gkrost/unidrive#171), so the daemon can only ever answer the NFC form of a name. Each manifest
+# entry is looked up by its NFC form; an NFD name that collapses onto another entry's NFC form (hazards/nfc-nfd-twins) can never have
+# a row of its own and is reported as NFCMERGE, not as MISSING.
 $expected = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+$merged = [System.Collections.Generic.List[string]]::new()
+$manifestRows = [System.Collections.Generic.List[object]]::new()
 foreach ($line in [IO.File]::ReadAllLines($Manifest, [Text.Encoding]::UTF8)) {
     if ($line.StartsWith('#') -or $line.Length -eq 0) { continue }
-    $c = $line.Split("`t"); $expected[$Prefix + '/' + (Expand-Tokens $c[5])] = [pscustomobject]@{ Kind = $c[0]; Size = $c[1] }
+    $c = $line.Split("`t"); $manifestRows.Add([pscustomobject]@{ Path = $Prefix + '/' + (Expand-Tokens $c[5]); Kind = $c[0]; Size = $c[1] })
 }
+foreach ($r in $manifestRows) {   # NFC names first, so the NFC member of a twin pair owns the key
+    if ([string]::Equals($r.Path, $r.Path.Normalize([Text.NormalizationForm]::FormC), [StringComparison]::Ordinal)) { $expected[$r.Path] = $r }
+}
+foreach ($r in $manifestRows) {
+    $key = $r.Path.Normalize([Text.NormalizationForm]::FormC)
+    if ([string]::Equals($r.Path, $key, [StringComparison]::Ordinal)) { continue }
+    if ($expected.ContainsKey($key)) { $merged.Add("NFCMERGE $(To-Ascii $r.Path)  ->  one row with  $(To-Ascii $key)") } else { $expected[$key] = $r }
+}
+function Get-Ordinal([System.Collections.Generic.IEnumerable[string]]$keys) { $a = [string[]]@($keys); [Array]::Sort($a, [StringComparer]::Ordinal); , $a }
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 do {
+    $script:leaks.Clear()
     $entries = Get-Tree $Prefix
     $got = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     foreach ($e in $entries) { $got[$e.path] = $e }
     $pending = @($entries | Where-Object { $_.pending_upload }).Count
     $errors = @($entries | Where-Object { $_.error }).Count
     $unsynced = @($entries | Where-Object { -not $_.folder -and -not $_.remote_id }).Count
-    Write-Host ("{0}  entries {1}/{2}, pending {3}, error {4}, no remote id {5}" -f (Get-Date -Format 'HH:mm:ss'), $entries.Count, $expected.Count, $pending, $errors, $unsynced)
+    Write-Host ("{0}  entries {1}/{2}, pending {3}, error {4}, no remote id {5}, leaked {6}" -f (Get-Date -Format 'HH:mm:ss'), $entries.Count, $expected.Count, $pending, $errors, $unsynced, $script:leaks.Count)
     if (-not $Watch) { break }
     if ($pending -eq 0 -and $entries.Count -ge $expected.Count) { break }
     Start-Sleep -Seconds 10
 } while ((Get-Date) -lt $deadline)
 
 $f = [System.Collections.Generic.List[string]]::new()
-foreach ($k in ($expected.Keys | Sort-Object)) {
+foreach ($l in $script:leaks) { $f.Add("LEAK     $l") }
+foreach ($m in $merged) { $f.Add($m) }
+foreach ($k in (Get-Ordinal $expected.Keys)) {
     $x = $expected[$k]
-    if (-not $got.ContainsKey($k)) { $f.Add("MISSING  $(To-Ascii $k)"); continue }
+    if (-not $got.ContainsKey($k)) { $f.Add("MISSING  $(To-Ascii $x.Path)"); continue }
     $e = $got[$k]
     if ($x.Kind -eq 'F') {
         if ([string]$e.size -ne $x.Size) { $f.Add("SIZE     $(To-Ascii $k): expected $($x.Size), daemon says $($e.size)") }
@@ -103,7 +129,7 @@ foreach ($k in ($expected.Keys | Sort-Object)) {
         elseif (-not $e.remote_id) { $f.Add("NOREMOTE $(To-Ascii $k)") }
     }
 }
-foreach ($k in ($got.Keys | Sort-Object)) { if (-not $expected.ContainsKey($k)) { $f.Add("EXTRA    $(To-Ascii $k)") } }
+foreach ($k in (Get-Ordinal $got.Keys)) { if (-not $expected.ContainsKey($k)) { $f.Add("EXTRA    $(To-Ascii $k)") } }
 $f | Select-Object -First $MaxLines | ForEach-Object { Write-Host $_ }
 if ($f.Count -gt $MaxLines) { Write-Host "... $($f.Count - $MaxLines) more" }
 Write-Host "findings: $($f.Count)"

@@ -20,20 +20,26 @@
 .PARAMETER Check
     Do not create a tree; build the manifest in memory and compare it to the committed manifest.tsv. Exit code 1 on a difference.
 
+.PARAMETER UpdateManifest
+    Write manifest.tsv and manifest.sha256 from the layout (after a deliberate layout change; bump the id too). Without it the
+    committed manifest is never written, and -Out refuses to build a tree from a layout that no longer matches it.
+
 .EXAMPLE
     pwsh scripts/golden/unicode-tree/generate.ps1 -Out C:\Users\me\unidrive-golden
     pwsh scripts/golden/unicode-tree/generate.ps1 -Check
+    pwsh scripts/golden/unicode-tree/generate.ps1 -UpdateManifest
 #>
 [CmdletBinding()]
 param(
     [string]$Out,
     [string]$Layout = (Join-Path $PSScriptRoot 'layout.json'),
     [string]$ManifestPath = (Join-Path $PSScriptRoot 'manifest.tsv'),
-    [switch]$Check
+    [switch]$Check,
+    [switch]$UpdateManifest
 )
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required (pwsh).' }
-if (-not $Check -and -not $Out) { throw 'Give -Out <directory> (or -Check).' }
+if (-not $Check -and -not $Out -and -not $UpdateManifest) { throw 'Give -Out <directory>, -Check or -UpdateManifest.' }
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 $spec = Get-Content -LiteralPath $Layout -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -106,7 +112,8 @@ function Add-Dir([string[]]$parts) {
 }
 
 foreach ($node in $spec.nodes) {
-    $dirParts = @($node.dir | ForEach-Object { Expand-Tokens $_ })
+    # @() keeps a one-segment directory an array: without it "$dirParts + $name" would concatenate two strings
+    $dirParts = [string[]]@($node.dir | ForEach-Object { Expand-Tokens $_ })
     $dirParts = for ($k = 0; $k -lt $dirParts.Count; $k++) { Apply-Form $dirParts[$k] $null }
     Add-Dir $dirParts
     foreach ($e in @($node.emptyDirs)) {
@@ -130,7 +137,7 @@ foreach ($p in @($dirs) + @($files | ForEach-Object { $_.Rel })) {
 $seen = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
 foreach ($p in (@($dirs) + @($files | ForEach-Object { $_.Rel }))) {
     $key = $p.ToUpperInvariant()
-    if ($seen.ContainsKey($key) -and $seen[$key] -cne $p) { Write-Warning "Names equal under invariant upper-casing (intended, a case-folding hazard; NTFS keeps them apart, other file systems may not): $(To-Ascii $p) vs $(To-Ascii $seen[$key])" }
+    if ($seen.ContainsKey($key) -and -not [string]::Equals($seen[$key], $p, [StringComparison]::Ordinal)) { Write-Warning "Names equal under invariant upper-casing (intended, a case-folding hazard; NTFS keeps them apart, other file systems may not): $(To-Ascii $p) vs $(To-Ascii $seen[$key])" }
     $seen[$key] = $p
 }
 $once = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -168,14 +175,20 @@ $nFiles = ($rows | Where-Object Kind -eq 'F').Count
 $nDirs = ($rows | Where-Object Kind -eq 'D').Count
 $total = ($rows | Where-Object Kind -eq 'F' | Measure-Object -Property Size -Sum).Sum
 
-if ($Check) {
-    $committed = if (Test-Path -LiteralPath $ManifestPath) { [IO.File]::ReadAllBytes($ManifestPath) } else { [byte[]]@() }
-    $committedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($committed)).ToLowerInvariant()
-    Write-Host "layout: $nDirs directories, $nFiles files, $total bytes; manifest sha256 $manifestHash"
-    if ($committedHash -ne $manifestHash) { Write-Host "DIFFERS from $ManifestPath ($committedHash)"; exit 1 }
-    Write-Host 'matches the committed manifest'
-    exit 0
+$committed = if (Test-Path -LiteralPath $ManifestPath) { [IO.File]::ReadAllBytes($ManifestPath) } else { [byte[]]@() }
+$committedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($committed)).ToLowerInvariant()
+Write-Host "layout: $nDirs directories, $nFiles files, $total bytes; manifest sha256 $manifestHash"
+if ($UpdateManifest) {
+    [IO.File]::WriteAllBytes($ManifestPath, $manifestBytes)
+    [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $ManifestPath) 'manifest.sha256'), "$manifestHash  manifest.tsv`n", $utf8)
+    Write-Host "wrote $ManifestPath (was $committedHash)"
+    if (-not $Out) { exit 0 }
+} elseif ($committedHash -ne $manifestHash) {
+    # a tree built from a drifted layout would be verified against a manifest it does not match
+    Write-Host "DIFFERS from $ManifestPath ($committedHash); after a deliberate layout change run -UpdateManifest"
+    exit 1
 }
+if ($Check) { Write-Host 'matches the committed manifest'; exit 0 }
 
 $root = Join-Path $Out $id
 if (Test-Path -LiteralPath $root) { throw "$root already exists; nothing is overwritten. Remove it or pick another -Out." }
@@ -189,7 +202,4 @@ foreach ($r in ($sorted | Where-Object Kind -eq 'F')) {
     [IO.File]::WriteAllBytes($full, $r.Data)
     [IO.File]::SetLastWriteTimeUtc($full, $r.MtimeValue)
 }
-[IO.File]::WriteAllBytes($ManifestPath, $manifestBytes)
-[IO.File]::WriteAllText((Join-Path (Split-Path -Parent $ManifestPath) 'manifest.sha256'), "$manifestHash  manifest.tsv`n", $utf8)
 Write-Host "created $root"
-Write-Host "$nDirs directories, $nFiles files, $total bytes; manifest sha256 $manifestHash"

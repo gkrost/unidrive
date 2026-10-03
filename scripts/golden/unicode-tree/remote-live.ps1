@@ -51,12 +51,13 @@ function Get-Listing([string]$cloudPath) {
     $text = @($raw | ForEach-Object { "$_" } | Where-Object { $_ -notmatch '^Picked up JAVA_TOOL_OPTIONS' })
     if ($code -ne 0) { return [pscustomobject]@{ Ok = $false; Error = ($text -join ' | '); Entries = @() } }
     $entries = foreach ($l in $text) {
-        if ($l -notmatch '\s+(\d{4}-\d{2}-\d{2}T\S+)$') { continue }
-        $rest = $l.Substring(0, $l.Length - $Matches[1].Length).TrimEnd()
+        # ls prints "%-Ns  %10s  %s": name (a folder with a trailing /), size (empty for a folder), ISO time or "-" when the provider has none
+        if ($l -notmatch '\s{2}(\d{4}-\d{2}-\d{2}T\S+|-)$') { continue }
+        $rest = $l.Substring(0, $l.Length - $Matches[1].Length).TrimEnd([char]' ')   # ASCII spaces only: a name may end in U+00A0 or U+3000
         $size = $null
         if ($rest -match '\s{2,}(\d+) B$') { $size = $Matches[1]; $rest = $rest.Substring(0, $rest.Length - $Matches[0].Length) }
         elseif ($rest -match '\s{2,}[\d.,]+ (?:KB|MB|GB|KiB|MiB|GiB)$') { $rest = $rest.Substring(0, $rest.Length - $Matches[0].Length) }
-        $isDir = $rest.EndsWith('/')
+        $isDir = $rest.EndsWith([char]'/')
         [pscustomobject]@{ Name = $(if ($isDir) { $rest.Substring(0, $rest.Length - 1) } else { $rest }); IsDir = $isDir; Size = $size }
     }
     [pscustomobject]@{ Ok = $true; Error = $null; Entries = @($entries) }
@@ -84,15 +85,19 @@ while ($queue.Count -gt 0) {
     if ($calls % 25 -eq 0) { Write-Host "  ... $calls folders listed, $($got.Count) entries" }
 }
 
-$scope = if ($Subtree) { { param($k) $k -eq $Subtree -or $k.StartsWith("$Subtree/") } } else { { param($k) $true } }
-foreach ($k in ($expected.Keys | Sort-Object)) {
+# Ordinal comparisons only: PowerShell's -eq / -ceq and String.StartsWith(string) compare by culture, which treats an NFC and an NFD
+# name (and a name with and without a zero width space) as equal.
+function Get-Ordinal([System.Collections.Generic.IEnumerable[string]]$keys) { $a = [string[]]@($keys); [Array]::Sort($a, [StringComparer]::Ordinal); , $a }
+$scope = if ($Subtree) { { param($k) [string]::Equals($k, $Subtree, [StringComparison]::Ordinal) -or $k.StartsWith("$Subtree/", [StringComparison]::Ordinal) } } else { { param($k) $true } }
+foreach ($k in (Get-Ordinal $expected.Keys)) {
     if (-not (& $scope $k)) { continue }
     $parent = if ($k.Contains('/')) { $k.Substring(0, $k.LastIndexOf('/')) } else { '' }
     if (-not $listed.Contains($parent)) { continue }   # its folder could not be listed
     $x = $expected[$k]
     if (-not $got.ContainsKey($k)) {
         $nfc = $k.Normalize([Text.NormalizationForm]::FormC)
-        $alt = $got.Keys | Where-Object { $_.Normalize([Text.NormalizationForm]::FormC) -ceq $nfc } | Select-Object -First 1
+        # an entry that is itself expected (the other member of an NFC/NFD twin pair) is not a renamed copy of this one
+        $alt = $got.Keys | Where-Object { [string]::Equals($_.Normalize([Text.NormalizationForm]::FormC), $nfc, [StringComparison]::Ordinal) -and -not $expected.ContainsKey($_) } | Select-Object -First 1
         if ($alt) { $findings.Add("FORM     $(To-Ascii $k)  ->  provider has  $(To-Ascii $alt)") } else { $findings.Add("MISSING  $(To-Ascii $k)") }
         continue
     }
@@ -100,7 +105,7 @@ foreach ($k in ($expected.Keys | Sort-Object)) {
     if (($x.Kind -eq 'D') -ne $e.IsDir) { $findings.Add("KIND     $(To-Ascii $k)"); continue }
     if ($x.Kind -eq 'F' -and $null -ne $e.Size -and $e.Size -ne $x.Size) { $findings.Add("SIZE     $(To-Ascii $k): expected $($x.Size), provider $($e.Size)") }
 }
-foreach ($k in ($got.Keys | Sort-Object)) { if (-not $expected.ContainsKey($k)) { $findings.Add("EXTRA    $(To-Ascii $k)") } }
+foreach ($k in (Get-Ordinal $got.Keys)) { if (-not $expected.ContainsKey($k)) { $findings.Add("EXTRA    $(To-Ascii $k)") } }
 $checked = @($expected.Keys | Where-Object { (& $scope $_) -and $listed.Contains($(if ($_.Contains('/')) { $_.Substring(0, $_.LastIndexOf('/')) } else { '' })) }).Count
 
 $findings | Select-Object -First $MaxLines | ForEach-Object { Write-Host $_ }

@@ -9,9 +9,10 @@ the same tree has to come out, and every difference is a finding.
 | `layout.json` | the pin of the layout: every directory, file name, text and size. Literal UTF-8 plus `{U+XXXX}` / `{rep:X:N}` tokens for what cannot be typed |
 | `manifest.tsv` | generated from the layout: one row per directory and file with size, SHA-256, modification time, normalisation form, ASCII-escaped path and path |
 | `manifest.sha256` | SHA-256 of `manifest.tsv`: **this one value identifies the layout** |
-| `generate.ps1` | builds the tree and the manifest (`-Out <dir>`), or checks the committed manifest (`-Check`) |
-| `verify.ps1` | compares a directory (a mount, a download, a restore) with the manifest: missing, extra, renamed (NFC/NFD), case, size, hash, mtime |
-| `daemon-view.ps1` | asks the running daemon (`hydration.list` over its IPC socket, one connection for the whole walk) for the cloud-side view and compares it with the manifest; `-Watch` waits for the uploads to drain |
+| `generate.ps1` | builds the tree (`-Out <dir>`, refused when the layout no longer matches the committed manifest), checks the committed manifest (`-Check`), or rewrites it after a deliberate layout change (`-UpdateManifest`) |
+| `verify.ps1` | compares a directory (a mount, a download, a restore) with the manifest: missing, extra, renamed (NFC/NFD), case, size, hash, mtime. Exact names are matched first, so the result does not depend on iteration order (twin pairs) |
+| `selftest.ps1` | damages fresh trees one way per case (rename to NFD, truncate, flip a byte, touch, add, delete, case swap, folder to file, either NFC/NFD twin deleted) and checks that `verify.ps1` classifies each correctly |
+| `daemon-view.ps1` | asks the running daemon (`hydration.list` over its IPC socket, one connection for the whole walk) for the cloud-side view and compares it with the manifest; `-Watch` waits for the uploads to drain. state.db keys paths in NFC (#171), so an NFD name that collapses onto another entry is reported as `NFCMERGE`, and an entry listed under the wrong parent as `LEAK` |
 | `remote-live.ps1` | asks the provider itself (`unidrive ls --live`, folder by folder, bypassing state.db) and compares names with the manifest; limited to folders with an ASCII-only path (the Windows CLI cannot take other arguments, gkrost/unidrive#487) |
 | `probes/` | read-only probes behind the numbers of the run report: `subscribe-events.ps1` (the daemon's event stream, flags lines that are not JSON), `daemon-counts.ps1` (upload progress), `local-vs-cloud-mtime.ps1` (times of the placeholders against the cloud) |
 | `RUN-2026-10-03.md` | the first run through the whole chain: setup, procedure, interventions, results, findings (interim until it says otherwise) |

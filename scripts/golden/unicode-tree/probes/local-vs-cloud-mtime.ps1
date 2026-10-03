@@ -21,23 +21,41 @@ $s = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::Unix, 
 $s.Connect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($sock))
 $st = [System.Net.Sockets.NetworkStream]::new($s); $rd = [IO.StreamReader]::new($st, $utf8)
 function Ask($o) { $b = $utf8.GetBytes(($o | ConvertTo-Json -Compress) + "`n"); $st.Write($b, 0, $b.Length); $st.Flush(); $rd.ReadLine() | ConvertFrom-Json }
-$orig = [DateTime]::Parse($GoldenMtime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+$parse = { param($t) [DateTime]::Parse($t, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) }
+$orig = & $parse $GoldenMtime
+# each file's own golden time (hazards/timestamps carries others), keyed by the NFC form the daemon answers with (state.db is NFC);
+# the local file is opened under its manifest name, which may be NFD
+$manifestPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'manifest.tsv'
+$golden = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+foreach ($line in [IO.File]::ReadAllLines($manifestPath, [Text.Encoding]::UTF8)) {
+    if ($line.StartsWith('#') -or -not $line.StartsWith("F`t")) { continue }
+    $c = $line.Split("`t")
+    $name = [regex]::Replace($c[5], '\{U\+([0-9A-Fa-f]{4,6})\}', { param($m) [char]::ConvertFromUtf32([Convert]::ToInt32($m.Groups[1].Value, 16)) })
+    $key = "$Prefix/$name".Normalize([Text.NormalizationForm]::FormC)
+    if (-not $golden.ContainsKey($key)) { $golden[$key] = [pscustomobject]@{ Name = $name; Mtime = & $parse $c[3] } }
+}
 $rows = [System.Collections.Generic.List[object]]::new()
+$seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $stack = [System.Collections.Generic.Stack[string]]::new(); $stack.Push($Prefix)
 while ($stack.Count) {
     $p = $stack.Pop(); $r = Ask @{ verb = 'hydration.list'; prefix = $p }
     foreach ($e in $r.entries) {
+        if (-not $seen.Add($e.path)) { continue }   # a grandchild leaking into a listing must not count twice
         if ($e.folder) { $stack.Push($e.path); continue }
         if (-not ($e.remote_id -and -not $e.pending_upload)) { continue }
-        $local = [IO.Path]::Combine($MountRoot, $e.path.TrimStart('/').Replace('/', '\'))
-        $fi = [IO.FileInfo]::new($local)
-        $rows.Add([pscustomobject]@{ Remote = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$e.remote_modified_ms).UtcDateTime; Local = $fi.LastWriteTimeUtc; Attr = $fi.Attributes })
+        $g = $golden[$e.path]
+        $rel = if ($g) { $g.Name } else { $e.path.Substring($Prefix.Length + 1) }
+        $fi = [IO.FileInfo]::new([IO.Path]::Combine($MountRoot, $Prefix.TrimStart('/').Replace('/', '\'), $rel.Replace('/', '\')))
+        $want = if ($g) { $g.Mtime } else { $orig }
+        $rows.Add([pscustomobject]@{ Remote = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$e.remote_modified_ms).UtcDateTime; Local = $fi.LastWriteTimeUtc; Want = $want; Exists = $fi.Exists; Attr = $fi.Attributes })
     }
 }
 $s.Dispose()
 $sorted = $rows | Sort-Object Remote
 foreach ($r in $sorted) {
-    '{0:HH:mm:ss}  local={1:yyyy-MM-dd HH:mm:ss}  {2}  attr={3}' -f $r.Remote, $r.Local, $(if ($r.Local -eq $orig) { 'ORIGINAL' } else { 'changed ' }), $r.Attr
+    $state = if (-not $r.Exists) { 'NO FILE ' } elseif ($r.Local -eq $r.Want) { 'ORIGINAL' } else { 'changed ' }
+    '{0:HH:mm:ss}  local={1:yyyy-MM-dd HH:mm:ss}  {2}  attr={3}' -f $r.Remote, $r.Local, $state, $r.Attr
 }
-$kept = @($sorted | Where-Object { $_.Local -eq $orig }).Count
-"uploaded files $($sorted.Count): local time original $kept, changed $($sorted.Count - $kept)"
+$kept = @($sorted | Where-Object { $_.Exists -and $_.Local -eq $_.Want }).Count
+$absent = @($sorted | Where-Object { -not $_.Exists }).Count
+"uploaded files $($sorted.Count): local time original $kept, changed $($sorted.Count - $kept - $absent), local file not found $absent"

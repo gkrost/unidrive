@@ -24,13 +24,15 @@ foreach ($line in [IO.File]::ReadAllLines($Manifest, [Text.Encoding]::UTF8)) {
     if ($line.StartsWith("D`t")) { $totalDirs++ } else { $totalFiles++ }
 }
 $stack = [System.Collections.Generic.Stack[string]]::new(); $stack.Push($Prefix)
-$dirs = 0; $files = 0; $done = 0; $pend = 0; $err = 0
+$dirs = 0; $files = 0; $done = 0; $pend = 0; $err = 0; $leaked = 0
 while ($stack.Count) {
     $p = $stack.Pop(); $r = Ask @{ verb = 'hydration.list'; prefix = $p }
     foreach ($e in $r.entries) {
+        # a grandchild that leaks into a listing (engine fault below names outside the BMP) would be counted twice
+        if (-not [string]::Equals($e.path.Substring(0, $e.path.LastIndexOf('/')), $p, [StringComparison]::Ordinal)) { $leaked++; continue }
         if ($e.folder) { $dirs++; $stack.Push($e.path) }
         else { $files++; if ($e.remote_id -and -not $e.pending_upload) { $done++ }; if ($e.pending_upload) { $pend++ }; if ($e.error) { $err++ } }
     }
 }
-'{0}  dirs {1}/{2}  files {3}/{4} (uploaded {5}, pending {6}, error {7})' -f (Get-Date -Format 'HH:mm:ss'), $dirs, $totalDirs, $files, $totalFiles, $done, $pend, $err
+'{0}  dirs {1}/{2}  files {3}/{4} (uploaded {5}, pending {6}, error {7}; leaked listing entries skipped {8})' -f (Get-Date -Format 'HH:mm:ss'), $dirs, $totalDirs, $files, $totalFiles, $done, $pend, $err, $leaked
 $s.Dispose()
