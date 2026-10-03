@@ -9,7 +9,8 @@
 
         tool <TAB> class <TAB> path <TAB> issue <TAB> note
 
-      tool    verify, daemon-view or remote-live (the tool whose finding the rule covers)
+      tool    verify, daemon-view or remote-live (the tool whose finding the rule covers), optionally with a surface:
+              verify:mirror applies only to a run compared with -Tool verify:mirror; plain verify applies to every surface
       class   the finding's first word: MISSING, EXTRA, FORM, CASE, SIZE, HASH, MTIME, KIND, ERROR, PENDING, NOREMOTE, NFCMERGE,
               LEAK, LISTFAIL
       path    the path below the golden root as the tools print it (non-ASCII as {U+XXXX}); * matches any run of characters,
@@ -31,7 +32,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Expected,
-    [Parameter(Mandatory)][ValidateSet('verify', 'daemon-view', 'remote-live')][string]$Tool,
+    [Parameter(Mandatory)][ValidatePattern('^(verify|daemon-view|remote-live)(:[a-z0-9-]+)?$')][string]$Tool,
     [Parameter(Mandatory)][string]$Findings,
     [string]$Root = 'golden-unicode-v1',
     [switch]$FailOnStale,
@@ -50,7 +51,7 @@ foreach ($line in [IO.File]::ReadAllLines($Expected, [Text.Encoding]::UTF8)) {
     if ($line.Length -eq 0 -or $line.StartsWith('#')) { continue }
     $c = $line.Split("`t")
     if ($c.Count -lt 4) { throw "$($Expected):$n needs tool, class, path and issue, tab-separated" }
-    if ($c[0] -cnotin 'verify', 'daemon-view', 'remote-live') { throw "$($Expected):$n unknown tool '$($c[0])'" }
+    if ($c[0] -cnotmatch '^(verify|daemon-view|remote-live)(:[a-z0-9-]+)?$') { throw "$($Expected):$n unknown tool '$($c[0])'" }
     if ($c[1] -cnotin $classes) { throw "$($Expected):$n unknown class '$($c[1])'" }
     if ($c[3].Trim().Length -eq 0) { throw "$($Expected):$n has no issue: an accepted deviation needs one" }
     # * is the only wildcard; everything else is literal (Regex.Escape), matched ordinally and in full
@@ -73,6 +74,10 @@ function Get-FindingPath([string]$rest) {
     $rest.Trim()
 }
 
+# The rules for this run: those of the tool itself (a rule for verify covers every surface) and those of this surface
+# (verify:mirror applies only when -Tool verify:mirror), so a deviation of one surface cannot hide the same finding on another.
+$base = $Tool.Split(':')[0]
+$mine = @($rules | Where-Object { $_.Tool -ceq $Tool -or $_.Tool -ceq $base })
 $unexpected = [System.Collections.Generic.List[string]]::new()
 $seen = 0
 foreach ($line in [IO.File]::ReadAllLines($Findings, [Text.Encoding]::UTF8)) {
@@ -82,11 +87,10 @@ foreach ($line in [IO.File]::ReadAllLines($Findings, [Text.Encoding]::UTF8)) {
     $class = $m.Groups[1].Value
     $path = Get-FindingPath $m.Groups[2].Value
     $rule = $null
-    foreach ($r in $rules) { if ($r.Tool -ceq $Tool -and $r.Class -ceq $class -and $r.Regex.IsMatch($path)) { $rule = $r; break } }
+    foreach ($r in $mine) { if ( $r.Class -ceq $class -and $r.Regex.IsMatch($path)) { $rule = $r; break } }
     if ($rule) { $rule.Hits++ } else { $unexpected.Add($line) }
 }
 
-$mine = @($rules | Where-Object { $_.Tool -ceq $Tool })
 $used = @($mine | Where-Object Hits -gt 0)   # not $expected: PowerShell names are case-insensitive, and $Expected is the [string] parameter
 $stale = @($mine | Where-Object Hits -eq 0)
 $unexpected | Select-Object -First $MaxLines | ForEach-Object { Write-Host "UNEXPECTED  $_" }

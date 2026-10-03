@@ -78,7 +78,8 @@ $rulesOk = @(
     "verify${T}MISSING${T}Docs/*${T}gkrost/unidrive#2${T}case-sensitive",
     "daemon-view${T}NFCMERGE${T}hazards/nfc-nfd-twins/*${T}gkrost/unidrive#491",
     "daemon-view${T}LEAK${T}african/*${T}gkrost/unidrive#489",
-    "daemon-view${T}ERROR${T}binary/sizes/b0000000.bin${T}gkrost/unidrive#485"
+    "daemon-view${T}ERROR${T}binary/sizes/b0000000.bin${T}gkrost/unidrive#485",
+    "verify:mirror${T}MISSING${T}empty/*${T}gkrost/unidrive#500${T}only on the mirror"
 )
 $verifyOut = @(
     'MTIME  binary/sizes/b0000000.bin: expected 2026-01-01T12:00:00Z, found 2026-10-03T06:46:35Z',
@@ -102,6 +103,8 @@ $compareCases = [ordered]@{
     'daemon-prefix-stale' = @{ Rules = $rulesOk; Tool = 'daemon-view'; Out = $daemonOut; Exit = 1; Want = 'unexpected 1, expected 2 (by 2 rules), stale rules 1' }
     'fail-on-stale'       = @{ Rules = $rulesOk; Tool = 'verify'; Out = $verifyOut; Exit = 1; Want = 'stale rules 1'; Extra = @('-FailOnStale') }
     'rule-without-issue'  = @{ Rules = @("verify${T}MTIME${T}*${T} "); Tool = 'verify'; Out = $verifyOut; Exit = 1; Want = 'has no issue' }
+    'surface-applies'     = @{ Rules = $rulesOk; Tool = 'verify:mirror'; Out = @('MISSING  empty/dir'); Exit = 0; Want = 'unexpected 0, expected 1' }
+    'surface-not-other'   = @{ Rules = $rulesOk; Tool = 'verify:mount'; Out = @('MISSING  empty/dir'); Exit = 1; Want = 'unexpected 1,' }
     'unknown-class'       = @{ Rules = @("verify${T}TIME${T}*${T}gkrost/unidrive#486"); Tool = 'verify'; Out = $verifyOut; Exit = 1; Want = "unknown class" }
 }
 if ($Only -eq 'verify') { $compareCases = [ordered]@{} }
