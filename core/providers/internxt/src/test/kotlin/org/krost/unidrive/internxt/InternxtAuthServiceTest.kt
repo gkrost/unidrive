@@ -236,6 +236,123 @@ class InternxtAuthServiceTest {
             }
         }
 
+    // --- #334: the 24 h pre-expiry margin must clamp to lifetime / 4 ---
+    //
+    // A fixed 24 h margin makes every fresh token of a ≤24 h lifetime count as
+    // near expiry: each getValidCredentials burns a sequential /users/refresh
+    // round-trip (the latch coalesces concurrent callers, not sequential ones)
+    // — a permanent refresh storm. The effective margin is min(24 h, lifetime/4)
+    // read from exp - iat; tokens without those claims keep the fixed margin.
+
+    private fun makeJwtWithExpAndIat(
+        expEpochSec: Long,
+        iatEpochSec: Long,
+    ): String {
+        val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header = encoder.encodeToString("""{"alg":"HS256","typ":"JWT"}""".toByteArray())
+        val payload = encoder.encodeToString("""{"exp":$expEpochSec,"iat":$iatEpochSec}""".toByteArray())
+        return "$header.$payload.fake-signature"
+    }
+
+    @Test
+    fun `a short-lifetime token issued just now is NOT near expiry`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-clamp-fresh-")
+            try {
+                val nowSec = System.currentTimeMillis() / 1000
+                // 12 h lifetime, issued now: margin clamps to 3 h → 9 h of clean runway.
+                seedCredentials(tmp, jwt = makeJwtWithExpAndIat(nowSec + 12L * 3600, nowSec))
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                val creds = auth.getValidCredentials()
+
+                assertEquals(
+                    0,
+                    auth.callCount.get(),
+                    "A fresh 12h token must not count as near expiry (today the fixed 24h " +
+                        "margin forces a refresh storm); got ${auth.callCount.get()} refresh call(s).",
+                )
+                assertTrue(creds.jwt.startsWith("refreshed-jwt").not())
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `the same short-lifetime token 10h later IS near expiry (lifetime-over-4 before the end)`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-clamp-late-")
+            try {
+                val nowSec = System.currentTimeMillis() / 1000
+                // 12 h lifetime issued 10 h ago: 2 h remain, margin = 3 h → within margin.
+                seedCredentials(
+                    tmp,
+                    jwt = makeJwtWithExpAndIat(nowSec + 2L * 3600, nowSec - 10L * 3600),
+                )
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                auth.getValidCredentials()
+
+                assertEquals(
+                    1,
+                    auth.callCount.get(),
+                    "Inside the clamped margin (lifetime/4 = 3h before the end) the token " +
+                        "must still refresh proactively; got ${auth.callCount.get()}.",
+                )
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `a 30-day token behaves exactly as with the fixed margin`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-clamp-long-")
+            try {
+                val nowSec = System.currentTimeMillis() / 1000
+                // 30-day lifetime: min(24h, 180h) = 24h — the fixed-margin behaviour.
+                seedCredentials(
+                    tmp,
+                    jwt = makeJwtWithExpAndIat(nowSec + 30L * 24 * 3600, nowSec),
+                )
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                auth.getValidCredentials()
+
+                assertEquals(0, auth.callCount.get(), "A fresh 30-day token is far from the 24h margin")
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `a token without iat keeps the fixed 24h margin`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-auth-clamp-noiat-")
+            try {
+                val nowSec = System.currentTimeMillis() / 1000
+                // 12 h left but no iat claim: lifetime unknown → fixed 24 h margin
+                // applies → the token IS within the margin and refreshes (today's
+                // behaviour, unchanged).
+                seedCredentials(tmp, jwt = makeJwtWithExp(nowSec + 12L * 3600))
+                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                auth.initialize()
+
+                auth.getValidCredentials()
+
+                assertEquals(
+                    1,
+                    auth.callCount.get(),
+                    "Without iat the fixed 24h margin must apply unchanged (12h < 24h → refresh).",
+                )
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
     /**
      * Reactive 401 → refresh contract: when the API layer signals
      * `forceRefresh = true` (it just saw an unexpected 401 mid-call),

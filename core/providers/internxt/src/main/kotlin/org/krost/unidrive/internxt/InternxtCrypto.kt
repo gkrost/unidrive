@@ -21,11 +21,18 @@ open class InternxtCrypto {
         private const val BIP39_ITERATIONS = 2048
         private const val BIP39_KEY_LENGTH = 512
 
+        // #333: fail loud on non-hex input. Character.digit returns -1 for any
+        // non-hex character, which used to fold silently into garbage keys/IVs.
         fun hexToBytes(hex: String): ByteArray {
-            val len = hex.length
-            val data = ByteArray(len / 2)
-            for (i in 0 until len step 2) {
-                data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+            require(hex.length % 2 == 0) { "Hex string must have an even length, got ${hex.length} characters" }
+            val data = ByteArray(hex.length / 2)
+            for (i in data.indices) {
+                val high = Character.digit(hex[i * 2], 16)
+                val low = Character.digit(hex[i * 2 + 1], 16)
+                require(high >= 0 && low >= 0) {
+                    "Invalid hex character at index ${if (high < 0) i * 2 else i * 2 + 1}"
+                }
+                data[i] = ((high shl 4) + low).toByte()
             }
             return data
         }

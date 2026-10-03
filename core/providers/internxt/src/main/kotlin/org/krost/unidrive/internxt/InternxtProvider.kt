@@ -334,7 +334,18 @@ class InternxtProvider(
                     if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
                     throw e
                 }
-            val indexBytes = InternxtCrypto.hexToBytes(bridgeInfo.index)
+            // #333 review: hexToBytes now fails loud on a malformed index. A bridge entry
+            // whose index is not hex can never decrypt, so quarantine it with a clear
+            // reason instead of letting the engine retry the same failure on every poll.
+            val indexBytes =
+                try {
+                    InternxtCrypto.hexToBytes(bridgeInfo.index)
+                } catch (e: IllegalArgumentException) {
+                    throw PermanentDownloadFailureException(
+                        "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
+                        cause = e,
+                    )
+                }
             val iv = indexBytes.copyOfRange(0, 16)
 
             val creds = authService.getValidCredentials()
@@ -342,8 +353,19 @@ class InternxtProvider(
             val bucketKey = crypto.deriveBucketKey(seed, bucket)
             val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
+            // #335: taking the first usable shard of a multi-shard object decrypted a
+            // truncated file whose length mismatch then surfaced as a RETRIABLE error —
+            // the engine retried forever instead of quarantining. Fail permanently (a
+            // clear quarantine reason) before any download request is made. One shard
+            // keeps working exactly as before; zero usable shards keeps today's error.
+            val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
+            if (usableShards.size > 1) {
+                throw PermanentDownloadFailureException(
+                    "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
+                )
+            }
             val downloadUrl =
-                bridgeInfo.shards.firstOrNull { it.url.isNotBlank() }?.url
+                usableShards.firstOrNull()?.url
                     ?: throw ProviderException("No download URL in bridge info for $remotePath")
 
             val cipher = crypto.createContentDecryptCipher(fileKey, iv)
@@ -621,6 +643,15 @@ class InternxtProvider(
                 localPath,
                 tomb.stage,
             )
+            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+            tomb = null
+        }
+
+        // #333 review: a tombstone whose index is not valid hex cannot be resumed (hexToBytes
+        // now throws). Treat it like the other unusable tombstones: discard and cold-restart
+        // with fresh indexBytes, instead of failing this upload on every retry.
+        if (tomb != null && runCatching { InternxtCrypto.hexToBytes(tomb.indexBytesHex) }.isFailure) {
+            log.warn("discarding upload tombstone for {} (malformed index bytes; rotating indexBytes)", localPath)
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             tomb = null
         }
