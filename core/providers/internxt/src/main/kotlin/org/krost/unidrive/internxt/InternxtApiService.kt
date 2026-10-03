@@ -88,6 +88,13 @@ class InternxtApiService(
             return params
         }
 
+        // #517 R2/F3: a whole-drive offset page can need 25-56 s and up to the
+        // server's statement_timeout of 300 s (public source) before the first
+        // byte; the flat 60 s watchdog cut every one of them. 330 s = statement
+        // timeout + 10 percent — past it the server errors on its own, which is
+        // the answer we want, not a silent client cut.
+        internal const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000
+
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
 
         // #517 F1/F2: the socket watchdog is read-idle — during a PUT it measures the
@@ -128,7 +135,12 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFile> =
         listFilesDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/files", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body =
+                authenticatedGet(
+                    "$baseUrl/files",
+                    listingQueryParams(updatedAt, limit, offset, status, sort),
+                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                )
             json.decodeFromString<List<InternxtFile>>(body)
         }
 
@@ -140,7 +152,12 @@ class InternxtApiService(
         sort: String = "uuid",
     ): List<InternxtFolder> =
         listFoldersDedup.load("$updatedAt|$limit|$offset|$status|$sort", currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders", listingQueryParams(updatedAt, limit, offset, status, sort))
+            val body =
+                authenticatedGet(
+                    "$baseUrl/folders",
+                    listingQueryParams(updatedAt, limit, offset, status, sort),
+                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                )
             json.decodeFromString<List<InternxtFolder>>(body)
         }
 
@@ -908,6 +925,7 @@ class InternxtApiService(
     private suspend fun authenticatedGet(
         url: String,
         params: Map<String, String> = emptyMap(),
+        socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
     ): String {
         var lastException: InternxtApiException? = null
         val delays = listOf(2_000L, 4_000L, 8_000L)
@@ -926,6 +944,17 @@ class InternxtApiService(
                             httpClient.get(url) {
                                 applyAuth(creds)
                                 params.forEach { (k, v) -> parameter(k, v) }
+                                // Only an elevated limit gets a per-request block; at the
+                                // installed default the request stays byte-identical.
+                                if (socketTimeoutMs != HttpDefaults.SOCKET_TIMEOUT_MS) {
+                                    timeout {
+                                        socketTimeoutMillis = socketTimeoutMs
+                                        // The whole-request cap rides above the watchdog so
+                                        // the read-idle timer, not the flat cap, is what a
+                                        // stalled call trips.
+                                        requestTimeoutMillis = socketTimeoutMs + 60_000
+                                    }
+                                }
                             }
                         checkResponse(response)
                         driveBudget.recordSuccess()

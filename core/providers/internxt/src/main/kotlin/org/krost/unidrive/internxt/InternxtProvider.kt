@@ -1633,15 +1633,16 @@ class InternxtProvider(
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
         // Parallel listing pagination. Files and folders streams run concurrently;
-        // inside each stream up to 2 page fetches stay in flight at a time — the
-        // same width as the Drive HttpRetryBudget every listing call passes
-        // through (driveBudget maxConcurrency = 2, InternxtApiService), so a
-        // speculative fetch never queues behind another page call for a budget
-        // slot. The API itself tolerates more (measured on a live account
-        // 2026-09-29, #392: throughput still scaled at concurrency 8, 8.7
-        // calls/s, zero throttling; /folders/content p50 ~0.3s, p99 ~2-4s,
-        // max ~8s) — the overlap exists to absorb the p99 tail instead of
-        // stalling the stream behind one slow page.
+        // inside each stream up to 2 page fetches stay in flight at a time. (The
+        // Drive HttpRetryBudget every listing call passes through does NOT bound
+        // this: awaitSlot gates on breaker, priority lane and spacing only —
+        // maxConcurrency seeds a storm-halving counter nothing enforces — so four
+        // heavy listing calls can be in flight at once, as observed on the live
+        // account, #517 F4. R7 tracks turning that into a real permit.) The API
+        // itself tolerates more (measured on a live account 2026-09-29, #392:
+        // throughput still scaled at concurrency 8, 8.7 calls/s, zero throttling;
+        // /folders/content p50 ~0.3s, p99 ~2-4s, max ~8s) — the overlap exists to
+        // absorb the p99 tail instead of stalling the stream behind one slow page.
         // Running counts via AtomicInteger so the heartbeat reports monotonically
         // non-decreasing totals as pages arrive on either stream. The resumed-row
         // contribution is baked in up front so the heartbeat total is monotonic
@@ -1676,12 +1677,16 @@ class InternxtProvider(
             }
 
         // The two account-wide listings page through the whole account with an offset.
-        // On a large account the gateway cuts those calls (seen 2026-10-03, ~50k
-        // items: the connection is closed after about a minute, /files from offset 0
-        // and /folders from about offset 10,000), and after the retry ladder the call
-        // ends as 503. Either one failing that way means: list the folder tree
-        // instead (per-folder listings, up to 4 in flight), the walk a scoped profile
-        // does anyway. A failing /folders used to end the whole gather, and a failing
+        // On a large account those calls are slow server-side (25-56 s per folder page,
+        // more per file page, latency growing with the account's row count, not the
+        // offset, #517 F3) and the flat 60 s socket watchdog cut every one of them —
+        // reported by Ktor-over-TLS as "the server prematurely closed the connection",
+        // which looked like a gateway cap and was our own timer (#517 F1, loopback
+        // probe). R2 raised their watchdog to 330 s, so what remains here are real
+        // closes and pages past the server's own 300 s statement timeout. Either
+        // listing failing as 500/503 still means: list the folder tree instead
+        // (per-folder listings, up to 4 in flight), the walk a scoped profile does
+        // anyway. A failing /folders used to end the whole gather, and a failing
         // /files fell back to a sequential walk that would take an hour.
         try {
             coroutineScope {
