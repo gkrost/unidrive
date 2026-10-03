@@ -318,11 +318,12 @@ class InternxtApiServiceTest {
     fun `UD-353 OVH-pessimistic 10 KiB-s floor grants a 10 MiB file 17 minutes`() {
         // Post-fix behaviour: same 10 MiB shard with the OVH-specific
         // 10 KiB/s override returns 1024 s ≈ 17 min — easily covers the
-        // 1000 s legitimate-progress upper bound. The 60 s
-        // socketTimeoutMillis watchdog still catches stalled connections,
-        // so slow-loris exposure is unchanged; we only grant more
-        // wall-clock for actual byte-flowing uploads against OVH's slow
-        // third-party endpoint.
+        // 1000 s legitimate-progress upper bound. The PUT sets its
+        // socketTimeoutMillis to the same value: the 60 s default is a
+        // read-idle timer (time since bytes were last RECEIVED) and OVH
+        // answers only after the whole body has arrived, so the default
+        // would cut every upload that takes longer than 60 s, however fast
+        // it flows (InternxtOwnTimeoutTest pins that against a real socket).
         val sizeBytes = 10L * 1024 * 1024
         val ovhMinThroughputBps = 10L * 1024 // mirrors InternxtApiService.OVH_PUT_MIN_THROUGHPUT_BPS
         val timeoutMs =

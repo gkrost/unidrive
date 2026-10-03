@@ -45,7 +45,10 @@ import java.nio.file.Path
  * ```kotlin
  * httpClient.put(url) {
  *     timeout {
- *         requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
+ *         // The socket timeout too: see UploadTimeoutPolicy.
+ *         val timeoutMs = UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize)
+ *         requestTimeoutMillis = timeoutMs
+ *         socketTimeoutMillis = timeoutMs
  *     }
  *     setBody(streamingFileBody(localPath, fileSize))
  * }

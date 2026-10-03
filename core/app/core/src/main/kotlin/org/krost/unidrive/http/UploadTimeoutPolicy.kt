@@ -17,9 +17,15 @@ package org.krost.unidrive.http
  * need" — a function of the file size and a minimum-throughput floor.
  * For a 2 GiB file at 512 KiB/s that's exactly 4096 seconds; for a
  * 5 GiB file at 50 KiB/s (the conservative default) it's ~28 hours.
- * The 60 s `SOCKET_TIMEOUT_MS` watchdog still catches genuinely-stuck
- * connections (no bytes between reads), so this policy bounds without
- * overcommitting.
+ *
+ * **The socket timeout has to grow with it.** `HttpDefaults.SOCKET_TIMEOUT_MS`
+ * (60 s) is a read-idle timer: it measures the time since bytes were last
+ * RECEIVED. A storage endpoint answers only after the whole body has
+ * arrived, so a PUT that takes longer than 60 s to send is cut at 60 s however
+ * fast it flows, whatever its `requestTimeoutMillis` (over TLS the CIO engine
+ * reports that as "the server prematurely closed the connection", the text of
+ * a real close by the peer). A call site therefore sets `socketTimeoutMillis`
+ * to the same value as `requestTimeoutMillis`.
  *
  * **History.** Originally lived as `WebDavTimeoutPolicy` in the WebDAV
  * provider (UD-277). Lifted to `:app:core` under UD-337 so Internxt /
@@ -29,11 +35,13 @@ package org.krost.unidrive.http
  * ```kotlin
  * httpClient.put(url) {
  *     timeout {
- *         requestTimeoutMillis = computeRequestTimeoutMs(
+ *         val timeoutMs = computeRequestTimeoutMs(
  *             fileSize = fileSize,
  *             floorMs = UploadTimeoutPolicy.DEFAULT_FLOOR_MS,
  *             minThroughputBytesPerSecond = UploadTimeoutPolicy.DEFAULT_MIN_THROUGHPUT_BYTES_PER_SECOND,
  *         )
+ *         requestTimeoutMillis = timeoutMs
+ *         socketTimeoutMillis = timeoutMs
  *     }
  *     setBody(...)
  * }
