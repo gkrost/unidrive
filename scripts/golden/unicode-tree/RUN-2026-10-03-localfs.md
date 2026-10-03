@@ -112,3 +112,19 @@ placeholders alike), the mirror's missing empty folders (G9), the 18 phantom ent
 | H2 | `hazards/case-fold/ς.txt` (final sigma) next to `Σ.txt` stays a plain, local-only file: no queue line, no row; `Σ` and the other five case-fold files are uploaded. It stays that way until the mount is restarted (the start scan finds it: in run 2 pass B it was uploaded). The runner reports it as `STUCK`, which is correct. **Correction after the review:** my first reading (no `notify-file-close` in the trace) was void: that callback fires only for placeholders, a plain file never logs it. The likely cause, found in the code: `LocalChangeWatcher` keyed its debounce map `OrdinalIgnoreCase`, which in .NET folds U+03C2 into U+03A3 while NTFS keeps the two files apart, so with both events pending the second overwrote the first. A real-timing test passes even with the old keys (a late event rescues the file), so likely, not proven | client trace log, `LocalChangeWatcher` | unidrive-windows#124, draft fix #125 (ordinal keys); the safety-net rescan needs a design (#124) |
 | H3 | the state column's push for an empty folder fails with `ArgumentException 0x80070057` (E_INVALIDARG), the same six folders as before; #122 made the HRESULT visible. The log gives the HRESULT, not the cause (candidates: a clear on an empty folder, or a not-in-sync placeholder folder); #122 now logs push or clear, file or folder, placeholder or not | client log of run 3 | unidrive-windows#121, cause open |
 | H4 | the combining-mark name is still stored in NFC (`FORM`) | provider | by design (#171), see #491 |
+
+### 7.4 Run 4: the integration builds plus the name-clash guard and the watcher fix
+
+Engine `1a00eaf` (as run 3), client `4a8f5ad` = `6ea4bf5` + #123 (name-clash guard, option 1 of #491) + #125 (ordinal keys in the watcher) + the extra diagnostics of #122.
+Expectations: `expected/golden-unicode-v1@localfs@1a00eaf+4a8f5ad.tsv` (the refusal, explicitly not an accepted deviation). Command:
+`run-localfs.ps1 -EngineJar builds/run4/engine/unidrive.jar -ClientDir builds/run4/client -Expected <that file> -Trace`. **Exit code 0.**
+
+| | |
+|---|---|
+| upload | settled 148 s after the copy: 290 of 290 folders, 239 files, nothing pending, no stall, 0 leaked listing entries |
+| mount after the upload | 239 placeholders and 10 plain files, all 10 in a name clash (0 plain files with an NFC name outside a clash); 290 of 290 folders are placeholders |
+| provider, mirror, fresh mount | 528 ok; MISSING 10 (both members of each of the five NFC-merging pairs: refused, none uploaded), FORM 1 (the lone combining-mark name, stored NFC by design); **0 SIZE, 0 HASH, 0 MTIME, 0 EXTRA** |
+| mount (local files) | 539 of 539 present, hashes ok |
+| compare-expected | **unexpected 0** on every surface (11, 11, 10 and 11 findings, all expected, none stale except the mount's unused rules) |
+
+What changed against run 3: the five overwrites are gone (the guard refuses both members of a pair and keeps them local, so the cloud holds neither content: nothing is lost, and nothing is uploaded either, which is the point of option 1), and the final-sigma file `ς.txt`, which run 3 left behind, is uploaded (H2: the watcher fix works in a real run too, a hint at the cause that run 3 could only suspect). Everything the earlier runs found has either a fix in this build or an explicit rule with its issue. [V]
