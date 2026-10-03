@@ -80,7 +80,7 @@ Consequence for the live profile: do not restart the live mount in place. Start 
 ### 7.1 Runs 2b and 2c: the installed builds again
 
 The same builds as run 2, one command each. Both stalled in the same place: 153 and 152 of 249 files uploaded (run 2: 137), then nothing,
-no error, healthy event stream; the runner reported `STUCK` (92 plain files with NFC names still waiting). The number differs from run to run
+no error, healthy event stream; the runner reported `STUCK` (run 2c: 98 plain files, 92 of them with an NFC name, taken from the runner's own line, not checked by name). The number differs from run to run
 (which two files take the slots depends on timing), the cause does not: a non-NFC name never matches the engine's NFC `completed` event
 (G1, unidrive-windows#115). Run 2b also showed a typo of mine in the runner. [V]
 
@@ -101,7 +101,7 @@ no error, healthy event stream; the runner reported `STUCK` (92 plain files with
 | daemon view | 11 findings: 5 NFCMERGE (expected), 5 SIZE, 1 MISSING; **0 LEAK** |
 | fresh mount (round trip) | 527 ok, 6 MISSING, 1 FORM, 5 SIZE, **0 EXTRA**, 0 MTIME; size mismatches stop the hash check for those five files |
 
-Fixed, as the PRs claim: the stall (G1), the listing leak (G4, 0 of 16 leaks), the lost modification times (G5: **0 MTIME on every surface**, localfs and
+Fixed, as the PRs claim: the stall (G1), the listing leak (G4: the installed builds' runs 2b and 2c counted 16 leaked listing entries with `daemon-counts`, run 2's `daemon-view` listed 18 LEAK lines, run 3 has 0 in both), the lost modification times (G5: **0 MTIME on every surface**, localfs and
 placeholders alike), the mirror's missing empty folders (G9), the 18 phantom entries of the fresh mount. [V]
 
 ### 7.3 What run 3 found
@@ -109,6 +109,6 @@ placeholders alike), the mirror's missing empty folders (G9), the 18 phantom ent
 | # | finding | evidence | status |
 |---|---|---|---|
 | H1 | **Silent data loss in all five NFC-merging pairs.** With NFC matching in the client (#116) the NFD member is now uploaded; the engine maps it onto the NFC member's row, and the upload replaces that row's content. The provider's file under the NFC name holds the other member's bytes in 5 of 5 pairs (`café`, `Ångström`, Hangul, katakana with dakuten, `Å` against the angstrom sign): SHA-256 of the provider file equals the other member's manifest hash, compared ordinally. The NFC member still exists locally, and a fresh mount serves the wrong content under its name. In run 2 the same pairs were harmless only because the NFD members never got through the stalled queue | provider SIZE findings, hashes, fresh mount | gkrost/unidrive#491: the guard (option 1, detect and refuse) has to come with or before #116 |
-| H2 | a file whose name equals another file's name under case folding is never reported to the client: `hazards/case-fold/ς.txt` (final sigma) next to `Σ.txt` has no `notify-file-close` in the trace, no queue line, no row; `Σ` and the other five case-fold files are uploaded. It stays a plain, local-only file until the mount is restarted (the start scan finds it: in run 2 pass B it was uploaded). The runner reports it as `STUCK`, which is correct | client trace log (0 lines for the name, 6 for its neighbours) | not filed [V] |
-| H3 | the state column's push for an empty folder fails with `ArgumentException 0x80070057` (E_INVALIDARG), the same six folders as before; #122 made the reason visible | client log of run 3 | unidrive-windows#121 (root cause found in this log) |
+| H2 | `hazards/case-fold/ς.txt` (final sigma) next to `Σ.txt` stays a plain, local-only file: no queue line, no row; `Σ` and the other five case-fold files are uploaded. It stays that way until the mount is restarted (the start scan finds it: in run 2 pass B it was uploaded). The runner reports it as `STUCK`, which is correct. **Correction after the review:** my first reading (no `notify-file-close` in the trace) was void: that callback fires only for placeholders, a plain file never logs it. The likely cause, found in the code: `LocalChangeWatcher` keyed its debounce map `OrdinalIgnoreCase`, which in .NET folds U+03C2 into U+03A3 while NTFS keeps the two files apart, so with both events pending the second overwrote the first. A real-timing test passes even with the old keys (a late event rescues the file), so likely, not proven | client trace log, `LocalChangeWatcher` | unidrive-windows#124, draft fix #125 (ordinal keys); the safety-net rescan needs a design (#124) |
+| H3 | the state column's push for an empty folder fails with `ArgumentException 0x80070057` (E_INVALIDARG), the same six folders as before; #122 made the HRESULT visible. The log gives the HRESULT, not the cause (candidates: a clear on an empty folder, or a not-in-sync placeholder folder); #122 now logs push or clear, file or folder, placeholder or not | client log of run 3 | unidrive-windows#121, cause open |
 | H4 | the combining-mark name is still stored in NFC (`FORM`) | provider | by design (#171), see #491 |
