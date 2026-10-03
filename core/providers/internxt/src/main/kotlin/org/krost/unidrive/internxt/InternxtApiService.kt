@@ -46,6 +46,9 @@ class InternxtApiService(
         HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 500, stormSpacingMs = 1_000),
     private val bridgeBudget: HttpRetryBudget =
         HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
+    // The socket timeout of the listings, whose answers need minutes on a large account. A parameter so that
+    // loopback tests can run with a small one.
+    private val listingSocketTimeoutMs: Long = LISTING_SOCKET_TIMEOUT_MS,
     // Tests hand in a client on a MockEngine; production builds the default one.
     private val httpClient: HttpClient = defaultHttpClient(),
 ) : AutoCloseable {
@@ -93,6 +96,8 @@ class InternxtApiService(
         // byte; the flat 60 s watchdog cut every one of them. 330 s = statement
         // timeout + 10 percent — past it the server errors on its own, which is
         // the answer we want, not a silent client cut.
+        // A folder's content is such a listing too: a flat folder of 29,000 files needed 106 s and 31 MB, so
+        // getFolderContents rides at this limit as well.
         internal const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
@@ -123,7 +128,7 @@ class InternxtApiService(
 
     suspend fun getFolderContents(folderUuid: String): FolderContentResponse =
         folderContentsDedup.load(folderUuid, currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid")
+            val body = authenticatedGet("$baseUrl/folders/content/$folderUuid", socketTimeoutMs = listingSocketTimeoutMs)
             json.decodeFromString<FolderContentResponse>(body)
         }
 
@@ -139,7 +144,7 @@ class InternxtApiService(
                 authenticatedGet(
                     "$baseUrl/files",
                     listingQueryParams(updatedAt, limit, offset, status, sort),
-                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                    socketTimeoutMs = listingSocketTimeoutMs,
                 )
             json.decodeFromString<List<InternxtFile>>(body)
         }
@@ -156,7 +161,7 @@ class InternxtApiService(
                 authenticatedGet(
                     "$baseUrl/folders",
                     listingQueryParams(updatedAt, limit, offset, status, sort),
-                    socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                    socketTimeoutMs = listingSocketTimeoutMs,
                 )
             json.decodeFromString<List<InternxtFolder>>(body)
         }
@@ -176,7 +181,7 @@ class InternxtApiService(
             authenticatedGet(
                 "$baseUrl/folders/sync",
                 syncQueryParams(updatedAt, cursor, status, limit),
-                socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                socketTimeoutMs = listingSocketTimeoutMs,
             ),
         )
 
@@ -190,7 +195,7 @@ class InternxtApiService(
             authenticatedGet(
                 "$baseUrl/files/sync",
                 syncQueryParams(updatedAt, cursor, status, limit),
-                socketTimeoutMs = LISTING_SOCKET_TIMEOUT_MS,
+                socketTimeoutMs = listingSocketTimeoutMs,
             ),
         )
 
