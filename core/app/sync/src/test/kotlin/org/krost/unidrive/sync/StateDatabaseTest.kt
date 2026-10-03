@@ -574,6 +574,42 @@ class StateDatabaseTest {
         }
     }
 
+    /** The plan SQLite reports for [sql] with one bound [param], read through a connection of its own. */
+    private fun queryPlan(
+        database: StateDatabase,
+        sql: String,
+        param: String,
+    ): String {
+        val dbPath = database.javaClass.getDeclaredField("dbPath")
+            .apply { isAccessible = true }.get(database) as java.nio.file.Path
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            conn.prepareStatement("EXPLAIN QUERY PLAN $sql").use { stmt ->
+                stmt.setString(1, param)
+                val rs = stmt.executeQuery()
+                val plan = StringBuilder()
+                while (rs.next()) plan.append(rs.getString("detail")).append("\n")
+                return plan.toString()
+            }
+        }
+    }
+
+    @Test
+    fun `EXPLAIN QUERY PLAN for the lookup by effective remote path is an index search`() {
+        // The save of a gather looks every item up by its effective remote path. The expression
+        // COALESCE(remote_path, path) is covered by no other index, so without its own the lookup scanned the
+        // whole table and saving a large drive's first enumeration took hours. No ANALYZE here, for the
+        // reason given in the parent_uuid test above.
+        for (i in 0 until 20) db.upsertEntry(entry("/p/file$i.txt").copy(remoteId = "uuid-$i"))
+
+        val plan = queryPlan(db, StateDatabase.BY_REMOTE_PATH, "/p/file3.txt")
+
+        assertTrue(
+            "SEARCH" in plan && "idx_sync_entries_remote_path_alive" in plan && "SCAN" !in plan,
+            "expected an index search on the effective remote path; got plan:\n$plan",
+        )
+        assertEquals("/p/file3.txt", db.getEntryByRemotePath("/p/file3.txt")?.path)
+    }
+
     @Test
     fun `recovery namespace is the only path to TRASHED rows`() {
         db.upsertEntry(entry("/alive.txt").copy(remoteId = "uuid-alive"))
@@ -1188,6 +1224,12 @@ class StateDatabaseTest {
             assertNull(row.remotePath, "an existing row has no remote_path → reads as null (non-aliased)")
             // getEntryByRemotePath collapses to a plain path match for null rows.
             assertEquals("/Docs/report.pdf", upgraded.getEntryByRemotePath("/Docs/report.pdf")?.path)
+            // The index of that lookup needs the column, so the migrated database has it too.
+            val plan = queryPlan(upgraded, StateDatabase.BY_REMOTE_PATH, "/Docs/report.pdf")
+            assertTrue(
+                "idx_sync_entries_remote_path_alive" in plan && "SCAN" !in plan,
+                "a migrated database must search the effective remote path by index; got plan:\n$plan",
+            )
             // schema_version is unchanged (additive column, no bump).
             assertEquals(
                 StateDatabase.SCHEMA_VERSION.toString(),
