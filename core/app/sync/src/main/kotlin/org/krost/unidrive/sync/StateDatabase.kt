@@ -375,6 +375,16 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN upload_refused TEXT",
                 )
             }
+            // Every item a gather brings is looked up by its effective remote path (getEntryByRemotePath), and no
+            // other index covers that expression: each lookup scanned the whole table, so saving the first
+            // enumeration of a large drive took time quadratic in its size (hours for a few hundred thousand
+            // items). Created here, after the migrations, because older databases get remote_path above.
+            stmt.executeUpdate(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sync_entries_remote_path_alive
+                    ON sync_entries(COALESCE(remote_path, path)) WHERE status='EXISTS'
+            """,
+            )
         }
     }
 
@@ -671,9 +681,7 @@ class StateDatabase(
     @Synchronized
     fun getEntryByRemotePath(remotePathRaw: String): SyncEntry? {
         val remotePath = PathNormalizer.nfc(remotePathRaw)
-        conn.prepareStatement(
-            "SELECT * FROM alive_entries WHERE COALESCE(remote_path, path) = ?",
-        ).use { stmt ->
+        conn.prepareStatement(BY_REMOTE_PATH).use { stmt ->
             stmt.setString(1, remotePath)
             val rs = stmt.executeQuery()
             return if (rs.next()) rs.toSyncEntry() else null
@@ -1574,6 +1582,12 @@ class StateDatabase(
 
         /** `path` starts with the bound prefix, exactly (see [bindPrefix]): two parameters, both the prefix. */
         private const val UNDER_PREFIX = "substr(path, 1, length(?)) = ?"
+
+        /**
+         * The lookup by effective remote path. Its expression and the `alive_entries` predicate are those of
+         * `idx_sync_entries_remote_path_alive`; SQLite uses that index only for exactly this expression.
+         */
+        internal const val BY_REMOTE_PATH = "SELECT * FROM alive_entries WHERE COALESCE(remote_path, path) = ?"
 
         /** Extra room required beyond the source size before a snapshot is attempted. */
         private const val SNAPSHOT_SPACE_FACTOR = 1.2
