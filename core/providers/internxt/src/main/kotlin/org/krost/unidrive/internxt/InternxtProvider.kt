@@ -532,7 +532,28 @@ class InternxtProvider(
         }
     }
 
+    // #493: a request the server refuses as such (400 Bad Request, 413, 415, 422) is refused again with the same bytes; it
+    // becomes a PermanentUploadFailureException, so the hydration queue does not run its retry ladder on it. Everything else
+    // (5xx, 408, 409, 429, auth, network) keeps its type and stays retryable.
     override suspend fun upload(
+        localPath: Path,
+        remotePath: String,
+        existingRemoteId: String?,
+        ifMatchETag: String?,
+        onProgress: ((Long, Long) -> Unit)?,
+    ): CloudItem =
+        try {
+            uploadUnclassified(localPath, remotePath, existingRemoteId, ifMatchETag, onProgress)
+        } catch (e: InternxtApiException) {
+            if (e.statusCode !in PERMANENT_UPLOAD_STATUS) throw e
+            throw org.krost.unidrive.PermanentUploadFailureException(
+                "Internxt refused the upload of $remotePath (${e.statusCode}): ${e.message}",
+                cause = e,
+                requestId = e.requestId,
+            )
+        }
+
+    private suspend fun uploadUnclassified(
         localPath: Path,
         remotePath: String,
         existingRemoteId: String?,
@@ -1961,6 +1982,9 @@ class InternxtProvider(
     }
 
     companion object {
+        /** #493: statuses by which the server refuses an upload request as such; another attempt is refused again. */
+        internal val PERMANENT_UPLOAD_STATUS = setOf(400, 413, 415, 422)
+
         // Server-unavailable status codes that trigger the slower fallback
         // walk over the folder tree (line 518) or skip-this-folder (line 699).
         // Narrower than TRANSIENT_STATUSES: 429 (rate-limited) and 502/504

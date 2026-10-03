@@ -486,6 +486,20 @@ class HydrationImpl(
                     ok = false,
                     error = HydrationError.Conflict,
                 )
+            } catch (e: org.krost.unidrive.PermanentUploadFailureException) {
+                // #493: the provider refused the request itself; the same bytes and the same call would be refused again,
+                // so the retry ladder would only hold a transfer slot through its whole backoff schedule.
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                val err = HydrationError.Generic(e.message ?: "upload refused")
+                _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
+                log.warn("upload of {} refused by the provider, not retrying: {}", path, e.message ?: "upload refused")
+                return HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.UPLOAD,
+                    ok = false,
+                    error = err,
+                )
             } catch (e: Exception) {
                 runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
                 // A vanished row (renamed away, unlinked, or reaped while queued) or a vanished cache copy: nothing a

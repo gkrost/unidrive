@@ -117,6 +117,32 @@ class HydrationUploadQueueTest {
         collector.cancel()
     }
 
+    // #493: an upload the provider refuses as such (Internxt's 400 for an empty file, #485) used to run the whole retry
+    // ladder, holding a transfer slot through every backoff, before failing the same way.
+    @Test
+    fun `an upload the provider refuses is not retried`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 3,
+            uploadRetryDelaysMs = listOf(1L, 1L),
+        )
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        writeCache(env, "/docs/f.txt", "refused")
+        env.syncEngine.refuseUploads(999)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForWrite("conn1", "h1", "/docs/f.txt", env.syncEngine.resolveCachePath("/docs/f.txt"))
+        advanceUntilIdle()
+
+        assertEquals(1, env.syncEngine.uploadAttempts(), "a refusal is deterministic: retrying cannot succeed")
+        assertEquals(listOf(false), events.filterIsInstance<HydrationEvent.Failed>().map { it.retryScheduled })
+        assertFalse(events.filterIsInstance<HydrationEvent.Completed>().single().ok)
+        assertTrue(env.stateDb.lastErrorAt("/docs/f.txt") != null, "the refused row stays visible as failed")
+        collector.cancel()
+    }
+
     @Test
     fun `an upload whose row vanished while queued is not retried`() = runTest {
         val env = HydrationTestEnv(
