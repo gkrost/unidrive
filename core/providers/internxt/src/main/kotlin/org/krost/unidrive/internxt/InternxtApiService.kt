@@ -154,6 +154,8 @@ class InternxtApiService(
         size: Long,
         type: String?,
         fileId: String? = null,
+        // #486: CreateFileDto takes an optional modificationTime; without it the server stamps the upload time.
+        modificationTime: java.time.Instant? = null,
     ): InternxtFile =
         retryOnTransient {
             withAuthRetry { creds ->
@@ -169,6 +171,9 @@ class InternxtApiService(
                             put("encryptVersion", kotlinx.serialization.json.JsonPrimitive("03-aes"))
                             if (type != null) put("type", kotlinx.serialization.json.JsonPrimitive(type))
                             if (fileId != null) put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
+                            if (modificationTime != null) {
+                                put("modificationTime", kotlinx.serialization.json.JsonPrimitive(modificationTime.toString()))
+                            }
                         }
                     val response =
                         httpClient.post("$baseUrl/files") {
