@@ -221,6 +221,11 @@ class GraphApiService(
         // Content-Type: text/html) instead of bytes can't be recovered by
         // re-GETting the same stale URL. Re-resolve the download URL once.
         var htmlReresolved = false
+        // #329: the pre-authenticated @microsoft.graph.downloadUrl carries a tempauth
+        // token that expires (~1 h). A 401/403 on that URL says nothing about account
+        // auth: re-resolve the item once for a fresh URL before treating it as an
+        // authentication failure. Bounded to a single re-resolve (no loop).
+        var authUrlReresolved = false
         while (true) {
             try {
                 throttleBudget.awaitSlot()
@@ -232,6 +237,9 @@ class GraphApiService(
                     statement.execute { response ->
                         if (authNeeded && response.status == HttpStatusCode.Unauthorized && !authRefreshed) {
                             return@execute DownloadOutcome.RetryAuth
+                        }
+                        if (!authNeeded && (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden)) {
+                            return@execute DownloadOutcome.ExpiredUrl(response.status.value, readBoundedErrorBody(response))
                         }
                         if (response.status == HttpStatusCode.Unauthorized) {
                             throw AuthenticationException(
@@ -257,34 +265,38 @@ class GraphApiService(
                                 Files.createDirectories(destPath.parent)
                                 val tmpPath = destPath.parent.resolve("${destPath.fileName}.unidrive-tmp")
                                 try {
-                                    Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
-                                        val buf = ByteArray(8192)
-                                        var w = 0L
-                                        while (true) {
-                                            val n = channel.readAvailable(buf)
-                                            if (n <= 0) break
-                                            out.write(buf, 0, n)
-                                            w += n
+                                    val w =
+                                        Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
+                                            val buf = ByteArray(8192)
+                                            var n = 0L
+                                            while (true) {
+                                                val r = channel.readAvailable(buf)
+                                                if (r <= 0) break
+                                                out.write(buf, 0, r)
+                                                n += r
+                                            }
+                                            n
                                         }
-                                        w
-                                    }.also {
-                                        Files.move(tmpPath, destPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                                    // #354: the truncation guard runs on the TEMP file, before the
+                                    // atomic move. A connection that closes mid-body without throwing
+                                    // used to have its short temp promoted over the destination
+                                    // first and only detected afterwards — the intact previous
+                                    // version was gone before truncation surfaced. A short read now
+                                    // deletes the temp and throws with the destination untouched,
+                                    // the same guarantee the thrown-exception path already had.
+                                    val expected = response.contentLength()
+                                    if (expected != null && expected >= 0L && w != expected) {
+                                        throw java.io.IOException(
+                                            "Truncated download itemId=$itemId: got $w of $expected bytes",
+                                        )
                                     }
+                                    Files.move(tmpPath, destPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                                    w
                                 } catch (e: Exception) {
                                     Files.deleteIfExists(tmpPath)
                                     throw e
                                 }
                             }
-                        // Truncation guard: a connection that closes mid-body can yield a
-                        // short file without throwing. Compare bytes written against the
-                        // response Content-Length and treat a short read as a retryable
-                        // flake, so a partial cache is never returned as a complete download.
-                        val expected = response.contentLength()
-                        if (expected != null && expected >= 0L && written != expected) {
-                            throw java.io.IOException(
-                                "Truncated download itemId=$itemId: got $written of $expected bytes",
-                            )
-                        }
                         downloadedBytes = written
                         DownloadOutcome.Done
                     }
@@ -294,6 +306,37 @@ class GraphApiService(
                     DownloadOutcome.RetryAuth -> {
                         log.info("Got 401 on download itemId={} — forcing token refresh and retrying once", itemId)
                         authRefreshed = true
+                        continue
+                    }
+                    is DownloadOutcome.ExpiredUrl -> {
+                        // #329: the tempauth token of the pre-authenticated downloadUrl
+                        // expired — not an account-auth problem. Re-resolve the item once
+                        // for a fresh URL (mirrors the HTML re-resolve arm below); only a
+                        // 401/403 on the fresh URL is surfaced as an authentication failure.
+                        if (authUrlReresolved) {
+                            // Only a 401 is an authentication failure. A 403 that persists on a
+                            // fresh URL is an access refusal (before #329 it surfaced as the
+                            // generic download failure): keep that, so it cannot latch the
+                            // stale-auth UX (#157).
+                            if (outcome.statusCode == HttpStatusCode.Forbidden.value) {
+                                throw GraphApiException(
+                                    "Download failed: ${HttpStatusCode.Forbidden} - ${outcome.body}",
+                                    outcome.statusCode,
+                                )
+                            }
+                            throw AuthenticationException(
+                                "Authentication failed (${outcome.statusCode}) on a re-resolved download URL for item $itemId",
+                            )
+                        }
+                        authUrlReresolved = true
+                        log.warn(
+                            "Got {} on the pre-authenticated download URL itemId={} — re-resolving for a fresh URL and retrying once",
+                            outcome.statusCode,
+                            itemId,
+                        )
+                        val fresh = getItemById(itemId)
+                        url = fresh.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+                        authNeeded = fresh.downloadUrl == null
                         continue
                     }
                     is DownloadOutcome.Throttle -> {
@@ -1048,6 +1091,13 @@ class GraphApiService(
         data object Done : DownloadOutcome()
 
         data object RetryAuth : DownloadOutcome()
+
+        // #329: the pre-authenticated downloadUrl's tempauth token expired (401/403 on
+        // an authNeeded == false request). Carries the status for the failure surface.
+        data class ExpiredUrl(
+            val statusCode: Int,
+            val body: String,
+        ) : DownloadOutcome()
 
         data class Throttle(
             val waitMs: Long,

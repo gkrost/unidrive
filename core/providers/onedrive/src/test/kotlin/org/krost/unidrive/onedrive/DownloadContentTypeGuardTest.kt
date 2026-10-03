@@ -207,4 +207,107 @@ class DownloadContentTypeGuardTest {
             runCatching { Files.deleteIfExists(destPath) }
             runCatching { Files.deleteIfExists(tempDir) }
         }
+
+    // #354: the truncation guard must run BEFORE the temp file is moved over the
+    // destination. A silent short read used to be atomically promoted first and only
+    // detected afterwards, so the destination held the truncated bytes and the intact
+    // previous version was gone before the failure surfaced.
+    @Test
+    fun `a truncated download leaves the previous destination untouched and no temp behind`() =
+        runTest {
+            val cdnUrl = "https://fake-cdn.sharepoint.com/trunc-over-good"
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    if (url.contains("/drive/items/test-id") && !url.endsWith("/content")) {
+                        respond(
+                            content = driveItemWithCdnUrl(cdnUrl),
+                            status = HttpStatusCode.OK,
+                            headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        respond(
+                            content = ByteArray(5),
+                            status = HttpStatusCode.OK,
+                            headers =
+                                headersOf(
+                                    HttpHeaders.ContentType to listOf("application/octet-stream"),
+                                    HttpHeaders.ContentLength to listOf("100"),
+                                ),
+                        )
+                    }
+                }
+
+            val service = newService()
+            installMockClient(service, engine)
+            val tempDir = Files.createTempDirectory("od354-guard-")
+            val destPath = tempDir.resolve("f.bin")
+            val goodBytes = "GOOD-BYTES-V1".toByteArray()
+            Files.write(destPath, goodBytes)
+
+            val e = assertFailsWith<Exception> { service.downloadFile("test-id", destPath) }
+            assertTrue(
+                e.message?.contains("Truncated download") == true,
+                "the truncation guard must be what surfaces, got: ${e.message}",
+            )
+            assertTrue(
+                goodBytes.contentEquals(Files.readAllBytes(destPath)),
+                "#354: the destination must still hold the previous bytes, got ${Files.readAllBytes(destPath).size} bytes",
+            )
+            Files.list(tempDir).use { stream ->
+                assertTrue(
+                    stream.noneMatch { it.fileName.toString().endsWith(".unidrive-tmp") },
+                    "the short temp file must be deleted, not left beside the destination",
+                )
+            }
+
+            service.close()
+            runCatching { Files.deleteIfExists(destPath) }
+            runCatching { Files.deleteIfExists(tempDir) }
+        }
+
+    // #354 control: a complete download (body length == Content-Length) still replaces
+    // a pre-existing destination.
+    @Test
+    fun `a complete download still replaces the previous destination`() =
+        runTest {
+            val cdnUrl = "https://fake-cdn.sharepoint.com/complete"
+            val payload = "COMPLETE-NEW-BYTES".toByteArray()
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    if (url.contains("/drive/items/test-id") && !url.endsWith("/content")) {
+                        respond(
+                            content = driveItemWithCdnUrl(cdnUrl),
+                            status = HttpStatusCode.OK,
+                            headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                        )
+                    } else {
+                        respond(
+                            content = payload,
+                            status = HttpStatusCode.OK,
+                            headers =
+                                headersOf(
+                                    HttpHeaders.ContentType to listOf("application/octet-stream"),
+                                    HttpHeaders.ContentLength to listOf(payload.size.toString()),
+                                ),
+                        )
+                    }
+                }
+
+            val service = newService()
+            installMockClient(service, engine)
+            val tempDir = Files.createTempDirectory("od354-ok-")
+            val destPath = tempDir.resolve("f.bin")
+            Files.write(destPath, "OLD-CONTENT".toByteArray())
+
+            val size = service.downloadFile("test-id", destPath)
+
+            assertEquals(payload.size.toLong(), size)
+            assertTrue(payload.contentEquals(Files.readAllBytes(destPath)), "the new bytes must replace the old ones")
+
+            service.close()
+            runCatching { Files.deleteIfExists(destPath) }
+            runCatching { Files.deleteIfExists(tempDir) }
+        }
 }

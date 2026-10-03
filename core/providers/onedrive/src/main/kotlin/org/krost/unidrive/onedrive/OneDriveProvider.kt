@@ -81,6 +81,30 @@ class OneDriveProvider(
     override suspend fun download(
         remotePath: String,
         destination: Path,
+    ): Long =
+        // #247: a 404 with Graph error code `itemNotFound` that escapes the download
+        // flow (the item is gone at the first path resolve, or still gone after the
+        // bounded stale-URL re-resolve below) is a permanent failure, not a transient
+        // one: the engine quarantines the row via PermanentDownloadFailureException —
+        // the same machinery the Internxt provider feeds — instead of retrying the
+        // download on every poll. Any other 404 error code and every 5xx/429 keep
+        // today's retryable behaviour. The re-resolve arm below runs FIRST, so a
+        // stale download URL on a live item still recovers.
+        try {
+            downloadResolved(remotePath, destination)
+        } catch (e: GraphApiException) {
+            if (e.isItemNotFound()) {
+                throw PermanentDownloadFailureException(
+                    "OneDrive item at '$remotePath' is gone (404 itemNotFound): the download can never succeed until the row is re-resolved",
+                    cause = e,
+                )
+            }
+            throw e
+        }
+
+    private suspend fun downloadResolved(
+        remotePath: String,
+        destination: Path,
     ): Long {
         val item = graphApi.getItemByPath(remotePath)
         return try {
@@ -102,6 +126,12 @@ class OneDriveProvider(
             graphApi.downloadFile(fresh.id, destination)
         }
     }
+
+    // #247: the Graph error body is embedded in the message by requireSuccess and the
+    // download path ("API error: 404 Not Found - {\"error\":{\"code\":\"itemNotFound\",...}}").
+    // statusCode alone cannot distinguish "gone" from any other 404.
+    private fun GraphApiException.isItemNotFound(): Boolean =
+        message?.contains("\"code\":\"itemNotFound\"") == true
 
     override suspend fun upload(
         localPath: Path,

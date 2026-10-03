@@ -7,11 +7,14 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
+import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.PermanentDownloadFailureException
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -239,12 +242,231 @@ class OneDriveDownloadReresolveTest {
 
             val dest = Files.createTempFile("od-gone", ".bin")
             val ex =
-                assertFailsWith<GraphApiException> {
+                assertFailsWith<PermanentDownloadFailureException> {
                     provider.download("/gone.bin", dest)
                 }
-            assertEquals(404, ex.statusCode, "a genuinely-missing item must surface a 404 not-found")
+            val cause = assertNotNull(ex.cause, "the underlying GraphApiException stays attached")
+            assertTrue(cause is GraphApiException && cause.statusCode == 404, "the cause carries the 404")
             // Bounded: initial resolve + exactly one re-resolve = 2 path resolves; no more.
             assertEquals(2, getByPathCalls.get(), "the item must be re-resolved AT MOST once (no infinite loop)")
+            provider.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #329: the pre-authenticated @microsoft.graph.downloadUrl carries a tempauth token
+    // that expires (~1 h). A 401 on that URL says nothing about account auth — the item
+    // must be re-resolved once for a fresh URL and the download retried, instead of
+    // being misclassified as an AuthenticationException.
+    @Test
+    fun `an expired pre-authenticated download url 401 is re-resolved once and the download succeeds`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        // getItemById inside downloadFile: hands out an expired CDN URL first,
+                        // a fresh one after the re-resolve.
+                        url.contains("/me/drive/items/item-401") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            val dl = if (n == 0) "https://cdn.example/expired" else "https://cdn.example/fresh401"
+                            respond(
+                                content = jsonItem("item-401", dl),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        // The expired pre-auth URL answers 401 — the tempauth token aged out.
+                        url == "https://cdn.example/expired" -> {
+                            respond(
+                                content = """{"error":{"code":"InvalidAuthenticationToken","message":"Access token expired."}}""",
+                                status = HttpStatusCode.Unauthorized,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        // The re-resolved URL serves the bytes.
+                        url == "https://cdn.example/fresh401" -> {
+                            respond(
+                                content = "FRESH",
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/octet-stream"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329", ".bin")
+            service.downloadFile("item-401", dest)
+
+            assertEquals("FRESH", Files.readString(dest), "the fresh URL must serve the download")
+            assertEquals(2, itemByIdCalls.get(), "the item must be resolved exactly twice (initial + one re-resolve)")
+            service.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #329: a 401 that persists on the re-resolved URL is a real failure — but exactly
+    // one re-resolve, no loop.
+    @Test
+    fun `a 401 that persists after re-resolution throws AuthenticationException with no second re-resolve`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/me/drive/items/item-401b") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            val dl = if (n == 0) "https://cdn.example/gone401a" else "https://cdn.example/gone401b"
+                            respond(
+                                content = jsonItem("item-401b", dl),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url.startsWith("https://cdn.example/gone401") -> {
+                            respond(
+                                content = """{"error":{"code":"InvalidAuthenticationToken","message":"Access token expired."}}""",
+                                status = HttpStatusCode.Unauthorized,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329b", ".bin")
+            assertFailsWith<AuthenticationException> {
+                service.downloadFile("item-401b", dest)
+            }
+            assertEquals(
+                2,
+                itemByIdCalls.get(),
+                "at most one re-resolve: initial + one, never a loop",
+            )
+            service.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #329 review: a 403 that persists on the fresh URL is an access refusal, not an
+    // authentication failure (it must not latch the stale-auth UX), as before the change.
+    @Test
+    fun `a 403 that persists after re-resolution stays a GraphApiException`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/me/drive/items/item-403") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            respond(
+                                content = jsonItem("item-403", "https://cdn.example/forbidden$n"),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url.startsWith("https://cdn.example/forbidden") -> {
+                            respond(
+                                content = """{"error":{"code":"accessDenied","message":"no"}}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329c", ".bin")
+            val ex = assertFailsWith<GraphApiException> { service.downloadFile("item-403", dest) }
+            assertEquals(403, ex.statusCode)
+            assertEquals(2, itemByIdCalls.get(), "still exactly one re-resolve")
+            service.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #247, the live repro: the item is already gone at the FIRST path resolve. That
+    // 404 used to escape as a raw GraphApiException and was retried on every poll.
+    @Test
+    fun `a 404 itemNotFound on the initial path resolve is a permanent failure`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/me/drive/root:/") -> {
+                            respond(
+                                content = """{"error":{"code":"itemNotFound","message":"The resource could not be found."}}""",
+                                status = HttpStatusCode.NotFound,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val provider = OneDriveProvider(OneDriveConfig())
+            installGraphApi(provider, engine)
+
+            val dest = Files.createTempFile("od-247", ".bin")
+            assertFailsWith<PermanentDownloadFailureException> {
+                provider.download("/never-was.bin", dest)
+            }
+            provider.close()
+            Files.deleteIfExists(dest)
+        }
+
+    // #247: only `itemNotFound` means gone. A 404 with another error code stays the
+    // retryable GraphApiException, and so does a 503.
+    @Test
+    fun `a 404 with another error code and a 503 stay retryable`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        // 503 on the path resolve: sendThrottled retries it internally,
+                        // then requireSuccess throws GraphApiException — never permanent.
+                        url.contains("throttle.bin") -> {
+                            respond(
+                                content = """{"error":{"code":"serviceNotAvailable","message":"503"}}""",
+                                status = HttpStatusCode.ServiceUnavailable,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        // 404 generalException on the path resolve: retryable, not permanent.
+                        url.contains("other-code.bin") -> {
+                            respond(
+                                content = """{"error":{"code":"generalException","message":"boom"}}""",
+                                status = HttpStatusCode.NotFound,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val provider = OneDriveProvider(OneDriveConfig())
+            installGraphApi(provider, engine)
+
+            val dest = Files.createTempFile("od-247b", ".bin")
+            assertFailsWith<GraphApiException> {
+                provider.download("/other-code.bin", dest)
+            }
+            assertFailsWith<GraphApiException> {
+                provider.download("/throttle.bin", dest)
+            }
             provider.close()
             Files.deleteIfExists(dest)
         }
