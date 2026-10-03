@@ -283,6 +283,92 @@ class InternxtScopedDeltaTest {
             )
         }
 
+    // The window belongs to full gathers. An incremental poll is one cheap updatedAt-filtered query, and walking the whole
+    // tree in its place costs a full enumeration: a failed full gather must not push the poll after it into one, and a
+    // failed poll must not make the next full gather skip the account-wide listings. Here the full listing (no updatedAt)
+    // and the incremental one (an updatedAt bound) are told apart by that parameter.
+
+    @Test
+    fun `an incremental poll right after a full gather that ended in the walk still lists by updatedAt`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) ->
+                            if (request.url.parameters["updatedAt"] != null) {
+                                respond("[]", HttpStatusCode.OK, json)
+                            } else {
+                                throw cutByTheGateway()
+                            }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val p = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val full = p.delta(null, null, scanContext)
+            assertTrue(full.complete, "the full gather ended in the walk")
+            val before = requested.size
+            val poll = p.delta("2026-10-03T10:00:00Z", null, scanContext)
+
+            val since = requested.drop(before)
+            assertTrue(since.none { it.contains("/folders/content/") }, "the poll walked the folder tree: $since")
+            assertTrue(
+                since.any { java.net.URI(it).path.endsWith("/drive/files") && it.contains("updatedAt=") },
+                "the poll did not list files by updatedAt: $since",
+            )
+            assertTrue(
+                since.any { java.net.URI(it).path.endsWith("/drive/folders") && it.contains("updatedAt=") },
+                "the poll did not list folders by updatedAt: $since",
+            )
+            assertTrue(poll.items.isEmpty(), "nothing changed since: ${poll.items.map { it.path }}")
+            assertTrue(poll.complete)
+        }
+
+    @Test
+    fun `an incremental poll that fails does not make the next full gather skip the account-wide listings`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) ->
+                            if (request.url.parameters["updatedAt"] != null) {
+                                throw cutByTheGateway()
+                            } else {
+                                respond("[]", HttpStatusCode.OK, json)
+                            }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val p = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val poll = p.delta("2026-10-03T10:00:00Z", null, scanContext)
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                poll.items.map { it.path }.toSet(),
+                "a failed poll still ends in the walk, as before",
+            )
+            val before = requested.size
+            val full = p.delta(null, null, scanContext)
+
+            val since = requested.drop(before)
+            assertTrue(
+                since.any { java.net.URI(it).path.endsWith("/drive/files") && !it.contains("updatedAt=") },
+                "the full gather did not ask the account-wide listing: $since",
+            )
+            assertTrue(since.none { it.contains("/folders/content/") }, "the full gather walked the folder tree: $since")
+            assertTrue(full.items.isEmpty(), "the listing is empty: ${full.items.map { it.path }}")
+        }
+
     @Test
     fun `a listing that fails for another reason than the gateway's unavailability still fails the gather`() =
         runTest {

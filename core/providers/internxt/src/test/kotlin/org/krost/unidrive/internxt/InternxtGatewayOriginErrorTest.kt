@@ -282,6 +282,47 @@ class InternxtGatewayOriginErrorTest {
             assertTrue(second.complete)
         }
 
+    // The window is for full gathers: after a 524 on a full gather the incremental poll still asks its cheap updatedAt
+    // listing, instead of being turned into a walk of the whole tree.
+    @Test
+    fun `a 524 on a full gather leaves the incremental poll that follows on its updatedAt listing`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val (code, headers) = answer(524, retryAfter = "120")
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    val path = request.url.encodedPath
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        path.endsWith("/drive/files") || path.endsWith("/drive/folders") ->
+                            if (request.url.parameters["updatedAt"] != null) {
+                                respond("[]", HttpStatusCode.OK, json)
+                            } else {
+                                respond(errorBody(524), code, headers)
+                            }
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val provider = provider(engine)
+            val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
+
+            val full = provider.delta(null, null, scanContext)
+            val before = requested.size
+            val poll = provider.delta("2026-10-03T10:00:00Z", null, scanContext)
+
+            assertTrue(full.complete, "the 524 on the full gather ended in the walk")
+            val since = requested.drop(before)
+            assertTrue(since.none { it.contains("/folders/content/") }, "the poll walked the folder tree: $since")
+            assertTrue(
+                since.any { java.net.URI(it).path.endsWith("/drive/files") && it.contains("updatedAt=") },
+                "the poll did not list files by updatedAt: $since",
+            )
+            assertTrue(poll.items.isEmpty(), "nothing changed since: ${poll.items.map { it.path }}")
+            assertTrue(poll.complete)
+        }
+
     // ---- on a real socket ---------------------------------------------------------------------------------------------
 
     @Test
