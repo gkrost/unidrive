@@ -1333,6 +1333,14 @@ open class SyncEngine(
 
     // Records the attempt for enumerationStatus: its start, its end, and a failure that escapes. The
     // provider failures that end as an EnumerateResult are recorded where they are caught.
+    //
+    // #517 R3: the failure side of ENUMERATE_FAILURE_STREAK_KEY — one write per
+    // failed gather, read by the daemon's enumerate poller at start.
+    private fun recordEnumerateFailureStreak() {
+        val streak = (db.getSyncState(ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0) + 1
+        db.setSyncState(ENUMERATE_FAILURE_STREAK_KEY, streak.toString())
+    }
+
     private suspend fun enumerateRemoteIntoStateLocked(reset: Boolean): EnumerateResult {
         enumerationTracker.begin()
         try {
@@ -1407,9 +1415,11 @@ open class SyncEngine(
                 gatherRemoteChanges(progress = enumerationTracker).filterKeys { isTracked(it) }
             } catch (e: ProviderException) {
                 enumerationTracker.failed(e.message ?: e.javaClass.simpleName)
+                recordEnumerateFailureStreak()
                 return EnumerateResult(ok = false, error = e.message)
             }
         val listingMs = enumerationTracker.saving(remoteChanges.count { !it.value.deleted })
+        db.setSyncState(ENUMERATE_FAILURE_STREAK_KEY, "0")
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
         val canonicalToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
@@ -5254,6 +5264,12 @@ open class SyncEngine(
 
     companion object {
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+
+        // #517 R3: sync_state key counting consecutive enumerations that ended in a
+        // provider failure. The daemon's enumerate poller seeds its backoff from it
+        // at start, so a restart into a known-bad remote doesn't re-run the doomed
+        // cycle at full cadence. Reset to "0" by any gather that comes back.
+        const val ENUMERATE_FAILURE_STREAK_KEY: String = "enumerate_failure_streak"
 
         // Bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2):
         // a complete enumeration flipping more than max(absolute, fraction × tracked

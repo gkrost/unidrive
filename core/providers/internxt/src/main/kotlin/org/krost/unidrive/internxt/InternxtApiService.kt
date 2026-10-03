@@ -936,9 +936,14 @@ class InternxtApiService(
         // 401 doesn't restart the full 3-iteration delay ladder — it consumes
         // only the current attempt's slot.
         for ((index, delay) in delays.withIndex()) {
+            // Per-attempt start, taken after the budget slot is granted so the
+            // elapsed time matches what the socket watchdog measures (connect +
+            // send + wait for the first response byte). 0 = no attempt started.
+            var attemptStartNanos = 0L
             try {
                 return withAuthRetry { creds ->
                     driveBudget.awaitSlot()
+                    attemptStartNanos = System.nanoTime()
                     try {
                         val response =
                             httpClient.get(url) {
@@ -978,6 +983,23 @@ class InternxtApiService(
                 // EOFException alone, as this did, never saw that commonest case: the gateway cuts a slow
                 // /drive/files request after a minute or two, the call gave up at once as "Connection error"
                 // (status 0), and neither the retry nor the /files -> folder walk fallback (500/503 only) ran.
+                val elapsedMs = (System.nanoTime() - attemptStartNanos) / 1_000_000
+                if (attemptStartNanos != 0L &&
+                    e.closedBeforeResponse() &&
+                    UploadTimeoutPolicy.isSocketWatchdogCut(elapsedMs, socketTimeoutMs)
+                ) {
+                    // #517 R3/F1: a cut whose elapsed matches the request's own read-idle watchdog is not a
+                    // server event, and the ladder proved it: retrying with identical parameters won 2 of 26
+                    // folder pairs and 0 of 22 file pairs, at ~62 s each. Surface 503 at once so the caller's
+                    // fallback (the tree walk) starts now.
+                    throw InternxtApiException(
+                        "Socket watchdog fired for GET $url after ${elapsedMs}ms (limit ${socketTimeoutMs}ms) — " +
+                            "a cut at the limit is our own read-idle timer, not the server; " +
+                            "not retrying with identical parameters",
+                        503,
+                        cause = e,
+                    )
+                }
                 driveBudget.recordIoRetry()
                 lastException =
                     if (e.closedBeforeResponse()) {

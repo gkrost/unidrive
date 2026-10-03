@@ -125,6 +125,35 @@ class EnumeratePollerTest {
         scope.cancel()
     }
 
+    // #517 R3: a flat first step repeated forever re-ran a doomed enumerate every ~7 min
+    // for hours on the live account. The injected jitter records every sleep before it
+    // is taken, so the recorded values ARE the schedule.
+
+    @Test
+    fun `backoff escalates with consecutive failures to the cap`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+            )
+        poller.start()
+
+        // Ticks at 60s, 300s (60+240) and 900s (300+600): one flat step, then the cap.
+        advanceTimeBy(900_001L)
+        runCurrent()
+        assertEquals(listOf(60_000L, 240_000L, 600_000L), sleeps.take(3), "240s once, then the cap — not 240s forever")
+        scope.cancel()
+    }
+
     @Test
     fun `the poller records the jittered sleep, not the nominal one`() = runTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
@@ -146,6 +175,33 @@ class EnumeratePollerTest {
         runCurrent()
 
         assertEquals(listOf(null, (intervalMs + 7_000) + (3 * intervalMs + 7_000)), reported)
+        scope.cancel()
+    }
+
+    @Test
+    fun `backoff starts escalated from the prior run's failure streak`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+                consecutiveFailuresAtStart = 2,
+            )
+        poller.start()
+
+        // Seeded 60k → 240k → 600k cap; the first tick waits 600s, failures keep it there.
+        advanceTimeBy(1_200_001L)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get())
+        assertEquals(listOf(600_000L, 600_000L), sleeps.take(2), "a streak of 2 starts the schedule at the cap")
         scope.cancel()
     }
 
@@ -195,6 +251,33 @@ class EnumeratePollerTest {
         runCurrent()
 
         assertEquals(listOf<Long?>(null, null), reported, "each run start clears; a success leaves nothing scheduled")
+        scope.cancel()
+    }
+
+    @Test
+    fun `a success returns an escalated schedule to the plain interval`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+                consecutiveFailuresAtStart = 2,
+            )
+        poller.start()
+
+        // First tick at the seeded 600s succeeds; the next sleep is the plain interval.
+        advanceTimeBy(600_000L + 60_000L + 1)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get())
+        assertEquals(listOf(600_000L, 60_000L), sleeps.take(2), "recovery drops the escalation")
         scope.cancel()
     }
 
