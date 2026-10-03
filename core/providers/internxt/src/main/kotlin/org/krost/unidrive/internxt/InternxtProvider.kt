@@ -924,6 +924,7 @@ class InternxtProvider(
                         size = fileSize,
                         type = ext,
                         fileId = bucketEntry.id,
+                        modificationTime = localMtime,
                     )
                 finalItem = created.toCloudItem(parentPath)
             } else {
@@ -949,6 +950,7 @@ class InternxtProvider(
                         size = fileSize,
                         type = ext,
                         fileId = bucketEntry.id,
+                        modificationTime = localMtime,
                     )
                 } catch (e: InternxtApiException) {
                     // UD-366 defensive fallback: reconciler/DB drift can leave us POSTing a
@@ -1035,6 +1037,7 @@ class InternxtProvider(
                                         size = fileSize,
                                         type = ext,
                                         fileId = bucketEntry.id,
+                                        modificationTime = localMtime,
                                     )
                                 break
                             } catch (ce: InternxtApiException) {
@@ -1123,6 +1126,7 @@ class InternxtProvider(
                 size = 0L,
                 type = ext,
                 fileId = null,
+                modificationTime = localMtime,
             )
 
         if (existingRemoteId != null) {
