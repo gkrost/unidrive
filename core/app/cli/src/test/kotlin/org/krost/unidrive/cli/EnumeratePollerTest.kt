@@ -119,9 +119,11 @@ class EnumeratePollerTest {
         runCurrent()
         assertEquals(listOf(null, 240_000L), reported, "cleared at the start, then 60 s + the backed-off 180 s")
 
-        advanceTimeBy(180_000) // the retry starts at 240 s and fails too
+        // The retry starts at 240 s and fails too; the backoff escalates (180 s x 3 = 540 s,
+        // not a flat 180 s again, #517 R3), so the reported next attempt is 240 s + 540 s.
+        advanceTimeBy(180_000)
         runCurrent()
-        assertEquals(listOf(null, 240_000L, null, 420_000L), reported)
+        assertEquals(listOf(null, 240_000L, null, 780_000L), reported)
         scope.cancel()
     }
 
