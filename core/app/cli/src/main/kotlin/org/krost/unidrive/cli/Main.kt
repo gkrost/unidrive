@@ -862,7 +862,9 @@ internal fun renderConfigMissingMessage(
         }
     }
 
-fun main(args: Array<String>) {
+fun main(rawArgs: Array<String>) {
+    // #487: on Windows the arguments arrive in the ANSI code page; read them back from the UTF-16 command line.
+    val args = WindowsArgv.recover(rawArgs)
     // #391: choose stdout/stderr charsets before anything prints — redirected
     // output must be UTF-8 so captured plan lines round-trip non-ASCII names.
     CliEncoding.apply()
