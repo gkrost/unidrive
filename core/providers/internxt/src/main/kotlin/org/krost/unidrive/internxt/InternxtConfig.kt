@@ -31,6 +31,16 @@ data class InternxtConfig(
         /** Default page size for /files and /folders pagination (no public maximum documented). */
         const val LISTING_PAGE_SIZE: Int = 999
 
+        /**
+         * Socket (read-idle) and request timeouts of the account-wide `/files` and `/folders` listings. A page of a
+         * whole-drive enumeration needs from 25 s to more than a minute on a large account, far beyond the 60 s every
+         * other call runs with. These are upper bounds: the gateway ends a request that took about two minutes with its
+         * own 524, and the server's public configuration sets a database `statement_timeout` of 300 s, so both answer
+         * before this timer fires.
+         */
+        const val LISTING_SOCKET_TIMEOUT_MS: Long = 330_000L
+        const val LISTING_REQUEST_TIMEOUT_MS: Long = 360_000L
+
         /** swift-core parity — files at/above this size use multipart upload. */
         const val MULTIPART_MIN_SIZE_BYTES: Long = 100L * 1024L * 1024L // 100 MB
 

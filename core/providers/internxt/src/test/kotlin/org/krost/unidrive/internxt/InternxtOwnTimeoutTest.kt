@@ -21,6 +21,57 @@ import kotlin.test.assertTrue
 class InternxtOwnTimeoutTest {
     private val ktorPlainTimer = "Socket timeout has expired"
 
+    // ---- the heavy listings get the time they need ---------------------------------------------------------------------
+
+    @Test
+    fun `a heavy listing that needs longer than the default socket timeout completes on the listing timeouts`() {
+        LoopbackServer(tls = false) { exchange ->
+            exchange.readHead()
+            Thread.sleep(1_500)
+            exchange.respond(200, "OK", "[]")
+        }.use { server ->
+            loopbackService(loopbackClient(server, socketTimeoutMs = 500), socketMs = 500, listingSocketMs = 8_000, listingRequestMs = 10_000).use { api ->
+                runBlocking {
+                    assertEquals(emptyList(), api.listFiles(), "the answer came after 3 default socket timeouts")
+                    assertEquals(1, server.connections)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the same listing is cut by the timer when it only has the default socket timeout`() {
+        LoopbackServer(tls = false) { exchange ->
+            exchange.readHead()
+            Thread.sleep(5_000)
+            exchange.respond(200, "OK", "[]")
+        }.use { server ->
+            loopbackService(loopbackClient(server, socketTimeoutMs = 500), socketMs = 500, listingSocketMs = 500).use { api ->
+                runBlocking {
+                    val failure = assertFailsWith<InternxtApiException> { api.listFiles() }
+                    assertTrue(failure.timedOutLocally, failure.message)
+                    assertEquals(1, server.connections, "a timer failure is not retried")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a cheap call keeps the default socket timeout while the listing gets the long one`() {
+        LoopbackServer(tls = false) { exchange ->
+            exchange.readHead()
+            Thread.sleep(5_000)
+            exchange.respond(200, "OK", "[]")
+        }.use { server ->
+            loopbackService(loopbackClient(server, socketTimeoutMs = 500), socketMs = 500, listingSocketMs = 8_000, listingRequestMs = 10_000).use { api ->
+                runBlocking {
+                    val failure = assertFailsWith<InternxtApiException> { api.getFileMeta("some-file") }
+                    assertTrue(failure.timedOutLocally, "a /meta call still runs on the default timeout: ${failure.message}")
+                }
+            }
+        }
+    }
+
     // ---- a timer failure is not retried, a real close still goes through the ladder ----------------------------------
 
     private fun silentServerEndsByTheTimerAfterOneAttempt(
