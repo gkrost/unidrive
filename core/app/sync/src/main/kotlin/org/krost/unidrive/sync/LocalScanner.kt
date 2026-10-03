@@ -50,6 +50,12 @@ class LocalScanner(
 
     private fun underBlockedKey(path: String): Boolean = blockedKeys.any { path == it || path.startsWith("$it/") }
 
+    /** #503: whether [path] (an NFC path) is, or lies below, a name the last [scan] refused as an NFC clash. */
+    fun isUnderNfcCollision(path: String): Boolean = underBlockedKey(path)
+
+    /** #503: the NFC paths the last [scan] refused (empty when there is no clash). */
+    val nfcCollisionKeys: Set<String> get() = blockedKeys.toSet()
+
     private fun refuseNfcTwins(dir: Path) {
         val byKey = LinkedHashMap<String, MutableList<Path>>()
         try {

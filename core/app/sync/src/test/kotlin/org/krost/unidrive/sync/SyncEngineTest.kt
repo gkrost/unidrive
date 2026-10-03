@@ -552,6 +552,35 @@ class SyncEngineTest {
             assertEquals(500, entry.remoteSize)
         }
 
+    // #503 review: a name refused as an NFC clash (#491) is out of sync in both directions. The scan reports no change for
+    // it, so a remote edit of the cloud copy must not be downloaded over the local member that carries the name.
+    @Test
+    fun `a remote edit of a name in an NFC clash is not downloaded over the local file`() =
+        runTest {
+            val composed = "caf" + '\u00E9' + ".txt"
+            val decomposed = "cafe" + '\u0301' + ".txt"
+            provider.files["/$composed"] = "cloud v1".toByteArray()
+            provider.deltaItems = listOf(cloudItem("/$composed", size = 8))
+            provider.deltaCursor = "cursor-1"
+            engine.syncOnce()
+            assertEquals("cloud v1", Files.readString(syncRoot.resolve(composed)))
+
+            // Locally: the composed file is edited and its decomposed twin appears; in the cloud: the copy changes.
+            Files.writeString(syncRoot.resolve(composed), "my local edit")
+            Files.writeString(syncRoot.resolve(decomposed), "the twin")
+            provider.files["/$composed"] = "edited in the cloud".toByteArray()
+            provider.deltaItems =
+                listOf(cloudItem("/$composed", size = 19).copy(hash = "new-hash", modified = Instant.parse("2026-03-29T12:00:00Z")))
+            provider.deltaCursor = "cursor-2"
+            provider.uploadedPaths.clear()
+            engine.syncOnce()
+
+            assertEquals("my local edit", Files.readString(syncRoot.resolve(composed)), "the local member must not be overwritten")
+            assertEquals("the twin", Files.readString(syncRoot.resolve(decomposed)))
+            assertEquals(emptyList(), provider.uploadedPaths, "neither member is uploaded while the clash exists")
+            assertEquals("edited in the cloud", String(provider.files.getValue("/$composed")), "the cloud copy is untouched")
+        }
+
     @Test
     fun `remote folder deletion removes folder and children locally`() =
         runTest {
