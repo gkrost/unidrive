@@ -26,4 +26,9 @@ sync_root = "~/Internxt"
 # Default 21474836480 (20 GiB). `unidrive doctor` shows the size against the budget.
 # hydration_cache_max_bytes = 21474836480
 
+# `unidrive daemon run` rescans the sync root for files that arrived there other than through the
+# mount (copied in, dropped while the daemon was stopped, restored from a backup) and uploads them:
+# once at start, then every this many minutes. Upload-only, never downloads or deletes. 0 = off.
+# sync_root_rescan_minutes = 10
+
 # exclude_patterns = ["/dev/git/**"]

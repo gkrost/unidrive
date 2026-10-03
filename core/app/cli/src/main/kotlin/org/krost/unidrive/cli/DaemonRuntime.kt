@@ -55,6 +55,9 @@ class DaemonRuntime(
     private val pollIntervalMs: Long = 0,
     // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited.
     private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
+    // #504: > 0 = rescan the sync root for files that arrived out of band (a pass at start, then every
+    // this many ms), uploading them; 0 = off. Profile key sync_root_rescan_minutes (default 10 min).
+    private val syncRootRescanIntervalMs: Long = 0,
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -214,6 +217,17 @@ class DaemonRuntime(
                     runCatching { hydration.replayPendingUploads() }
                         .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
                         .onFailure { log.warn("pending-upload replay failed", it) }
+                    // #504: the sync root is nobody's inbox but the engine's: files that reach it
+                    // other than through the mount (copied in, dropped while the daemon was down,
+                    // restored from a backup) are uploaded by an upload-only rescan, once now (after
+                    // the replay above, so a mount write's own queued upload goes first) and then on
+                    // a timer. Never downloads or deletes; see SyncEngine.rescanSyncRootForUpload.
+                    SyncRootRescanner(syncRootRescanIntervalMs) {
+                        val r = engine.rescanSyncRootForUpload()
+                        if (r.uploaded > 0 || r.foldersCreated > 0) {
+                            log.info("sync root rescan: {} file(s) uploaded, {} folder(s) created", r.uploaded, r.foldersCreated)
+                        }
+                    }.run()
                 }
 
                 // sync.subscribe — symmetric to SyncCommand's wiring.

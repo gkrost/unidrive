@@ -73,6 +73,7 @@ class DaemonRunCommand : Runnable {
             excludePatterns = config.effectiveExcludePatterns(profile.name),
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
+            syncRootRescanIntervalMs = config.syncRootRescanMinutes(profile.name) * 60_000L,
         )
 
         // Install SIGTERM handler that signals graceful shutdown. It must wait for the main
