@@ -1464,6 +1464,9 @@ open class SyncEngine(
         val skipped: Int = 0,
         // True when the pass did not run: another was under way, or the sync root is not usable.
         val notRun: Boolean = false,
+        // Edited files whose cloud copy changed (or went away) since the row was recorded: not uploaded,
+        // so the remote change is never overwritten; a full sync resolves them (keep both).
+        val conflicts: Int = 0,
     )
 
     private val rescanInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1524,6 +1527,7 @@ open class SyncEngine(
             var foldersCreated = 0
             var failed = 0
             var skipped = 0
+            var conflicts = 0
             val touched = LinkedHashSet<String>()
             val failedFolders = HashSet<String>()
             for (folder in newFolders.sortedWith(compareBy({ it.count { c -> c == '/' } }, { it }))) {
@@ -1552,6 +1556,24 @@ open class SyncEngine(
                     skipped++
                     continue
                 }
+                // An edit of a file the cloud already has replaces it there: only while the cloud copy is still the one
+                // this row recorded. A full sync would see a remote change and keep both; this pass does not reconcile,
+                // so it must not overwrite what it has not seen.
+                if (entry.remoteId != null) {
+                    when (remoteVersionSince(entry)) {
+                        RemoteVersion.SAME -> {}
+                        RemoteVersion.CHANGED, RemoteVersion.GONE -> {
+                            conflicts++
+                            log.warn("#504: rescan did not upload {}: its cloud copy changed since the last sync; run 'unidrive sync' to keep both", path)
+                            continue
+                        }
+                        RemoteVersion.UNKNOWN -> {
+                            skipped++
+                            log.debug("#504: rescan could not check the cloud copy of {}; trying again next pass", path)
+                            continue
+                        }
+                    }
+                }
                 try {
                     transferBudget.withPermit {
                         // The slot may have been taken while this upload waited for its permit.
@@ -1574,13 +1596,38 @@ open class SyncEngine(
             // The scan wrote a pending row for every new file: a mount may list those now.
             for ((path, state) in changes) if (state == ChangeState.NEW && path in candidates) touched.add(path)
             if (touched.isNotEmpty()) viewInvalidationSink(touched, false)
-            if (uploaded + foldersCreated + failed + skipped > 0) {
-                log.info("#504: sync root rescan: {} uploaded, {} folder(s) created, {} failed, {} skipped", uploaded, foldersCreated, failed, skipped)
+            if (uploaded + foldersCreated + failed + skipped + conflicts > 0) {
+                log.info("#504: sync root rescan: {} uploaded, {} folder(s) created, {} failed, {} skipped, {} conflict(s)", uploaded, foldersCreated, failed, skipped, conflicts)
             }
-            return LocalRescanResult(uploaded, foldersCreated, failed, skipped)
+            return LocalRescanResult(uploaded, foldersCreated, failed, skipped, conflicts = conflicts)
         } finally {
             rescanInFlight.set(false)
         }
+    }
+
+    private enum class RemoteVersion { SAME, CHANGED, GONE, UNKNOWN }
+
+    // #504 review: is the cloud copy still the one [entry] recorded? Provider-neutral on purpose: the row's remoteHash is a
+    // content hash on OneDrive (quickXor) but a version token on Internxt, so it cannot be sent as an If-Match everywhere;
+    // comparing it with the provider's own current metadata works for every provider. Same remote id and same hash, or,
+    // without hashes, same size and modification time.
+    private suspend fun remoteVersionSince(entry: SyncEntry): RemoteVersion {
+        val current =
+            try {
+                provider.getMetadata(entry.remotePath ?: entry.path)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return if (isAlreadyGone(e)) RemoteVersion.GONE else RemoteVersion.UNKNOWN
+            }
+        if (current.isFolder || current.id != entry.remoteId) return RemoteVersion.CHANGED
+        val same =
+            if (entry.remoteHash != null && current.hash != null) {
+                entry.remoteHash == current.hash
+            } else {
+                entry.remoteSize == current.size && entry.remoteModified == current.modified
+            }
+        return if (same) RemoteVersion.SAME else RemoteVersion.CHANGED
     }
 
     open suspend fun syncOnce(

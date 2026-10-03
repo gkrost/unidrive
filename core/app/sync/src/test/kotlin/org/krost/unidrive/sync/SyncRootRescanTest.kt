@@ -119,12 +119,91 @@ class SyncRootRescanTest {
             val e = engine()
             e.rescanSyncRootForUpload()
             provider.uploadedPaths.clear()
+            cloudCopyAsRecorded("/doc.txt")
             Files.writeString(file, "version two")
             Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 5_000))
             val r = e.rescanSyncRootForUpload()
             assertEquals(1, r.uploaded)
             assertEquals(listOf("/doc.txt"), provider.uploadedPaths)
             assertEquals("id-/doc.txt", provider.lastUploadExistingRemoteId)
+        }
+
+    // The cloud copy the provider reports now is exactly the one the row recorded (the fake's upload answers hash "uploaded").
+    private fun cloudCopyAsRecorded(path: String, hash: String? = null) {
+        val row = assertNotNull(db.getEntry(path))
+        provider.deltaItems =
+            listOf(
+                CloudItem(
+                    id = assertNotNull(row.remoteId),
+                    name = path.substringAfterLast('/'),
+                    path = path,
+                    size = row.remoteSize,
+                    isFolder = false,
+                    modified = row.remoteModified,
+                    created = row.remoteModified,
+                    hash = hash ?: row.remoteHash,
+                    mimeType = null,
+                ),
+            )
+    }
+
+    // #504 review: an edit found by the rescan must never overwrite a cloud change the daemon has not seen yet.
+    @Test
+    fun `an edited file whose cloud copy changed meanwhile is not uploaded`() =
+        runTest {
+            val file = write("doc.txt", "v1")
+            val e = engine()
+            e.rescanSyncRootForUpload()
+            provider.uploadedPaths.clear()
+            cloudCopyAsRecorded("/doc.txt", hash = "edited elsewhere")
+            Files.writeString(file, "my local edit")
+            Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 5_000))
+
+            val r = e.rescanSyncRootForUpload()
+
+            assertEquals(0, r.uploaded)
+            assertEquals(1, r.conflicts)
+            assertEquals(emptyList(), provider.uploadedPaths, "the remote change must not be overwritten")
+            assertEquals("my local edit", Files.readString(file), "the local edit stays for a full sync to keep both")
+        }
+
+    @Test
+    fun `an edited file whose cloud copy is gone is not uploaded again`() =
+        runTest {
+            val file = write("doc.txt", "v1")
+            val e = engine()
+            e.rescanSyncRootForUpload()
+            provider.uploadedPaths.clear()
+            provider.getMetadataError = org.krost.unidrive.ProviderException("Item not found: /doc.txt")
+            Files.writeString(file, "edit of a file deleted in the cloud")
+            Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 5_000))
+
+            val r = e.rescanSyncRootForUpload()
+
+            assertEquals(0, r.uploaded)
+            assertEquals(1, r.conflicts)
+            assertEquals(emptyList(), provider.uploadedPaths, "a remote delete is a full sync's decision, not a resurrection")
+        }
+
+    @Test
+    fun `an edited file whose cloud copy cannot be checked waits for the next pass`() =
+        runTest {
+            val file = write("doc.txt", "v1")
+            val e = engine()
+            e.rescanSyncRootForUpload()
+            provider.uploadedPaths.clear()
+            provider.getMetadataError = java.io.IOException("connection reset")
+            Files.writeString(file, "version two")
+            Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis() + 5_000))
+
+            val first = e.rescanSyncRootForUpload()
+            assertEquals(0, first.uploaded)
+            assertEquals(emptyList(), provider.uploadedPaths)
+
+            provider.getMetadataError = null
+            cloudCopyAsRecorded("/doc.txt")
+            val second = e.rescanSyncRootForUpload()
+            assertEquals(1, second.uploaded, "uploaded once the cloud copy could be checked")
         }
 
     @Test

@@ -3420,7 +3420,13 @@ class SyncEngineTest {
             return childrenByParent[path] ?: emptyList()
         }
 
-        override suspend fun getMetadata(path: String) = deltaItems.first { it.path == path }
+        // #504 review: when set, getMetadata throws it (a remote item that is gone, an outage).
+        var getMetadataError: Exception? = null
+
+        override suspend fun getMetadata(path: String): CloudItem {
+            getMetadataError?.let { throw it }
+            return deltaItems.first { it.path == path }
+        }
 
         override suspend fun download(
             remotePath: String,
