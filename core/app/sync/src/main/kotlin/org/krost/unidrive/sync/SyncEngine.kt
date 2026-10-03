@@ -879,8 +879,19 @@ open class SyncEngine(
         // to this just-written remote item (see markRecentlyUploaded). Keyed by the
         // REMOTE path so the absence sweep (remote namespace) matches.
         markRecentlyUploaded(remotePath)
-        val mtime = Files.getLastModifiedTime(cachePath).toMillis()
-        val size = Files.size(cachePath)
+        // #337/#148: the row records the cache copy's stats as they were BEFORE
+        // the transfer (same rule as applyUpload). A write landing mid-upload
+        // keeps a newer mtime than the recorded watermark, so a later re-upload
+        // of those bytes is never absorbed into this baseline.
+        val afterUpload = statBeforeUpload(cachePath)
+        if (afterUpload != null && sent != null && afterUpload != sent) {
+            log.debug(
+                "uploadFromCache: {} changed while it was being uploaded; keeping the pre-upload watermark",
+                path,
+            )
+        }
+        val mtime = sent?.first ?: afterUpload?.first ?: Files.getLastModifiedTime(cachePath).toMillis()
+        val size = sent?.second ?: afterUpload?.second ?: Files.size(cachePath)
         val existing = db.getEntry(path)
         if (existing == null) {
             // #319: the row vanished while the bytes were in flight (a delete or
@@ -1324,6 +1335,10 @@ open class SyncEngine(
         var reaped = 0
         val reapedViewPaths = mutableSetOf<String>()
         var nextDeferred = emptySet<String>()
+        // #149: cache files are evicted AFTER the batch commits — a filesystem
+        // delete is a non-transactional side effect and must not lengthen the
+        // SQLite lock window.
+        val cacheEvictions = mutableListOf<Triple<String, Path, Long?>>()
         db.batch {
             updateRemoteEntries(remoteChanges)
             if (complete) {
@@ -1367,7 +1382,9 @@ open class SyncEngine(
                     }
                     deferredReapWarned.remove(path)
                     db.markDeleted(path)
-                    runCatching { Files.deleteIfExists(cachePath) }
+                    cacheEvictions.add(
+                        Triple(path, cachePath, runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull()),
+                    )
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }
@@ -1384,6 +1401,18 @@ open class SyncEngine(
                         )
                     }
                 }
+            }
+        }
+        // #149: same per-file behaviour as before (errors swallowed — the row
+        // flip is the truth and the cache copy is a disk-space concern), just
+        // outside the transaction now.
+        // The lock window is gone, so a hydration write may have recreated the path
+        // in between (#301 class): skip the delete when an upload is queued for it or
+        // the cache file is no longer the one the reap decided on.
+        for ((path, cachePath, mtimeAtReap) in cacheEvictions) {
+            runCatching {
+                val unchanged = runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull() == mtimeAtReap
+                if (!uploadInFlight(path) && unchanged) Files.deleteIfExists(cachePath)
             }
         }
         // A bulk disappearance must be corroborated by CONSECUTIVE complete enumerations.
@@ -3784,8 +3813,20 @@ open class SyncEngine(
         // deletion verdict instead of reaping + re-uploading in a loop. Marked by
         // the REMOTE path because the absence sweep reasons in the remote namespace.
         markRecentlyUploaded(remotePath)
-        val mtime = Files.getLastModifiedTime(localPath).toMillis()
-        val size = Files.size(localPath)
+        // #337/#148: the row records the file's stats as they were BEFORE the
+        // transfer. A write that lands while the upload is in flight must stay
+        // visible to the next scan (which re-uploads it); recording the
+        // post-upload mtime of a changed file would absorb the edit into the
+        // baseline and it would never be sent.
+        val afterUpload = statBeforeUpload(localPath)
+        if (afterUpload != null && sent != null && afterUpload != sent) {
+            log.debug(
+                "Upload: {} changed while it was being uploaded; keeping the pre-upload watermark so the next scan re-plans it",
+                action.path,
+            )
+        }
+        val mtime = sent?.first ?: afterUpload?.first ?: Files.getLastModifiedTime(localPath).toMillis()
+        val size = sent?.second ?: afterUpload?.second ?: Files.size(localPath)
         db.upsertEntry(
             SyncEntry(
                 path = action.path,
@@ -4400,7 +4441,17 @@ open class SyncEngine(
                 provider.upload(localPath, action.path) { transferred, total ->
                     reporter.onTransferProgress(action.path, transferred, total)
                 }
-            val mtime = Files.getLastModifiedTime(localPath).toMillis()
+            // #337/#148: record the pre-upload stat (same rule as applyUpload) so a
+            // write landing during this upload is re-planned by the next scan.
+            val afterUpload = statBeforeUpload(localPath)
+            if (afterUpload != null && sent != null && afterUpload != sent) {
+                log.debug(
+                    "Conflict keep-both: {} changed while it was being uploaded; keeping the pre-upload watermark",
+                    action.path,
+                )
+            }
+            val mtime = sent?.first ?: afterUpload?.first ?: Files.getLastModifiedTime(localPath).toMillis()
+            val size = sent?.second ?: afterUpload?.second ?: Files.size(localPath)
             db.upsertEntry(
                 SyncEntry(
                     path = action.path,
@@ -4409,7 +4460,7 @@ open class SyncEngine(
                     remoteSize = result.size,
                     remoteModified = result.modified,
                     localMtime = mtime,
-                    localSize = Files.size(localPath),
+                    localSize = size,
                     isFolder = false,
                     isPinned = false,
                     isHydrated = true,
@@ -4522,11 +4573,12 @@ open class SyncEngine(
             null
         }
 
-    // An upload row records the file's stats as read after the transfer, so an edit that
-    // lands during a long upload is already part of that baseline (#337). Hashing those
-    // bytes would also let every later touch be absorbed as unchanged, and the edit would
-    // never be sent. Guard the hash with the stats taken before the upload instead: if the
-    // file changed while it was being sent, it gets no hash.
+    // An upload row records the file's stats as they were BEFORE the transfer
+    // (#337/#148), so a write landing during a long upload keeps a newer mtime
+    // than the recorded baseline and the next scan re-uploads it. Hashing the
+    // bytes that were sent is therefore only safe while the file still matches
+    // those pre-upload stats: if the file changed while it was being sent, it
+    // gets no hash — otherwise the edit could be absorbed as an unchanged touch.
     private fun withSentHash(
         entry: SyncEntry,
         local: Path,

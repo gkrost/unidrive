@@ -69,6 +69,11 @@ class StateDatabase(
     // for its owner, which reopens a transaction on its next write).
     private var batchSuspended: Boolean = false
 
+    // Test seam (#149): fired after a top-level [batch] has COMMITTED, before control
+    // returns to the caller. Lets the sync tests observe filesystem side effects that
+    // must happen outside the transaction (the reap's cache eviction).
+    internal var batchCommitHook: (() -> Unit)? = null
+
     val recovery: Recovery = Recovery()
 
     @Synchronized
@@ -89,7 +94,14 @@ class StateDatabase(
             }
         _conn = DriverManager.getConnection(url)
         conn.autoCommit = true
-        bootstrapSchema()
+        try {
+            bootstrapSchema()
+        } catch (e: Throwable) {
+            // A refused open (#323) must not leak the connection it opened.
+            runCatching { _conn?.close() }
+            _conn = null
+            throw e
+        }
     }
 
     private fun initializeReadOnly() {
@@ -162,6 +174,15 @@ class StateDatabase(
                 // collide with stale objects.
                 conn.createStatement().use { stmt ->
                     stmt.executeUpdate("DROP TABLE IF EXISTS sync_entries")
+                }
+            } else {
+                // #323: an older jar must never stamp the version downward — the
+                // next upgrade would believe nothing changed and skip migrations.
+                // Refuse before any write (mirrors the read-only and snapshot
+                // guards); equal or lower versions behave as before.
+                check(recordedVersion <= SCHEMA_VERSION) {
+                    "state.db was written by a newer unidrive (schema $recordedVersion, this build supports $SCHEMA_VERSION); " +
+                        "upgrade unidrive or use a different state db."
                 }
             }
         }
@@ -406,15 +427,18 @@ class StateDatabase(
         beginWrite()
         if (!conn.autoCommit) return block() // already inside a transaction
         conn.autoCommit = false
-        return try {
+        var committed = false
+        try {
             val result = block()
             conn.commit()
-            result
+            committed = true
+            return result
         } catch (e: Exception) {
             conn.rollback()
             throw e
         } finally {
             conn.autoCommit = true
+            if (committed) batchCommitHook?.invoke()
         }
     }
 

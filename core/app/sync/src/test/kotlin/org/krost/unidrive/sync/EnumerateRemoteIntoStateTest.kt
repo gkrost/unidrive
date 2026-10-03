@@ -8,6 +8,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
 import java.nio.file.Files
+import java.nio.file.attribute.FileTime
 import java.nio.file.Path
 import java.time.Instant
 import kotlin.test.AfterTest
@@ -124,6 +125,67 @@ class EnumerateRemoteIntoStateTest {
             engine.enumerateRemoteIntoState(reset = true)
 
             assertFalse(Files.exists(cache), "cache file must be evicted when the remote path is reaped")
+        }
+
+    // #149: the filesystem delete is a side effect and must not run inside the
+    // reap's database transaction — the batch commits first, the cache files
+    // are evicted afterwards.
+    @Test
+    fun `the reap evicts cache files after the batch has committed`() =
+        runTest {
+            provider.putRemote("/evict.bin", "E")
+            // The cache file must predate the row (see the test above) or the
+            // #301 guard defers the reap entirely.
+            val cache =
+                engine.resolveCachePath("/evict.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "E")
+                }
+            engine.enumerateRemoteIntoState(reset = false)
+
+            provider.removeRemote("/evict.bin")
+            var cacheExistedWhileBatchOpen = false
+            db.batchCommitHook = { cacheExistedWhileBatchOpen = Files.exists(cache) }
+            val r =
+                try {
+                    engine.enumerateRemoteIntoState(reset = true)
+                } finally {
+                    db.batchCommitHook = null
+                }
+
+            assertEquals(1, r.reaped, "precondition: the path was reaped")
+            assertTrue(
+                cacheExistedWhileBatchOpen,
+                "#149: the cache file must still exist while the reap batch is open",
+            )
+            assertFalse(Files.exists(cache), "the cache file is evicted once the batch has committed")
+        }
+
+    // #149 follow-up: with the delete outside the lock, a cache file rewritten between
+    // the commit and the eviction (an edit through the mount) must survive.
+    @Test
+    fun `a cache file rewritten after the reap commit is not evicted`() =
+        runTest {
+            provider.putRemote("/rewritten.bin", "E")
+            val cache =
+                engine.resolveCachePath("/rewritten.bin").also {
+                    Files.createDirectories(it.parent)
+                    Files.writeString(it, "E")
+                }
+            engine.enumerateRemoteIntoState(reset = false)
+
+            provider.removeRemote("/rewritten.bin")
+            db.batchCommitHook = {
+                Files.writeString(cache, "user edit")
+                Files.setLastModifiedTime(cache, FileTime.fromMillis(Files.getLastModifiedTime(cache).toMillis() + 60_000L))
+            }
+            try {
+                engine.enumerateRemoteIntoState(reset = true)
+            } finally {
+                db.batchCommitHook = null
+            }
+
+            assertTrue(Files.exists(cache), "bytes written after the reap decision must not be deleted")
         }
 
     // #301: the enumerate-reap must not evict (or tombstone) a path whose
