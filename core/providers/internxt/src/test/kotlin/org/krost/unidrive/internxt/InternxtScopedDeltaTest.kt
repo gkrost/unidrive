@@ -85,4 +85,186 @@ class InternxtScopedDeltaTest {
             assertTrue(requested.none { it.contains("/files") && !it.contains("/folders/content/") }, "no account-wide /files call")
             assertTrue(requested.none { it.endsWith("/folders") || it.contains("/folders?") }, "no account-wide /folders call")
         }
+
+    // ---- the account-wide listings cut by the gateway: the tree walk takes over ----------------------------------------
+    //
+    // /files and /folders page through the whole account with an offset. On a large account the gateway closes those calls
+    // after about a minute (live, 2026-10-03: /files from offset 0, /folders from about offset 10,000). After the retry ladder
+    // that is a 503, and the gather used to end with it (a failing /folders) or to crawl the tree one folder at a time (a
+    // failing /files).
+
+    private val json = headersOf("Content-Type", "application/json")
+
+    // root -> [_INBOX, other] and top.txt; _INBOX -> a.txt; other -> o.txt
+    private val tree =
+        mapOf(
+            "root" to
+                """{"children":[
+                    {"uuid":"inbox","plainName":"_INBOX","status":"EXISTS"},
+                    {"uuid":"other","plainName":"other","status":"EXISTS"}],
+                  "files":[{"uuid":"t","plainName":"top","type":"txt","size":"1","status":"EXISTS"}]}""",
+            "inbox" to """{"children":[],"files":[{"uuid":"a","plainName":"a","type":"txt","size":"3","status":"EXISTS"}]}""",
+            "other" to """{"children":[],"files":[{"uuid":"o","plainName":"o","type":"txt","size":"5","status":"EXISTS"}]}""",
+        )
+
+    private fun contentOf(url: String): String? = tree.entries.firstOrNull { url.endsWith("/folders/content/${it.key}") }?.value
+
+    private fun isAccountWideListing(path: String) = path.endsWith("/drive/files") || path.endsWith("/drive/folders")
+
+    private fun cutByTheGateway() =
+        io.ktor.utils.io.ClosedReadChannelException(
+            java.io.EOFException("Failed to parse HTTP response: the server prematurely closed the connection"),
+        )
+
+    @Test
+    fun `a full delta whose account-wide listings are cut walks the whole tree instead`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) -> throw cutByTheGateway()
+                        else -> error("unexpected request: $url")
+                    }
+                }
+
+            val page = provider(engine).delta(null, null, ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList()))
+
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                page.items.map { it.path }.toSet(),
+            )
+            assertTrue(page.complete)
+            assertTrue(!page.hasMore)
+            assertTrue(requested.any { isAccountWideListing(java.net.URI(it).path) }, "the account-wide listing was tried first")
+            assertEquals(3, requested.count { it.contains("/folders/content/") }, "root, _INBOX and other: $requested")
+        }
+
+    @Test
+    fun `a failing files listing alone also ends in the tree walk, not in the half the folders listing returned`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        request.url.encodedPath.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
+                        request.url.encodedPath.endsWith("/drive/files") -> throw cutByTheGateway()
+                        else -> error("unexpected request: $url")
+                    }
+                }
+
+            val page = provider(engine).delta(null, null, ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList()))
+
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                page.items.map { it.path }.toSet(),
+            )
+            assertTrue(page.complete)
+        }
+
+    @Test
+    fun `an incremental delta of a scoped profile, listings cut, walks the scope only`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    when {
+                        contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        isAccountWideListing(request.url.encodedPath) -> throw cutByTheGateway()
+                        else -> error("unexpected request: $url")
+                    }
+                }
+
+            val page =
+                provider(engine).delta(
+                    cursor = "2026-10-01T00:00:00Z",
+                    onPageProgress = null,
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/_INBOX")),
+                )
+
+            assertEquals(setOf("/_INBOX", "/_INBOX/a.txt"), page.items.map { it.path }.toSet())
+            assertTrue(requested.none { it.endsWith("/folders/content/other") }, "a sibling of the scope is not listed: $requested")
+        }
+
+    @Test
+    fun `the handover to the fallback walk never reports a lower progress total`() =
+        runTest {
+            // Six full /files pages cross the heartbeat's 5,000-item interval, so the speculative phase reports 5,994
+            // before page seven is cut. A walk heartbeat seeded with nothing would report its own count from 1 —
+            // progress jumping down at the exact moment the gather just failed (the jump that alarmed users before,
+            // 208k → 261k → 218k). Seeded with the items already counted, the walk's first report clears the 5,000
+            // threshold at once and the reported sequence never steps down.
+            val ticks = Collections.synchronizedList(mutableListOf<Int>())
+            val engine =
+                MockEngine { request ->
+                    val path = request.url.encodedPath
+                    when {
+                        path.endsWith("/drive/files") -> {
+                            val offset = request.url.parameters["offset"]?.toInt() ?: 0
+                            if (offset < 6 * 999) {
+                                val page =
+                                    (0 until 999).joinToString(",", "[", "]") { i ->
+                                        val n = offset + i
+                                        """{"uuid":"f$n","plainName":"f$n","type":"txt","size":"1","status":"EXISTS"}"""
+                                    }
+                                respond(page, HttpStatusCode.OK, json)
+                            } else {
+                                throw cutByTheGateway()
+                            }
+                        }
+                        path.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
+                        contentOf(request.url.toString()) != null ->
+                            respond(contentOf(request.url.toString())!!, HttpStatusCode.OK, json)
+                        else -> error("unexpected request: $path")
+                    }
+                }
+
+            val page =
+                provider(engine).delta(
+                    cursor = null,
+                    onPageProgress = { itemsSoFar -> ticks += itemsSoFar },
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList()),
+                )
+
+            assertEquals(
+                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
+                page.items.map { it.path }.toSet(),
+            )
+            assertTrue(page.complete)
+            assertTrue(ticks.size >= 2, "the walk reports progress of its own: $ticks")
+            assertTrue(
+                ticks.zipWithNext().all { (before, after) -> after >= before },
+                "the handover to the walk never reports a lower total: $ticks",
+            )
+        }
+
+    @Test
+    fun `a listing that fails for another reason than the gateway's unavailability still fails the gather`() =
+        runTest {
+            val requested = Collections.synchronizedList(mutableListOf<String>())
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    requested += url
+                    when {
+                        request.url.encodedPath.endsWith("/drive/folders") -> respond("[]", HttpStatusCode.OK, json)
+                        request.url.encodedPath.endsWith("/drive/files") -> respond("{}", HttpStatusCode.NotFound, json)
+                        else -> error("unexpected request: $url")
+                    }
+                }
+
+            val failure =
+                kotlin.test.assertFailsWith<InternxtApiException> {
+                    provider(engine).delta(null, null, ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList()))
+                }
+
+            assertEquals(404, failure.statusCode)
+            assertTrue(requested.none { it.contains("/folders/content/") }, "no tree walk for a 404: $requested")
+        }
 }
