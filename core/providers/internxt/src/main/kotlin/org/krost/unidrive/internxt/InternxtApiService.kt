@@ -89,6 +89,14 @@ class InternxtApiService(
         }
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
+
+        // #517 F1/F2: the socket watchdog is read-idle — during a PUT it measures the
+        // whole silent-upload window, so the flat 60 s cut every body at what 60 s
+        // carries (~362 MB at the measured 48 Mbit/s) and each retry restarted from
+        // byte 0 (~55 min of uplink a day on the live account). Give the watchdog the
+        // time the body needs at half the slowest answered shard PUT (41.8 Mbit/s
+        // ≈ 5.2 MB/s); a genuinely stalled connection still trips the raised watchdog.
+        private const val SHARD_PUT_MIN_THROUGHPUT_BPS: Long = 2L * 1024 * 1024
     }
 
     private val json = org.krost.unidrive.UnidriveJson
@@ -764,18 +772,30 @@ class InternxtApiService(
         // in BACKLOG.md history).
         retryOnTransient {
             bridgeBudget.awaitSlot()
+            val socketTimeoutMs =
+                UploadTimeoutPolicy.computeSocketTimeoutMs(
+                    fileSize = data.size.toLong(),
+                    floorMs = HttpDefaults.SOCKET_TIMEOUT_MS,
+                    minThroughputBytesPerSecond = SHARD_PUT_MIN_THROUGHPUT_BPS,
+                )
+            val attemptStart = System.nanoTime()
             try {
                 val response =
                     httpClient.put(url) {
                         // UD-337 + UD-353: size-adaptive request timeout against
                         // OVH (Internxt's shard backend) with a pessimistic
                         // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
+                        // #517 R1: the socket watchdog gets its own size-adaptive
+                        // limit — requestTimeoutMillis stays far above it (10 KiB/s
+                        // floor), so the read-idle watchdog is what a stalled
+                        // upload trips, not the flat request cap.
                         timeout {
                             requestTimeoutMillis =
                                 UploadTimeoutPolicy.computeRequestTimeoutMs(
                                     fileSize = data.size.toLong(),
                                     minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
                                 )
+                            socketTimeoutMillis = socketTimeoutMs
                         }
                         header("Content-Type", "application/octet-stream")
                         setBody(data)
@@ -787,6 +807,8 @@ class InternxtApiService(
             } catch (e: InternxtApiException) {
                 if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
                 throw e
+            } catch (e: java.io.IOException) {
+                throw shardPutFailure(data.size.toLong(), socketTimeoutMs, attemptStart, e)
             }
         }
     }
@@ -797,15 +819,27 @@ class InternxtApiService(
         size: Long,
     ) {
         bridgeBudget.awaitSlot()
+        val socketTimeoutMs =
+            UploadTimeoutPolicy.computeSocketTimeoutMs(
+                fileSize = size,
+                floorMs = HttpDefaults.SOCKET_TIMEOUT_MS,
+                minThroughputBytesPerSecond = SHARD_PUT_MIN_THROUGHPUT_BPS,
+            )
+        val attemptStart = System.nanoTime()
         try {
             val response =
                 httpClient.put(url) {
+                    // Size-adaptive request timeout (UD-337/UD-353) plus a
+                    // size-adaptive socket watchdog (#517 R1): the flat 60 s
+                    // read-idle watchdog cut every upload longer than what 60 s
+                    // carries and every retry restarted from byte 0.
                     timeout {
                         requestTimeoutMillis =
                             UploadTimeoutPolicy.computeRequestTimeoutMs(
                                 fileSize = size,
                                 minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
                             )
+                        socketTimeoutMillis = socketTimeoutMs
                     }
                     header("Content-Type", "application/octet-stream")
                     setBody(streamingFileBody(file, size))
@@ -817,6 +851,33 @@ class InternxtApiService(
         } catch (e: InternxtApiException) {
             if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
             throw e
+        } catch (e: java.io.IOException) {
+            throw shardPutFailure(size, socketTimeoutMs, attemptStart, e)
+        }
+    }
+
+    // #517 R1: report a fired socket watchdog as what it is. Ktor-over-TLS surfaces
+    // it as "the server prematurely closed the connection" — indistinguishable from
+    // a real close — which sent the RCA after a phantom gateway cap. Rewrap the
+    // elapsed≈limit cuts with the numbers that identify them; other IOExceptions
+    // pass through unchanged. Stays an IOException so retryShardCommit keeps
+    // retrying it and no throttle signal is recorded.
+    private fun shardPutFailure(
+        sizeBytes: Long,
+        socketTimeoutMs: Long,
+        attemptStartNanos: Long,
+        e: java.io.IOException,
+    ): java.io.IOException {
+        val elapsedMs = (System.nanoTime() - attemptStartNanos) / 1_000_000
+        return if (UploadTimeoutPolicy.isSocketWatchdogCut(elapsedMs, socketTimeoutMs)) {
+            java.io.IOException(
+                "Shard PUT of $sizeBytes bytes cut after ${elapsedMs}ms — the socket watchdog " +
+                    "(limit ${socketTimeoutMs}ms), not the server; over TLS the two are " +
+                    "indistinguishable and a cut at the limit is ours (#517 F1)",
+                e,
+            )
+        } else {
+            e
         }
     }
 

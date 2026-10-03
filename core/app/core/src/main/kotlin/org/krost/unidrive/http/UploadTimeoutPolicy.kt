@@ -17,9 +17,19 @@ package org.krost.unidrive.http
  * need" — a function of the file size and a minimum-throughput floor.
  * For a 2 GiB file at 512 KiB/s that's exactly 4096 seconds; for a
  * 5 GiB file at 50 KiB/s (the conservative default) it's ~28 hours.
- * The 60 s `SOCKET_TIMEOUT_MS` watchdog still catches genuinely-stuck
- * connections (no bytes between reads), so this policy bounds without
- * overcommitting.
+ *
+ * **The socket watchdog is read-idle (#517 F1).** `SOCKET_TIMEOUT_MS` fires
+ * when no bytes have been RECEIVED for the interval — during a PUT to a peer
+ * that stays silent until the response, that is the whole upload, body
+ * flowing at line rate or not. Over TLS, Ktor reports the fired watchdog as
+ * "the server prematurely closed the connection", indistinguishable from a
+ * real close; every observed cut landed within ~1.5 s of the limit. The flat
+ * 60 s watchdog therefore capped uploads at what 60 s carries (~362 MB on the
+ * measured 48 Mbit/s line) and discarded every byte on the way — so pair this
+ * policy with [computeSocketTimeoutMs], which gives the watchdog the time the
+ * body needs at a pessimistic floor throughput. A genuinely stuck connection
+ * is still caught, by the raised watchdog: a stuck peer sends no response
+ * bytes either, and the stall eventually crosses the same read-idle limit.
  *
  * **History.** Originally lived as `WebDavTimeoutPolicy` in the WebDAV
  * provider (UD-277). Lifted to `:app:core` under UD-337 so Internxt /
@@ -91,4 +101,34 @@ public object UploadTimeoutPolicy {
         if (seconds > Long.MAX_VALUE / 1000L) return Long.MAX_VALUE
         return maxOf(floorMs, seconds * 1000L)
     }
+
+    /**
+     * Compute the socket (read-idle) watchdog for a data-plane PUT of
+     * [fileSize] bytes. The watchdog fires when nothing has been RECEIVED for
+     * this long, which during a PUT is the whole silent-upload window — so it
+     * must cover the time the body needs at [minThroughputBytesPerSecond],
+     * not a flat guess. Small uploads keep [floorMs].
+     *
+     * Same math as [computeRequestTimeoutMs] (which must stay the larger of
+     * the two at the call site, so the read-idle watchdog — not the flat
+     * whole-request cap — is what a stalled upload trips).
+     */
+    public fun computeSocketTimeoutMs(
+        fileSize: Long,
+        floorMs: Long,
+        minThroughputBytesPerSecond: Long,
+    ): Long = computeRequestTimeoutMs(fileSize, floorMs, minThroughputBytesPerSecond)
+
+    /**
+     * True when an IOException surfaced after roughly the connection's own
+     * socket-watchdog limit: then the cut was almost certainly OUR read-idle
+     * watchdog, not a server event. Over TLS the two are indistinguishable in
+     * the log (#517 F1, loopback probe C), but every observed watchdog cut
+     * landed within ~1.5 s of the limit (59.84–61.48 s for a 60 s watchdog,
+     * n=64), so elapsed ≈ limit identifies it. The 5 % slack absorbs the
+     * teardown between timer fire and catch; a real close at 58 s is
+     * misclassified, which only costs the difference in log wording.
+     */
+    public fun isSocketWatchdogCut(elapsedMs: Long, socketTimeoutMs: Long): Boolean =
+        elapsedMs >= socketTimeoutMs * 95L / 100L
 }
