@@ -6,6 +6,9 @@ import kotlinx.coroutines.test.runTest
 import java.io.EOFException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -71,6 +74,94 @@ class InternxtOwnTimeoutTest {
             }
         }
     }
+
+    // ---- the data PUT is not cut while it flows -------------------------------------------------------------------------
+
+    private fun shard(size: Int) = Files.createTempFile("shard", ".enc").also { Files.write(it, ByteArray(size)) }
+
+    private fun slowPutCompletes(
+        tls: Boolean,
+        send: suspend InternxtApiService.(shard: Path, size: Int) -> Unit,
+    ) {
+        val size = 512 * 1024
+        val received = AtomicLong(0)
+        val tookMs = AtomicLong(0)
+        val shard = shard(size)
+        try {
+            LoopbackServer(tls) { exchange ->
+                val head = exchange.readHead()
+                val started = System.nanoTime()
+                // About 400 KiB/s: the server answers 1.3 s after the first byte, 2.5 default socket timeouts.
+                received.set(exchange.drain(head.contentLength, bytesPerSecond = 400L * 1024))
+                tookMs.set((System.nanoTime() - started) / 1_000_000)
+                exchange.respond(200, "OK", "")
+            }.use { server ->
+                loopbackService(loopbackClient(server, socketTimeoutMs = 500), socketMs = 500).use { api ->
+                    runBlocking { api.send(shard, size) }
+                }
+            }
+        } finally {
+            Files.deleteIfExists(shard)
+        }
+        assertEquals(size.toLong(), received.get(), "the whole body arrived")
+        assertTrue(tookMs.get() > 1_000, "the server took longer than twice the default socket timeout to answer: ${tookMs.get()} ms")
+    }
+
+    private val storageUrl = "https://storage.example.invalid/shard"
+
+    @Test
+    fun `a PUT that flows for longer than the default socket timeout completes (plain HTTP)`() =
+        slowPutCompletes(tls = false) { shard, size -> putEncryptedShardFromFile(storageUrl, shard, size.toLong()) }
+
+    @Test
+    fun `a PUT that flows for longer than the default socket timeout completes (TLS)`() =
+        slowPutCompletes(tls = true) { shard, size -> putEncryptedShardFromFile(storageUrl, shard, size.toLong()) }
+
+    @Test
+    fun `the in-memory shard PUT is not cut while it flows either`() =
+        slowPutCompletes(tls = false) { _, size -> putEncryptedShard(storageUrl, ByteArray(size)) }
+
+    private fun putTimerIsReported(tls: Boolean) {
+        val size = 64 * 1024
+        val shard = shard(size)
+        try {
+            LoopbackServer(tls) { exchange ->
+                exchange.drain(exchange.readHead().contentLength)
+                exchange.awaitClientClose()
+            }.use { server ->
+                loopbackService(loopbackClient(server, socketTimeoutMs = 60_000), socketMs = 60_000).use { api ->
+                    ServiceWarnings().use { warnings ->
+                        val presigned = "https://storage.example.invalid/bucket/shard-1?X-Amz-Signature=do-not-log-me&X-Amz-Expires=900"
+                        val failure =
+                            runBlocking {
+                                assertFailsWith<SocketTimeoutException> { api.putShardFromFile(presigned, shard, size.toLong(), timeoutMs = 1_500) }
+                            }
+                        val message = failure.message.orEmpty()
+                        assertTrue(message.startsWith("timed out after "), message)
+                        assertTrue(message.contains("PUT https://storage.example.invalid/bucket/shard-1;"), message)
+                        assertTrue(message.contains("the engine's own limit"), message)
+                        assertFalse(message.contains("prematurely closed"), "this is not what a close reads: $message")
+                        // Ktor's timeout exceptions print the whole URL: neither the message, nor what it chains, nor the log may carry the signature.
+                        val chain = generateSequence<Throwable>(failure) { it.cause }.toList()
+                        assertTrue(chain.none { (it.message ?: "").contains("do-not-log-me") || (it.message ?: "").contains("?") }, "$chain")
+                        val logged = warnings.messages.single { it.contains("the engine's own timer fired") }
+                        assertTrue(logged.startsWith("PUT of $size bytes timed out after "), logged)
+                        assertTrue(logged.contains("socket timeout 1500 ms, request timeout 1500 ms"), logged)
+                        assertTrue(warnings.messages.none { it.contains("do-not-log-me") || it.contains("storage.example.invalid") }, "${warnings.messages}")
+                        assertEquals(1, server.connections)
+                    }
+                }
+            }
+        } finally {
+            Files.deleteIfExists(shard)
+        }
+    }
+
+    @Test
+    fun `a PUT that the engine's own timer ends is reported as a timeout without the presigned query (plain HTTP)`() = putTimerIsReported(tls = false)
+
+    @Test
+    fun `a PUT that the engine's own timer ends is reported as a timeout without the presigned query (TLS)`() = putTimerIsReported(tls = true)
 
     // ---- a timer failure is not retried, a real close still goes through the ladder ----------------------------------
 
@@ -183,6 +274,15 @@ class InternxtOwnTimeoutTest {
         val plain = SocketTimeoutException("Socket timeout has expired [url=https://gateway.internxt.com/drive/files, socket_timeout=60000] ms")
         assertTrue(InternxtApiService.isOwnTimeout(plain, elapsedMs = 60_050, socketTimeoutMs = 60_000))
         assertFalse(InternxtApiService.isOwnTimeout(plain, elapsedMs = 100, socketTimeoutMs = 60_000))
+    }
+
+    @Test
+    fun `the request timer is the engine's own as well`() {
+        // On a PUT whose socket and request timeout are equal it is the request timer that fires first. Its message names
+        // the whole URL, which is why it is never chained.
+        val request = io.ktor.client.plugins.HttpRequestTimeoutException("https://storage.example.invalid/p?X-Amz-Signature=secret", 612_000)
+        assertTrue(InternxtApiService.isOwnTimeout(request, elapsedMs = 612_000, socketTimeoutMs = 612_000))
+        assertFalse(InternxtApiService.isOwnTimeout(request, elapsedMs = 1_000, socketTimeoutMs = 612_000))
     }
 
     @Test

@@ -99,11 +99,17 @@ class InternxtApiService(
 
         private const val OVH_PUT_MIN_THROUGHPUT_BPS: Long = 10L * 1024
 
-        // Was the failure the engine's own socket timer rather than the peer closing the connection? The timer closes
+        // Socket and request timeout of the data PUT: the size-based value, see shardPutTimeouts.
+        private fun shardPutTimeoutMs(size: Long): Long =
+            UploadTimeoutPolicy.computeRequestTimeoutMs(fileSize = size, minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS)
+
+        // Was the failure the engine's own timer rather than the peer closing the connection? The socket timer closes
         // the client's read channel when no byte has arrived for socketTimeoutMs. Plain HTTP reports that as a
         // SocketTimeoutException, but over TLS the very same close reads as an EOFException ("the server prematurely
         // closed the connection"), the text of a real close by the peer. Only the elapsed time tells them apart: a
-        // failure of that shape after at least 90 % of the socket timeout was the timer, a quicker one the peer.
+        // failure of that shape after at least 90 % of the socket timeout was the timer, a quicker one the peer. The
+        // request timer (HttpRequestTimeoutException) is the engine's own as well: it starts with the request, so on a
+        // PUT whose two timeouts are equal it fires before the socket timer.
         internal fun isOwnTimeout(
             e: Throwable,
             elapsedMs: Long,
@@ -111,7 +117,7 @@ class InternxtApiService(
         ): Boolean =
             elapsedMs >= socketTimeoutMs - socketTimeoutMs / 10 &&
                 generateSequence(e) { it.cause }.take(8).any {
-                    it is java.io.EOFException || it is java.net.SocketTimeoutException
+                    it is java.io.EOFException || it is java.net.SocketTimeoutException || it is HttpRequestTimeoutException
                 }
 
         // scheme://host/path of [url]. Never the query: on a presigned storage URL it carries the signature.
@@ -805,16 +811,10 @@ class InternxtApiService(
             try {
                 val response =
                     httpClient.put(url) {
-                        // UD-337 + UD-353: size-adaptive request timeout against
+                        // UD-337 + UD-353: size-adaptive timeouts against
                         // OVH (Internxt's shard backend) with a pessimistic
                         // 10 KiB/s floor — see OVH_PUT_MIN_THROUGHPUT_BPS.
-                        timeout {
-                            requestTimeoutMillis =
-                                UploadTimeoutPolicy.computeRequestTimeoutMs(
-                                    fileSize = data.size.toLong(),
-                                    minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
-                                )
-                        }
+                        shardPutTimeouts(shardPutTimeoutMs(data.size.toLong()))
                         header("Content-Type", "application/octet-stream")
                         setBody(data)
                     }
@@ -834,19 +834,28 @@ class InternxtApiService(
         file: java.nio.file.Path,
         size: Long,
     ) {
+        putShardFromFile(url, file, size, shardPutTimeoutMs(size))
+    }
+
+    // The same call with its timeout given instead of derived from the size, so that a loopback test can make the timer short.
+    internal suspend fun putShardFromFile(
+        url: String,
+        file: java.nio.file.Path,
+        size: Long,
+        timeoutMs: Long,
+    ) {
         bridgeBudget.awaitSlot()
         try {
+            val startedNs = System.nanoTime()
             val response =
-                httpClient.put(url) {
-                    timeout {
-                        requestTimeoutMillis =
-                            UploadTimeoutPolicy.computeRequestTimeoutMs(
-                                fileSize = size,
-                                minThroughputBytesPerSecond = OVH_PUT_MIN_THROUGHPUT_BPS,
-                            )
+                try {
+                    httpClient.put(url) {
+                        shardPutTimeouts(timeoutMs)
+                        header("Content-Type", "application/octet-stream")
+                        setBody(streamingFileBody(file, size))
                     }
-                    header("Content-Type", "application/octet-stream")
-                    setBody(streamingFileBody(file, size))
+                } catch (e: java.io.IOException) {
+                    throw explainPutFailure(e, url, size, (System.nanoTime() - startedNs) / 1_000_000, timeoutMs)
                 }
             if (!response.status.isSuccess()) {
                 throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value)
@@ -856,6 +865,41 @@ class InternxtApiService(
             if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
             throw e
         }
+    }
+
+    // The data PUT's socket and request timeout are one size-based value. The object store answers only after the whole
+    // body has arrived, and the client's socket timeout is a read-idle timer (time since bytes were last RECEIVED): a
+    // value shorter than the transfer cuts a PUT that is still flowing at line rate, however slow the request timeout.
+    private fun HttpRequestBuilder.shardPutTimeouts(timeoutMs: Long) {
+        timeout {
+            socketTimeoutMillis = timeoutMs
+            requestTimeoutMillis = timeoutMs
+        }
+    }
+
+    // A PUT that failed with an IOException: the engine's own timer or the peer. An IOException goes back out so that
+    // the retry of the caller (retryShardCommit) stays as it was; only its text and the log say what happened. The URL
+    // is a presigned one: its query, the signature, never goes into a message or the log. That is also why the timer's
+    // own exception is not kept as the cause: Ktor's timeout exceptions print the whole URL, query included.
+    private fun explainPutFailure(
+        e: java.io.IOException,
+        url: String,
+        size: Long,
+        elapsedMs: Long,
+        timeoutMs: Long,
+    ): java.io.IOException {
+        if (!isOwnTimeout(e, elapsedMs, timeoutMs)) {
+            log.warn("PUT of {} bytes failed after {} ms (socket timeout {} ms): {}", size, elapsedMs, timeoutMs, e.javaClass.simpleName)
+            return e
+        }
+        log.warn(
+            "PUT of {} bytes timed out after {} ms: the engine's own timer fired (socket timeout {} ms, request timeout {} ms), not a server close",
+            size,
+            elapsedMs,
+            timeoutMs,
+            timeoutMs,
+        )
+        return java.net.SocketTimeoutException(ownTimeoutMessage("PUT", url, elapsedMs, timeoutMs))
     }
 
     suspend fun getQuota(): QuotaInfo {
