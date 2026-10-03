@@ -62,6 +62,11 @@
             "type": "integer",
             "minimum": 0
           },
+          "sync_root_rescan_minutes": {
+            "description": "How often the daemon rescans the sync root for files that arrived there other than through the mount (copied in, dropped while the daemon was stopped, restored from a backup) and uploads them, in minutes. One pass also runs at daemon start. Upload-only: never downloads or deletes. 0 turns it off. Default 10.",
+            "type": "integer",
+            "minimum": 0
+          },
           "bucket": { "type": "string" },
           "region": { "type": "string" },
           "endpoint": { "type": "string" },

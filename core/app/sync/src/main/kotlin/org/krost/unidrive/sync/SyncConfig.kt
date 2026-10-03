@@ -322,6 +322,9 @@ data class RawProvider(
     // #450: budget of this profile's hydration cache in bytes (the copies the mount's reads and
     // writes leave under ~/.cache/unidrive/hydration/<profile>). 0 = unlimited. Absent = the default.
     val hydration_cache_max_bytes: Long? = null,
+    // #504: how often the daemon rescans the sync root for files that arrived there out of band, in
+    // minutes. 0 = off. Absent = the default (10).
+    val sync_root_rescan_minutes: Int? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -442,6 +445,10 @@ data class SyncConfig(
     fun hydrationCacheMaxBytes(profileName: String): Long =
         (providers[profileName]?.hydrationCacheMaxBytes ?: DEFAULT_HYDRATION_CACHE_MAX_BYTES).coerceAtLeast(0L)
 
+    /** #504: minutes between the daemon's sync root rescans for this profile; 0 = off. */
+    fun syncRootRescanMinutes(profileName: String): Int =
+        (providers[profileName]?.syncRootRescanMinutes ?: DEFAULT_SYNC_ROOT_RESCAN_MINUTES).coerceAtLeast(0)
+
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
@@ -451,11 +458,15 @@ data class SyncConfig(
         val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
         val excludePatterns: List<String> = emptyList(),
         val hydrationCacheMaxBytes: Long? = null,
+        val syncRootRescanMinutes: Int? = null,
     )
 
     companion object {
         /** #450: default hydration cache budget per profile, 20 GiB. */
         const val DEFAULT_HYDRATION_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
+
+        /** #504: default interval of the daemon's sync root rescan, in minutes. */
+        const val DEFAULT_SYNC_ROOT_RESCAN_MINUTES: Int = 10
 
         /**
          * Patterns excluded from sync for every profile, before any user
@@ -784,6 +795,7 @@ data class SyncConfig(
                                 .mapValues { (_, v) -> parsePolicy(v) },
                         excludePatterns = rp.exclude_patterns ?: emptyList(),
                         hydrationCacheMaxBytes = rp.hydration_cache_max_bytes,
+                        syncRootRescanMinutes = rp.sync_root_rescan_minutes,
                     )
                 }
             val pollInt = general.poll_interval ?: 60
