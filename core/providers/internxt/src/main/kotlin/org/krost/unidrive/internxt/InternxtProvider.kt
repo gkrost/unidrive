@@ -342,8 +342,19 @@ class InternxtProvider(
             val bucketKey = crypto.deriveBucketKey(seed, bucket)
             val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
+            // #335: taking the first usable shard of a multi-shard object decrypted a
+            // truncated file whose length mismatch then surfaced as a RETRIABLE error —
+            // the engine retried forever instead of quarantining. Fail permanently (a
+            // clear quarantine reason) before any download request is made. One shard
+            // keeps working exactly as before; zero usable shards keeps today's error.
+            val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
+            if (usableShards.size > 1) {
+                throw PermanentDownloadFailureException(
+                    "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
+                )
+            }
             val downloadUrl =
-                bridgeInfo.shards.firstOrNull { it.url.isNotBlank() }?.url
+                usableShards.firstOrNull()?.url
                     ?: throw ProviderException("No download URL in bridge info for $remotePath")
 
             val cipher = crypto.createContentDecryptCipher(fileKey, iv)
