@@ -37,10 +37,60 @@ class LocalScanner(
     var lastScanSkipped: Int = 0
         private set
 
+    // #503/#491: local siblings whose names are equal after NFC but differ in code points
+    // cannot both live under one cloud name. Both are refused (owner decision, #491). Rebuilt
+    // by every scan(): the clash exists for as long as the twins do.
+    //  - blockedPaths: absolute on-disk paths of the refused members (files skipped,
+    //    folders pruned with their whole subtree).
+    //  - blockedKeys: their shared NFC remote-style paths. Never reported as changes and
+    //    never DELETED: a state row for the key is left exactly as it is (nothing is deleted
+    //    remotely or locally; a previously synced member just stops being uploaded).
+    private val blockedPaths = mutableSetOf<Path>()
+    private val blockedKeys = mutableSetOf<String>()
+
+    private fun underBlockedKey(path: String): Boolean = blockedKeys.any { path == it || path.startsWith("$it/") }
+
+    /** #503: whether [path] (an NFC path) is, or lies below, a name the last [scan] refused as an NFC clash. */
+    fun isUnderNfcCollision(path: String): Boolean = underBlockedKey(path)
+
+    /** #503: the NFC paths the last [scan] refused (empty when there is no clash). */
+    val nfcCollisionKeys: Set<String> get() = blockedKeys.toSet()
+
+    private fun refuseNfcTwins(dir: Path) {
+        val byKey = LinkedHashMap<String, MutableList<Path>>()
+        try {
+            Files.newDirectoryStream(dir).use { ds ->
+                for (child in ds) {
+                    // Ordinal NFC comparison only; no case folding (sigma / final sigma are distinct).
+                    byKey.getOrPut(PathNormalizer.nfc(child.fileName.toString())) { mutableListOf() }.add(child)
+                }
+            }
+        } catch (e: IOException) {
+            log.debug("#503: cannot list {} to check for NFC twins: {}", dir, e.message)
+            return
+        }
+        for ((nfcName, members) in byKey) {
+            if (members.map { it.fileName.toString() }.distinct().size < 2) continue
+            val nfcPath = PathNormalizer.nfc("/" + syncRoot.relativize(dir.resolve(nfcName)).toString().replace('\\', '/'))
+            if (isExcluded(nfcPath) || !onScopePath(nfcPath)) continue
+            blockedPaths.addAll(members)
+            blockedKeys.add(nfcPath)
+            val names = members.map { it.fileName.toString() }.sorted()
+            log.warn(
+                "Local path collision at {}: {} are the same name for the cloud (Unicode normalisation, #491); " +
+                    "neither is synced - rename one",
+                nfcPath,
+                if (names.size == 2) "${names[0]} and ${names[1]}" else names.joinToString(", "),
+            )
+        }
+    }
+
     private fun isExcluded(relativePath: String): Boolean = excludePatterns.any { pattern -> Reconciler.matchesGlob(relativePath, pattern) }
 
     fun scan(onProgress: ((Int) -> Unit)? = null): Map<String, ChangeState> {
         val changes = mutableMapOf<String, ChangeState>()
+        blockedPaths.clear()
+        blockedKeys.clear()
         val seenPaths = mutableSetOf<String>()
         var skipped = 0
 
@@ -66,6 +116,7 @@ class LocalScanner(
         var batchCommitted = false
         try {
 
+        if (Files.isDirectory(syncRoot)) refuseNfcTwins(syncRoot)
         if (Files.isDirectory(syncRoot)) Files.walkFileTree(
             syncRoot,
             object : SimpleFileVisitor<Path>() {
@@ -73,6 +124,7 @@ class LocalScanner(
                     file: Path,
                     attrs: BasicFileAttributes,
                 ): FileVisitResult {
+                    if (file in blockedPaths) return FileVisitResult.CONTINUE
                     // #171: canonicalize to NFC so an NFD on-disk name matches the
                     // NFC remote/state.db key in the reconciler.
                     val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(file).toString().replace('\\', '/'))
@@ -185,10 +237,12 @@ class LocalScanner(
                     attrs: BasicFileAttributes,
                 ): FileVisitResult {
                     if (dir == syncRoot) return FileVisitResult.CONTINUE
+                    if (dir in blockedPaths) return FileVisitResult.SKIP_SUBTREE
                     // #171: canonicalize to NFC (see visitFile).
                     val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(dir).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.SKIP_SUBTREE
                     if (!onScopePath(relativePath)) return FileVisitResult.SKIP_SUBTREE
+                    refuseNfcTwins(dir)
                     seenPaths.add(relativePath)
 
                     if (dbEntries[relativePath] == null) {
@@ -227,6 +281,7 @@ class LocalScanner(
             if (entry.path !in seenPaths) {
                 if (isExcluded(entry.path)) continue
                 if (!onScopePath(entry.path)) continue
+                if (underBlockedKey(entry.path)) continue
                 val localPath = safeResolveLocal(syncRoot, entry.path)
                 if (!Files.exists(localPath)) {
                     changes[entry.path] = ChangeState.DELETED

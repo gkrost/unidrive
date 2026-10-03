@@ -1928,7 +1928,7 @@ open class SyncEngine(
         // apply mode (skipRemoteGather) has no fresh listing, so it is never gated.
         val enumerationComplete =
             skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
-        val reconciledActions =
+        val reconciledActionsAll =
             if (streamingActions != null) {
                 reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
@@ -1937,6 +1937,19 @@ open class SyncEngine(
                 reconciler.reconcile(remoteChanges, localChanges, reporter, syncPaths,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
+            }
+        // #503 review: a name the local scan refused as an NFC clash (#491) is out of sync in BOTH directions. The scan
+        // reports no change for it, so without this a remote edit of the cloud copy would be planned as a download that
+        // overwrites the local member with that name (and a local edit of it would be lost). Nothing is planned for it.
+        val reconciledActions =
+            if (scanner.nfcCollisionKeys.isEmpty()) {
+                reconciledActionsAll
+            } else {
+                reconciledActionsAll.filterNot { a ->
+                    scanner.isUnderNfcCollision(a.path) ||
+                        (a is SyncAction.MoveRemote && scanner.isUnderNfcCollision(a.fromPath)) ||
+                        (a is SyncAction.MoveLocal && scanner.isUnderNfcCollision(a.fromPath))
+                }.also { kept -> if (kept.size < reconciledActionsAll.size) log.warn("#503: {} planned action(s) under NFC-clashing local names skipped", reconciledActionsAll.size - kept.size) }
             }
         logUnhydratedFolderSkips(dryRun)
 
