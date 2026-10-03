@@ -18,6 +18,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class InternxtApiServiceTest {
+    // One instance for the wire-model tests: building a Json per use is slow and the compiler says so.
+    private val lenientJson = Json { ignoreUnknownKeys = true }
+
     @Test
     fun `deserialize mirror response`() {
         val json = Json { ignoreUnknownKeys = true }
@@ -179,7 +182,7 @@ class InternxtApiServiceTest {
     fun `UD-372 InternxtFile eagerly parses creation+modification timestamps via JSON deserialise`() {
         val raw =
             """{"uuid":"u1","creationTime":"2026-05-03T17:39:55.123Z","modificationTime":"2026-05-03T18:00:00Z"}"""
-        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        val file = lenientJson.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
         assertEquals(java.time.Instant.parse("2026-05-03T17:39:55.123Z"), file.creationInstant)
         assertEquals(java.time.Instant.parse("2026-05-03T18:00:00Z"), file.modificationInstant)
         // Wire fields preserved.
@@ -190,7 +193,7 @@ class InternxtApiServiceTest {
     @Test
     fun `UD-372 InternxtFile timestamps null when wire field absent`() {
         val raw = """{"uuid":"u1"}"""
-        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        val file = lenientJson.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
         assertEquals(null, file.creationInstant)
         assertEquals(null, file.modificationInstant)
     }
@@ -198,7 +201,7 @@ class InternxtApiServiceTest {
     @Test
     fun `UD-372 InternxtFile timestamps null when wire field is malformed (lenient parse)`() {
         val raw = """{"uuid":"u1","creationTime":"not-a-date","modificationTime":""}"""
-        val file = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
+        val file = lenientJson.decodeFromString<org.krost.unidrive.internxt.model.InternxtFile>(raw)
         assertEquals(null, file.creationInstant)
         assertEquals(null, file.modificationInstant)
     }
@@ -207,7 +210,7 @@ class InternxtApiServiceTest {
     fun `UD-372 InternxtFolder eagerly parses timestamps via JSON deserialise`() {
         val raw =
             """{"uuid":"f1","creationTime":"2026-05-03T17:39:55Z","modificationTime":"2026-05-03T18:00:00Z"}"""
-        val folder = Json { ignoreUnknownKeys = true }.decodeFromString<org.krost.unidrive.internxt.model.InternxtFolder>(raw)
+        val folder = lenientJson.decodeFromString<org.krost.unidrive.internxt.model.InternxtFolder>(raw)
         assertEquals(java.time.Instant.parse("2026-05-03T17:39:55Z"), folder.creationInstant)
         assertEquals(java.time.Instant.parse("2026-05-03T18:00:00Z"), folder.modificationInstant)
     }

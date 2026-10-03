@@ -296,7 +296,7 @@ class ReconcilerTest {
         // Verify the synthesised CloudItem carries the DB's remoteId so Pass 2's
         // downloadById can fetch from the provider even when the path was
         // missing from the delta.
-        assertEquals("id-/_INBOX/orphan.pdf", (action as SyncAction.DownloadContent).remoteItem.id)
+        assertEquals("id-/_INBOX/orphan.pdf", action.remoteItem.id)
         assertEquals(100L, action.remoteItem.size)
     }
 

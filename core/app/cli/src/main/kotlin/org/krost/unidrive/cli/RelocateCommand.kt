@@ -316,7 +316,7 @@ class RelocateCommand : Runnable {
 
         if (deleteSource) {
             print("\nDelete source files? Type 'yes' to confirm: ")
-            val confirm = readLine()
+            val confirm = readlnOrNull()
             if (confirm != "yes") {
                 println("Aborted")
                 return
@@ -329,7 +329,7 @@ class RelocateCommand : Runnable {
         }
     }
 
-    private suspend fun deleteSourceRecursive(
+    internal suspend fun deleteSourceRecursive(
         provider: CloudProvider,
         prefix: String,
     ): Int {
@@ -346,7 +346,8 @@ class RelocateCommand : Runnable {
                     }
                 }
             }
-            if (page.cursor == null) break
+            // The cursor is never null; the provider says "last page" with hasMore = false.
+            if (!page.hasMore) break
             page = provider.delta(page.cursor)
         }
         // Delete folders bottom-up

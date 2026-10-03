@@ -157,7 +157,7 @@ class ProcessLockTest {
             val reader = ProcessLock(lockFile)
             val info = reader.readHolderInfo()
             assertNotNull(info)
-            assertEquals(ProcessHandle.current().pid(), info!!.pid)
+            assertEquals(ProcessHandle.current().pid(), info.pid)
             assertEquals(ProcessLock.Mode.DAEMON, info.mode)
         } finally {
             held.unlock()
@@ -186,7 +186,7 @@ class ProcessLockTest {
             val reader = ProcessLock(lockFile)
             val info = reader.readHolderInfo()
             assertNotNull(info, "legacy pid-only file must parse")
-            assertEquals(12345L, info!!.pid)
+            assertEquals(12345L, info.pid)
             assertEquals(
                 ProcessLock.Mode.SYNC,
                 info.mode,
@@ -208,7 +208,7 @@ class ProcessLockTest {
             val reader = ProcessLock(lockFile)
             val info = reader.readHolderInfo()
             assertNotNull(info, "unknown-mode file must still parse the pid")
-            assertEquals(67890L, info!!.pid)
+            assertEquals(67890L, info.pid)
             assertEquals(
                 null,
                 info.mode,

@@ -187,7 +187,7 @@ class InternxtAmbiguousPathTest {
             provider.deleteById("twin-a", "/dup.txt")
             val body = trashBody
             assertTrue(body != null && "twin-a" in body && """"file"""" in body, "trash body: $body")
-            assertTrue("twin-b" !in (body ?: ""), "the sibling twin must be untouched")
+            assertTrue("twin-b" !in body, "the sibling twin must be untouched")
         }
 
     @Test

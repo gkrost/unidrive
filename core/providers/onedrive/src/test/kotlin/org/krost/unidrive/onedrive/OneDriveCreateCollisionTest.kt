@@ -201,7 +201,7 @@ class OneDriveCreateCollisionTest {
 
             assertTrue(sessionBody != null, "createUploadSession must be called for a >4 MiB file")
             assertTrue(
-                sessionBody!!.contains("\"@microsoft.graph.conflictBehavior\":\"fail\""),
+                sessionBody.contains("\"@microsoft.graph.conflictBehavior\":\"fail\""),
                 "DATA LOSS: a chunked create must open its session with fail, not replace; body was $sessionBody",
             )
             provider.close()

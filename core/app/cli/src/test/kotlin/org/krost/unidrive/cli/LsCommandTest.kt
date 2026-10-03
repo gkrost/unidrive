@@ -158,7 +158,7 @@ class LsCommandTest {
             // Single source of truth: the two surfaces list identical paths.
             assertEquals(
                 mountView.map { it.path }.toSortedSet(),
-                lsView!!.map { it.path }.toSortedSet(),
+                lsView.map { it.path }.toSortedSet(),
                 "ls must list exactly the paths the mount view serves (no stale-window disagreement)",
             )
         } finally {

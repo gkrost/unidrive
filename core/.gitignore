@@ -30,4 +30,6 @@ NOTICE
 REVIEW_PROMPT.md
 claude_sessions.txt
 gradle.properties
+# core/gradle.properties itself is tracked: build-wide Gradle settings (per-machine overrides go to ~/.gradle/gradle.properties)
+!/gradle.properties
 __pycache__/

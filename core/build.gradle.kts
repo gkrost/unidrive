@@ -109,6 +109,14 @@ subprojects {
                 compilerOptions {
                     jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
                 }
+                // kotlinx-coroutines-test (runTest, StandardTestDispatcher, advanceUntilIdle, currentTime, ...)
+                // is still marked experimental and the tests use it throughout: one opt-in for the test
+                // compilation instead of an annotation on every test class (76 warnings per build before).
+                target.compilations.named("test") {
+                    compileTaskProvider.configure {
+                        compilerOptions.optIn.add("kotlinx.coroutines.ExperimentalCoroutinesApi")
+                    }
+                }
             }
         }
     }
@@ -141,6 +149,13 @@ providers.gradleProperty("unidriveTestJvm").orNull?.let { jvmVersion ->
                 }
             tasks.withType<Test>().configureEach {
                 javaLauncher.set(runtimeLauncher)
+                // JEP 500 (JDK 26+): the first reflective write to a final field prints a three-line warning per
+                // test JVM, and a future JDK will refuse it. Many provider tests inject a mock HTTP client
+                // into a private val that way (follow-up: give those classes real test seams). Enabling it
+                // explicitly keeps the log readable and the intent visible. The option does not exist before 26.
+                if (runtimeJvm.asInt() >= 26) {
+                    jvmArgs("--enable-final-field-mutation=ALL-UNNAMED")
+                }
             }
         }
     }

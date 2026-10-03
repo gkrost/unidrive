@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -361,7 +362,8 @@ class HydrationImpl(
         // body, so the slot/permit bookkeeping in the finally blocks below would be skipped
         // (slot stuck busy, queue permit lost, no Completed for the handle). ATOMIC
         // guarantees the body is entered; the ensureActive() below then turns a pending
-        // cancel into the normal cancelled path.
+        // cancel into the normal cancelled path. ATOMIC is a delicate API; this is the case it exists for.
+        @OptIn(DelicateCoroutinesApi::class)
         val worker = recoveryUploadScope.launch(start = CoroutineStart.ATOMIC) {
             // Emitted only after the slot is released (below): a client that reacts to
             // Completed by re-listing must already see pending_upload settled, not still

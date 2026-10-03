@@ -54,14 +54,13 @@ val liveTierProperty = "unidrive.liveTier"
 tasks.test {
     useJUnit()
     systemProperty(liveTierProperty, System.getProperty(liveTierProperty, "routine"))
-    // Live tests print plan size, adopted count, refresh/throttle observability,
-    // and other operator-facing data via println. Surface that to stdout so a
-    // human running the test can see it without digging into the HTML report.
-    // Other modules don't enable this — only sync-tracking, where the live
-    // test's println IS the answer the operator wants.
+    // `check` runs this task, so it stays as quiet as the other modules' tests: failures only. The
+    // routine tier's fake-driven tests log their simulated failures at WARN and used to echo every test
+    // and every line of it into the build log. Output is still in the test report. The live-test tasks
+    // below keep the full echo: there the test's println IS the answer the operator wants (plan size,
+    // adopted count, refresh/throttle observability).
     testLogging {
-        showStandardStreams = true
-        events("passed", "skipped", "failed")
+        events("failed")
     }
 }
 

@@ -30,7 +30,7 @@ class HydrationOpenSetConcurrencyTest {
     fun `dehydrate of an open path stays Busy under concurrent open-set mutation`() =
         runBlocking(Dispatchers.IO) {
             val env = HydrationTestEnv()
-            val impl = env.hydration as HydrationImpl
+            val impl = env.hydration
 
             env.stateDb.insertHydratedEntry("/victim.txt", localSize = 5)
             env.syncEngine.seedCacheContent("/victim.txt", "hello")

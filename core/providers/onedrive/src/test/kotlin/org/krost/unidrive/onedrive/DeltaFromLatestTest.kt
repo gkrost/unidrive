@@ -63,7 +63,7 @@ class DeltaFromLatestTest {
             assertTrue(result.items.isEmpty(), "Graph returns an empty item list for token=latest")
             assertNotNull(result.deltaLink)
             assertTrue(
-                result.deltaLink!!.contains("token=ABC123"),
+                result.deltaLink.contains("token=ABC123"),
                 "expected server-issued cursor to be surfaced, got: ${result.deltaLink}",
             )
             service.close()

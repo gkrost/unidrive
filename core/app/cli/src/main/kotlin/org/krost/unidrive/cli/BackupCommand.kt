@@ -147,14 +147,14 @@ class BackupListCommand : Runnable {
             val fields = sectionFields[name] ?: emptyMap()
             val direction = fields["sync_direction"] ?: "bidi"
             val versioning = fields["file_versioning"] == "true"
-            val target = cfg?.remote_path ?: "-"
+            val target = cfg.remote_path ?: "-"
             println(
                 "%-20s  %-12s  %-10s  %-24s  %s%s".format(
                     name,
-                    cfg?.type ?: "?",
+                    cfg.type ?: "?",
                     direction,
                     target,
-                    cfg?.sync_root ?: "~/",
+                    cfg.sync_root ?: "~/",
                     if (versioning) "  [versioned]" else "",
                 ),
             )
