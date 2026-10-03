@@ -356,6 +356,46 @@ class OneDriveDownloadReresolveTest {
             Files.deleteIfExists(dest)
         }
 
+    // #329 review: a 403 that persists on the fresh URL is an access refusal, not an
+    // authentication failure (it must not latch the stale-auth UX), as before the change.
+    @Test
+    fun `a 403 that persists after re-resolution stays a GraphApiException`() =
+        runTest {
+            val itemByIdCalls = AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        url.contains("/me/drive/items/item-403") && !url.endsWith("/content") -> {
+                            val n = itemByIdCalls.getAndIncrement()
+                            respond(
+                                content = jsonItem("item-403", "https://cdn.example/forbidden$n"),
+                                status = HttpStatusCode.OK,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        url.startsWith("https://cdn.example/forbidden") -> {
+                            respond(
+                                content = """{"error":{"code":"accessDenied","message":"no"}}""",
+                                status = HttpStatusCode.Forbidden,
+                                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                            )
+                        }
+                        else -> error("unexpected URL: $url")
+                    }
+                }
+
+            val service = GraphApiService(config = OneDriveConfig(), tokenProvider = { "tok" })
+            installMockClient(service, engine)
+
+            val dest = Files.createTempFile("od-329c", ".bin")
+            val ex = assertFailsWith<GraphApiException> { service.downloadFile("item-403", dest) }
+            assertEquals(403, ex.statusCode)
+            assertEquals(2, itemByIdCalls.get(), "still exactly one re-resolve")
+            service.close()
+            Files.deleteIfExists(dest)
+        }
+
     // #247, the live repro: the item is already gone at the FIRST path resolve. That
     // 404 used to escape as a raw GraphApiException and was retried on every poll.
     @Test

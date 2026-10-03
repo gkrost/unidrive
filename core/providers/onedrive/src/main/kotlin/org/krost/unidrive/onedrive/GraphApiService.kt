@@ -239,7 +239,7 @@ class GraphApiService(
                             return@execute DownloadOutcome.RetryAuth
                         }
                         if (!authNeeded && (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden)) {
-                            return@execute DownloadOutcome.ExpiredUrl(response.status.value)
+                            return@execute DownloadOutcome.ExpiredUrl(response.status.value, readBoundedErrorBody(response))
                         }
                         if (response.status == HttpStatusCode.Unauthorized) {
                             throw AuthenticationException(
@@ -314,6 +314,16 @@ class GraphApiService(
                         // for a fresh URL (mirrors the HTML re-resolve arm below); only a
                         // 401/403 on the fresh URL is surfaced as an authentication failure.
                         if (authUrlReresolved) {
+                            // Only a 401 is an authentication failure. A 403 that persists on a
+                            // fresh URL is an access refusal (before #329 it surfaced as the
+                            // generic download failure): keep that, so it cannot latch the
+                            // stale-auth UX (#157).
+                            if (outcome.statusCode == HttpStatusCode.Forbidden.value) {
+                                throw GraphApiException(
+                                    "Download failed: ${HttpStatusCode.Forbidden} - ${outcome.body}",
+                                    outcome.statusCode,
+                                )
+                            }
                             throw AuthenticationException(
                                 "Authentication failed (${outcome.statusCode}) on a re-resolved download URL for item $itemId",
                             )
@@ -1086,6 +1096,7 @@ class GraphApiService(
         // an authNeeded == false request). Carries the status for the failure surface.
         data class ExpiredUrl(
             val statusCode: Int,
+            val body: String,
         ) : DownloadOutcome()
 
         data class Throttle(
