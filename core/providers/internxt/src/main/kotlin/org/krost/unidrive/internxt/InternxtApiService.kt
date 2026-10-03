@@ -193,12 +193,13 @@ class InternxtApiService(
      * (required), and optional `modificationTime`. The endpoint preserves the existing
      * file's bucket, encrypted name, parent folder, and encryptVersion — there is nothing
      * to re-derive on the client side. Returns the updated `FileDto` (same `uuid`,
-     * swapped `fileId`).
+     * swapped `fileId`). #485: `fileId` is required when `size > 0` and must be absent when
+     * `size == 0` (an empty file has no bucket entry); pass null for an empty replacement.
      */
     suspend fun replaceFile(
         uuid: String,
         size: Long,
-        fileId: String,
+        fileId: String?,
         modificationTime: java.time.Instant? = null,
     ): InternxtFile =
         retryOnTransient {
@@ -207,7 +208,7 @@ class InternxtApiService(
                 try {
                     val requestBody =
                         kotlinx.serialization.json.buildJsonObject {
-                            put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
+                            if (fileId != null) put("fileId", kotlinx.serialization.json.JsonPrimitive(fileId))
                             put("size", kotlinx.serialization.json.JsonPrimitive(size))
                             if (modificationTime != null) {
                                 put("modificationTime", kotlinx.serialization.json.JsonPrimitive(modificationTime.toString()))
