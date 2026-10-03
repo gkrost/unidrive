@@ -58,6 +58,9 @@ class HydrationImpl(
     // #450: after a close or an upload completion the eviction pass runs once this much later, one
     // pass for any number of triggers (it walks the whole cache directory). 0 = immediately.
     private val evictionDelayMs: Long = EVICTION_DELAY_MS,
+    // #493: a row whose last upload attempt failed is replayed this much after the start instead of at once, so work
+    // that can succeed (and the client's fresh writes) goes first. 0 = replay at once, as before.
+    private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) : Hydration {
 
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
@@ -150,6 +153,9 @@ class HydrationImpl(
         const val DEFAULT_CACHE_MAX_BYTES: Long = SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES
         const val CACHE_ACCESS_GRACE_MS: Long = 60_000
         const val EVICTION_DELAY_MS: Long = 5_000
+
+        /** #493: default delay of the replay of rows whose last upload attempt failed (see [failedReplayDelayMs]). */
+        const val DEFAULT_FAILED_REPLAY_DELAY_MS: Long = 10L * 60 * 1000
 
         // Temp files the engine stages beside their destination (`<name>.hydrating-<uuid>` for a
         // download, `.ud-serve-*.tmp` for a copy out of the sync root); a crash leaves them behind.
@@ -530,21 +536,51 @@ class HydrationImpl(
      * when the daemon last stopped — a restart alone drains the backlog even
      * with no client connected. Skips excluded (keep-local) and out-of-scope
      * rows, and rows whose cache copy is gone. Returns the number of uploads
-     * enqueued; every enqueued upload goes through the same per-path
+     * enqueued at once; every enqueued upload goes through the same per-path
      * serialization and transfer budget as client-submitted ones.
+     *
+     * #493: a row whose last attempt failed (last_error_at set) is replayed
+     * [failedReplayDelayMs] later instead: replayed at once, two uploads that
+     * keep failing held both transfer slots for their whole retry ladder
+     * (about 10 minutes) after every start, and nothing else uploaded. When its
+     * turn comes the row is replayed only if it is still pending, still
+     * replayable and no upload of it is under way (a client may have written
+     * it meanwhile).
      */
     suspend fun replayPendingUploads(): Int {
         var queued = 0
+        var deferred = 0
         for (path in stateDb.pendingUploadPaths()) {
-            if (syncEngine.isExcludedPath(path)) continue
-            if (syncEngine.isOutOfScope(path)) continue
-            val cachePath = syncEngine.resolveCachePath(path)
-            if (!Files.exists(cachePath)) continue
-            launchSerializedUpload(path, cachePath, "engine-replay-${queued + 1}", baseEtag = null)
+            if (!replayable(path)) continue
+            if (failedReplayDelayMs > 0 && stateDb.getEntry(path)?.lastErrorAt != null) {
+                deferred++
+                val handleId = "engine-replay-late-$deferred"
+                recoveryUploadScope.launch {
+                    delay(failedReplayDelayMs)
+                    val entry = stateDb.getEntry(path)
+                    if (entry == null || entry.remoteId != null || !entry.isHydrated) return@launch // gone or uploaded
+                    if (uploadSlots.containsKey(path) || !replayable(path)) return@launch
+                    launchSerializedUpload(path, syncEngine.resolveCachePath(path), handleId, baseEtag = null)
+                }
+                continue
+            }
+            launchSerializedUpload(path, syncEngine.resolveCachePath(path), "engine-replay-${queued + 1}", baseEtag = null)
             queued++
+        }
+        if (deferred > 0) {
+            log.info(
+                "replay of {} upload(s) whose last attempt failed deferred by {} s (#493)",
+                deferred,
+                failedReplayDelayMs / 1000,
+            )
         }
         return queued
     }
+
+    private fun replayable(path: String): Boolean =
+        !syncEngine.isExcludedPath(path) &&
+            !syncEngine.isOutOfScope(path) &&
+            Files.exists(syncEngine.resolveCachePath(path))
 
     override suspend fun cancelUpload(path: String): Boolean {
         val slot = uploadSlots[path] ?: return false

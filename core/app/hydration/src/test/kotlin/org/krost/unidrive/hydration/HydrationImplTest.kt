@@ -271,6 +271,8 @@ internal class HydrationTestEnv(
     val uploadRetryDelaysMs: List<Long> = listOf(2_000L, 10_000L),
     /** Coalescing gap for `uploading` progress events (0 = emit every callback). */
     val uploadProgressMinIntervalMs: Long = 400,
+    /** #493: delay of the replay of rows whose last upload failed; 0 = at once. */
+    val failedReplayDelayMs: Long = HydrationImpl.DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -310,6 +312,7 @@ internal class HydrationTestEnv(
             maxUploadAttempts = maxUploadAttempts,
             uploadRetryDelaysMs = uploadRetryDelaysMs,
             uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
+            failedReplayDelayMs = failedReplayDelayMs,
         )
     }
 
