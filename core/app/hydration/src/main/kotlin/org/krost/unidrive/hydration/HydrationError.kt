@@ -67,7 +67,8 @@ sealed interface HydrationError {
      * write is accepted and the content stays local-only, deliberately never
      * uploaded (carried as [Completed.error] so a client marking in-sync on a
      * Completed event cannot mark an excluded file as uploaded). On rename it
-     * IS a refusal: moving cloud content onto an excluded name would take a
+     * IS a refusal (for a synced source; a never-uploaded file renames
+     * locally): moving cloud content onto an excluded name would take a
      * synced object out of every sync action silently (the Reconciler and
      * LocalScanner skip excluded names), so the move is refused and both
      * paths stay untouched. Its [message] is the STABLE wire token `excluded`.

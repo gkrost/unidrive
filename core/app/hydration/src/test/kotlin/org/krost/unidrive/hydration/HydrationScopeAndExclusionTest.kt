@@ -130,6 +130,33 @@ class HydrationScopeAndExclusionTest {
     }
 
     @Test
+    fun `rename of a missing source onto an excluded name answers old_path_not_found`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+
+        assertEquals(RenameResult.OldPathNotFound, env.hydration.rename("/new/ghost.txt", "/new/scratch.tmp"))
+    }
+
+    @Test
+    fun `a never-uploaded file may be renamed onto an excluded name locally`() = runTest {
+        // Nothing exists in the cloud for it, so nothing can be stranded: the rename is local
+        // (an app that writes `x` and renames it to `x.tmp` must not get an error).
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+        env.stateDb.insertLocalOnlyHydratedEntry("/new/draft.txt")
+
+        // This env's provider fake does not implement the ghost-probe a local-only rename runs
+        // afterwards, so the outcome past the guard is a generic failure here (the local rename
+        // itself is covered by HydrationImplRenameTest): what matters is that the excluded
+        // guard does not fire for a source that never reached the cloud.
+        val r = env.hydration.rename("/new/draft.txt", "/new/draft.tmp")
+        if (r is RenameResult.Failed) {
+            assertTrue(r.error.message != HydrationError.EXCLUDED_TOKEN, "the excluded guard must not fire for a never-uploaded source")
+        }
+        assertEquals(0, env.syncEngine.movedPairs().size, "a local-only rename must not touch the cloud")
+    }
+
+    @Test
     fun `create accepts an excluded file and open_write never uploads it`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
         env.stateDb.insertFolderEntry("/new")
