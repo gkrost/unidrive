@@ -82,12 +82,12 @@ if (-not $Work) { $Work = Join-Path $HOME ('unidrive-golden\runs\' + (Get-Date -
 $Work = [IO.Path]::GetFullPath($Work)
 if (Test-Path -LiteralPath $Work) { throw "$Work exists; nothing is overwritten." }
 $runId = Split-Path -Leaf $Work
-$profile = 'golden_' + ($runId -replace '[^A-Za-z0-9]', '_')
+$runProfile = 'golden_' + ($runId -replace '[^A-Za-z0-9]', '_')
 $cfg = Join-Path $Work 'config'; $remote = Join-Path $Work 'remote'; $mirror = Join-Path $Work 'engine-sync-root'
 $staging = Join-Path $Work 'staging'; $out = Join-Path $Work 'out'
 foreach ($d in $cfg, (Join-Path $remote '_INBOX'), $mirror, $staging, $out) { [void][IO.Directory]::CreateDirectory($d) }
 $mount = Join-Path $Work 'mount'
-Write-Host "  work: $Work`n  profile: $profile"
+Write-Host "  work: $Work`n  profile: $runProfile"
 
 # which engine and client
 $installedLauncher = Join-Path $env:LOCALAPPDATA 'unidrive\unidrive.ps1'
@@ -134,9 +134,9 @@ $mountScript = Join-Path $Work 'unidrive-mount.ps1'
 # ---- environment -------------------------------------------------------------------------------------------------------------------
 $toml = @"
 [general]
-default_profile = "$profile"
+default_profile = "$runProfile"
 
-[providers.$profile]
+[providers.$runProfile]
 type = "localfs"
 root_path = "$(To-Toml $remote)"
 sync_root = "$(To-Toml $mirror)"
@@ -149,10 +149,10 @@ if ($Trace) { $env:UNIDRIVE_TRACE = '1' }
 
 $summary = [System.Collections.Generic.List[object]]::new()
 function Mount-Script([string[]]$more) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $mountScript @more -Profile $profile -ConfigDir $cfg 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 (Join-Path $out 'mount-script.log')
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $mountScript @more -Profile $runProfile -ConfigDir $cfg 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 (Join-Path $out 'mount-script.log')
     $LASTEXITCODE
 }
-function Counts() { (& $pwsh -NoProfile -File (Join-Path $here 'probes\daemon-counts.ps1') -Profile $profile 2>&1 | Select-Object -Last 1) }
+function Counts() { (& $pwsh -NoProfile -File (Join-Path $here 'probes\daemon-counts.ps1') -Profile $runProfile 2>&1 | Select-Object -Last 1) }
 function Run-Verify([string]$name, [string]$root, [string[]]$more) {
     $file = Join-Path $out "$name.out"
     & $pwsh -NoProfile -File (Join-Path $here 'verify.ps1') -Root $root -StrictMtime -MaxLines 100000 @more *> $file
@@ -164,13 +164,22 @@ function Run-Verify([string]$name, [string]$root, [string[]]$more) {
 # every file is a placeholder, except names the client cannot match (non-NFC names, see the expected file). A plain file with an
 # NFC name that is still plain means the upload queue is stuck (gkrost/unidrive-windows#115).
 function Placeholder-Counts([string]$root) {
-    $phF = 0; $plF = 0; $phD = 0; $plD = 0; $stuck = 0; $names = [System.Collections.Generic.List[string]]::new()
+    $phF = 0; $plF = 0; $phD = 0; $plD = 0; $stuck = 0; $clashes = 0; $names = [System.Collections.Generic.List[string]]::new()
     foreach ($e in [IO.Directory]::EnumerateFileSystemEntries($root, '*', [IO.SearchOption]::AllDirectories)) {
         $a = [IO.File]::GetAttributes($e); $rp = ($a -band [IO.FileAttributes]::ReparsePoint) -ne 0
         if (($a -band [IO.FileAttributes]::Directory) -ne 0) { if ($rp) { $phD++ } else { $plD++ } }
-        elseif ($rp) { $phF++ } else { $plF++; if ([IO.Path]::GetFileName($e).IsNormalized([Text.NormalizationForm]::FormC)) { $stuck++; if ($names.Count -lt 12) { $names.Add((To-Ascii $e.Substring($root.Length + 1).Replace('\', '/'))) } } }
+        elseif ($rp) { $phF++ } else {
+            $plF++
+            $leaf = [IO.Path]::GetFileName($e)
+            # a name with a sibling that is the same name for the cloud (gkrost/unidrive#491) stays plain on purpose once the client
+            # refuses such pairs (unidrive-windows#123): that is a clash, not a stuck queue
+            $nfc = $leaf.Normalize([Text.NormalizationForm]::FormC)
+            $clash = @([IO.Directory]::EnumerateFileSystemEntries([IO.Path]::GetDirectoryName($e)) | Where-Object { $n = [IO.Path]::GetFileName($_); -not [string]::Equals($n, $leaf, [StringComparison]::Ordinal) -and [string]::Equals($n.Normalize([Text.NormalizationForm]::FormC), $nfc, [StringComparison]::Ordinal) }).Count -gt 0
+            if ($clash) { $clashes++ }
+            elseif ([string]::Equals($leaf, $nfc, [StringComparison]::Ordinal)) { $stuck++; if ($names.Count -lt 12) { $names.Add((To-Ascii $e.Substring($root.Length + 1).Replace('\', '/'))) } }
+        }
     }
-    [pscustomobject]@{ FilesPlaceholder = $phF; FilesPlain = $plF; DirsPlaceholder = $phD; DirsPlain = $plD; PlainNfc = $stuck; PlainNfcNames = $names }
+    [pscustomobject]@{ FilesPlaceholder = $phF; FilesPlain = $plF; DirsPlaceholder = $phD; DirsPlain = $plD; PlainNfc = $stuck; PlainNfcNames = $names; PlainClash = $clashes }
 }
 function Classify([string]$tool, [string]$file) {
     if (-not $Expected) { return $null }
@@ -216,7 +225,7 @@ try {
     # ---- the surfaces --------------------------------------------------------------------------------------------------------------
     Step 'the mount after the upload'
     $pc = Placeholder-Counts (Join-Path $mount '_INBOX\golden-unicode-v1')
-    $mountState = "files: $($pc.FilesPlaceholder) placeholders, $($pc.FilesPlain) plain ($($pc.PlainNfc) of them with an NFC name); folders: $($pc.DirsPlaceholder) placeholders, $($pc.DirsPlain) plain"
+    $mountState = "files: $($pc.FilesPlaceholder) placeholders, $($pc.FilesPlain) plain ($($pc.PlainNfc) of them with an NFC name and no clash, $($pc.PlainClash) in a name clash); folders: $($pc.DirsPlaceholder) placeholders, $($pc.DirsPlain) plain"
     Write-Host "  $mountState"
     if ($pc.PlainNfc -gt 0) {
         Write-Host '  STUCK: files with an NFC name are still plain: the upload queue did not finish them (or the platform never told the client about them):'
@@ -229,7 +238,7 @@ try {
     $files['mirror'] = @('verify:mirror', (Run-Verify 'mirror' (Join-Path $mirror '_INBOX\golden-unicode-v1') @()))
     $files['mount'] = @('verify', (Run-Verify 'mount' (Join-Path $mount '_INBOX\golden-unicode-v1') @()))
     $dv = Join-Path $out 'daemon.out'
-    & $pwsh -NoProfile -File (Join-Path $here 'daemon-view.ps1') -Profile $profile -MaxLines 100000 *> $dv
+    & $pwsh -NoProfile -File (Join-Path $here 'daemon-view.ps1') -Profile $runProfile -MaxLines 100000 *> $dv
     Write-Host ("  {0,-8} {1}" -f 'daemon', (Get-Content -LiteralPath $dv -Encoding UTF8 | Select-Object -Last 1))
     $files['daemon'] = @('daemon-view', $dv)
 
