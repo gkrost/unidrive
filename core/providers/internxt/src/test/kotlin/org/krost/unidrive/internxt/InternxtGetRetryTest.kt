@@ -2,10 +2,12 @@ package org.krost.unidrive.internxt
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.MockRequestHandleScope
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ClosedReadChannelException
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.internxt.model.InternxtCredentials
@@ -113,5 +115,75 @@ class InternxtGetRetryTest {
             assertEquals(3, calls.get(), "network errors without a status are retried (canonical matrix)")
             assertTrue(e.message.orEmpty().startsWith("Connection error for GET"), e.message)
             service.close()
+        }
+
+
+    // ---- the pauses between the attempts ------------------------------------------------------------------------
+
+    private val jsonHeaders = headersOf("Content-Type", "application/json")
+
+    // What a 503 says about when to come back: a Retry-After header, a retry_after hint in the JSON body, both or neither.
+    private class Hint(
+        val body: String = "{}",
+        val retryAfter: String? = null,
+    )
+
+    private fun MockRequestHandleScope.overloaded(hint: Hint = Hint()) =
+        respond(
+            content = hint.body,
+            status = HttpStatusCode.ServiceUnavailable,
+            headers =
+                if (hint.retryAfter == null) {
+                    jsonHeaders
+                } else {
+                    headersOf("Content-Type" to listOf("application/json"), "Retry-After" to listOf(hint.retryAfter))
+                },
+        )
+
+    @Test
+    fun `three attempts are paused 2 s and 4 s apart, there is no step after the last one`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val service =
+                serviceOn(
+                    MockEngine {
+                        calls.incrementAndGet()
+                        overloaded()
+                    },
+                )
+
+            val e = assertFailsWith<InternxtApiException> { service.listFiles() }
+
+            assertEquals(503, e.statusCode)
+            assertEquals(3, calls.get())
+            assertEquals(2_000L + 4_000L, currentTime)
+            service.close()
+        }
+
+    @Test
+    fun `the server's hint replaces the backoff, the header over the body, a long one capped at a minute`() =
+        runTest {
+            val cases =
+                listOf(
+                    Hint(retryAfter = "7") to 7_000L,
+                    Hint(body = """{"retry_after":5}""") to 5_000L,
+                    Hint(body = """{"retry_after":5}""", retryAfter = "3") to 3_000L,
+                    Hint(retryAfter = "3600") to 60_000L,
+                )
+            for ((hint, expectedMs) in cases) {
+                val calls = AtomicInteger(0)
+                val service =
+                    serviceOn(
+                        MockEngine {
+                            if (calls.incrementAndGet() == 1) overloaded(hint) else respond("[]", HttpStatusCode.OK, jsonHeaders)
+                        },
+                    )
+                val before = currentTime
+
+                assertEquals(emptyList<InternxtFile>(), service.listFiles())
+
+                assertEquals(expectedMs, currentTime - before, "hint: ${hint.retryAfter} / ${hint.body}")
+                service.close()
+            }
         }
 }
