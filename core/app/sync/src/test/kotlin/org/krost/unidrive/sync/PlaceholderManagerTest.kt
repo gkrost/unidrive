@@ -78,7 +78,6 @@ class PlaceholderManagerTest {
     fun `dehydrate truncates file to sparse placeholder`() {
         val file = syncRoot.resolve("test.txt")
         Files.writeString(file, "hello world content here")
-        val originalSize = Files.size(file)
 
         mgr.dehydrate("/test.txt", remoteSize = 500, remoteModified = Instant.now())
 

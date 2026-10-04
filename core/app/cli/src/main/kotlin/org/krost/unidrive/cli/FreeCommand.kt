@@ -19,7 +19,6 @@ class FreeCommand : Runnable {
     override fun run() {
         val lock = parent.acquireProfileLock()
         try {
-            val provider = parent.createProvider()
             val config = parent.loadSyncConfig()
             val dbPath = parent.providerConfigDir().resolve("state.db")
             val db = StateDatabase(dbPath)

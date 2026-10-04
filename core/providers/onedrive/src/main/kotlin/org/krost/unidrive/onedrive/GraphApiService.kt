@@ -622,7 +622,7 @@ class GraphApiService(
         var lastSessionGone: GraphApiException? = null
         repeat(2) { attempt ->
             try {
-                return uploadLargeFileOnce(localPath, remotePath, cleanPath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior, ifMatchETag)
+                return uploadLargeFileOnce(localPath, remotePath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior, ifMatchETag)
             } catch (e: GraphApiException) {
                 val isSessionGone = e.statusCode == 404 || e.statusCode == 410
                 if (attempt == 0 && isSessionGone) {
@@ -646,7 +646,6 @@ class GraphApiService(
     private suspend fun uploadLargeFileOnce(
         localPath: Path,
         remotePath: String,
-        cleanPath: String,
         encoded: String,
         fileSize: Long,
         onProgress: ((Long, Long) -> Unit)?,
@@ -654,7 +653,7 @@ class GraphApiService(
         conflictBehavior: String = "replace",
         ifMatchETag: String? = null,
     ): DriveItem {
-        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, cleanPath, encoded, fileSize, fileSystemInfo, conflictBehavior, ifMatchETag)
+        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, encoded, fileSize, fileSystemInfo, conflictBehavior, ifMatchETag)
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
@@ -706,7 +705,6 @@ class GraphApiService(
     private suspend fun resolveUploadSession(
         localPath: Path,
         remotePath: String,
-        cleanPath: String,
         encoded: String,
         fileSize: Long,
         fileSystemInfo: FileSystemInfo? = null,

@@ -4,8 +4,6 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class OneDrivePasswordShareTest {
-    private val json = Json { ignoreUnknownKeys = true }
-
     private fun buildShareBody(password: String? = null): JsonObject =
         buildJsonObject {
             put("type", "view")

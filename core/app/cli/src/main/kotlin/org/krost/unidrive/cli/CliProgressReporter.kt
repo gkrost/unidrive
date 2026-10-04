@@ -4,7 +4,6 @@ import org.krost.unidrive.sync.ProgressReporter
 import java.util.Locale
 
 class CliProgressReporter(
-    private val verbose: Boolean = false,
     private val dryRun: Boolean = false,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressReporter {
@@ -267,15 +266,6 @@ class CliProgressReporter(
 
     override fun onWarning(message: String) {
         System.err.println("  WARN: $message")
-    }
-
-    // UD-408: commitInline is no longer needed — printInline now lands a real
-    // line per call (no mid-line cursor state to commit). The companion-stub
-    // is left so any external caller that referenced it still compiles, but
-    // the body is a no-op.
-    @Suppress("UNUSED")
-    private fun commitInline() {
-        // intentionally empty — see UD-408
     }
 
     // UD-757: format M:SS for under one hour, H:MM:SS above. Shared by both

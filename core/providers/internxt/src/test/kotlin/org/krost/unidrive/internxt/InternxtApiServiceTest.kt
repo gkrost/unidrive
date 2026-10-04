@@ -1248,47 +1248,6 @@ class InternxtApiServiceTest {
             }
         }
 
-    /**
-     * Build a provider whose AuthService is pre-populated with credentials that
-     * carry a non-empty `bucket` (the upload pipeline requires it) and a
-     * far-future JWT exp so getValidCredentials never triggers a real refresh.
-     */
-    private fun newProviderWithBucketCredentials(): InternxtProvider {
-        val provider = InternxtProvider()
-        val authField = InternxtProvider::class.java.getDeclaredField("authService")
-        authField.isAccessible = true
-        val authService = authField.get(provider)
-        val credsField = authService.javaClass.getDeclaredField("credentials")
-        credsField.isAccessible = true
-        val payload = """{"exp":9999999999}"""
-        val payloadB64 =
-            java.util.Base64
-                .getUrlEncoder()
-                .withoutPadding()
-                .encodeToString(payload.toByteArray())
-        val fakeJwt = "header.$payloadB64.signature"
-        credsField.set(
-            authService,
-            org.krost.unidrive.internxt.model.InternxtCredentials(
-                jwt = fakeJwt,
-                // BIP39 mnemonic — any valid-shape one works since
-                // deriveBucketKey is just a PBKDF2 + SHA pipeline. Use the same
-                // canonical 12-word seed phrase the InternxtCrypto tests use.
-                mnemonic =
-                    "abandon abandon abandon abandon abandon abandon " +
-                        "abandon abandon abandon abandon abandon about",
-                rootFolderId = "root-folder-uuid",
-                email = "test@example.invalid",
-                bridgeUser = "bridge-user",
-                bridgeUserId = "bridge-secret",
-                // deriveBucketKey hex-decodes the bucket id, so the test value
-                // must be valid hex (matches the InternxtCryptoTest sample).
-                bucket = "6928426c1a2316b856c9ab81",
-            ),
-        )
-        return provider
-    }
-
     private fun installMockClientOnProvider(
         provider: InternxtProvider,
         engine: io.ktor.client.engine.mock.MockEngine,
@@ -1334,8 +1293,8 @@ class InternxtApiServiceTest {
 
     /**
      * Build a provider rooted at [tokenPath] (so the tombstone-store sidecar
-     * dir is test-local), pre-populated with the same credentials shape that
-     * [newProviderWithBucketCredentials] uses.
+     * dir is test-local), pre-populated with bucket-carrying credentials and a
+     * far-future JWT exp so getValidCredentials never triggers a real refresh.
      */
     private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
         val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))

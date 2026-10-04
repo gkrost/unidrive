@@ -45,7 +45,6 @@ open class AuthService(
             }
         },
 ) : AutoCloseable {
-    private val log = org.slf4j.LoggerFactory.getLogger(AuthService::class.java)
     private val json = UnidriveJson
     private var credentials: InternxtCredentials? = null
 

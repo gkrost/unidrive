@@ -330,7 +330,7 @@ open class SyncCommand : Runnable {
         // Apply config pin patterns to DB
         applyConfigPinRules(db, config, profile.name)
 
-        val cliReporter = CliProgressReporter(parent.verbose, dryRun)
+        val cliReporter = CliProgressReporter(dryRun = dryRun)
 
         val notifyReporter =
             if (config.desktopNotifications && NotifyProgressReporter.isAvailable()) {
