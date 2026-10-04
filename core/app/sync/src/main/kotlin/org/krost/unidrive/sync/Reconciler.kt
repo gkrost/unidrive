@@ -1368,7 +1368,7 @@ class Reconciler(
         // (post `removePrefix("/")`). Cardinality is bounded by the number of distinct
         // exclude/pin patterns the user configures (typically <50); no eviction needed.
         // ConcurrentHashMap because the daemon shares the companion across syncs.
-        private val globCache = ConcurrentHashMap<String, Regex>()
+        private val globCache = ConcurrentHashMap<String, CompiledGlob>()
 
         // Visible-for-test counter so UD-373's cache-hit assertion can verify that
         // buildGlobRegex is invoked exactly once per distinct pattern.
@@ -1380,17 +1380,118 @@ class Reconciler(
         ): Boolean {
             val cleanPath = path.removePrefix("/")
             val cleanPattern = pattern.removePrefix("/")
-            val regex =
+            val glob =
                 globCache.computeIfAbsent(cleanPattern) {
                     buildGlobRegexInvocations.incrementAndGet()
-                    Regex("^${buildGlobRegex(it)}$")
+                    compileGlob(it)
                 }
-            // If pattern has no '/', also match against just the filename (basename match)
-            return if ('/' !in cleanPattern) {
-                regex.matches(cleanPath.substringAfterLast('/'))
-            } else {
-                regex.matches(cleanPath)
+            return glob.matches(cleanPath)
+        }
+
+        /** The regex-only answer of [matchesGlob]: the reference the fast paths are tested against (#552). */
+        internal fun matchesGlobRegex(
+            path: String,
+            pattern: String,
+        ): Boolean {
+            val cleanPattern = pattern.removePrefix("/")
+            return compileGlob(cleanPattern).matchesRegex(path.removePrefix("/"))
+        }
+
+        // #552: a glob compiles to its regex and, for the shapes the default excludes and most user excludes
+        // have, to a plain string test. The regex of `**/x` backtracks along the whole path; the exclude
+        // patterns run once per row of state.db (hundreds of thousands) and the string tests do not.
+        private class CompiledGlob(
+            val regex: Regex,
+            // If the pattern has no '/', it is also matched against just the filename (basename match)
+            val basenameOnly: Boolean,
+            val fast: ((String) -> Boolean)?,
+        ) {
+            fun matches(cleanPath: String): Boolean {
+                // `.` in the regex stops at a line terminator, a string test does not: such names keep the regex.
+                if (fast != null && !hasLineTerminator(cleanPath)) return fast.invoke(cleanPath)
+                return matchesRegex(cleanPath)
             }
+
+            fun matchesRegex(cleanPath: String): Boolean =
+                if (basenameOnly) regex.matches(cleanPath.substringAfterLast('/')) else regex.matches(cleanPath)
+        }
+
+        private fun hasLineTerminator(s: String): Boolean {
+            for (c in s) if (c == '\n' || c == '\r' || c == '\u0085' || c == ' ' || c == ' ') return true
+            return false
+        }
+
+        private fun compileGlob(cleanPattern: String): CompiledGlob =
+            CompiledGlob(
+                regex = Regex("^${buildGlobRegex(cleanPattern)}$"),
+                basenameOnly = '/' !in cleanPattern,
+                fast = fastGlob(cleanPattern),
+            )
+
+        // A test for one path segment (no '/'), or null where the segment needs the regex.
+        private fun segmentTest(segment: String): ((String) -> Boolean)? {
+            if ("**" in segment || '/' in segment) return null
+            val star = segment.indexOf('*')
+            if (star < 0 && '?' !in segment) return { s -> s == segment }
+            if ('?' in segment) return segmentRegexTest(segment)
+            if (star == 0 && segment.indexOf('*', 1) < 0) {
+                val suffix = segment.substring(1)
+                return { s -> s.endsWith(suffix) }
+            }
+            if (star == segment.length - 1) {
+                val prefix = segment.substring(0, star)
+                return { s -> s.startsWith(prefix) }
+            }
+            return segmentRegexTest(segment)
+        }
+
+        private fun segmentRegexTest(segment: String): (String) -> Boolean {
+            val regex = Regex("^${buildGlobRegex(segment)}$")
+            return { s -> regex.matches(s) }
+        }
+
+        private fun wildcardFree(s: String): Boolean = '*' !in s && '?' !in s
+
+        private fun fastGlob(p: String): ((String) -> Boolean)? {
+            when {
+                // `name`, `*.log`, `._*`: matched against the filename only.
+                '/' !in p -> {
+                    val test = segmentTest(p) ?: return null
+                    return { path -> test(path.substringAfterLast('/')) }
+                }
+                // `**/name`, `**/*.part`: some filename. The regex's `(.+/)?` wants a non-empty text before the last '/'.
+                p.startsWith("**/") && !p.endsWith("/**") -> {
+                    val test = segmentTest(p.substring(3)) ?: return null
+                    return { path ->
+                        val slash = path.lastIndexOf('/')
+                        slash != 0 && test(if (slash < 0) path else path.substring(slash + 1))
+                    }
+                }
+                // `**/name/**`: some segment matches, and the path goes on below it or ends there.
+                p.startsWith("**/") && p.endsWith("/**") && p.length > 6 -> {
+                    val test = segmentTest(p.substring(3, p.length - 3)) ?: return null
+                    return { path ->
+                        var start = 0
+                        var found = false
+                        while (!found) {
+                            val end = path.indexOf('/', start).let { if (it < 0) path.length else it }
+                            // A segment after the first needs a non-empty text before the '/' that precedes it,
+                            // which fails only for the segment right after an empty first one (start == 1).
+                            if (start != 1 && test(path.substring(start, end))) found = true
+                            if (end >= path.length) break
+                            start = end + 1
+                        }
+                        found
+                    }
+                }
+                // `dir/**`, `a/b/**`: the directory itself or anything below it.
+                p.endsWith("/**") && p.length > 3 && wildcardFree(p.dropLast(3)) -> {
+                    val dir = p.dropLast(3)
+                    val below = "$dir/"
+                    return { path -> path == dir || path.startsWith(below) }
+                }
+            }
+            return null
         }
 
         private fun buildGlobRegex(pattern: String): String {
