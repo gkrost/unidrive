@@ -110,8 +110,12 @@ class RefreshRpcHandler(
                     } catch (e: Exception) {
                         log.warn("refresh.run failed: job_id=$jobId", e)
                         // See jsonString() — full JSON-string escaping, not quote-only.
+                        // The engine's scope/empty-local guards throw IllegalStateException
+                        // before any provider call — a client scripting on the token must
+                        // not read them as provider failures (#532).
+                        val token = if (e is IllegalStateException) "engine_guard" else "provider_error"
                         val msg = jsonString(e.message)
-                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"provider_error","message":$msg}"""
+                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"$token","message":$msg}"""
                     } finally {
                         inFlight.set(null)
                     }

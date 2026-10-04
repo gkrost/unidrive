@@ -1867,6 +1867,14 @@ open class SyncEngine(
         // committed it. Both writes are now gated on `!dryRun`. The refusal
         // / warning branches are pure reads and stay structured as before.
         val priorScope = loadEffectiveScope()
+        // #532: a refresh (skipTransfers) of a profile that has a persisted scope but no
+        // runtime syncPaths continues WITHIN the persisted scope instead of being refused
+        // below: refresh plans the boundary the profile has been operating on, so
+        // out-of-scope paths stay invisible to the reconciler exactly as under
+        // --sync-path. A refresh never widens or clears the persisted scope — it only
+        // reads it. A plain sync keeps the refusal (its un-scoped bidirectional apply is
+        // the catastrophe pattern the guard exists for).
+        val runScope = if (syncPaths.isEmpty() && skipTransfers) priorScope else syncPaths
         if (allowFullTreeReconciliation) {
             if (priorScope.isNotEmpty() && !dryRun) {
                 log.info(
@@ -1896,7 +1904,7 @@ open class SyncEngine(
                     unioned.size,
                 )
             }
-        } else if (priorScope.isNotEmpty() && syncDirection == SyncDirection.BIDIRECTIONAL) {
+        } else if (priorScope.isNotEmpty() && syncDirection == SyncDirection.BIDIRECTIONAL && !skipTransfers) {
             val msg =
                 "UD-256: this profile has been used with scoped operations " +
                     "(--sync-path) in the past. Persisted effective_scope: " +
@@ -2050,10 +2058,10 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             val localChangesPre =
-                if (syncPaths.isNotEmpty()) {
-                    val ancestors = SyncScope.ancestors(syncPaths)
+                if (runScope.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(runScope)
                     allLocalChangesPre.filterKeys {
-                        SyncScope.contains(it, syncPaths) || it in ancestors
+                        SyncScope.contains(it, runScope) || it in ancestors
                     }
                 } else {
                     allLocalChangesPre
@@ -2092,8 +2100,8 @@ open class SyncEngine(
         }
 
         val remoteChanges =
-            if (syncPaths.isNotEmpty()) {
-                allRemoteChanges.filterKeys { SyncScope.contains(it, syncPaths) }
+            if (runScope.isNotEmpty()) {
+                allRemoteChanges.filterKeys { SyncScope.contains(it, runScope) }
             } else {
                 allRemoteChanges
             }
@@ -2115,7 +2123,7 @@ open class SyncEngine(
         // skipRemoteGather (apply mode) has no fresh listing to judge.
         val actualFullEnumeration =
             db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
-        if (actualFullEnumeration && syncPaths.isEmpty() && !skipRemoteGather) {
+        if (actualFullEnumeration && runScope.isEmpty() && !skipRemoteGather) {
             val observedAlive = allRemoteChanges.values.count { !it.deleted }
             remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
                 if (dryRun) {
@@ -2160,9 +2168,9 @@ open class SyncEngine(
                     reporter.onScanProgress("local", count)
                 }
             localChanges =
-                if (syncPaths.isNotEmpty()) {
-                    val ancestors = SyncScope.ancestors(syncPaths)
-                    allLocalChanges.filterKeys { SyncScope.contains(it, syncPaths) || it in ancestors }
+                if (runScope.isNotEmpty()) {
+                    val ancestors = SyncScope.ancestors(runScope)
+                    allLocalChanges.filterKeys { SyncScope.contains(it, runScope) || it in ancestors }
                 } else {
                     allLocalChanges
                 }
@@ -2191,11 +2199,11 @@ open class SyncEngine(
             skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
         val reconciledActionsAll =
             if (streamingActions != null) {
-                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, syncPaths,
+                reconciler.finalizeStreaming(streamingActions, remoteChanges, localChanges, runScope,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             } else {
-                reconciler.reconcile(remoteChanges, localChanges, reporter, syncPaths,
+                reconciler.reconcile(remoteChanges, localChanges, reporter, runScope,
                     downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                     enumerationComplete = enumerationComplete)
             }

@@ -4047,6 +4047,25 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `UD-256 a refresh of a profile with persisted scope continues within it instead of refusing`() =
+        runTest {
+            // #532: refresh has no --sync-path; a profile scoped by earlier runs was permanently
+            // unusable — every refresh died on the guard with error provider_error. A refresh
+            // (skipTransfers) plans the persisted boundary: out-of-scope paths stay invisible to
+            // the reconciler exactly as under --sync-path, so the run proceeds. The persisted
+            // scope itself must be untouched.
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val before = db.getSyncState("effective_scope")
+
+            val reporter = RecordingReporter()
+            val refreshEngine = engineForScope(reporter = reporter)
+            refreshEngine.syncOnce(skipTransfers = true)
+
+            assertEquals(before, db.getSyncState("effective_scope"), "a refresh must not widen or clear the persisted scope")
+        }
+
+    @Test
     fun `UD-256 bare bidirectional dry-run on scoped profile warns instead of throwing`() =
         runTest {
             provider.deltaItems = emptyList()
