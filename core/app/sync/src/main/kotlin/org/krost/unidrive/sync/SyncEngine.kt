@@ -2925,7 +2925,19 @@ open class SyncEngine(
         // absence as deletion.
         if (fastBootstrap && cursor == null) {
             if (Capability.FastBootstrap in provider.capabilities()) {
-                when (val result = provider.deltaFromLatest()) {
+                // #532: the preview's bootstrap carries readOnly, so a dry-run --fast-bootstrap
+                // stamps nothing in the provider's own storage (OneDrive's delta_last_seen).
+                when (
+                    val result =
+                        provider.deltaFromLatest(
+                            org.krost.unidrive.ScanContext(
+                                resumeMarker = null,
+                                resumedItems = emptyList(),
+                                persistPage = { _, _ -> },
+                                readOnly = readOnly,
+                            ),
+                        )
+                ) {
                     is CapabilityResult.Success -> {
                         val page = result.value
                         for (item in page.items) {

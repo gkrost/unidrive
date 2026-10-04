@@ -3402,7 +3402,7 @@ class SyncEngineTest {
                 if (supportsFastBootstrap) add(org.krost.unidrive.Capability.FastBootstrap)
             }
 
-        override suspend fun deltaFromLatest(): org.krost.unidrive.CapabilityResult<DeltaPage> {
+        override suspend fun deltaFromLatest(scanContext: org.krost.unidrive.ScanContext?): org.krost.unidrive.CapabilityResult<DeltaPage> {
             deltaFromLatestCalls++
             return if (supportsFastBootstrap) {
                 org.krost.unidrive.CapabilityResult.Success(
