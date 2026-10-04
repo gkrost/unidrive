@@ -469,7 +469,7 @@ class HydrationImpl(
                 syncEngine.withTransferPermit {
                     onPermitAcquired()
                     _events.emit(HydrationEvent.Hydrating(path))
-                    syncEngine.uploadFromCache(path, cachePath, baseEtag, onProgress)
+                    syncEngine.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
                 }
                 val bytes = Files.size(cachePath)
                 _events.emit(HydrationEvent.Hydrated(path, bytes))
@@ -612,7 +612,11 @@ class HydrationImpl(
     private fun replayable(path: String): Boolean =
         !syncEngine.isExcludedPath(path) &&
             !syncEngine.isOutOfScope(path) &&
-            Files.exists(syncEngine.resolveCachePath(path))
+            runCatching { Files.exists(syncEngine.resolveCachePath(path)) }
+                .getOrElse {
+                    log.warn("#526: not replaying pending upload with an invalid local name: {}", path)
+                    false
+                }
 
     // #493: <cache mtime ms>|<cache size> of the bytes an upload sends; null when the cache copy is gone.
     private fun refusalStamp(cachePath: Path): String? =
