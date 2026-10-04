@@ -2572,13 +2572,22 @@ open class SyncEngine(
                         if (action is SyncAction.MoveRemote && moveSourceStillRemote(action.fromPath)) {
                             failedMoveSources.add(action.fromPath)
                         }
-                        // UD-253: class name + throwable (SLF4J renders stack trace when the
-                        // last arg is a Throwable) so WARNs are self-diagnosing in the log.
-                        // UD-203: requestIdSuffix(e) renders ` requestId=<id>` when the
-                        // caught exception is a ProviderException with a non-null id,
-                        // empty string otherwise — same line shape as before for non-
-                        // provider failures.
+                        // #530: one WARN line with the item, the class and the message (the
+                        // console appender's threshold is WARN — a throwable here printed the
+                        // full JVM stack trace for every expected per-file failure); the
+                        // stack trace lives on a DEBUG event, which the file appender takes
+                        // and the console drops. UD-203: requestIdSuffix(e) renders
+                        // ` requestId=<id>` when the caught exception is a ProviderException
+                        // with a non-null id, empty string otherwise.
                         log.warn(
+                            "Action failed for {} ({} consecutive): {}: {}{}",
+                            action.path,
+                            consecutiveFailures,
+                            e.javaClass.simpleName,
+                            e.message,
+                            org.krost.unidrive.requestIdSuffix(e),
+                        )
+                        log.debug(
                             "Action failed for {} ({} consecutive): {}: {}{}",
                             action.path,
                             consecutiveFailures,
@@ -2695,8 +2704,14 @@ open class SyncEngine(
                                             handlePermanentDownloadFailure(action, e)
                                             transferFailures.incrementAndGet()
                                         } catch (e: Exception) {
-                                            // UD-253: class name + throwable (SLF4J stack trace).
+                                            // #530: one WARN line, the stack trace at DEBUG.
                                             log.warn(
+                                                "Download failed for {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                            )
+                                            log.debug(
                                                 "Download failed for {}: {}: {}",
                                                 action.path,
                                                 e.javaClass.simpleName,
@@ -2741,8 +2756,14 @@ open class SyncEngine(
                                         } catch (e: CancellationException) {
                                             throw e
                                         } catch (e: Exception) {
-                                            // UD-253: class name + throwable (SLF4J stack trace).
+                                            // #530: one WARN line, the stack trace at DEBUG.
                                             log.warn(
+                                                "Upload failed for {}: {}: {}",
+                                                action.path,
+                                                e.javaClass.simpleName,
+                                                e.message,
+                                            )
+                                            log.debug(
                                                 "Upload failed for {}: {}: {}",
                                                 action.path,
                                                 e.javaClass.simpleName,
@@ -3284,7 +3305,14 @@ open class SyncEngine(
                     transferFailures.incrementAndGet()
                     executedPaths.add(action.path)
                 } catch (e: Exception) {
+                    // #530: one WARN line, the stack trace at DEBUG.
                     log.warn(
+                        "Streaming download failed for {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                    )
+                    log.debug(
                         "Streaming download failed for {}: {}: {}",
                         action.path,
                         e.javaClass.simpleName,
@@ -3334,7 +3362,14 @@ open class SyncEngine(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    // #530: one WARN line, the stack trace at DEBUG.
                     log.warn(
+                        "Streaming upload failed for {}: {}: {}",
+                        action.path,
+                        e.javaClass.simpleName,
+                        e.message,
+                    )
+                    log.debug(
                         "Streaming upload failed for {}: {}: {}",
                         action.path,
                         e.javaClass.simpleName,
@@ -4655,7 +4690,15 @@ open class SyncEngine(
                             failedPaths.add(normalizeTrackedPath(action.path))
                             failures.incrementAndGet()
                             passOneFailures.incrementAndGet()
+                            // #530: one WARN line, the stack trace at DEBUG.
                             log.warn(
+                                "Action failed for {}: {}: {}{}",
+                                action.path,
+                                e.javaClass.simpleName,
+                                e.message,
+                                org.krost.unidrive.requestIdSuffix(e),
+                            )
+                            log.debug(
                                 "Action failed for {}: {}: {}{}",
                                 action.path,
                                 e.javaClass.simpleName,

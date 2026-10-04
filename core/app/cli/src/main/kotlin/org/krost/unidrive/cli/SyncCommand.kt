@@ -350,7 +350,7 @@ open class SyncCommand : Runnable {
         val ipcReporter = IpcProgressReporter(ipcServer, profile.name)
         val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
         if (notifyReporter != null) delegates.add(notifyReporter)
-        val reporter: ProgressReporter = CompositeReporter(delegates)
+        val reporter = CompositeReporter(delegates)
 
         // UD-296: surface profile + provider type + sync_root + direction up
         // front so users can spot sync_root drift (wrong directory pointed at)
@@ -797,7 +797,7 @@ open class SyncCommand : Runnable {
                     // milliseconds. Bypasses the runBlocking unwind that
                     // would otherwise park forever on the AF_UNIX accept
                     // loop the OS won't let us cancel.
-                    System.exit(if (failure != null) 1 else 0)
+                    System.exit(exitCodeFor(failure, reporter.lastFailedCount))
                 }
             }
         } catch (e: AuthenticationException) {
@@ -929,6 +929,23 @@ open class SyncCommand : Runnable {
     private class CompositeReporter(
         private val delegates: List<ProgressReporter>,
     ) : ProgressReporter {
+        // #530: the failed count of the last completed sync pass, as reported by the engine.
+        // Last write wins: syncOnce emits onSyncComplete once per pass, and the run's exit
+        // decision reads this after syncOnce returns.
+        var lastFailedCount: Int = 0
+            private set
+
+        override fun onSyncComplete(
+            downloaded: Int,
+            uploaded: Int,
+            conflicts: Int,
+            durationMs: Long,
+            actionCounts: Map<String, Int>,
+            failed: Int,
+        ) {
+            lastFailedCount = failed
+            delegates.forEach { it.onSyncComplete(downloaded, uploaded, conflicts, durationMs, actionCounts, failed) }
+        }
         override fun onScanProgress(
             phase: String,
             count: Int,
@@ -962,22 +979,28 @@ open class SyncCommand : Runnable {
             it.onTransferProgress(path, bytesTransferred, totalBytes)
         }
 
-        override fun onSyncComplete(
-            downloaded: Int,
-            uploaded: Int,
-            conflicts: Int,
-            durationMs: Long,
-            actionCounts: Map<String, Int>,
-            failed: Int,
-        ) = delegates.forEach {
-            it.onSyncComplete(downloaded, uploaded, conflicts, durationMs, actionCounts, failed)
-        }
-
         override fun onWarning(message: String) = delegates.forEach { it.onWarning(message) }
     }
 
     companion object {
         internal const val WS_SILENCE_THRESHOLD_MS: Long = 90_000L
+
+        /**
+         * #530: the process exit code of a one-shot `sync` run. 0 = completed and every action
+         * transferred; 1 = the run aborted with an exception; 2 = completed, but per-action
+         * failures happened (the "Sync complete: … N failed" run) — a script or a scheduled task
+         * must be able to tell a partial failure from success. Before this, every run that
+         * reached the summary printed 0.
+         */
+        internal fun exitCodeFor(
+            syncFailure: Throwable?,
+            failedActions: Int,
+        ): Int =
+            when {
+                syncFailure != null -> 1
+                failedActions > 0 -> 2
+                else -> 0
+            }
 
         /**
          * Render a sync failure as a clean, operator-facing message instead

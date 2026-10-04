@@ -12,13 +12,16 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * UD-253 regression: SyncEngine WARN lines emitted from catch blocks
- * must include the exception class name in the message and the
- * Throwable as the last logger argument so SLF4J renders the full
- * stack trace (and not just `e.message`).
+ * UD-253 regression, reshaped by #530: SyncEngine failure WARN lines emitted
+ * from catch blocks must include the exception class name in the message, but
+ * NOT the Throwable — the console appender's threshold is WARN, so a throwable
+ * there printed the full JVM stack trace to stdout for every expected per-file
+ * failure. The throwable lives on the matching DEBUG event (file appender
+ * takes DEBUG, the console drops it).
  */
 class SyncEngineWarnContextTest {
     private lateinit var syncRoot: Path
@@ -45,7 +48,7 @@ class SyncEngineWarnContextTest {
     }
 
     @Test
-    fun `WARN on upload failure carries exception class and throwable`() =
+    fun `WARN on upload failure carries exception class and message, the throwable moves to DEBUG`() =
         runTest {
             val provider = SyncEngineTest.FakeCloudProvider()
             // FakeCloudProvider throws ProviderException("Network timeout on upload")
@@ -84,10 +87,22 @@ class SyncEngineWarnContextTest {
                 "UD-253: WARN must include exception class name; message was: " +
                     "'${failureWarn.formattedMessage}'",
             )
-            assertNotNull(
+            assertNull(
                 failureWarn.throwableProxy,
-                "UD-253: WARN must carry the Throwable so SLF4J renders a stack trace; " +
-                    "message was: '${failureWarn.formattedMessage}'",
+                "#530: the WARN must NOT carry the Throwable — the console appender's WARN " +
+                    "threshold would print the full stack trace; message was: " +
+                    "'${failureWarn.formattedMessage}'",
+            )
+
+            val matchingDebug =
+                appender.list.firstOrNull {
+                    it.level.levelStr == "DEBUG" && it.throwableProxy != null &&
+                        it.formattedMessage.contains("doc.txt")
+                }
+            assertNotNull(
+                matchingDebug,
+                "#530: the stack trace must live on a DEBUG event for the failed item; " +
+                    "got ${appender.list.filter { it.level.levelStr == "DEBUG" }.map { it.formattedMessage }}",
             )
         }
 }
