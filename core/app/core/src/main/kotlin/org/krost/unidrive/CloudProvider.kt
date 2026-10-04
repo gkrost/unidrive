@@ -93,6 +93,15 @@ interface CloudProvider {
     ): CloudItem
 
     /**
+     * WB-3 (#87): discard any staged upload state the provider keeps for [localPath] — Internxt's
+     * encrypted resume copy and its tombstone sidecar. The delete of a never-uploaded file calls
+     * this so the user's deletion removes the only other copy of the content instead of leaving it
+     * in the tombstone directory until the resume TTL expires. A provider without staged uploads
+     * never needs to override this.
+     */
+    suspend fun discardStagedUpload(localPath: String) {}
+
+    /**
      * Delete the remote item at [remotePath].
      *
      * #291: [ifMatchETag], when non-null, makes the delete conditional on the caller's view of

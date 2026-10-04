@@ -260,6 +260,14 @@ class InternxtProvider(
             "refusing to pick one (delete/move by remote id instead — see the wrong-twin issue #402)",
     )
 
+    // WB-3 (#87): the delete of a never-uploaded file removes the staged encrypted copy and its
+    // tombstone sidecar — the user deleted the content, so the resume state must not outlive it.
+    override suspend fun discardStagedUpload(localPath: String) {
+        withContext(Dispatchers.IO) {
+            tombstoneStore.discard(UploadTombstoneStore.pathHash(localPath))
+        }
+    }
+
     override suspend fun downloadById(
         remoteId: String,
         remotePath: String,

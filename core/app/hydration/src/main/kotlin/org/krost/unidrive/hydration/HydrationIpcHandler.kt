@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  *   unlink      request:  {"verb":"hydration.unlink","path":"/foo.txt"}
  *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"busy"}               the upload is in flight (#87)
  *                         {"ok":false,"error":"path_is_folder"}     EISDIR
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
@@ -47,6 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *               reply:    {"ok":true}
  *                         {"ok":false,"error":"path_is_file"}       ENOTDIR
  *                         {"ok":false,"error":"not_empty"}          ENOTEMPTY
+ *                         {"ok":false,"error":"busy"}               an upload below is in flight (#87)
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
  *   create      request:  {"verb":"hydration.create","handle_id":"...","path":"/foo.txt"}
@@ -332,6 +334,7 @@ class HydrationIpcHandler(
                 when (val r = hydration.unlink(path)) {
                     is UnlinkResult.Ok -> reply(ok = true)
                     UnlinkResult.PathIsFolder -> reply(ok = false, error = "path_is_folder")
+                    UnlinkResult.Busy -> reply(ok = false, error = "busy")
                     is UnlinkResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }
@@ -341,6 +344,7 @@ class HydrationIpcHandler(
                     is RmdirResult.Ok -> reply(ok = true)
                     RmdirResult.PathIsFile -> reply(ok = false, error = "path_is_file")
                     RmdirResult.NotEmpty -> reply(ok = false, error = "not_empty")
+                    RmdirResult.Busy -> reply(ok = false, error = "busy")
                     is RmdirResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }

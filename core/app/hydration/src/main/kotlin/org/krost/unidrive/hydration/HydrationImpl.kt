@@ -912,6 +912,12 @@ class HydrationImpl(
             ?: return UnlinkResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return UnlinkResult.PathIsFolder
 
+        // WB-3 (#87): the file's own upload is queued or in flight — deleting the row and the cache
+        // copy under it would orphan the cloud copy the upload is about to create (the row is gone
+        // when the upload lands). Answer busy, the same refusal dehydrate has given since #301; the
+        // client cancels the upload (cancelUpload) and retries, or retries after the completed event.
+        if (hasUploadSlot(normalised)) return UnlinkResult.Busy
+
         // Never-uploaded file (remote_id is null): the file only ever existed
         // locally — created through the mount, upload not yet done. There is
         // nothing to delete cloud-side, so calling provider.delete would 404
@@ -940,6 +946,7 @@ class HydrationImpl(
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
                     syncEngine.deleteRemote(normalised)
+                    discardStagedUploadBestEffort(normalised)
                     evictCacheFile(normalised)
                     UnlinkResult.Ok
                 }.getOrElse { e ->
@@ -950,6 +957,10 @@ class HydrationImpl(
                 runCatching {
                     java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
                 }
+                // WB-3 (#87): the staged encrypted copy of a failed upload is the only other copy of
+                // the content — the user deleted the file, so it goes too, instead of staying in the
+                // resume directory for days.
+                discardStagedUploadBestEffort(normalised)
                 stateDb.deleteEntry(normalised)
                 UnlinkResult.Ok
             }.getOrElse { e ->
@@ -959,10 +970,25 @@ class HydrationImpl(
 
         return runCatching {
             syncEngine.deleteRemote(normalised)
+            // A tracked file whose last edit's upload failed has a staged copy too.
+            discardStagedUploadBestEffort(normalised)
             evictCacheFile(normalised)
             UnlinkResult.Ok
         }.getOrElse { e ->
             UnlinkResult.Failed(HydrationError.Generic(e.message ?: "unlink failed"))
+        }
+    }
+
+    // WB-3 (#87): the staged copy goes with a delete, but failing to remove it must not fail a
+    // delete that already happened (the cloud copy is trashed, or the row is about to go): the
+    // resume store's TTL GC is the backstop.
+    private suspend fun discardStagedUploadBestEffort(path: String) {
+        try {
+            syncEngine.discardStagedUpload(path)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("#87: could not discard the staged upload copy of {}: {}: {}", path, e.javaClass.simpleName, e.message)
         }
     }
 
@@ -971,6 +997,12 @@ class HydrationImpl(
         val entry = stateDb.getEntry(normalised)
             ?: return RmdirResult.Failed(HydrationError.UnknownPath)
         if (!entry.isFolder) return RmdirResult.PathIsFile
+
+        // WB-3 (#87): the delete tombstones every row below the folder and evicts its cache tree.
+        // An upload queued or in flight for a file below it would read its cache copy while it is
+        // evicted and land its cloud copy into a trashed folder. Answer busy, as unlink does.
+        val below = if (normalised == "/") "/" else "$normalised/"
+        if (uploadSlots.keys.any { it.startsWith(below) }) return RmdirResult.Busy
 
         return runCatching {
             syncEngine.deleteRemote(normalised)

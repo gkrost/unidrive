@@ -18,6 +18,7 @@ import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
+import org.krost.unidrive.ProviderException
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,17 @@ internal class MinimalFakeProvider(
 
     // Throw-injection for testing error paths
     private var nextThrowable: Throwable? = null
+
+    // WB-3 (#87): the local paths whose staged upload copies unlink asked to discard.
+    val discardedStagedUploads = mutableListOf<String>()
+
+    // When set, discardStagedUpload throws this after recording the call.
+    var discardFailure: Exception? = null
+
+    override suspend fun discardStagedUpload(localPath: String) {
+        discardedStagedUploads.add(localPath)
+        discardFailure?.let { throw it }
+    }
 
     // Optional gate: when set, upload() suspends until this deferred completes.
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
@@ -95,8 +107,24 @@ internal class MinimalFakeProvider(
 
     override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
 
-    override suspend fun getMetadata(path: String): CloudItem =
-        error("getMetadata not used in hydration tests")
+    // WB-3 (#87): the unlink ghost check probes the cloud for a local: row's content. A path with
+    // no seeded remote content answers "not found" the way the provider would (a 404-shaped
+    // exception that remoteItemOrNull maps to null).
+    override suspend fun getMetadata(path: String): CloudItem {
+        remoteFiles[path]
+            ?: throw ProviderException("Item not found: $path")
+        return CloudItem(
+            id = "id-$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 1,
+            isFolder = false,
+            modified = Instant.parse("2026-03-28T12:00:00Z"),
+            created = Instant.parse("2026-03-28T12:00:00Z"),
+            hash = null,
+            mimeType = null,
+        )
+    }
 
     override suspend fun download(remotePath: String, destination: Path): Long {
         val content = remoteFiles[remotePath] ?: ByteArray(0)
@@ -328,23 +356,31 @@ internal class HydrationTestEnv(
     }
 
     internal inner class StateDatabaseFacade(private val db: StateDatabase) {
-        fun insertUnhydratedEntry(path: String, remoteSize: Long) {
+        fun insertUnhydratedEntry(
+            path: String,
+            remoteSize: Long,
+            isFolder: Boolean = false,
+            remoteId: String? = "id-$path",
+        ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
-                    remoteId = "id-$path",
+                    remoteId = remoteId,
                     remoteHash = "hash-$path",
                     remoteSize = remoteSize,
                     remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
                     localMtime = null,
                     localSize = null,
-                    isFolder = false,
+                    isFolder = isFolder,
                     isPinned = false,
                     isHydrated = false,
                     lastSynced = Instant.now(),
                 ),
             )
         }
+
+        /** The row's status regardless of alive/dead (#87 tombstone checks); null when no row exists. */
+        fun statusOf(path: String): org.krost.unidrive.sync.model.EntryStatus? = db.statusOf(path)
 
         fun insertHydratedEntry(
             path: String,
@@ -672,6 +708,159 @@ class HydrationImplTest {
                 "verb $verb must surface the stable unknown_path token for an unknown path; got $token",
             )
         }
+    }
+
+    // #87 (WB-3): a folder deleted from the mount forgets its whole subtree — every row below it is
+    // tombstoned (the live case left ~133k of them EXISTS, and the next fresh mount re-listed the
+    // folder and planned the subtree for re-download) and the hydration-cache tree goes with it.
+    // The 20k-row scale of the tombstone statement is pinned at the engine layer (SyncEngineTest);
+    // this test pins the verb's end: rmdir → tombstoned rows + evicted cache tree.
+    @Test
+    fun `#87 rmdir of a folder tombstones the rows below and evicts the cache tree`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/sub", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/sub/a.txt", remoteSize = 5)
+        env.stateDb.insertUnhydratedEntry("/sub/nested", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/sub/nested/b.txt", remoteSize = 6)
+        env.syncEngine.seedCacheContent("/sub/a.txt", "cached bytes")
+
+        val result = env.hydration.rmdir("/sub")
+
+        assertTrue(result is RmdirResult.Ok, "rmdir succeeded: $result")
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.DELETED,
+            env.stateDb.statusOf("/sub/a.txt"),
+            "the child row is tombstoned",
+        )
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.DELETED,
+            env.stateDb.statusOf("/sub/nested/b.txt"),
+            "the grandchild row is tombstoned too",
+        )
+        val cacheFile = env.syncEngine.resolveCachePath("/sub/a.txt")
+        assertFalse(Files.exists(cacheFile), "the hydration-cache copy went with the folder")
+    }
+
+    // #87 (WB-3): the delete of a never-uploaded file must remove the staged encrypted copy of its
+    // failed upload — it is the only other copy of the content, and the resume path would otherwise
+    // keep it until the resume TTL (7 days) expires.
+    @Test
+    fun `#87 unlink of a never-uploaded file discards its staged upload copy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/pending.txt", remoteSize = 5, remoteId = null)
+
+        val result = env.hydration.unlink("/pending.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertEquals(
+            1,
+            env.providerForTest.discardedStagedUploads.size,
+            "the provider was asked to discard the staged copy; got ${env.providerForTest.discardedStagedUploads}",
+        )
+        assertTrue(
+            env.providerForTest.discardedStagedUploads[0].replace('\\', '/').endsWith("/pending.txt"),
+            "the discard names the file's cache path; got ${env.providerForTest.discardedStagedUploads[0]}",
+        )
+        assertNull(env.stateDb.statusOf("/pending.txt"), "the row is hard-deleted")
+    }
+
+    // #87 (WB-3): deleting a file whose own upload is queued or in flight must not drop the row and
+    // the cache copy under the upload — the upload would land its cloud copy into a deleted row.
+    // The delete answers busy (the token dehydrate has used since #301); the client cancels the
+    // upload and retries, or retries after the completed event.
+    @Test
+    fun `#87 unlink answers busy while the file's own upload is in flight`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/busy.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/busy.txt", "the bytes")
+
+        val opened = env.hydration.openForWrite("conn1", "h1", "/busy.txt", env.syncEngine.resolveCachePath("/busy.txt"))
+        assertTrue(opened is OpenResult.Ok, "open_write queued the upload: $opened")
+        assertTrue(env.hydration.hasUploadSlot("/busy.txt"), "the upload is queued or in flight")
+
+        val result = env.hydration.unlink("/busy.txt")
+
+        assertTrue(result is UnlinkResult.Busy, "the delete answers busy: $result")
+        assertNotNull(env.stateDb.statusOf("/busy.txt"), "the row was not deleted under the upload")
+        gate.complete(Unit)
+    }
+
+    // #87 review: rmdir tombstones the rows below the folder and evicts its cache tree, so an
+    // upload in flight for a file below it must hold the folder delete off, exactly as unlink.
+    @Test
+    fun `#87 rmdir answers busy while an upload below the folder is in flight`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/dir", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/dir/deep/busy.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/dir/deep/busy.txt", "the bytes")
+
+        val opened = env.hydration.openForWrite(
+            "conn1",
+            "h1",
+            "/dir/deep/busy.txt",
+            env.syncEngine.resolveCachePath("/dir/deep/busy.txt"),
+        )
+        assertTrue(opened is OpenResult.Ok, "open_write queued the upload: $opened")
+
+        val result = env.hydration.rmdir("/dir")
+
+        assertEquals(RmdirResult.Busy, result, "the folder delete answers busy")
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.EXISTS,
+            env.stateDb.statusOf("/dir/deep/busy.txt"),
+            "the uploading file's row was not tombstoned under its upload",
+        )
+        assertTrue(Files.exists(env.syncEngine.resolveCachePath("/dir/deep/busy.txt")), "its cache copy stays")
+        gate.complete(Unit)
+    }
+
+    // #87 review: a sibling whose name merely starts with the folder's name is not below it.
+    @Test
+    fun `#87 an upload of a same-prefix sibling does not hold the folder delete`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/dir", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/dir2.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/dir2.txt", "the bytes")
+        env.hydration.openForWrite("conn1", "h1", "/dir2.txt", env.syncEngine.resolveCachePath("/dir2.txt"))
+
+        assertEquals(RmdirResult.Ok, env.hydration.rmdir("/dir"))
+        gate.complete(Unit)
+    }
+
+    // #87 review: the staged copy is discarded best-effort — a failing discard must not turn a
+    // delete that already happened into an error (the resume store's TTL GC is the backstop).
+    @Test
+    fun `#87 a failing discard of the staged copy does not fail the unlink`() = runTest {
+        val env = HydrationTestEnv()
+        env.providerForTest.discardFailure = java.io.IOException("disk says no")
+        env.stateDb.insertUnhydratedEntry("/pending.txt", remoteSize = 5, remoteId = null)
+
+        val result = env.hydration.unlink("/pending.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertNull(env.stateDb.statusOf("/pending.txt"), "the row is hard-deleted")
+    }
+
+    // #87 review: a tracked file whose last edit's upload failed has a staged copy as well; its
+    // delete discards it too.
+    @Test
+    fun `#87 unlink of a tracked file discards its staged upload copy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/tracked.txt", remoteSize = 5)
+
+        val result = env.hydration.unlink("/tracked.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertTrue(
+            env.providerForTest.discardedStagedUploads.any { it.replace('\\', '/').endsWith("/tracked.txt") },
+            "the discard names the file's cache path; got ${env.providerForTest.discardedStagedUploads}",
+        )
     }
 
     @Test

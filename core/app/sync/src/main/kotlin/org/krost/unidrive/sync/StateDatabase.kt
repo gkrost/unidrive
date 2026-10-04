@@ -878,6 +878,52 @@ class StateDatabase(
     }
 
     /**
+     * #87: tombstone every alive row BELOW [folderPathRaw] in one statement, and return how many. A
+     * folder deleted from the mount (hydration.rmdir) or by the reconciler used to tombstone only the
+     * folder's own row — a subtree of ~133k rows stayed EXISTS, survived into the next fresh mount and
+     * was planned for re-download. The UPDATE touches only rows still EXISTS: rows the delta already
+     * flipped to TRASHED ([setStatusTrashed]) keep their status, so the two paths agree and neither
+     * undoes the other. Descendants keep their remote ids, so a later tombstone report for them is a
+     * no-op exactly as for the folder's own row. One UPDATE, not one call per row: state.db carries
+     * hundreds of thousands of rows and this runs inside the delete's write.
+     */
+    @Synchronized
+    fun markDescendantsDeleted(folderPathRaw: String): Int {
+        beginWrite()
+        val folder = PathNormalizer.nfc(folderPathRaw)
+        val prefix = if (folder.endsWith("/")) folder else "$folder/"
+        // A range, not substr(path, 1, prefix.length): SQLite's substr counts code points, Kotlin's
+        // length counts UTF-16 units, so a folder name with a character outside the BMP (an emoji)
+        // matched nothing. Under BINARY collation every path that starts with "<folder>/" sorts in
+        // ["<folder>/", "<folder>0") — '0' is the character after '/' — and the range can use the
+        // alive-path index.
+        val upperBound = prefix.dropLast(1) + "0"
+        conn.prepareStatement(
+            "UPDATE sync_entries SET status = 'DELETED' WHERE status = 'EXISTS' AND path >= ? AND path < ?",
+        ).use { stmt ->
+            stmt.setString(1, prefix)
+            stmt.setString(2, upperBound)
+            return stmt.executeUpdate()
+        }
+    }
+
+    /**
+     * The row's status regardless of whether it is alive: null when no row exists. [getEntry] reads
+     * the alive view only, so a tombstoned row is invisible there — a tombstone check needs this.
+     */
+    @Synchronized
+    fun statusOf(pathRaw: String): EntryStatus? {
+        // An alive row wins over a tombstone left at the same path by an earlier delete.
+        conn.prepareStatement(
+            "SELECT status FROM sync_entries WHERE path = ? ORDER BY status = 'EXISTS' DESC LIMIT 1",
+        ).use { stmt ->
+            stmt.setString(1, PathNormalizer.nfc(pathRaw))
+            val rs = stmt.executeQuery()
+            return if (rs.next()) EntryStatus.valueOf(rs.getString(1)) else null
+        }
+    }
+
+    /**
      * Hard-delete an alive row (no tombstone). Use this only for transitions
      * that DO NOT correspond to a cloud-side delete: move-source cleanup
      * (the item moved, didn't disappear) and pending-upload-row cleanup

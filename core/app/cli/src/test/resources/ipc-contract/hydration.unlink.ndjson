@@ -2,3 +2,5 @@
 {"ok":true}
 {"verb":"hydration.unlink","path":"/docs/sub"}
 {"ok":false,"error":"path_is_folder"}
+{"verb":"hydration.unlink","path":"/docs/uploading.txt"}
+{"ok":false,"error":"busy"}

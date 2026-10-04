@@ -16,6 +16,7 @@ import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class InternxtApiServiceTest {
@@ -1441,6 +1442,49 @@ class InternxtApiServiceTest {
             store.write(pathHash, original)
             val readBack = store.read(pathHash)
             assertEquals(original, readBack)
+        } finally {
+            tmp.toFile().deleteRecursively()
+        }
+    }
+
+    // WB-3 (#87): the delete of a never-uploaded file discards the staged encrypted copy and its
+    // sidecar through the provider — the user deleted the content, so the resume state (which the
+    // GC would otherwise keep for the 7-day TTL) must not outlive the file.
+    @Test
+    fun `discardStagedUpload removes the tombstone sidecar and the ciphertext`() {
+        val tmp = java.nio.file.Files.createTempDirectory("ud-tomb-discard-")
+        try {
+            val provider = newProviderRooted(tmp)
+            val store = UploadTombstoneStore(tmp.resolve("upload-tombstones"))
+            val local = java.nio.file.Files.createTempFile(tmp, "src-", ".bin").also { p ->
+                java.nio.file.Files.write(p, ByteArray(32) { it.toByte() })
+            }
+            val localPathString = local.toAbsolutePath().toString()
+            val pathHash = UploadTombstoneStore.pathHash(localPathString)
+            store.write(
+                pathHash,
+                UploadTombstone(
+                    localPath = localPathString,
+                    localMtimeMillis = 1_700_000_000_000L,
+                    localSize = 32L,
+                    bucket = "bucket-1",
+                    folderUuid = "folder-uuid-1",
+                    plainName = "src",
+                    ext = "bin",
+                    indexBytesHex = "00".repeat(32),
+                    stage = UploadTombstone.Stage.ENCRYPTING,
+                    startedAtMillis = 1_700_000_000_000L,
+                    tombstoneWrittenAtMillis = 1_700_000_000_000L,
+                ),
+            )
+            val enc = store.ciphertextPath(pathHash)
+            java.nio.file.Files.createDirectories(enc.parent)
+            java.nio.file.Files.write(enc, ByteArray(48) { 0x42 })
+
+            kotlinx.coroutines.test.runTest { provider.discardStagedUpload(localPathString) }
+
+            assertNull(store.read(pathHash), "the sidecar is gone")
+            assertTrue(java.nio.file.Files.notExists(enc), "the staged ciphertext is gone")
         } finally {
             tmp.toFile().deleteRecursively()
         }
