@@ -84,9 +84,11 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
 
-        // Step 3: Sync root
-        val home = System.getenv("HOME") ?: System.getProperty("user.home")
-        val defaultRoot = "$home/${type.replaceFirstChar { it.uppercase() }}"
+        // Step 3: Sync root — the canonical default resolver: Paths-joined, so it
+        // renders with the OS's own separators (string-concatenating "$home/" mixed
+        // backslashes into the Windows form), and it honours a provider's
+        // syncRootDirName override (onedrive suggests ~/OneDrive, not ~/Onedrive).
+        val defaultRoot = SyncConfig.defaultSyncRoot(type).toString()
         print("Sync root [$defaultRoot]: ")
         val rootInput = console.readLine()?.trim()
         val syncRoot = if (rootInput.isNullOrBlank()) defaultRoot else rootInput
