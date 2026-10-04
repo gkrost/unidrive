@@ -315,6 +315,32 @@ class SyncEngineTest {
             assertEquals("c526", db.getSyncState("delta_cursor"), "the run completed and promoted the cursor")
         }
 
+    // ── #531: after --fast-bootstrap, folders that exist remotely but were never enumerated stay
+    // unknown to state.db — the planner emitted mkdir-remote for them every run and each one 409'd
+    // (nameAlreadyExists), counting a failure on every sync. The apply now resolves the conflict:
+    // a create that fails with the folder already present adopts the existing folder's remote id.
+
+    @Test
+    fun `#531 a mkdir-remote for a folder that already exists remotely is adopted, not failed`() =
+        runTest {
+            provider.remoteFoldersExisting.add("/docs")
+            provider.remoteFoldersExisting.add("/docs/deep")
+            Files.createDirectories(syncRoot.resolve("docs/deep"))
+            Files.writeString(syncRoot.resolve("docs/a.txt"), "a")
+            Files.writeString(syncRoot.resolve("docs/deep/b.txt"), "b")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "c531"
+
+            // The live mkdir came from the daemon's rescan pass: a folder that is NEW locally and
+            // unknown to state.db goes to newFolders and its create runs through the same
+            // applyCreateRemoteFolder the sync path uses.
+            engine.rescanSyncRootForUpload()
+
+            assertEquals("exists-/docs", db.getEntry("/docs")?.remoteId, "the top-level folder adopted the existing remote id")
+            assertEquals("exists-/docs/deep", db.getEntry("/docs/deep")?.remoteId, "the nested folder adopted too — any depth, any run")
+            assertFalse(provider.createdFolders.contains("/docs"), "no create was issued for the existing folder")
+        }
+
     // ── #87 (WB-3): a folder delete forgets its subtree ─────────────────────────────────────────
     // The live case: a ~133k-item folder deleted in the mount left every row below it EXISTS in
     // state.db (only the folder's own row was tombstoned), so the next fresh mount listed the folder
@@ -3634,8 +3660,25 @@ class SyncEngineTest {
         // #504 review: when set, getMetadata throws it (a remote item that is gone, an outage).
         var getMetadataError: Exception? = null
 
+        // #531: folders that exist remotely but are invisible to the delta (the fast-bootstrap
+        // adopted cursor never enumerated them) — getMetadata sees them, the delta does not.
+        val remoteFoldersExisting = mutableSetOf<String>()
+
         override suspend fun getMetadata(path: String): CloudItem {
             getMetadataError?.let { throw it }
+            if (path in remoteFoldersExisting) {
+                return CloudItem(
+                    id = "exists-" + path,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = 0,
+                    isFolder = true,
+                    modified = Instant.now(),
+                    created = Instant.now(),
+                    hash = null,
+                    mimeType = null,
+                )
+            }
             return deltaItems.first { it.path == path }
         }
 
@@ -3765,6 +3808,10 @@ class SyncEngineTest {
         override suspend fun createFolder(path: String): CloudItem {
             if (path in createFolderFailPaths) {
                 throw ProviderException("Simulated createFolder failure for $path")
+            }
+            if (path in remoteFoldersExisting) {
+                // the live #531 shape: 409 nameAlreadyExists from OneDrive
+                throw ProviderException("Create folder failed: 409 Conflict - nameAlreadyExists")
             }
             createdFolders.add(path)
             return CloudItem(
