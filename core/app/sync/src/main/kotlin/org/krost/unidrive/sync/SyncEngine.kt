@@ -698,9 +698,9 @@ open class SyncEngine(
                 // The cache copy is the row's local file: clean only while it is exactly what was recorded.
                 return if (cacheIsBaseline) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
             }
-            val placeholderMatchesCache = Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
-            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path) && placeholderMatchesCache) {
-                return CacheDisposition.REDUNDANT
+            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path)) {
+                val placeholderMatchesCache = Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
+                if (placeholderMatchesCache) return CacheDisposition.REDUNDANT
             }
             if (cacheMatchesRecordedVersion(entry, cache, size)) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
         } catch (e: java.io.IOException) {
