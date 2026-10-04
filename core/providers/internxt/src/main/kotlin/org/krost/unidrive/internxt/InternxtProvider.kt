@@ -333,69 +333,92 @@ class InternxtProvider(
         // indexHex, so a fresh attempt produces a byte-identical cipher state.
         // TRUNCATE_EXISTING on the destination open mode (inside
         // downloadFileStreaming) discards any partial prior attempt's bytes.
-        val written = retryShardCommit {
-            val bridgeInfo =
-                try {
-                    api.getBridgeFileInfo(bucket, fileId)
-                } catch (e: InternxtApiException) {
-                    // Live evidence: a single zero-byte file
-                    // (`/Annika.txt`) was retried 1,248 times over 8h after
-                    // the user deleted it from Internxt. The 404 body is the
-                    // stable `{"error":"Bucket entry … not found"}` shape; the
-                    // bridge returns the same shape for any hard-deleted
-                    // bucket entry. Treating it as permanent (rather than
-                    // transient) lets the engine quarantine the row and stop
-                    // burning download attempts; the next delta event for the
-                    // same remote_id clears the flag.
-                    if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
-                    throw e
-                }
-            // #333 review: hexToBytes now fails loud on a malformed index. A bridge entry
-            // whose index is not hex can never decrypt, so quarantine it with a clear
-            // reason instead of letting the engine retry the same failure on every poll.
-            val indexBytes =
-                try {
-                    InternxtCrypto.hexToBytes(bridgeInfo.index)
-                } catch (e: IllegalArgumentException) {
-                    throw PermanentDownloadFailureException(
-                        "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
-                        cause = e,
-                    )
-                }
-            val iv = indexBytes.copyOfRange(0, 16)
-
-            val creds = authService.getValidCredentials()
-            val seed = crypto.mnemonicToSeed(creds.mnemonic)
-            val bucketKey = crypto.deriveBucketKey(seed, bucket)
-            val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
-
-            // #335: taking the first usable shard of a multi-shard object decrypted a
-            // truncated file whose length mismatch then surfaced as a RETRIABLE error —
-            // the engine retried forever instead of quarantining. Fail permanently (a
-            // clear quarantine reason) before any download request is made. One shard
-            // keeps working exactly as before; zero usable shards keeps today's error.
-            val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
-            if (usableShards.size > 1) {
-                throw PermanentDownloadFailureException(
-                    "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
-                )
-            }
-            val downloadUrl =
-                usableShards.firstOrNull()?.url
-                    ?: throw ProviderException("No download URL in bridge info for $remotePath")
-
-            val cipher = crypto.createContentDecryptCipher(fileKey, iv)
-            api.downloadFileStreaming(downloadUrl, cipher, destination)
-        }
-        // Completeness guard: downloadFileStreaming returns the actual decrypted bytes
-        // written and does not validate length itself, so a short/truncated decrypt
-        // would otherwise be stored as a complete cache. Compare against the declared
-        // plaintext size and fail loudly so the caller (hydration) never trusts a
-        // partial file. Skipped when the declared size is unknown (0).
+        // The declared plaintext size rides along so the streaming call can
+        // refuse a short stored object before reading a byte (#536); a null/0
+        // size stays "unknown" and only the post-download guard applies.
         val expected = fileMeta.size.toLongOrNull()
+        val written =
+            try {
+                retryShardCommit {
+                    val bridgeInfo =
+                        try {
+                            api.getBridgeFileInfo(bucket, fileId)
+                        } catch (e: InternxtApiException) {
+                            // Live evidence: a single zero-byte file
+                            // (`/Annika.txt`) was retried 1,248 times over 8h after
+                            // the user deleted it from Internxt. The 404 body is the
+                            // stable `{"error":"Bucket entry … not found"}` shape; the
+                            // bridge returns the same shape for any hard-deleted
+                            // bucket entry. Treating it as permanent (rather than
+                            // transient) lets the engine quarantine the row and stop
+                            // burning download attempts; the next delta event for the
+                            // same remote_id clears the flag.
+                            if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
+                            throw e
+                        }
+                    // #333 review: hexToBytes now fails loud on a malformed index. A bridge entry
+                    // whose index is not hex can never decrypt, so quarantine it with a clear
+                    // reason instead of letting the engine retry the same failure on every poll.
+                    val indexBytes =
+                        try {
+                            InternxtCrypto.hexToBytes(bridgeInfo.index)
+                        } catch (e: IllegalArgumentException) {
+                            throw PermanentDownloadFailureException(
+                                "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
+                                cause = e,
+                            )
+                        }
+                    val iv = indexBytes.copyOfRange(0, 16)
+
+                    val creds = authService.getValidCredentials()
+                    val seed = crypto.mnemonicToSeed(creds.mnemonic)
+                    val bucketKey = crypto.deriveBucketKey(seed, bucket)
+                    val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
+
+                    // #335: taking the first usable shard of a multi-shard object decrypted a
+                    // truncated file whose length mismatch then surfaced as a RETRIABLE error —
+                    // the engine retried forever instead of quarantining. Fail permanently (a
+                    // clear quarantine reason) before any download request is made. One shard
+                    // keeps working exactly as before; zero usable shards keeps today's error.
+                    val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
+                    if (usableShards.size > 1) {
+                        throw PermanentDownloadFailureException(
+                            "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
+                        )
+                    }
+                    val downloadUrl =
+                        usableShards.firstOrNull()?.url
+                            ?: throw ProviderException("No download URL in bridge info for $remotePath")
+
+                    val cipher = crypto.createContentDecryptCipher(fileKey, iv)
+                    api.downloadFileStreaming(downloadUrl, cipher, destination, expectedSize = expected)
+                }
+            } catch (e: RemoteIncompleteDownloadException) {
+                // The stored object cannot produce a whole file; say so with the
+                // path before the typed failure quarantines the row (#536).
+                log.warn("download of {} refused: {}", remotePath, e.message)
+                throw e
+            }
+        // Completeness guard (the second line, for a stream whose length was not known in
+        // advance): downloadFileStreaming returns the actual decrypted bytes written and does
+        // not validate length itself, so a short/truncated decrypt would otherwise be stored as
+        // a complete cache. Compare against the declared plaintext size, remove the partial copy
+        // and fail as the typed permanent failure so the caller (hydration) never trusts a
+        // partial file. Skipped when the declared size is unknown (0).
         if (expected != null && expected > 0L && written != expected) {
-            throw ProviderException(
+            withContext(Dispatchers.IO) {
+                Files.deleteIfExists(destination)
+            }
+            log.warn(
+                "download of {} is incomplete: got {} of {} bytes; removed the partial copy",
+                remotePath,
+                written,
+                expected,
+            )
+            throw RemoteIncompleteDownloadException(
                 "Incomplete download of $remotePath: got $written of $expected bytes",
+                storedBytes = written,
+                declaredBytes = expected,
             )
         }
         return written

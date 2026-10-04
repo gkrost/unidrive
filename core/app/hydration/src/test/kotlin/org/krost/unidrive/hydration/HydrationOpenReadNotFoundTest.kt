@@ -2,6 +2,7 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -97,5 +98,76 @@ class HydrationOpenReadNotFoundTest {
         )
 
         assertEquals("""{"ok":false,"error":"not_found"}""", reply.trim())
+    }
+
+    // #536: a stored object shorter than the size the drive reports (a truncated multipart upload
+    // another client wrote) is NOT a gone file — every download of it fails, so it carries its own
+    // token with the numbers instead of not_found ("file is gone") or a generic message.
+    @Test
+    fun `open_for_read_of_a_truncated_remote_object_surfaces_remote_incomplete_not_not_found`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/truncated.7z", remoteSize = 360951317)
+        env.syncEngine.makeNextDownloadThrow(
+            RemoteIncompleteDownloadException(
+                "Stored object for /truncated.7z is short: 298844160 of 360951317 bytes",
+                storedBytes = 298_844_160L,
+                declaredBytes = 360_951_317L,
+            ),
+        )
+
+        val result = env.hydration.openForRead("conn1", "h1", "/truncated.7z")
+
+        assertTrue(result is OpenResult.Failed, "a short stored object must fail: $result")
+        assertEquals(
+            "remote_incomplete: got 298844160 of 360951317 bytes",
+            result.error.message,
+            "the truncated object is not a gone file: its own token, with the numbers",
+        )
+    }
+
+    @Test
+    fun `hydrate_of_a_truncated_remote_object_surfaces_remote_incomplete_not_not_found`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/truncated2.7z", remoteSize = 360951317)
+        env.syncEngine.makeNextDownloadThrow(
+            RemoteIncompleteDownloadException(
+                "Stored object for /truncated2.7z is short: 298844160 of 360951317 bytes",
+                storedBytes = 298_844_160L,
+                declaredBytes = 360_951_317L,
+            ),
+        )
+
+        val result = env.hydration.hydrate("/truncated2.7z")
+
+        assertTrue(result is HydrateResult.Failed, "a short stored object must fail: $result")
+        assertEquals(
+            "remote_incomplete: got 298844160 of 360951317 bytes",
+            result.error.message,
+            "the hydrate verb carries the same token as the open_read path",
+        )
+    }
+
+    @Test
+    fun `open_read IPC reply carries the remote_incomplete token with the numbers verbatim`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/wire2.7z", remoteSize = 360951317)
+        env.syncEngine.makeNextDownloadThrow(
+            RemoteIncompleteDownloadException(
+                "Stored object for /wire2.7z is short: 298844160 of 360951317 bytes",
+                storedBytes = 298_844_160L,
+                declaredBytes = 360_951_317L,
+            ),
+        )
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val reply = handler.handle(
+            "conn1",
+            """{"verb":"hydration.open_read","handle_id":"h1","path":"/wire2.7z"}""",
+        )
+
+        assertEquals(
+            """{"ok":false,"error":"remote_incomplete: got 298844160 of 360951317 bytes"}""",
+            reply.trim(),
+        )
     }
 }

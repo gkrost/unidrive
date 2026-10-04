@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.SyncEngine
@@ -209,10 +210,10 @@ class HydrationImpl(
         } catch (e: Exception) {
             // A genuinely-gone read (provider download still not-found after the
             // #176 re-resolve) must surface a typed not_found token so the mount
-            // maps it to ENOENT, not the catch-all EIO. Any other failure stays
-            // Generic (→ EIO).
-            val err: HydrationError =
-                if (isNotFound(e)) HydrationError.NotFound else HydrationError.Generic(e.message ?: "download failed")
+            // maps it to ENOENT, not the catch-all EIO. A stored object shorter
+            // than the size the drive reports (#536) is not a gone file: its own
+            // token carries the numbers. Any other failure stays Generic (→ EIO).
+            val err: HydrationError = downloadFailureOf(e, fallback = "download failed")
             _events.emit(HydrationEvent.Failed(path, err))
             _events.emit(
                 HydrationEvent.Completed(
@@ -783,7 +784,7 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             HydrateResult.Ok
         } catch (e: Exception) {
-            val err = HydrationError.Generic(e.message ?: "hydrate failed")
+            val err = downloadFailureOf(e, fallback = "hydrate failed")
             _events.emit(HydrationEvent.Failed(path, err))
             HydrateResult.Failed(err)
         }
@@ -1361,6 +1362,15 @@ class HydrationImpl(
         openSets.remove(connectionId)
     }
 
+    // One classification for a failed download, shared by the open_read path and the hydrate verb:
+    // a stored object shorter than the size the drive reports (#536) carries its own token with the
+    // numbers, a genuinely-gone read the not_found token, everything else stays Generic (→ EIO).
+    private fun downloadFailureOf(e: Exception, fallback: String): HydrationError = when {
+        e is RemoteIncompleteDownloadException -> HydrationError.RemoteIncomplete(e.storedBytes, e.declaredBytes)
+        isNotFound(e) -> HydrationError.NotFound
+        else -> HydrationError.Generic(e.message ?: fallback)
+    }
+
     // Classify a download failure as genuinely-not-found versus any other error.
     // Two provider-agnostic signals, since this module cannot reference a concrete
     // provider's exception type:
@@ -1369,6 +1379,9 @@ class HydrationImpl(
     //  - An exception carrying an Int `statusCode` == 404 — covers OneDrive's
     //    GraphApiException, read reflectively to avoid a provider classpath dep.
     private fun isNotFound(e: Throwable): Boolean {
+        // A short stored object (#536) IS a PermanentDownloadFailureException — quarantined like
+        // one — but it is not a gone file: it keeps its own remote_incomplete token.
+        if (e is RemoteIncompleteDownloadException) return false
         if (e is PermanentDownloadFailureException) return true
         return statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)
     }

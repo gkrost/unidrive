@@ -79,6 +79,24 @@ open class PermanentDownloadFailureException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * #536: the stored object is shorter than the size the drive reports — a multipart upload another
+ * client truncated (live evidence: a 23-part declared object whose 19 parts landed, 62 MiB short).
+ * Every download of such an object must fail the completeness guard, so the provider raises this
+ * typed failure — before streaming, off the shard's Content-Length, or after it, off the bytes
+ * written — instead of a retryable/generic shape. It is a [PermanentDownloadFailureException] so
+ * every quarantine site catches it without changes, but the hydration layer maps it to its own
+ * `remote_incomplete` wire token (with the numbers), never to `not_found`: the file is not gone,
+ * its cloud copy is short.
+ */
+open class RemoteIncompleteDownloadException(
+    message: String,
+    val storedBytes: Long,
+    val declaredBytes: Long,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentDownloadFailureException(message, cause, requestId)
+
+/**
  * #493: a permanent upload failure — the provider rejected the request itself (a malformed or refused payload, e.g.
  * Internxt's 400 "fileId must not be provided when size is 0", #485), so another attempt with the same bytes and the same
  * call would be rejected the same way. The hydration upload queue does not run its retry ladder for it: it marks the row

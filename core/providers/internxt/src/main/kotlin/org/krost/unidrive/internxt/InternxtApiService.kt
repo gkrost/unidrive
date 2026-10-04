@@ -15,6 +15,7 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.InFlightDedup
 import org.krost.unidrive.http.UploadTimeoutPolicy
@@ -697,6 +698,7 @@ class InternxtApiService(
         downloadUrl: String,
         cipher: javax.crypto.Cipher,
         destination: Path,
+        expectedSize: Long? = null,
     ): Long {
         bridgeBudget.awaitSlot()
         try {
@@ -707,6 +709,21 @@ class InternxtApiService(
                     }
 
                     assertNotHtml(response, contextMsg = "Download (encrypted) -> ${destination.fileName}")
+                    // #536: the shard's Content-Length already says when the stored object is shorter
+                    // than the size the drive reports (a multipart upload another client truncated) —
+                    // refuse before reading a single byte instead of pulling 285 MiB that cannot
+                    // succeed. An absent header (chunked) or an unknown declared size (0) stays with
+                    // the post-download completeness guard, as before.
+                    response.headers[HttpHeaders.ContentLength]?.toLongOrNull()?.let { contentLength ->
+                        if (expectedSize != null && expectedSize > 0 && contentLength < expectedSize) {
+                            throw RemoteIncompleteDownloadException(
+                                "Stored object for ${destination.fileName} is shorter than the size the drive reports: " +
+                                    "$contentLength of $expectedSize bytes",
+                                storedBytes = contentLength,
+                                declaredBytes = expectedSize,
+                            )
+                        }
+                    }
                     val channel: ByteReadChannel = response.body()
                     var written = 0L
                     withContext(Dispatchers.IO) {

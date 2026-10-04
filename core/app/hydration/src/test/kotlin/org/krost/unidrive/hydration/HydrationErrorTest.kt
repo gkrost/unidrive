@@ -23,6 +23,17 @@ class HydrationErrorTest {
         assertEquals("conflict", HydrationError.CONFLICT_TOKEN)
     }
 
+    // #536: the token plus the numbers, one string — a client parses the prefix, the mount crate
+    // falls to its EIO catch-all.
+    @Test
+    fun `remote incomplete carries the stable token with the numbers`() {
+        assertEquals(
+            "remote_incomplete: got 298844160 of 360951317 bytes",
+            HydrationError.RemoteIncomplete(storedBytes = 298_844_160L, declaredBytes = 360_951_317L).message,
+        )
+        assertTrue(HydrationError.RemoteIncomplete(1, 2).message.startsWith(HydrationError.REMOTE_INCOMPLETE_TOKEN))
+    }
+
     @Test
     fun `sealed interface allows future variants without breaking exhaustiveness`() {
         val e: HydrationError = HydrationError.Generic("x")
@@ -34,6 +45,7 @@ class HydrationErrorTest {
             HydrationError.OutOfScope -> "outside_scope"
             HydrationError.Excluded -> "excluded"
             HydrationError.Cancelled -> "cancelled"
+            is HydrationError.RemoteIncomplete -> "remote_incomplete"
         }
         assertTrue(rendered.startsWith("generic:"))
     }
