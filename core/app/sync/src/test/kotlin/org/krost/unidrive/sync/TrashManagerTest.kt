@@ -195,4 +195,24 @@ class TrashManagerTest {
     fun `expiredCount is zero without a trash directory`() {
         assertEquals(0, TrashManager(syncRoot).expiredCount(30))
     }
+
+
+    @Test
+    fun `a nested trash lists and restores under its cloud-style key on every OS`() {
+        val file = syncRoot.resolve("docs/deep/test.txt")
+        file.parent.createDirectories()
+        file.writeText("nested")
+
+        val manager = TrashManager(syncRoot)
+        manager.trash("/docs/deep/test.txt")
+
+        val listed = manager.list().single()
+        assertEquals(
+            "docs/deep/test.txt",
+            listed.originalPath,
+            "the key is the cloud-style path, never the OS's separators",
+        )
+        assertTrue(manager.restore("/docs/deep/test.txt"), "restore matches the cloud-style key")
+        assertEquals("nested", syncRoot.resolve("docs/deep/test.txt").readText())
+    }
 }

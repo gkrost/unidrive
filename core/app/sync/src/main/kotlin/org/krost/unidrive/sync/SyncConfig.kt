@@ -609,7 +609,11 @@ data class SyncConfig(
 
         val KNOWN_TYPES: Set<String> get() = org.krost.unidrive.ProviderRegistry.knownTypes
 
-        private fun expandTilde(path: String): String = if (path.startsWith("~")) home + path.substring(1) else path
+        // Paths-join, not string-concat: `home + "/Docs"` rendered every echoed
+        // expansion as "C:\Users\gerno/Docs" on Windows — half of it in the OS's
+        // own separators, half in the cloud's.
+        private fun expandTilde(path: String): String =
+            if (path.startsWith("~")) Paths.get(home, path.substring(1)).toString() else path
 
         fun resolveProfile(
             name: String,
