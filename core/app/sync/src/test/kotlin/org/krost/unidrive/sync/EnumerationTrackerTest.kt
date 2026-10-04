@@ -55,6 +55,25 @@ class EnumerationTrackerTest {
 
     // ---- what a fresh tracker and a beginning attempt say ---------------------------------------------------------
 
+    // unidrive-windows#136: the client printed "The first scan found 245,490 items in 48 min" for a
+    // listing that took 22 — the elapsed kept counting while state.db was written. During the saving
+    // phase the listing is over: the status reports its duration, frozen.
+    @Test
+    fun `the elapsed freezes at the listing duration while saving`() {
+        tracker.begin() // started at now
+        after(7)
+        tracker.onItems(5)
+        assertEquals(7_000L, tracker.snapshot().elapsedMs)
+
+        assertEquals(7_000L, tracker.saving(5), "saving() returns how long the listing took")
+        val saving = tracker.snapshot()
+        assertEquals(EnumerationStatus.Phase.SAVING, saving.phase)
+        assertEquals(7_000L, saving.elapsedMs, "the elapsed must be the listing's duration, not the attempt's wall time")
+
+        after(41) // state.db writing takes its own time
+        assertEquals(7_000L, tracker.snapshot().elapsedMs, "still frozen: the save time must not grow the reported elapsed")
+    }
+
     @Test
     fun `a tracker that has seen nothing is idle and the first enumeration is still to come`() {
         val s = tracker.snapshot()

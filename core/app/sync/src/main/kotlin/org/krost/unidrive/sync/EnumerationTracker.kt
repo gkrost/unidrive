@@ -57,6 +57,9 @@ class EnumerationTracker(
     private var lastError: String? = null
     private var nextAttemptAtMs: Long? = null
 
+    /** How long the listing of the running attempt took, frozen at its [saving] transition. */
+    private var listingElapsedMs: Long? = null
+
     /** An attempt starts: counted, progress cleared, a pending retry time dropped. */
     fun begin() {
         synchronized(lock) {
@@ -106,7 +109,10 @@ class EnumerationTracker(
 
     /**
      * The listing is done and [finalItems] items go to state.db. Returns how long the listing took.
-     * The rate and the estimate end here: they describe the listing.
+     * The rate and the estimate end here: they describe the listing. That duration is also what the
+     * status keeps reporting for the elapsed: the listing is over, and a count that keeps growing
+     * while state.db is written made the client show "found N items in 48 min" for what took 22
+     * (unidrive-windows#136).
      */
     fun saving(finalItems: Int): Long =
         synchronized(lock) {
@@ -114,7 +120,7 @@ class EnumerationTracker(
             phase = EnumerationStatus.Phase.SAVING
             items = max(finalItems, 0)
             samples.clear()
-            now - (startedAtMs ?: now)
+            (now - (startedAtMs ?: now)).also { listingElapsedMs = it }
         }
 
     /** The attempt completed. The next one counts from zero and the last failure is history. */
@@ -171,7 +177,17 @@ class EnumerationTracker(
                 phase = if (running) phase else null,
                 listing = if (progressShown) listing else null,
                 startedAtMs = startedAtMs,
-                elapsedMs = if (running) startedAtMs?.let { max(now - it, 0) } else null,
+                elapsedMs = if (running) {
+                    startedAtMs?.let {
+                        // #136: during the saving phase the listing is over — report its frozen
+                        // duration, not a count that grows while state.db is written.
+                        if (phase == EnumerationStatus.Phase.SAVING) {
+                            listingElapsedMs
+                        } else {
+                            max(now - it, 0)
+                        }
+                    }
+                } else null,
                 items = if (progressShown) items else null,
                 foldersDone = if (progressShown) foldersDone else null,
                 foldersKnown = if (progressShown) foldersKnown else null,
@@ -195,6 +211,7 @@ class EnumerationTracker(
         foldersDone = null
         foldersKnown = null
         foldersSkipped = null
+        listingElapsedMs = null
         samples.clear()
     }
 
