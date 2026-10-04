@@ -283,6 +283,68 @@ class SyncEngineTest {
             assertTrue(provider.deletedPaths.contains("/to-remove.txt"))
         }
 
+    // ── #87 (WB-3): a folder delete forgets its subtree ─────────────────────────────────────────
+    // The live case: a ~133k-item folder deleted in the mount left every row below it EXISTS in
+    // state.db (only the folder's own row was tombstoned), so the next fresh mount listed the folder
+    // again and planned the whole subtree for re-download.
+
+    @Test
+    fun `#87 deleting a folder forgets its subtree in one statement`() =
+        runTest {
+            db.upsertEntry(trackedRow("/big", isFolder = true))
+            db.batch {
+                for (i in 1..20_000) db.upsertEntry(trackedRow("/big/f$i.txt", isFolder = false))
+            }
+
+            engine.deleteRemote("/big")
+
+            assertTrue(provider.deletedPaths.contains("/big"), "the folder is trashed remotely, once")
+            assertEquals(
+                org.krost.unidrive.sync.model.EntryStatus.DELETED,
+                db.statusOf("/big"),
+                "the folder's own row is tombstoned",
+            )
+            assertEquals(
+                org.krost.unidrive.sync.model.EntryStatus.DELETED,
+                db.statusOf("/big/f1.txt"),
+                "the subtree is tombstoned by the delete itself",
+            )
+            assertEquals(
+                org.krost.unidrive.sync.model.EntryStatus.DELETED,
+                db.statusOf("/big/f20000.txt"),
+                "the LAST row of the subtree is tombstoned too — nothing below the folder stayed EXISTS",
+            )
+            // The hydration-cache tree's eviction lives in HydrationImpl.rmdir (evictCacheTree) and is
+            // pinned by the verb-level test there; deleteRemote itself only owns state.db.
+        }
+
+    @Test
+    fun `#87 a delta that reports the trashed subtree leaves the tombstones alone`() =
+        runTest {
+            db.upsertEntry(trackedRow("/big", isFolder = true))
+            db.upsertEntry(trackedRow("/big/f1.txt", isFolder = false))
+            engine.deleteRemote("/big")
+
+            // The trash has landed remotely: the next delta reports the items deleted. The delta path
+            // skips deleted items and the tombstones stay exactly as the delete left them — neither
+            // side undoes the other.
+            provider.deltaItems = listOf(
+                cloudItem("/big", deleted = true),
+                cloudItem("/big/f1.txt", deleted = true),
+            )
+            provider.deltaCursor = "after-trash"
+            engine.syncOnce()
+
+            assertEquals(
+                org.krost.unidrive.sync.model.EntryStatus.DELETED,
+                db.statusOf("/big"),
+            )
+            assertEquals(
+                org.krost.unidrive.sync.model.EntryStatus.DELETED,
+                db.statusOf("/big/f1.txt"),
+            )
+        }
+
     @Test
     fun `zero-byte remote files are auto-hydrated`() =
         runTest {

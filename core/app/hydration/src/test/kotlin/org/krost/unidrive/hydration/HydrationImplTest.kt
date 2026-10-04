@@ -328,7 +328,11 @@ internal class HydrationTestEnv(
     }
 
     internal inner class StateDatabaseFacade(private val db: StateDatabase) {
-        fun insertUnhydratedEntry(path: String, remoteSize: Long) {
+        fun insertUnhydratedEntry(
+            path: String,
+            remoteSize: Long,
+            isFolder: Boolean = false,
+        ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
@@ -338,13 +342,16 @@ internal class HydrationTestEnv(
                     remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
                     localMtime = null,
                     localSize = null,
-                    isFolder = false,
+                    isFolder = isFolder,
                     isPinned = false,
                     isHydrated = false,
                     lastSynced = Instant.now(),
                 ),
             )
         }
+
+        /** The row's status regardless of alive/dead (#87 tombstone checks); null when no row exists. */
+        fun statusOf(path: String): org.krost.unidrive.sync.model.EntryStatus? = db.statusOf(path)
 
         fun insertHydratedEntry(
             path: String,
@@ -672,6 +679,37 @@ class HydrationImplTest {
                 "verb $verb must surface the stable unknown_path token for an unknown path; got $token",
             )
         }
+    }
+
+    // #87 (WB-3): a folder deleted from the mount forgets its whole subtree — every row below it is
+    // tombstoned (the live case left ~133k of them EXISTS, and the next fresh mount re-listed the
+    // folder and planned the subtree for re-download) and the hydration-cache tree goes with it.
+    // The 20k-row scale of the tombstone statement is pinned at the engine layer (SyncEngineTest);
+    // this test pins the verb's end: rmdir → tombstoned rows + evicted cache tree.
+    @Test
+    fun `#87 rmdir of a folder tombstones the rows below and evicts the cache tree`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/sub", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/sub/a.txt", remoteSize = 5)
+        env.stateDb.insertUnhydratedEntry("/sub/nested", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/sub/nested/b.txt", remoteSize = 6)
+        env.syncEngine.seedCacheContent("/sub/a.txt", "cached bytes")
+
+        val result = env.hydration.rmdir("/sub")
+
+        assertTrue(result is RmdirResult.Ok, "rmdir succeeded: $result")
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.DELETED,
+            env.stateDb.statusOf("/sub/a.txt"),
+            "the child row is tombstoned",
+        )
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.DELETED,
+            env.stateDb.statusOf("/sub/nested/b.txt"),
+            "the grandchild row is tombstoned too",
+        )
+        val cacheFile = env.syncEngine.resolveCachePath("/sub/a.txt")
+        assertFalse(Files.exists(cacheFile), "the hydration-cache copy went with the folder")
     }
 
     @Test

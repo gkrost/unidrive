@@ -1186,6 +1186,9 @@ open class SyncEngine(
             }
         }
         db.markDeleted(path)
+        // #87: a folder's rows below it are part of the same user delete — leave none of
+        // them EXISTS, or the next fresh mount plans their re-download (the live 133k case).
+        if (entryBefore?.isFolder == true) db.markDescendantsDeleted(path)
         dropSyncRootCopy(path, entryBefore)
     }
 
