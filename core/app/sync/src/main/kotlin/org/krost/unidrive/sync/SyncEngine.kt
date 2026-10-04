@@ -1192,6 +1192,18 @@ open class SyncEngine(
         dropSyncRootCopy(path, entryBefore)
     }
 
+    /**
+     * WB-3 (#87): the delete of a never-uploaded file discards the provider's staged upload copy —
+     * the encrypted ciphertext (and its resume sidecar) is the only other copy of the content, the
+     * user deleted the file, so it goes with the row and the cache copy instead of sitting in the
+     * tombstone directory until the resume TTL passes. The path is the logical one; the engine
+     * resolves it to the local cache path the uploader staged, which is what the tombstone is keyed
+     * by. A provider without staged uploads ignores this (the default is a no-op).
+     */
+    suspend fun discardStagedUpload(logicalPath: String) {
+        provider.discardStagedUpload(resolveCachePath(logicalPath).toAbsolutePath().toString())
+    }
+
     // #449 review fix: the remote path is gone and its row tombstoned — the sync-root
     // mirror must not survive them, or the next scan reads the orphan file as NEW and
     // re-uploads the path the user just deleted (a resurrection through the mirror).

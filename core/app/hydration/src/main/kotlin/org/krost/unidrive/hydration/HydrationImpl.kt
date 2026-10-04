@@ -912,6 +912,12 @@ class HydrationImpl(
             ?: return UnlinkResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return UnlinkResult.PathIsFolder
 
+        // WB-3 (#87): the file's own upload is queued or in flight — deleting the row and the cache
+        // copy under it would orphan the cloud copy the upload is about to create (the row is gone
+        // when the upload lands). Answer busy, the same refusal dehydrate has given since #301; the
+        // client cancels the upload (cancelUpload) and retries, or retries after the completed event.
+        if (hasUploadSlot(normalised)) return UnlinkResult.Busy
+
         // Never-uploaded file (remote_id is null): the file only ever existed
         // locally — created through the mount, upload not yet done. There is
         // nothing to delete cloud-side, so calling provider.delete would 404
@@ -940,6 +946,7 @@ class HydrationImpl(
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
                     syncEngine.deleteRemote(normalised)
+                    syncEngine.discardStagedUpload(normalised)
                     evictCacheFile(normalised)
                     UnlinkResult.Ok
                 }.getOrElse { e ->
@@ -950,6 +957,10 @@ class HydrationImpl(
                 runCatching {
                     java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
                 }
+                // WB-3 (#87): the staged encrypted copy of a failed upload is the only other copy of
+                // the content — the user deleted the file, so it goes too, or the resume path finds
+                // the ciphertext (and its plaintext plaintext-shape) on disk for days.
+                syncEngine.discardStagedUpload(normalised)
                 stateDb.deleteEntry(normalised)
                 UnlinkResult.Ok
             }.getOrElse { e ->

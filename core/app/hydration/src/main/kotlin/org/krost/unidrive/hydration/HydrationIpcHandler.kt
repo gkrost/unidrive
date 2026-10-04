@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  *   unlink      request:  {"verb":"hydration.unlink","path":"/foo.txt"}
  *               reply:    {"ok":true}
+ *                         {"ok":false,"error":"busy"}               the upload is in flight (#87)
  *                         {"ok":false,"error":"path_is_folder"}     EISDIR
  *                         {"ok":false,"error":"<msg>"}              EIO
  *
@@ -332,6 +333,7 @@ class HydrationIpcHandler(
                 when (val r = hydration.unlink(path)) {
                     is UnlinkResult.Ok -> reply(ok = true)
                     UnlinkResult.PathIsFolder -> reply(ok = false, error = "path_is_folder")
+                    UnlinkResult.Busy -> reply(ok = false, error = "busy")
                     is UnlinkResult.Failed -> reply(ok = false, error = r.error.message)
                 }
             }

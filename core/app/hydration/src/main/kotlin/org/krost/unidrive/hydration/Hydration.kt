@@ -159,6 +159,15 @@ sealed class UnlinkResult {
     data object Ok : UnlinkResult()
     data class Failed(val error: HydrationError) : UnlinkResult()
     data object PathIsFolder : UnlinkResult()
+
+    /**
+     * WB-3 (#87): the file's own upload is queued or in flight, so the delete cannot be answered
+     * yet — deleting the row and the cache copy under a running upload would orphan its cloud copy
+     * (the upload lands after the row is gone). The client cancels the upload
+     * ([Hydration.cancelUpload]) and retries, or retries after the upload's completed event. Wire
+     * token `busy` — the same one dehydrate has answered since #301.
+     */
+    data object Busy : UnlinkResult()
 }
 
 sealed class RmdirResult {

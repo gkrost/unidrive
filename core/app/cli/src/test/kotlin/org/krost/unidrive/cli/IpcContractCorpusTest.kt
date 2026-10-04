@@ -306,7 +306,11 @@ class IpcContractCorpusTest {
             }
 
         override suspend fun unlink(path: String): UnlinkResult =
-            if (path == "/docs/sub") UnlinkResult.PathIsFolder else UnlinkResult.Ok
+            when (path) {
+                "/docs/sub" -> UnlinkResult.PathIsFolder
+                "/docs/uploading.txt" -> UnlinkResult.Busy
+                else -> UnlinkResult.Ok
+            }
 
         override suspend fun rmdir(path: String): RmdirResult = when (path) {
             "/docs/report.txt" -> RmdirResult.PathIsFile

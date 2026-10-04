@@ -18,6 +18,7 @@ import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
+import org.krost.unidrive.ProviderException
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,13 @@ internal class MinimalFakeProvider(
 
     // Throw-injection for testing error paths
     private var nextThrowable: Throwable? = null
+
+    // WB-3 (#87): the local paths whose staged upload copies unlink asked to discard.
+    val discardedStagedUploads = mutableListOf<String>()
+
+    override suspend fun discardStagedUpload(localPath: String) {
+        discardedStagedUploads.add(localPath)
+    }
 
     // Optional gate: when set, upload() suspends until this deferred completes.
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
@@ -95,8 +103,24 @@ internal class MinimalFakeProvider(
 
     override suspend fun listChildren(path: String): List<CloudItem> = emptyList()
 
-    override suspend fun getMetadata(path: String): CloudItem =
-        error("getMetadata not used in hydration tests")
+    // WB-3 (#87): the unlink ghost check probes the cloud for a local: row's content. A path with
+    // no seeded remote content answers "not found" the way the provider would (a 404-shaped
+    // exception that remoteItemOrNull maps to null).
+    override suspend fun getMetadata(path: String): CloudItem {
+        remoteFiles[path]
+            ?: throw ProviderException("Item not found: $path")
+        return CloudItem(
+            id = "id-$path",
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = 1,
+            isFolder = false,
+            modified = Instant.parse("2026-03-28T12:00:00Z"),
+            created = Instant.parse("2026-03-28T12:00:00Z"),
+            hash = null,
+            mimeType = null,
+        )
+    }
 
     override suspend fun download(remotePath: String, destination: Path): Long {
         val content = remoteFiles[remotePath] ?: ByteArray(0)
@@ -332,11 +356,12 @@ internal class HydrationTestEnv(
             path: String,
             remoteSize: Long,
             isFolder: Boolean = false,
+            remoteId: String? = "id-$path",
         ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
-                    remoteId = "id-$path",
+                    remoteId = remoteId,
                     remoteHash = "hash-$path",
                     remoteSize = remoteSize,
                     remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
@@ -710,6 +735,52 @@ class HydrationImplTest {
         )
         val cacheFile = env.syncEngine.resolveCachePath("/sub/a.txt")
         assertFalse(Files.exists(cacheFile), "the hydration-cache copy went with the folder")
+    }
+
+    // #87 (WB-3): the delete of a never-uploaded file must remove the staged encrypted copy of its
+    // failed upload — it is the only other copy of the content, and the resume path would otherwise
+    // keep it until the resume TTL (7 days) expires.
+    @Test
+    fun `#87 unlink of a never-uploaded file discards its staged upload copy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/pending.txt", remoteSize = 5, remoteId = null)
+
+        val result = env.hydration.unlink("/pending.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertEquals(
+            1,
+            env.providerForTest.discardedStagedUploads.size,
+            "the provider was asked to discard the staged copy; got ${env.providerForTest.discardedStagedUploads}",
+        )
+        assertTrue(
+            env.providerForTest.discardedStagedUploads[0].replace('\\', '/').endsWith("/pending.txt"),
+            "the discard names the file's cache path; got ${env.providerForTest.discardedStagedUploads[0]}",
+        )
+        assertNull(env.stateDb.statusOf("/pending.txt"), "the row is hard-deleted")
+    }
+
+    // #87 (WB-3): deleting a file whose own upload is queued or in flight must not drop the row and
+    // the cache copy under the upload — the upload would land its cloud copy into a deleted row.
+    // The delete answers busy (the token dehydrate has used since #301); the client cancels the
+    // upload and retries, or retries after the completed event.
+    @Test
+    fun `#87 unlink answers busy while the file's own upload is in flight`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/busy.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/busy.txt", "the bytes")
+
+        val opened = env.hydration.openForWrite("conn1", "h1", "/busy.txt", env.syncEngine.resolveCachePath("/busy.txt"))
+        assertTrue(opened is OpenResult.Ok, "open_write queued the upload: $opened")
+        assertTrue(env.hydration.hasUploadSlot("/busy.txt"), "the upload is queued or in flight")
+
+        val result = env.hydration.unlink("/busy.txt")
+
+        assertTrue(result is UnlinkResult.Busy, "the delete answers busy: $result")
+        assertNotNull(env.stateDb.statusOf("/busy.txt"), "the row was not deleted under the upload")
+        gate.complete(Unit)
     }
 
     @Test
