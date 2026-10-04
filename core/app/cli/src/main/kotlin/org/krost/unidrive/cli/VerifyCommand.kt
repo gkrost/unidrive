@@ -9,6 +9,7 @@ import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.Reconciler
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncScope
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
@@ -53,6 +54,16 @@ class VerifyCommand : Callable<Int> {
     )
     var deep: Boolean = false
 
+    @Option(
+        names = ["--sync-path"],
+        description = [
+            "Audit only a subtree, e.g. --sync-path /Documents. Repeatable. The remote walk starts " +
+                "inside the scope instead of listing the whole drive (#532: 170 folder listings in 150 s).",
+        ],
+        arity = "1..*",
+    )
+    var syncPaths: MutableList<String> = mutableListOf()
+
     override fun call(): Int {
         val profile = parent.resolveCurrentProfile()
         val configDir = parent.configBaseDir().resolve(profile.name)
@@ -70,13 +81,16 @@ class VerifyCommand : Callable<Int> {
         // never transfer (sidecars, OS junk, user patterns) must not count as
         // divergence in any of the three views.
         val excludes = parent.loadSyncConfig().effectiveExcludePatterns(profile.name)
+        // #532: all three views must be cut to the same boundary, or the audit reports
+        // out-of-scope rows as db-only/remote-only divergences instead of ignoring them.
+        val scope = SyncScope.normalize(syncPaths)
 
         // Read-only snapshot of the rows; closed before any other source is walked.
         val db = StateDatabase(dbPath)
         db.initialize()
         val dbEntries =
             try {
-                db.getAllEntries()
+                db.getAllEntries().filter { scope.isEmpty() || SyncScope.contains(it.path, scope) }
             } finally {
                 db.close()
             }
@@ -87,7 +101,7 @@ class VerifyCommand : Callable<Int> {
             try {
                 runBlocking {
                     provider.authenticateAndLog()
-                    listRemoteFiles(provider, excludes)
+                    listRemoteFiles(provider, excludes, scope)
                 }
             } catch (e: AuthenticationException) {
                 System.err.print(
@@ -115,7 +129,10 @@ class VerifyCommand : Callable<Int> {
 
         val report =
             VerifyAudit.audit(
-                localFiles = walkLocalFiles(syncRoot, excludes),
+                localFiles =
+                    walkLocalFiles(syncRoot, excludes).filterKeys { path ->
+                        scope.isEmpty() || SyncScope.contains(path, scope)
+                    },
                 dbEntries = dbEntries.filterNot { isExcluded(it.path, excludes) },
                 remoteFiles = remoteFiles.mapValues { it.value.size },
                 hashMismatch = { path ->
@@ -136,19 +153,24 @@ class VerifyCommand : Callable<Int> {
 
     /**
      * Full remote enumeration via the provider's list API — a breadth-first
-     * walk over [CloudProvider.listChildren] from the root, one call per
+     * walk over [CloudProvider.listChildren], one call per
      * folder (each call returns that folder's complete child list; providers
      * paginate internally). Deliberately NOT the delta feed: the audit wants
      * the provider's *current* answer, independent of any cursor state the
      * engine maintains.
+     *
+     * With a non-empty [scope] the walk starts at the scope roots instead of
+     * the drive root, so the call count follows the audited subtree rather
+     * than the whole drive (#532).
      */
     private suspend fun listRemoteFiles(
         provider: CloudProvider,
         excludes: List<String>,
+        scope: List<String>,
     ): Map<String, CloudItem> {
         val files = mutableMapOf<String, CloudItem>()
         val pending = ArrayDeque<String>()
-        pending.add("/")
+        if (scope.isEmpty()) pending.add("/") else scope.forEach { pending.add(it) }
         while (pending.isNotEmpty()) {
             val dir = pending.removeFirst()
             for (item in provider.listChildren(dir)) {
