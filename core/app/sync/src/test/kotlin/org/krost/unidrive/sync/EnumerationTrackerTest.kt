@@ -286,6 +286,55 @@ class EnumerationTrackerTest {
         assertNull(s.etaS)
     }
 
+    // unidrive-windows#136: the client printed "The first scan found 245,490 items in 48 min" for a
+    // listing that took 22 — the elapsed kept counting while state.db was written. During the saving
+    // phase the listing is over: the status reports its duration, frozen.
+    @Test
+    fun `the elapsed freezes at the listing duration while saving`() {
+        tracker.begin() // started at now
+        after(7)
+        tracker.onItems(5)
+        assertEquals(7_000L, tracker.snapshot().elapsedMs)
+
+        assertEquals(7_000L, tracker.saving(5), "saving() returns how long the listing took")
+        val saving = tracker.snapshot()
+        assertEquals(EnumerationStatus.Phase.SAVING, saving.phase)
+        assertEquals(7_000L, saving.elapsedMs, "the elapsed must be the listing's duration, not the attempt's wall time")
+
+        after(41) // state.db writing takes its own time
+        assertEquals(7_000L, tracker.snapshot().elapsedMs, "still frozen: the save time must not grow the reported elapsed")
+    }
+
+    @Test
+    fun `a listing that took no time reports an elapsed of zero while saving, not an absent one`() {
+        tracker.begin()
+
+        assertEquals(0L, tracker.saving(finalItems = 3))
+
+        assertEquals(0L, tracker.snapshot().elapsedMs)
+    }
+
+    @Test
+    fun `a failed save leaves no elapsed behind and the next attempt counts from its own start`() {
+        tracker.begin()
+        after(7)
+        tracker.saving(finalItems = 5)
+        after(41)
+        tracker.failed("the disk is full")
+
+        val failed = tracker.snapshot()
+        assertEquals(EnumerationStatus.State.FAILED, failed.state)
+        assertNull(failed.elapsedMs, "only a running attempt has an elapsed")
+        assertNull(failed.phase)
+
+        after(30)
+        tracker.begin()
+        after(3)
+        val retry = tracker.snapshot()
+        assertEquals(EnumerationStatus.Phase.LISTING, retry.phase)
+        assertEquals(3_000L, retry.elapsedMs, "a retry counts from its own start, whatever the failed attempt reached")
+    }
+
     @Test
     fun `reports that arrive after the listing ended change nothing`() {
         tracker.begin()

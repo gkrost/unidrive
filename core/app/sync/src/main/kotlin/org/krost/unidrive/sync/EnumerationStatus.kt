@@ -16,7 +16,10 @@ data class EnumerationStatus(
     val listing: String? = null,
     /** Start of the running attempt, or of the last one. */
     val startedAtMs: Long? = null,
-    /** Elapsed time of the running attempt. */
+    /**
+     * Elapsed time of the running attempt; once its phase is [Phase.SAVING] it stays at the duration of the listing
+     * (the save time is not part of it). Absent unless an attempt is running.
+     */
     val elapsedMs: Long? = null,
     val items: Int? = null,
     val foldersDone: Int? = null,

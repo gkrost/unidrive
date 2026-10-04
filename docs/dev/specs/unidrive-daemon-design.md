@@ -300,7 +300,7 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 | `attempt` | attempts since the last success, counting the running one; 0 after a success |
 | `phase` | while running: `listing` (gathering from the remote) or `saving` (writing the result to state.db) |
 | `listing` | `account` (account-wide offset pagination), `cursor` (account-wide cursor pagination, resumable from the cursor of the last page) or `tree` (folder walk); absent when the provider does not say |
-| `started_at_ms`, `elapsed_ms` | start of the running or the last attempt (epoch ms); elapsed time of the running one |
+| `started_at_ms`, `elapsed_ms` | start of the running or the last attempt (epoch ms); elapsed time of the running one. While `phase` is `saving`, `elapsed_ms` stays at how long the listing took: the save time is not counted, so a client can word "found N items in X" with it. `elapsed_ms` is absent when no attempt runs |
 | `items` | items gathered by the running (or the failed) attempt so far |
 | `folders_done`, `folders_known`, `folders_skipped` | folder walk only: folders listed or skipped, folders discovered so far (a lower bound of the total), folders that failed and were skipped |
 | `rate_per_s` | items per second, smoothed over the last minute; absent before ten seconds of data and while the listing stands still |
