@@ -25,7 +25,10 @@ import java.nio.file.Files
  */
 @Command(
     name = "refresh",
-    description = ["Update state.db with remote changes via the running daemon's refresh.run RPC."],
+    description = [
+        "Update state.db with remote changes via the running daemon's refresh.run RPC. " +
+            "Resumes from the last sync cursor; use --reset to re-enumerate from scratch.",
+    ],
     mixinStandardHelpOptions = true,
 )
 class RefreshCommand : Runnable {

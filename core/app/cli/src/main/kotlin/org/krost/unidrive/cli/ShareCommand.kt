@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.authenticateAndLog
 import picocli.CommandLine
 import picocli.CommandLine.ArgGroup
 import picocli.CommandLine.Command
@@ -71,6 +72,10 @@ class ShareCommand : Runnable {
                 }
 
             try {
+                // Authenticate before the first provider call, as ls and get do: the
+                // token is loaded by authenticate(), so share, --list and --revoke
+                // all ended in "Not authenticated" without it.
+                provider.authenticateAndLog()
                 when {
                     listShares -> {
                         when (val result = provider.listShares(path)) {

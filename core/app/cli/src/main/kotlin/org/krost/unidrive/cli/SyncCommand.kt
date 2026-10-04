@@ -260,13 +260,16 @@ open class SyncCommand : Runnable {
         // A sync_path in config.toml is the profile's standing scope; --sync-path
         // replaces it for this invocation. --full-tree would run unscoped against a
         // profile whose scope is configured, so it is refused rather than silently
-        // overriding what the user wrote down.
+        // overriding what the user wrote down. Thrown as a picocli ParameterException
+        // this printed the whole usage block under the one-line message; it is an
+        // operator refusal, not a usage error: one line, exit 1.
         if (fullTree && config.syncPaths.isNotEmpty()) {
-            throw CommandLine.ParameterException(
-                spec.commandLine(),
-                "--full-tree conflicts with sync_path in config.toml for profile '${profile.name}' " +
+            System.err.println(
+                "Sync error: --full-tree conflicts with sync_path in config.toml for profile '${profile.name}' " +
                     "(${config.syncPaths.joinToString(", ")}). Remove sync_path from the profile to reconcile the whole drive.",
             )
+            System.exit(1)
+            return
         }
         val effectiveSyncPaths = resolveSyncPaths(syncPaths, config.syncPaths)
         val effectiveDirection =

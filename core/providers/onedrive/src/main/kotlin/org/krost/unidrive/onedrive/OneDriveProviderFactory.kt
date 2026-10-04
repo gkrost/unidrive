@@ -107,6 +107,11 @@ open class OneDriveProviderFactory : ProviderFactory {
                     CredentialHealth.Warning("Access token expired, no refresh token — re-auth required")
                 token.isExpired ->
                     CredentialHealth.Ok // expired access token with refresh token is normal; authenticate() will refresh
+                token.refreshToken != null ->
+                    // A refresh token makes the credential fine: the ~1 h life of an
+                    // access token is routine and authenticate() renews it. The 24 h
+                    // check below flagged every healthy profile ("[!] ...: 0h").
+                    CredentialHealth.Ok
                 else -> {
                     val hoursRemaining =
                         java.time.Duration

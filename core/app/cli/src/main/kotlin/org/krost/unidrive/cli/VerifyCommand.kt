@@ -90,7 +90,15 @@ class VerifyCommand : Callable<Int> {
                     listRemoteFiles(provider, excludes)
                 }
             } catch (e: AuthenticationException) {
-                System.err.print(parent.renderAuthError(e, provider.id, provider.displayName, parent.verbose))
+                System.err.print(
+                    parent.renderAuthError(
+                        e,
+                        provider.id,
+                        provider.displayName,
+                        parent.verbose,
+                        runCatching { parent.resolveCurrentProfile().name }.getOrNull(),
+                    ),
+                )
                 return EXIT_UNAUDITABLE
             } catch (e: Exception) {
                 System.err.println("verify: provider listing failed: ${e.message ?: e.javaClass.simpleName}")
