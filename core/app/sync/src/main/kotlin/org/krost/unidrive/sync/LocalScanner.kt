@@ -305,6 +305,13 @@ class LocalScanner(
                     if (isExcluded(entry.path)) continue
                     if (!onScopePath(entry.path)) continue
                     if (underBlockedKey(entry.path)) continue
+                    // #526: a name the filesystem cannot resolve (a trailing space, creatable through
+                    // an extended-length path or a Linux tool) threw here and aborted the whole scan.
+                    // Skip it with the walk's own warning shape and leave the row exactly as it is.
+                    if (localNameIssue(entry.path) != null) {
+                        log.warn("Skipping local file {}: the name cannot be represented on this filesystem", entry.path)
+                        continue
+                    }
                     val localPath = safeResolveLocal(syncRoot, entry.path)
                     if (!Files.exists(localPath)) {
                         changes[entry.path] = ChangeState.DELETED

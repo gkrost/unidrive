@@ -82,6 +82,24 @@ private const val WINDOWS_RESERVED_CHARS = "<>:\"/\\|?*"
  * unit-tested deterministically on any platform. POSIX accepts essentially any
  * byte in a name except '/' (the separator, already split out) and NUL.
  */
+/**
+ * #526: [safeResolveLocal] for row-driven passes (the pending-upload recovery, the delta's
+ * resurrection arm). A name the filesystem cannot represent — a trailing space, creatable
+ * through an extended-length path or a Linux tool — makes [Path.resolve] throw
+ * [java.nio.file.InvalidPathException] on Windows, which aborted the whole sync from the
+ * recovery loop. The row-driven passes skip such rows (null) instead; the scanner and the
+ * plan function never see them (the walk's localNameIssue guard filters them first).
+ */
+internal fun safeResolveLocalOrNull(
+    syncRoot: Path,
+    remotePath: String,
+): Path? =
+    if (localNameIssue(remotePath) != null) {
+        null
+    } else {
+        runCatching { safeResolveLocal(syncRoot, remotePath) }.getOrNull()
+    }
+
 internal fun localNameIssue(
     remotePath: String,
     windows: Boolean = System.getProperty("os.name", "").lowercase().contains("win"),

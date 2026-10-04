@@ -154,8 +154,10 @@ class Reconciler(
                 // wins). Folders never need re-download — the metadata flip
                 // is enough. `path` here is real-local (reverse-mapped), so
                 // resolveLocal lands on the alias-named on-disk folder.
-                val localPath = resolveLocal(path)
-                if (!item.isFolder && !Files.isRegularFile(localPath)) {
+                // #526: an unresolvable local name plans the download; its apply quarantines
+                // the row (#230) instead of aborting the resurrection pass.
+                val localPath = safeResolveLocalOrNull(syncRoot, path)
+                if (localPath == null || (!item.isFolder && !Files.isRegularFile(localPath))) {
                     resurrectedActions.add(SyncAction.DownloadContent(path, item))
                 }
                 // Local copy present + hash matches → no-op (main loop's
@@ -326,7 +328,8 @@ class Reconciler(
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             // UD-901a: same scope guard as the UD-225 loop above.
             if (!SyncScope.contains(entry.path, syncPaths)) continue
-            val localPath = safeResolveLocal(syncRoot, entry.path)
+            // #526: an unresolvable name must not abort the recovery loop — skip the row.
+            val localPath = safeResolveLocalOrNull(syncRoot, entry.path) ?: continue
             if (!Files.isRegularFile(localPath)) continue
             // #115: preserve any persisted canonical remote path as remoteTarget
             // so the retry uploads to the same canonical the row was keyed at.
@@ -583,7 +586,8 @@ class Reconciler(
             if (entry.path in coveredPaths) continue
             if (excludePatterns.any { matchesGlob(entry.path, it) }) continue
             if (!SyncScope.contains(entry.path, syncPaths)) continue
-            val localPath = safeResolveLocal(syncRoot, entry.path)
+            // #526: an unresolvable name must not abort the recovery loop — skip the row.
+            val localPath = safeResolveLocalOrNull(syncRoot, entry.path) ?: continue
             if (!Files.isRegularFile(localPath)) continue
             // #115: preserve persisted canonical remote path as remoteTarget.
             actions.add(SyncAction.Upload(entry.path, remoteTarget = entry.remotePath))

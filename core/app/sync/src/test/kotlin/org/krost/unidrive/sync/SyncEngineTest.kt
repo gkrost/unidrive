@@ -283,6 +283,38 @@ class SyncEngineTest {
             assertTrue(provider.deletedPaths.contains("/to-remove.txt"))
         }
 
+    // #526: a local name ending in a space (only creatable through an extended-length path or a
+    // Linux/WSL tool) used to abort the whole sync from the planner and poison doctor, the replay
+    // and the rescan. The scanner skips such names, the replay/rescan/mirror paths guard their
+    // resolves, and the transfer stage catches per item — a stale pre-guard row must not abort
+    // the run (this test runs on Windows, where Path.resolve of a trailing-space component throws).
+    @Test
+    fun `#526 a stale row with a trailing-space name does not abort the sync`() =
+        runTest {
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/trailing-space ",
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 5,
+                    remoteModified = Instant.now(),
+                    localMtime = Instant.now().toEpochMilli(),
+                    localSize = 5,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            Files.writeString(syncRoot.resolve("sibling.txt"), "healthy")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "c526"
+
+            engine.syncOnce()
+
+            assertEquals("c526", db.getSyncState("delta_cursor"), "the run completed and promoted the cursor")
+        }
+
     // ── #87 (WB-3): a folder delete forgets its subtree ─────────────────────────────────────────
     // The live case: a ~133k-item folder deleted in the mount left every row below it EXISTS in
     // state.db (only the folder's own row was tombstoned), so the next fresh mount listed the folder
