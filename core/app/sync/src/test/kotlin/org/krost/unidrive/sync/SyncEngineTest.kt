@@ -3441,7 +3441,7 @@ class SyncEngineTest {
                 if (supportsFastBootstrap) add(org.krost.unidrive.Capability.FastBootstrap)
             }
 
-        override suspend fun deltaFromLatest(): org.krost.unidrive.CapabilityResult<DeltaPage> {
+        override suspend fun deltaFromLatest(scanContext: org.krost.unidrive.ScanContext?): org.krost.unidrive.CapabilityResult<DeltaPage> {
             deltaFromLatestCalls++
             return if (supportsFastBootstrap) {
                 org.krost.unidrive.CapabilityResult.Success(
@@ -4083,6 +4083,25 @@ class SyncEngineTest {
             assertTrue(ex.message!!.contains("UD-256"))
             assertTrue(ex.message!!.contains("/Documents"))
             assertTrue(ex.message!!.contains("--sync-path") || ex.message!!.contains("--full-tree"))
+        }
+
+    @Test
+    fun `UD-256 a refresh of a profile with persisted scope continues within it instead of refusing`() =
+        runTest {
+            // #532: refresh has no --sync-path; a profile scoped by earlier runs was permanently
+            // unusable — every refresh died on the guard with error provider_error. A refresh
+            // (skipTransfers) plans the persisted boundary: out-of-scope paths stay invisible to
+            // the reconciler exactly as under --sync-path, so the run proceeds. The persisted
+            // scope itself must be untouched.
+            provider.deltaItems = emptyList()
+            engineForScope(syncPath = "/Documents").syncOnce()
+            val before = db.getSyncState("effective_scope")
+
+            val reporter = RecordingReporter()
+            val refreshEngine = engineForScope(reporter = reporter)
+            refreshEngine.syncOnce(skipTransfers = true)
+
+            assertEquals(before, db.getSyncState("effective_scope"), "a refresh must not widen or clear the persisted scope")
         }
 
     @Test

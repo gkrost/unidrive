@@ -119,7 +119,7 @@ class TwinProvider : CloudProvider {
         return item(toPath)
     }
 
-    override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> =
+    override suspend fun deltaFromLatest(scanContext: org.krost.unidrive.ScanContext?): CapabilityResult<DeltaPage> =
         if (supportsFastBootstrap) {
             CapabilityResult.Success(DeltaPage(items = emptyList(), cursor = deltaCursor, hasMore = false))
         } else {
