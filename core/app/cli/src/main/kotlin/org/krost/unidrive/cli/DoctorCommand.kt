@@ -381,7 +381,10 @@ class DoctorCommand : Runnable {
         val name = "quota-freshness"
         val fetchedAt = db.getSyncState("quota_fetched_at")
         if (fetchedAt == null) {
-            return CheckResult(name, Severity.WARN, "no cached quota (run `unidrive quota` to refresh)", emptyList())
+            // #532: a fresh state has never cached a quota — expected, not a warning.
+            // It used to be the single WARN that made `doctor` exit non-zero on a
+            // profile that had done nothing wrong.
+            return CheckResult(name, Severity.OK, "no cached quota yet (run `unidrive quota` to enable the freshness check)", emptyList())
         }
         val age = ageDaysOrNull(fetchedAt, now)
         return if (age != null && age > 7) {

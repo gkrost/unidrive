@@ -195,11 +195,12 @@ class RefreshRoutingTest {
     }
 
     @Test
-    fun refresh_run_emits_provider_error_on_engine_failure(): Unit = runBlocking {
+    fun refresh_run_emits_engine_guard_on_guard_failure(): Unit = runBlocking {
         // A throwing engine (vs. an EnumerateResult(ok=false)) must be caught and
-        // surfaced as a provider_error terminal event, with the exception message
-        // propagated and embedded quotes escaped — never an uncaught crash or a
-        // false success.
+        // surfaced as a failed terminal event, never an uncaught crash or a false
+        // success. An IllegalStateException is the engine's guard shape (the scope
+        // and empty-local guards throw it before any provider call), so the token is
+        // engine_guard — provider_error would misattribute it (#532).
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
         val engine = ThrowingEngine(IllegalStateException("delta \"503\""))
         val emitted = mutableListOf<String>()
@@ -219,8 +220,35 @@ class RefreshRoutingTest {
         val ev = emitted.single()
         assertTrue(ev.contains("\"event\":\"refresh.done\""), ev)
         assertTrue(ev.contains("\"ok\":false"), "a throwing engine must report ok:false: $ev")
-        assertTrue(ev.contains("\"error\":\"provider_error\""), ev)
+        assertTrue(ev.contains("\"error\":\"engine_guard\""), ev)
         assertTrue(ev.contains("""delta \"503\""""), "the exception message must propagate with quotes escaped: $ev")
+    }
+
+    @Test
+    fun refresh_run_emits_provider_error_on_provider_failure(): Unit = runBlocking {
+        // A non-guard failure (anything but the engine's IllegalStateException shape)
+        // keeps the provider_error token: the failure happened at or under the provider.
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val engine = ThrowingEngine(java.io.IOException("connection reset \"mid-listing\""))
+        val emitted = mutableListOf<String>()
+        val handler =
+            RefreshRpcHandler(
+                server,
+                engine,
+                db,
+                scope,
+                mountClientConnected = { true },
+                emit = { emitted.add(it) },
+            )
+
+        handler.handle("conn-1", """{"verb":"refresh.run"}""")
+        handler.awaitInFlight()
+
+        val ev = emitted.single()
+        assertTrue(ev.contains("\"event\":\"refresh.done\""), ev)
+        assertTrue(ev.contains("\"ok\":false"), "a throwing engine must report ok:false: $ev")
+        assertTrue(ev.contains("\"error\":\"provider_error\""), ev)
+        assertTrue(ev.contains("""connection reset \"mid-listing\""""), "the exception message must propagate with quotes escaped: $ev")
     }
 
     @Test

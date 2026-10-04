@@ -92,6 +92,17 @@ class DoctorCommandTest {
     // ── Clean profile → exit 0 ────────────────────────────────────────────
 
     @Test
+    fun `a fresh state without any cached quota is ok, not a warning`() {
+        // #532: the missing-quota branch used to return WARN — the single warning that
+        // made `doctor` exit non-zero on a profile that had never run `quota`. Expected
+        // state, not a finding.
+        seedDb { }
+        val checks = runDoctor()
+        val quota = result(checks, "quota-freshness")
+        assertEquals(DoctorCommand.Severity.OK, quota.severity, "fresh state: got ${quota.summary}")
+    }
+
+    @Test
     fun `clean profile reports no warnings or errors`() {
         seedDb { db ->
             // Recent cursors + fresh quota — nothing for any check to flag.

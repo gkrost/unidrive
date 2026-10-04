@@ -2984,8 +2984,10 @@ open class SyncEngine(
                             "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
                                 "Items that already exist on the remote will stay invisible until they next mutate. " +
                                 "Upload-direction sync is unaffected."
+                        // The log line only — reporter.onWarning duplicated it on every CLI
+                        // one-shot run (console appender + progress reporter, #532); the
+                        // daemon runs with the Silent reporter either way.
                         log.warn(msg)
-                        reporter.onWarning(msg)
                         // #116: arm adopt-on-name-match for this run's apply pass.
                         fastBootstrapActive = true
                         return@withContext changes
@@ -3412,8 +3414,10 @@ open class SyncEngine(
                         "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
                             "Items that already exist on the remote will stay invisible until they next mutate. " +
                             "Upload-direction sync is unaffected."
+                    // The log line only — reporter.onWarning duplicated it on every CLI
+                    // one-shot run (console appender + progress reporter, #532); the
+                    // daemon runs with the Silent reporter either way.
                     log.warn(msg)
-                    reporter.onWarning(msg)
                     // #116: arm adopt-on-name-match for this run's apply pass.
                     fastBootstrapActive = true
                     return@withContext changes to emptyList()
