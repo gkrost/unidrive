@@ -728,7 +728,10 @@ class InternxtApiService(
                     var written = 0L
                     withContext(Dispatchers.IO) {
                         Files.createDirectories(destination.parent)
-                        val tmpPath = destination.parent.resolve("${destination.fileName}.unidrive-tmp")
+                        // #529: a name near the 255-byte component limit cannot take the suffix — stage short.
+                        val tmpPath = destination.parent.resolve(
+                            org.krost.unidrive.io.stagingSiblingName(destination.fileName.toString(), ".unidrive-tmp"),
+                        )
                         try {
                             Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->
                                 val buf = ByteArray(256 * 1024)

@@ -560,7 +560,11 @@ open class SyncEngine(
         // truncated under it by TRUNCATE_EXISTING (silent short/garbage reads).
         val staged =
             cachePath.resolveSibling(
-                cachePath.fileName.toString() + ".hydrating-" + java.util.UUID.randomUUID(),
+                // #529: a long cache name cannot take the full suffix — stage short when over the limit.
+                org.krost.unidrive.io.stagingSiblingName(
+                    cachePath.fileName.toString(),
+                    ".hydrating-" + java.util.UUID.randomUUID(),
+                ),
             )
         try {
             val downloadedSize = downloadByIdOrPath(remoteItem, path, staged)
