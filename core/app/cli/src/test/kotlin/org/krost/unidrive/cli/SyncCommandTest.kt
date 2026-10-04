@@ -165,6 +165,26 @@ class SyncCommandTest {
         assertTrue("-w" in allNames)
     }
 
+    // ── #530: exit codes — a script must tell a partial failure from success ──
+    // 0 = completed, everything transferred; 1 = aborted by an exception; 2 = completed but
+    // per-action failures happened (the "Sync complete: … N failed" run). Before this, a run
+    // with 5 failed uploads exited 0, indistinguishable from a clean one.
+    @Test
+    fun `exit-code-1-means-aborted-not-partial`() {
+        assertEquals(1, SyncCommand.exitCodeFor(RuntimeException("boom"), failedActions = 3))
+    }
+
+    @Test
+    fun `exit-code-2-means-completed-with-per-action-failures`() {
+        assertEquals(2, SyncCommand.exitCodeFor(null, failedActions = 1))
+        assertEquals(2, SyncCommand.exitCodeFor(null, failedActions = 5))
+    }
+
+    @Test
+    fun `exit-code-0-means-a-clean-run`() {
+        assertEquals(0, SyncCommand.exitCodeFor(null, failedActions = 0))
+    }
+
     @Test
     fun `sync command has --exclude flag`() {
         val syncCmd = cmd.subcommands["sync"]!!

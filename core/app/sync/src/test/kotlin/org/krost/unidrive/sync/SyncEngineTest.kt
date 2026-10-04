@@ -1210,6 +1210,45 @@ class SyncEngineTest {
     }
 
     @Test
+    fun `#530 a failed transfer keeps its stack trace out of the console loggers`() =
+        runTest {
+            // The console appender's threshold is WARN, so a WARN carrying the throwable printed
+            // the full JVM stack trace to stdout for every expected per-file failure (the live
+            // pass printed 66 trace lines for three expected HTTP 400s). The invariant: per-action
+            // WARN lines carry the item and the provider's message only; the throwable lives on a
+            // DEBUG event (the file appender takes DEBUG, the console drops it).
+            provider.files["/flaky.txt"] = ByteArray(10)
+            provider.deltaItems = listOf(cloudItem("/flaky.txt", size = 10))
+            provider.deltaCursor = "cursor-530"
+            provider.downloadFailCount = 1
+
+            val logger = LoggerFactory.getLogger(SyncEngine::class.java) as ch.qos.logback.classic.Logger
+            val appender = ListAppender<ILoggingEvent>().also { it.start() }
+            logger.addAppender(appender)
+            try {
+                engine.syncOnce()
+            } finally {
+                logger.detachAppender(appender)
+                appender.stop()
+            }
+
+            val warnsWithThrowable = appender.list.filter { it.level.levelStr == "WARN" && it.throwableProxy != null }
+            assertTrue(
+                warnsWithThrowable.isEmpty(),
+                "no WARN event may carry a stack trace; got: ${warnsWithThrowable.map { it.formattedMessage }}",
+            )
+            val debugsWithThrowable = appender.list.filter { it.level.levelStr == "DEBUG" && it.throwableProxy != null }
+            assertTrue(
+                debugsWithThrowable.any { it.formattedMessage.contains("/flaky.txt") },
+                "the throwable must live on a DEBUG event for the failed item; got: ${debugsWithThrowable.map { it.formattedMessage }}",
+            )
+            assertTrue(
+                appender.list.filter { it.level.levelStr == "WARN" }.any { it.formattedMessage.contains("/flaky.txt") },
+                "the one WARN line must still name the failed item; got: ${appender.list.filter { it.level.levelStr == "WARN" }.map { it.formattedMessage }}",
+            )
+        }
+
+    @Test
     fun `#419 reaper does not touch a folder this run already deleted`() =
         runTest {
             // Deleting a local folder plans DeleteRemote for its files AND for the folder itself.
