@@ -3,6 +3,8 @@ plugins {
     kotlin("plugin.serialization") version libs.versions.kotlin.get() apply false
     // UD-706: ktlint lint, warn-only. Applied to every Kotlin subproject below.
     alias(libs.plugins.ktlint) apply false
+    // Static analysis, report-only (see the detekt block in `subprojects`).
+    alias(libs.plugins.detekt) apply false
     // Needed at root for the `jacocoMergedReport` task registered below —
     // JacocoReport requires the jacoco classpath to be resolvable on its owner
     // project.
@@ -88,6 +90,29 @@ subprojects {
             reporters {
                 reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.PLAIN)
                 reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.CHECKSTYLE)
+            }
+        }
+    }
+
+    // detekt: report-only. The existing findings are not yet triaged, so they are
+    // printed and written to build/reports/detekt/ on every `check` without failing
+    // it. Flipping to failing (or a baseline so only new findings fail) is an owner
+    // decision once they are burned down. Config deltas: config/detekt/detekt.yml.
+    pluginManager.withPlugin("org.jetbrains.kotlin.jvm") {
+        apply(plugin = "io.gitlab.arturbosch.detekt")
+        extensions.configure<io.gitlab.arturbosch.detekt.extensions.DetektExtension> {
+            buildUponDefaultConfig = true
+            parallel = true
+            ignoreFailures = true
+            config.setFrom(files("$rootDir/config/detekt/detekt.yml"))
+        }
+        tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
+            reports {
+                txt.required.set(true)
+                html.required.set(true)
+                xml.required.set(false)
+                sarif.required.set(false)
+                md.required.set(false)
             }
         }
     }
