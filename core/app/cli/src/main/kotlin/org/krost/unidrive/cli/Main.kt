@@ -56,7 +56,9 @@ import java.nio.file.Paths
         VersionsCommand::class,
     ],
 )
-class Main : Runnable {
+// open so tests can drive a command against a fake provider by overriding [createProvider]
+// (ShareCommandTest's authentication-order fake).
+open class Main : Runnable {
     @Option(names = ["-c", "--config-dir"], description = ["Config directory path"])
     var configDir: String? = null
 
@@ -247,7 +249,7 @@ class Main : Runnable {
         )
     }
 
-    fun createProvider(): CloudProvider {
+    open fun createProvider(): CloudProvider {
         val profile = resolveCurrentProfile()
         val tokenPath = baseConfigDir.resolve(profile.name)
         val rp = mergeVaultCreds(profile)

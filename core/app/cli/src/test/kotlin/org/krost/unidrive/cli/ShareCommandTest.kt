@@ -1,5 +1,12 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.Capability
+import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.CloudItem
+import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.ShareInfo
 import picocli.CommandLine
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -175,5 +182,125 @@ class ShareCommandTest {
     fun `UD-243 revoke alone is accepted`() {
         val exit = parseShareExitCode("/foo", "--revoke", "abc")
         assertEquals(0, exit, "--revoke alone should parse cleanly")
+    }
+
+    // ── #527: share authenticates before its first provider call ───────────────
+
+    /**
+     * Records the provider-call order and answers the share capabilities. The
+     * authentication assertion reads [calls]: `authenticate` must be its first
+     * entry, because the provider only loads its token in [authenticate].
+     */
+    private class AuthOrderingFake : CloudProvider {
+        val calls = mutableListOf<String>()
+
+        override val id = "fake"
+        override val displayName = "Fake"
+        override var isAuthenticated: Boolean = false
+
+        override fun capabilities() = setOf(Capability.Share, Capability.ListShares, Capability.RevokeShare)
+
+        override suspend fun authenticate() {
+            calls += "authenticate"
+            isAuthenticated = true
+        }
+
+        override suspend fun share(
+            path: String,
+            expiryHours: Int,
+            password: String?,
+        ): CapabilityResult<String> {
+            calls += "share"
+            return CapabilityResult.Success("https://share.example.invalid/f2")
+        }
+
+        override suspend fun listShares(path: String): CapabilityResult<List<ShareInfo>> {
+            calls += "listShares"
+            return CapabilityResult.Success(emptyList())
+        }
+
+        override suspend fun revokeShare(
+            path: String,
+            shareId: String,
+        ): CapabilityResult<Unit> {
+            calls += "revokeShare"
+            return CapabilityResult.Success(Unit)
+        }
+
+        // Members the share path never touches.
+        override suspend fun listChildren(path: String): List<CloudItem> = error("unused")
+
+        override suspend fun getMetadata(path: String): CloudItem = error("unused")
+
+        override suspend fun download(
+            remotePath: String,
+            destination: java.nio.file.Path,
+        ): Long = error("unused")
+
+        override suspend fun upload(
+            localPath: java.nio.file.Path,
+            remotePath: String,
+            existingRemoteId: String?,
+            ifMatchETag: String?,
+            onProgress: ((Long, Long) -> Unit)?,
+        ): CloudItem = error("unused")
+
+        override suspend fun delete(
+            remotePath: String,
+            ifMatchETag: String?,
+        ) = error("unused")
+
+        override suspend fun createFolder(path: String): CloudItem = error("unused")
+
+        override suspend fun move(
+            fromPath: String,
+            toPath: String,
+        ): CloudItem = error("unused")
+
+        override suspend fun delta(
+            cursor: String?,
+            onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+            scanContext: org.krost.unidrive.ScanContext?,
+        ): DeltaPage = error("unused")
+
+        override suspend fun quota(): QuotaInfo = error("unused")
+    }
+
+    private fun runShareAgainstFake(
+        provider: AuthOrderingFake,
+        vararg args: String,
+    ) {
+        val main =
+            object : Main() {
+                override fun createProvider(): CloudProvider = provider
+            }
+        val parsed = CommandLine(main).parseArgs("share", *args)
+        val share = parsed.subcommand()!!.commandSpec().userObject() as ShareCommand
+        share.run()
+    }
+
+    @Test
+    fun `share create authenticates before its first provider call`() {
+        val provider = AuthOrderingFake()
+        runShareAgainstFake(provider, "/f.txt", "-e", "1")
+        assertEquals(
+            "authenticate",
+            provider.calls.firstOrNull(),
+            "share must authenticate first or the provider call fails without a token",
+        )
+    }
+
+    @Test
+    fun `share --list authenticates before its first provider call`() {
+        val provider = AuthOrderingFake()
+        runShareAgainstFake(provider, "/f.txt", "--list")
+        assertEquals("authenticate", provider.calls.firstOrNull(), "--list must authenticate first")
+    }
+
+    @Test
+    fun `share --revoke authenticates before its first provider call`() {
+        val provider = AuthOrderingFake()
+        runShareAgainstFake(provider, "/f.txt", "--revoke", "abc")
+        assertEquals("authenticate", provider.calls.firstOrNull(), "--revoke must authenticate first")
     }
 }
