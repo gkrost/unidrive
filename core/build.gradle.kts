@@ -56,7 +56,7 @@ allprojects {
     // lands above its own advisory floor, so it needs no explicit force.
     configurations.all {
         resolutionStrategy {
-            force("com.squareup.okhttp3:okhttp:5.4.0")
+            force("com.squareup.okhttp3:okhttp:5.5.0")
             force("org.json:json:20260814")
         }
     }
