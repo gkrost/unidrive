@@ -259,10 +259,14 @@ class DoctorCommand : Runnable {
             .filter { !it.isFolder && it.isHydrated }
             .let { if (full) it.toList() else it.take(HYDRATION_SAMPLE).toList() }
         var missing = 0
+        var invalid = 0
         val sampleMissing = mutableListOf<String>()
         for (entry in hydratedFiles) {
-            val rel = entry.path.trimStart('/')
-            if (!Files.exists(syncRoot.resolve(rel))) {
+            val local = runCatching { syncRoot.resolve(entry.path.trimStart('/')) }.getOrNull()
+            if (local == null) {
+                invalid++
+                if (sampleMissing.size < SAMPLE_DETAIL) sampleMissing += entry.path
+            } else if (!Files.exists(local)) {
                 missing++
                 if (sampleMissing.size < SAMPLE_DETAIL) sampleMissing += entry.path
             }
@@ -270,10 +274,10 @@ class DoctorCommand : Runnable {
         val scope = if (full) "full table" else "sample ${hydratedFiles.size} rows"
         val severity = when {
             missing > 1000 -> Severity.ERR
-            missing > 50 -> Severity.WARN
+            missing > 50 || invalid > 0 -> Severity.WARN
             else -> Severity.OK
         }
-        val summary = "$missing of ${hydratedFiles.size} hydrated rows missing on disk ($scope)"
+        val summary = "$missing of ${hydratedFiles.size} hydrated rows missing on disk, $invalid invalid local name(s) ($scope)"
         val detail = mutableListOf<String>()
         if (sampleMissing.isNotEmpty()) {
             detail += "sample missing paths:"

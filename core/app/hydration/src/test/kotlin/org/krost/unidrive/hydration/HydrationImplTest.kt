@@ -76,6 +76,8 @@ internal class MinimalFakeProvider(
     private val activeUploadsTotal = AtomicInteger(0)
     private val maxConcurrentUploadsTotal = AtomicInteger(0)
     private val completedUploads = AtomicInteger(0)
+    var lastUploadIfMatch: String? = "not-called"
+        private set
 
     // Per-path concurrency tracking for the serialization test.
     // activeUploadsByPath: how many upload coroutines are currently inside upload() for each path.
@@ -119,6 +121,7 @@ internal class MinimalFakeProvider(
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        lastUploadIfMatch = ifMatchETag
         uploadAttempts.incrementAndGet()
         if (uploadFailuresRemaining.getAndUpdate { p -> if (p > 0) p - 1 else p } > 0) {
             throw IllegalStateException("injected upload failure")
@@ -450,6 +453,8 @@ internal class HydrationTestEnv(
 
         /** Returns the content most recently uploaded to [path] via uploadFromCache. */
         fun remoteContentSeen(path: String): String? = fakeProvider.uploadedContent(path)
+
+        fun lastUploadIfMatch(): String? = fakeProvider.lastUploadIfMatch
 
         /** Resolves a path to its cache location. */
         fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
@@ -880,6 +885,7 @@ class HydrationImplTest {
         assertTrue(r is OpenResult.Ok, "a current base etag must not block the write")
         advanceUntilIdle()
         assertEquals("mine", env.syncEngine.remoteContentSeen("/doc.txt"))
+        assertNull(env.syncEngine.lastUploadIfMatch(), "the content-hash base token is not a provider If-Match token (#511)")
     }
 
     @Test

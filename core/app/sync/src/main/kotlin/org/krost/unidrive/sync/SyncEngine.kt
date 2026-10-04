@@ -1592,7 +1592,11 @@ open class SyncEngine(
             for ((path, state) in changes) {
                 if (state != ChangeState.NEW && state != ChangeState.MODIFIED) continue
                 if (isExcludedPath(path) || isOutOfScope(path)) continue
-                val local = placeholder.resolveLocal(path)
+                val local = runCatching { placeholder.resolveLocal(path) }.getOrNull()
+                if (local == null) {
+                    log.warn("#526: rescan skipped local name the filesystem cannot represent: {}", path)
+                    continue
+                }
                 if (Files.isDirectory(local, noFollow)) {
                     if (state == ChangeState.NEW && db.getEntry(path) == null) newFolders.add(path)
                 } else if (Files.isRegularFile(local, noFollow)) {
@@ -1603,7 +1607,12 @@ open class SyncEngine(
             for (entry in db.getAllEntries()) {
                 if (entry.isFolder || !entry.isPendingUpload) continue
                 if (isExcludedPath(entry.path) || isOutOfScope(entry.path) || !SyncScope.contains(entry.path, syncPaths)) continue
-                if (Files.isRegularFile(placeholder.resolveLocal(entry.path), noFollow)) candidates.add(entry.path)
+                val local = runCatching { placeholder.resolveLocal(entry.path) }.getOrNull()
+                if (local == null) {
+                    log.warn("#526: rescan skipped pending row with an invalid local name: {}", entry.path)
+                } else if (Files.isRegularFile(local, noFollow)) {
+                    candidates.add(entry.path)
+                }
             }
             var uploaded = 0
             var foldersCreated = 0
@@ -2873,6 +2882,10 @@ open class SyncEngine(
             deletedRemoteFiles
                 .flatMap { ancestorDirsToSyncRoot(it) }
                 .distinct()
+                // A scoped pass may delete a file at the scope root, but its
+                // ancestors belong to the wider tree. Reaping one can cascade-delete
+                // siblings this pass did not enumerate (#525).
+                .filter { SyncScope.contains(it, syncPaths) }
                 .filterNot { it in alreadyDeleted }
                 .sortedByDescending { it.count { ch -> ch == '/' } }
         for (dir in candidates) {

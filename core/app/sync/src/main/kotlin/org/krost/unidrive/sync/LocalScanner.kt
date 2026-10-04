@@ -130,6 +130,13 @@ class LocalScanner(
                     val relativePath = PathNormalizer.nfc("/" + syncRoot.relativize(file).toString().replace('\\', '/'))
                     if (isExcluded(relativePath)) return FileVisitResult.CONTINUE
                     if (!inScope(relativePath)) return FileVisitResult.CONTINUE
+                    // A tree can arrive via WSL or an extended Win32 path. Do not
+                    // persist a pending upload Windows cannot resolve later (#526).
+                    localNameIssue(relativePath)?.let { reason ->
+                        skipped++
+                        log.warn("Skipping local file {}: {}", relativePath, reason)
+                        return FileVisitResult.CONTINUE
+                    }
                     seenPaths.add(relativePath)
                     visited++
 
