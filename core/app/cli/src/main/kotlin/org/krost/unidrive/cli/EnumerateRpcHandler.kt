@@ -70,12 +70,20 @@ class EnumerateRpcHandler(
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     log.info("sync.enumerate cancelled (shutdown): job_id=$jobId")
-                    buildJsonObject {
-                        put("event", "enumerate.done")
-                        put("job_id", jobId)
-                        put("ok", false)
-                        put("error", "shutdown")
-                    }.toString()
+                    // The view consumer still needs closure: emit the terminal
+                    // event here, then rethrow so the job ends cancelled instead
+                    // of silently completing.
+                    runCatching {
+                        emit(
+                            buildJsonObject {
+                                put("event", "enumerate.done")
+                                put("job_id", jobId)
+                                put("ok", false)
+                                put("error", "shutdown")
+                            }.toString(),
+                        )
+                    }
+                    throw e
                 } catch (e: Exception) {
                     log.warn("sync.enumerate failed: job_id=$jobId", e)
                     buildJsonObject {

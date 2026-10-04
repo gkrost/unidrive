@@ -3,6 +3,7 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.sync.EnumerateResult
 import kotlin.coroutines.coroutineContext
@@ -73,5 +74,41 @@ class EnumerateRpcHandlerTest {
         handler.awaitInFlight()
         assertEquals(true, engine.lastReset)
         assertNotNull(handler)
+    }
+
+    @Test
+    fun enumerate_emits_shutdown_on_daemon_close_and_ends_cancelled(): Unit = runBlocking {
+        // Cancelling the daemon scope while an enumeration is in flight must emit
+        // the shutdown terminal event (the view consumer needs closure), release
+        // the in-flight slot, and NOT swallow the CancellationException into a
+        // normal completion.
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val gate = CompletableDeferred<Unit>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true), gate = gate)
+        val emitted = mutableListOf<String>()
+        val handler = EnumerateRpcHandler(engine, scope, emit = { emitted.add(it) })
+
+        handler.handle("conn-1", """{"verb":"sync.enumerate"}""")
+
+        // Wait until the enumeration has actually suspended inside the engine.
+        repeat(200) {
+            if (engine.enumerateCalled) return@repeat
+            kotlinx.coroutines.yield()
+        }
+        assertTrue(engine.enumerateCalled, "enumerate must be in flight before the close")
+
+        // Simulate daemon close while the enumeration is suspended; the gate is
+        // never completed, so the coroutine resumes with CancellationException.
+        scope.cancel()
+        repeat(200) {
+            if (emitted.isNotEmpty()) return@repeat
+            kotlinx.coroutines.yield()
+        }
+
+        val ev = emitted.single()
+        assertTrue(ev.contains("\"event\":\"enumerate.done\""), ev)
+        assertTrue(ev.contains("\"ok\":false"), ev)
+        assertTrue(ev.contains("\"error\":\"shutdown\""), "scope cancellation must emit shutdown, not provider_error: $ev")
+        assertEquals(null, handler.inFlightJobId(), "the in-flight slot must be released on shutdown")
     }
 }

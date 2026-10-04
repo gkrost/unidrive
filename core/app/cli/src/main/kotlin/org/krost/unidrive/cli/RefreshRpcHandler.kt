@@ -106,7 +106,11 @@ class RefreshRpcHandler(
                         }
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         log.info("refresh.run cancelled (shutdown): job_id=$jobId")
-                        """{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}"""
+                        // Subscribers still need closure: emit the terminal event
+                        // here, then rethrow so the job ends cancelled instead of
+                        // silently completing.
+                        runCatching { emit("""{"event":"refresh.done","job_id":"$jobId","ok":false,"error":"shutdown"}""") }
+                        throw e
                     } catch (e: Exception) {
                         log.warn("refresh.run failed: job_id=$jobId", e)
                         // See jsonString() — full JSON-string escaping, not quote-only.
