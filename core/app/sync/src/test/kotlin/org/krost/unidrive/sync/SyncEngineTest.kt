@@ -315,6 +315,28 @@ class SyncEngineTest {
             assertEquals("c526", db.getSyncState("delta_cursor"), "the run completed and promoted the cursor")
         }
 
+    // ── #523: a whole-drive gather that skipped a folder must not look complete afterwards —
+    // the idle enumeration status carries the last gather's completeness for the status UI and
+    // daemon.status (the per-folder timer itself is already the #518 330 s listing timer).
+
+    @Test
+    fun `#523 an incomplete gather surfaces lastScanComplete=false in the idle status`() =
+        runTest {
+            provider.files["/a.txt"] = ByteArray(10)
+            provider.deltaItems = listOf(cloudItem("/a.txt", size = 10))
+            provider.deltaCursor = "c523"
+            provider.deltaComplete = false
+
+            engine.syncOnce()
+
+            assertEquals(false, engine.enumerationStatus().lastScanComplete, "the skipped folder is not hidden: the status says the last gather was incomplete")
+
+            // A later complete gather clears it.
+            provider.deltaComplete = true
+            engine.syncOnce()
+            assertEquals(true, engine.enumerationStatus().lastScanComplete)
+        }
+
     // ── #531: after --fast-bootstrap, folders that exist remotely but were never enumerated stay
     // unknown to state.db — the planner emitted mkdir-remote for them every run and each one 409'd
     // (nameAlreadyExists), counting a failure on every sync. The apply now resolves the conflict:

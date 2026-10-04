@@ -1410,6 +1410,7 @@ open class SyncEngine(
         return runCatching {
             status.copy(
                 first = db.getSyncState("delta_cursor").isNullOrEmpty(),
+                lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
                 lastSuccessAtMs =
                     status.lastSuccessAtMs
                         ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
