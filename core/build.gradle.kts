@@ -3,8 +3,6 @@ plugins {
     kotlin("plugin.serialization") version libs.versions.kotlin.get() apply false
     // UD-706: ktlint lint, warn-only. Applied to every Kotlin subproject below.
     alias(libs.plugins.ktlint) apply false
-    // Static analysis, report-only (see the detekt block in `subprojects`).
-    alias(libs.plugins.detekt) apply false
     // Needed at root for the `jacocoMergedReport` task registered below —
     // JacocoReport requires the jacoco classpath to be resolvable on its owner
     // project.
@@ -71,6 +69,62 @@ allprojects {
 // baseline drift, then `./gradlew build` to confirm green, then close UD-774.
 val ktlintEnabled = false
 
+// detekt runs as a plain process instead of a JavaExec task: Gradle 9 removed
+// JavaExec's ignoreExitValue, and this integration is report-only — findings
+// make detekt-cli exit 2 and must not fail the build, while a detekt crash
+// (exit 1) must. See the detekt block in `subprojects`.
+abstract class DetektTask : DefaultTask() {
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    @get:Classpath
+    abstract val detektClasspath: ConfigurableFileCollection
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sources: ConfigurableFileCollection
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val config: RegularFileProperty
+
+    @get:OutputFile
+    abstract val txtReport: RegularFileProperty
+
+    @get:OutputFile
+    abstract val htmlReport: RegularFileProperty
+
+    // Pinned by the registering block; detekt's output does not vary with the
+    // JVM minor version.
+    @get:Internal
+    abstract val javaLauncher: Property<org.gradle.jvm.toolchain.JavaLauncher>
+
+    @TaskAction
+    fun analyze() {
+        val result = execOperations.javaexec {
+            classpath(detektClasspath)
+            mainClass.set("io.gitlab.arturbosch.detekt.cli.Main")
+            javaLauncher.set(this@DetektTask.javaLauncher)
+            isIgnoreExitValue = true
+            args(
+                "--config", config.get().asFile.absolutePath,
+                "--build-upon-default-config",
+                "--parallel",
+                "--report", "txt:${txtReport.get().asFile.absolutePath}",
+                "--report", "html:${htmlReport.get().asFile.absolutePath}",
+                "--input", sources.files.joinToString(",") { it.absolutePath },
+            )
+        }
+        // detekt-cli exit codes: 0 clean, 2 findings (report-only — kept, not
+        // gating), 1 unexpected error, 3 invalid config — crashes, which fail.
+        if (result.exitValue != 0 && result.exitValue != 2) {
+            throw GradleException(
+                "detekt exited ${result.exitValue} (a detekt crash, not findings); see the task output above",
+            )
+        }
+    }
+}
+
 subprojects {
     apply(plugin = "jacoco")
     configure<JacocoPluginExtension> {
@@ -98,23 +152,49 @@ subprojects {
     // printed and written to build/reports/detekt/ on every `check` without failing
     // it. Flipping to failing (or a baseline so only new findings fail) is an owner
     // decision once they are burned down. Config deltas: config/detekt/detekt.yml.
+    //
+    // detekt-cli runs on the compile toolchain JVM instead of through the detekt
+    // Gradle plugin: the plugin analyzes in-process on the Gradle daemon's JVM,
+    // and detekt 1.x's embedded Kotlin compiler cannot run on a newer daemon —
+    // its JavaVersion parser throws on JDK 26+ and on four-part version strings
+    // (detekt#8980). The check-runtime-jdk leg runs the daemon on the runtime JDK
+    // by design, so the analysis must not care which JDK drives Gradle. Revisit
+    // when detekt 2.0 (config-format rewrite, still alpha) is stable and its
+    // embedded compiler tracks the JDK train.
     pluginManager.withPlugin("org.jetbrains.kotlin.jvm") {
-        apply(plugin = "io.gitlab.arturbosch.detekt")
-        extensions.configure<io.gitlab.arturbosch.detekt.extensions.DetektExtension> {
-            buildUponDefaultConfig = true
-            parallel = true
-            ignoreFailures = true
-            config.setFrom(files("$rootDir/config/detekt/detekt.yml"))
+        val detektCli = configurations.create("detekt") {
+            isCanBeConsumed = false
+            isCanBeResolved = true
         }
-        tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
-            reports {
-                txt.required.set(true)
-                html.required.set(true)
-                xml.required.set(false)
-                sarif.required.set(false)
-                md.required.set(false)
-            }
+        dependencies.add("detekt", libs.detekt.cli.get())
+
+        val kotlinSourceDirs = the<SourceSetContainer>().flatMap { sourceSet ->
+            (sourceSet.extensions.findByName("kotlin") as? SourceDirectorySet)
+                ?.srcDirs
+                ?.filter { it.exists() }
+                .orEmpty()
         }
+        // Resolved on the project — inside the task lambda `the<>()` would bind to
+        // the task's own (empty) extension container.
+        val toolchainService = the<org.gradle.jvm.toolchain.JavaToolchainService>()
+
+        val detekt = tasks.register<DetektTask>("detekt") {
+            group = "verification"
+            description = "Static analysis, report-only. Reports land in build/reports/detekt/."
+            detektClasspath.from(detektCli)
+            sources.from(kotlinSourceDirs)
+            config.set(rootProject.file("config/detekt/detekt.yml"))
+            txtReport.set(layout.buildDirectory.file("reports/detekt/detekt.txt"))
+            htmlReport.set(layout.buildDirectory.file("reports/detekt/detekt.html"))
+            // The bytecode target is the one JDK every gate leg resolves
+            // regardless of which JDK drives the Gradle daemon.
+            javaLauncher.set(
+                toolchainService.launcherFor {
+                    languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(21)
+                },
+            )
+        }
+        tasks.named("check") { dependsOn(detekt) }
     }
 
     tasks.withType<JacocoReport>().configureEach {
