@@ -12,6 +12,11 @@ bouncycastle = "1.86"
 eddsa = "0.3.0"
 playwright = "1.63.0"
 ktlint-gradle = "14.2.0"
+# 1.23.x line: detekt 2.0 is a config-format rewrite and still alpha. Invoked
+# directly as detekt-cli on the toolchain JVM (see core/build.gradle.kts) — the
+# 1.x Gradle plugin analyzes in-process on the daemon JVM, which breaks on
+# JDKs its embedded compiler cannot parse.
+detekt = "1.23.8"
 socket-io-client = "2.1.2"
 
 [libraries]
@@ -40,6 +45,7 @@ bcprov-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bo
 eddsa = { module = "net.i2p.crypto:eddsa", version.ref = "eddsa" }
 playwright = { module = "com.microsoft.playwright:playwright", version.ref = "playwright" }
 socket-io-client = { module = "io.socket:socket.io-client", version.ref = "socket-io-client" }
+detekt-cli = { module = "io.gitlab.arturbosch.detekt:detekt-cli", version.ref = "detekt" }
 
 [bundles]
 ktor-client = ["ktor-client-core", "ktor-client-cio", "ktor-client-content-negotiation", "ktor-serialization-kotlinx-json", "ktor-client-logging"]
@@ -50,3 +56,5 @@ kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-gradle" }
+# 1.23.x line: detekt 2.0 is a config-format rewrite and still alpha.
+detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }
