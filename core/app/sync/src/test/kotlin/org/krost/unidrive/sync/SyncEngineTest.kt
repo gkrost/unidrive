@@ -1,11 +1,13 @@
 package org.krost.unidrive.sync
 
+import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
 import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
+import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -5078,5 +5080,66 @@ class SyncEngineTest {
                 "DeleteRemote must re-emit on the next sync after a transient failure; got ${provider.deletedPaths}",
             )
             assertNull(db.getEntry("/transient.txt"), "row tombstoned once the delete finally succeeds")
+        }
+
+    // ---- #395: the narrowed-scope transition stays silent when nothing was untracked --------
+
+    private inline fun captureEngineLogs(block: () -> Unit): List<String> {
+        val logger = LoggerFactory.getLogger(SyncEngine::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        logger.addAppender(appender)
+        try {
+            block()
+        } finally {
+            logger.detachAppender(appender)
+        }
+        return appender.list.mapNotNull { it.formattedMessage }
+    }
+
+    @Test
+    fun `a first run of a new profile does not announce untracking zero rows`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            val messages =
+                captureEngineLogs {
+                    preview {
+                        engineForScope(standingScope = listOf("/Docs")).syncOnce(dryRun = true)
+                    }
+                }
+            assertTrue(
+                messages.none { it.contains("stopped tracking") },
+                "a fresh profile has no rows to untrack, so the transition must be silent: $messages",
+            )
+        }
+
+    @Test
+    fun `narrowing over an existing tracked row still says how many it stopped tracking`() =
+        runTest {
+            db.upsertEntry(
+                SyncEntry(
+                    path = "/outside.txt",
+                    remoteId = "id-outside",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = 0,
+                    localSize = 0,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.deltaItems = emptyList()
+            val messages =
+                captureEngineLogs {
+                    preview {
+                        engineForScope(standingScope = listOf("/Docs")).syncOnce(dryRun = true)
+                    }
+                }
+            assertTrue(
+                messages.any { it.contains("stopped tracking 1 row(s)") },
+                "the counted message must stay when a row really was untracked: $messages",
+            )
         }
 }

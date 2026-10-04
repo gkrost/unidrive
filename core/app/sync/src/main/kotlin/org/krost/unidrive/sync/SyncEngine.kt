@@ -3814,7 +3814,12 @@ open class SyncEngine(
                     db.deleteEntry(entry.path)
                     untracked++
                 }
-                log.info("Sync scope narrowed to {}: stopped tracking {} row(s); local files left in place", trackScope, untracked)
+                // Silent when nothing was untracked: the first run of a new profile
+                // narrows from "whole drive" to its scope over an empty db, and a
+                // "stopped tracking 0 row(s)" line reads as if state were lost (#395).
+                if (untracked > 0) {
+                    log.info("Sync scope narrowed to {}: stopped tracking {} row(s); local files left in place", trackScope, untracked)
+                }
             }
             if (widened) {
                 db.setSyncState("delta_cursor", "")
