@@ -1595,7 +1595,7 @@ class InternxtProvider(
      * Wall-clock skew between this host and Internxt's storage is absorbed
      * by the same `rewindCursor` window the regular delta path uses.
      */
-    override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> =
+    override suspend fun deltaFromLatest(scanContext: org.krost.unidrive.ScanContext?): CapabilityResult<DeltaPage> =
         CapabilityResult.Success(
             DeltaPage(
                 items = emptyList(),

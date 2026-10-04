@@ -206,8 +206,12 @@ interface CloudProvider {
      *
      * Providers that declare [Capability.FastBootstrap] must override.
      * OneDrive / Graph implements this via `?token=latest`. See UD-223.
+     *
+     * [scanContext] carries the same scan plumbing [delta] receives; a provider must honour
+     * [ScanContext.readOnly] here too — a preview's bootstrap must leave no persistent side effect
+     * (OneDrive: no `delta_last_seen` stamp).
      */
-    suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> =
+    suspend fun deltaFromLatest(scanContext: ScanContext? = null): CapabilityResult<DeltaPage> =
         CapabilityResult.Unsupported(Capability.FastBootstrap, "Provider does not support token=latest bootstrap")
 
     suspend fun quota(): QuotaInfo

@@ -322,8 +322,9 @@ class OneDriveProvider(
         }
     }
 
-    override suspend fun deltaFromLatest(): CapabilityResult<DeltaPage> {
-        val result = graphApi.getDelta(fromLatest = true)
+    override suspend fun deltaFromLatest(scanContext: org.krost.unidrive.ScanContext?): CapabilityResult<DeltaPage> {
+        // A preview's bootstrap must not stamp delta_last_seen — same readOnly contract as delta().
+        val result = graphApi.getDelta(fromLatest = true, readOnly = scanContext?.readOnly == true)
         val items = result.items.filterNot { it.isRootItem() }.map { it.toCloudItem() }
         return CapabilityResult.Success(
             DeltaPage(

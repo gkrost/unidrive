@@ -520,11 +520,10 @@ class ReconcilerTest {
         // UD-800: this test used to be named `both modified with same hash is
         // no-op` but the body asserted the OPPOSITE — hashes in the fixture
         // are "old" vs "new-hash" (different), and the assertion was Conflict.
-        // The promised same-hash-no-op invariant is not implementable at this
-        // layer — reconcile() sees `ChangeState.MODIFIED` from the local side
-        // but does not have the local content hash. The "both-sides-settled-
-        // on-the-same-content" no-op would need a pre-reconcile local hash
-        // pass; filed as follow-up in the closed-note of UD-800.
+        // The promised same-hash-no-op invariant needs the local content hash,
+        // which reaches the reconciler through the `sameContent` seam — without
+        // it (this constructor) the conflict stands; see the identical-content
+        // test below for the converged branch.
         db.upsertEntry(dbEntry("/same.txt", remoteHash = "old"))
         val remoteChanges = mapOf("/same.txt" to cloudItem("/same.txt", hash = "new-hash"))
         val localChanges = mapOf("/same.txt" to ChangeState.MODIFIED)
@@ -533,6 +532,31 @@ class ReconcilerTest {
         val actions = reconciler.reconcile(remoteChanges, localChanges)
         assertEquals(1, actions.size)
         assertIs<SyncAction.Conflict>(actions[0])
+    }
+
+    @Test
+    fun `both modified with identical local content adopts the remote instead of conflicting`() {
+        // #532: both devices wrote the same bytes between two syncs; the report showed
+        // the second sync renaming one copy to *.conflict-local-* and uploading it as a
+        // new remote file. When the local file hashes to the remote item's hash (the
+        // engine wires HashVerifier with the provider's algorithm into `sameContent`),
+        // the sides converged: adopt the remote metadata and keep the local bytes.
+        db.upsertEntry(dbEntry("/same.txt", remoteHash = "old"))
+        val remoteChanges = mapOf("/same.txt" to cloudItem("/same.txt", hash = "new-hash"))
+        val localChanges = mapOf("/same.txt" to ChangeState.MODIFIED)
+        Files.createDirectories(syncRoot)
+        Files.writeString(syncRoot.resolve("same.txt"), "content")
+
+        val converged =
+            Reconciler(db, syncRoot, ConflictPolicy.KEEP_BOTH, sameContent = { _, item -> item.hash == "new-hash" })
+        val actions = converged.reconcile(remoteChanges, localChanges)
+        assertEquals(1, actions.size)
+        assertIs<SyncAction.CreatePlaceholder>(actions[0])
+
+        // A hash mismatch keeps the conflict, and so does a reconciler without the seam.
+        val mismatch = Reconciler(db, syncRoot, ConflictPolicy.KEEP_BOTH, sameContent = { _, _ -> false })
+        assertIs<SyncAction.Conflict>(mismatch.reconcile(remoteChanges, localChanges).single())
+        assertIs<SyncAction.Conflict>(reconciler.reconcile(remoteChanges, localChanges).single())
     }
 
     @Test

@@ -44,6 +44,10 @@ class Reconciler(
     // Mount-write bytes live in the hydration cache until the platform client
     // mirrors them into sync_root. Their absence from sync_root is not a delete.
     private val isHydrationCachePresent: (String) -> Boolean = { false },
+    // #532: content-equality for the MODIFIED/MODIFIED branch. The engine wires HashVerifier
+    // (hash of the local file, provider algorithm, vs the remote item's hash). Null keeps the
+    // plain conflict — a provider without a content hash has nothing to compare.
+    private val sameContent: ((localFile: java.nio.file.Path, remoteItem: CloudItem) -> Boolean)? = null,
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
@@ -789,7 +793,23 @@ class Reconciler(
 
             // Both modified
             localState == ChangeState.MODIFIED && remoteState == ChangeState.MODIFIED -> {
-                SyncAction.Conflict(path, localState, remoteState, remoteItem, policyForPath(path))
+                // #532: the same bytes written on both sides between two syncs is convergence,
+                // not a conflict — the report showed both devices writing 42 identical bytes
+                // and the second sync renaming one copy to *.conflict-local-*. Adopt the remote
+                // metadata instead (CreatePlaceholder keeps the local bytes: with real content
+                // of the remote's size it records the row without re-downloading).
+                val localFile = resolveLocal(path)
+                if (
+                    remoteItem != null &&
+                    !remoteItem.isFolder &&
+                    sameContent != null &&
+                    Files.isRegularFile(localFile) &&
+                    sameContent(localFile, remoteItem)
+                ) {
+                    SyncAction.CreatePlaceholder(path, remoteItem, shouldHydrate = false)
+                } else {
+                    SyncAction.Conflict(path, localState, remoteState, remoteItem, policyForPath(path))
+                }
             }
 
             // Delete vs modify conflicts

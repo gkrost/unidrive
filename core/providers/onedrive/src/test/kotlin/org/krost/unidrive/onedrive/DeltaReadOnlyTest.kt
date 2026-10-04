@@ -69,4 +69,31 @@ class DeltaReadOnlyTest {
             assertTrue(Files.exists(tokenDir.resolve("delta_last_seen")), "a real pass records that the delta feed was seen")
             provider.close()
         }
+
+    @Test
+    fun `a read-only fast bootstrap does not stamp delta_last_seen`() =
+        runTest {
+            val tokenDir = Files.createTempDirectory("ud-400-token")
+            val provider = providerWithTokenDir(tokenDir)
+
+            provider.deltaFromLatest(context(readOnly = true))
+
+            assertFalse(
+                Files.exists(tokenDir.resolve("delta_last_seen")),
+                "a dry-run --fast-bootstrap must not restart the cursor-age clock (report: a dry-run wrote delta_last_seen into the real profile directory)",
+            )
+            provider.close()
+        }
+
+    @Test
+    fun `a normal fast bootstrap stamps delta_last_seen`() =
+        runTest {
+            val tokenDir = Files.createTempDirectory("ud-400-token")
+            val provider = providerWithTokenDir(tokenDir)
+
+            provider.deltaFromLatest(context(readOnly = false))
+
+            assertTrue(Files.exists(tokenDir.resolve("delta_last_seen")), "a real first sync records that the delta feed was seen")
+            provider.close()
+        }
 }
