@@ -206,4 +206,23 @@ class VersionManagerTest {
     fun `expiredCount is zero without a versions directory`() {
         assertEquals(0, VersionManager(syncRoot).expiredCount(90))
     }
+
+    @Test
+    fun `a nested version lists and restores under its cloud-style key on every OS`() {
+        val file = syncRoot.resolve("docs/deep/v.txt")
+        file.parent.createDirectories()
+        file.writeText("one")
+
+        val manager = VersionManager(syncRoot)
+        manager.snapshot("/docs/deep/v.txt")
+
+        val listed = manager.listAll().single()
+        assertEquals(
+            "docs/deep/v.txt",
+            listed.originalPath,
+            "the key is the cloud-style path, never the OS's separators",
+        )
+        assertTrue(manager.restore("/docs/deep/v.txt", listed.timestamp), "restore matches the cloud-style key")
+        assertEquals("one", syncRoot.resolve("docs/deep/v.txt").readText())
+    }
 }

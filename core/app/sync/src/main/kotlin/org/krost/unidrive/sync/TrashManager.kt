@@ -54,7 +54,11 @@ class TrashManager(
             if (!timestampDir.isDirectory()) continue
             val ts = decodeTimestamp(timestampDir.name) ?: continue
             for (file in timestampDir.toFile().walkTopDown().filter { it.isFile }) {
-                val relPath = timestampDir.relativize(file.toPath()).toString()
+                // The key is the cloud-style path the item was trashed under (the
+                // write side resolves forward slashes on every OS), so normalize the
+                // walk's separators back: on Windows the raw relativize form made
+                // --list print "a\b.txt" and --restore "a/b.txt" never match it.
+                val relPath = timestampDir.relativize(file.toPath()).toString().replace('\\', '/')
                 items.add(TrashedItem(ts, relPath, file.toPath(), file.length()))
             }
         }
@@ -62,7 +66,7 @@ class TrashManager(
     }
 
     fun restore(originalPath: String): Boolean {
-        val normalized = originalPath.removePrefix("/")
+        val normalized = originalPath.replace('\\', '/').removePrefix("/")
         val items = list().filter { it.originalPath == normalized }.sortedByDescending { it.timestamp }
         val latest = items.firstOrNull() ?: return false
         val dest = syncRoot.resolve(normalized)

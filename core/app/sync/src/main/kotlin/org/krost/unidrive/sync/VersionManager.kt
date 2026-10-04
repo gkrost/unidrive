@@ -37,7 +37,7 @@ class VersionManager(
     )
 
     fun snapshot(relativePath: String): Path? {
-        val normalized = relativePath.removePrefix("/")
+        val normalized = relativePath.replace('\\', '/').removePrefix("/")
         val source = syncRoot.resolve(normalized)
         if (!source.exists() || !source.isRegularFile()) return null
         val timestamp = encodeTimestamp(Instant.now().truncatedTo(ChronoUnit.SECONDS))
@@ -48,7 +48,7 @@ class VersionManager(
     }
 
     fun listVersions(relativePath: String): List<VersionedItem> {
-        val normalized = relativePath.removePrefix("/")
+        val normalized = relativePath.replace('\\', '/').removePrefix("/")
         val fileVersionsDir = versionsDir.resolve(normalized)
         if (!fileVersionsDir.exists() || !fileVersionsDir.isDirectory()) return emptyList()
         val items = mutableListOf<VersionedItem>()
@@ -66,7 +66,11 @@ class VersionManager(
         for (file in versionsDir.toFile().walkTopDown().filter { it.isFile }) {
             val filePath = file.toPath()
             val ts = decodeTimestamp(filePath.name) ?: continue
-            val relPath = versionsDir.relativize(filePath.parent).toString()
+            // The key is the cloud-style path the version was snapshotted under (the
+            // write side resolves forward slashes on every OS), so normalize the
+            // walk's separators back: on Windows the raw relativize form made --list
+            // print "a\b.txt" and --restore "a/b.txt" never match it.
+            val relPath = versionsDir.relativize(filePath.parent).toString().replace('\\', '/')
             items.add(VersionedItem(ts, relPath, filePath, file.length()))
         }
         return items.sortedByDescending { it.timestamp }
@@ -76,7 +80,7 @@ class VersionManager(
         relativePath: String,
         timestamp: Instant,
     ): Boolean {
-        val normalized = relativePath.removePrefix("/")
+        val normalized = relativePath.replace('\\', '/').removePrefix("/")
         val tsDir = encodeTimestamp(timestamp.truncatedTo(ChronoUnit.SECONDS))
         val versionFile = versionsDir.resolve(normalized).resolve(tsDir)
         if (!versionFile.exists()) return false
@@ -95,7 +99,7 @@ class VersionManager(
         for (item in versions.drop(maxVersions)) {
             item.versionPath.deleteIfExists()
         }
-        cleanEmptyDirs(versionsDir.resolve(relativePath.removePrefix("/")))
+        cleanEmptyDirs(versionsDir.resolve(relativePath.replace('\\', '/').removePrefix("/")))
     }
 
     fun pruneByAge(retentionDays: Int) {
