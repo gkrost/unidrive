@@ -70,4 +70,43 @@ class HandleAuthErrorTest {
             "verbose output should include the cause message",
         )
     }
+
+    @Test
+    fun `the remediation hint names the profile, not the provider id`() {
+        val e = AuthenticationException("Server key did not validate")
+
+        val rendered =
+            Main().renderAuthError(
+                e,
+                providerId = "onedrive",
+                providerDisplayName = "Microsoft OneDrive",
+                verbose = false,
+                profileName = "onedrive_test",
+            )
+
+        assertTrue(
+            rendered.contains("Run: unidrive -p onedrive_test auth"),
+            "the hint must name what -p accepts, got: $rendered",
+        )
+        assertFalse(
+            rendered.contains("-p onedrive auth"),
+            "the provider id must not stand in for the profile, got: $rendered",
+        )
+    }
+
+    @Test
+    fun `without a profile name the hint falls back to the provider id`() {
+        val e = AuthenticationException("Server key did not validate")
+
+        val rendered =
+            Main().renderAuthError(
+                e,
+                providerId = "onedrive",
+                providerDisplayName = "Microsoft OneDrive",
+                verbose = false,
+                profileName = null,
+            )
+
+        assertTrue(rendered.contains("Run: unidrive -p onedrive auth"), "fallback keeps the old hint, got: $rendered")
+    }
 }

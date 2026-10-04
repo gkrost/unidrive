@@ -489,7 +489,11 @@ open class Main : Runnable {
         e: AuthenticationException,
         provider: CloudProvider,
     ) {
-        System.err.print(renderAuthError(e, provider.id, provider.displayName, verbose))
+        // The hint must name what `-p` accepts: the profile. It is always resolvable
+        // here (the provider was built from it); fall back to the provider id rather
+        // than fail an error path.
+        val profileName = runCatching { resolveCurrentProfile().name }.getOrNull()
+        System.err.print(renderAuthError(e, provider.id, provider.displayName, verbose, profileName))
         System.exit(1)
     }
 
@@ -505,11 +509,15 @@ open class Main : Runnable {
         providerId: String,
         providerDisplayName: String,
         verbose: Boolean,
+        profileName: String? = null,
     ): String =
         buildString {
             appendLine("Not authenticated to $providerDisplayName.")
             appendLine()
-            appendLine("Run: unidrive -p $providerId auth")
+            // The hint names the profile (what `-p` accepts), not the provider id:
+            // `unidrive -p onedrive auth` re-authenticates the wrong or no profile
+            // when the configured profile is e.g. onedrive_test.
+            appendLine("Run: unidrive -p ${profileName ?: providerId} auth")
             if (verbose) {
                 appendLine("Cause: ${e.message}")
                 val cause = e.cause
