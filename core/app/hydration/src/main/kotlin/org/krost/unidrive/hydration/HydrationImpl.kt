@@ -469,10 +469,7 @@ class HydrationImpl(
                 syncEngine.withTransferPermit {
                     onPermitAcquired()
                     _events.emit(HydrationEvent.Hydrating(path))
-                    // baseEtag is the list/change-detection token. For OneDrive it is
-                    // a content hash, whereas Graph's If-Match needs its opaque eTag.
-                    // Forwarding it turns every mount edit into a 412 and keep-both.
-                    syncEngine.uploadFromCache(path, cachePath, ifMatchETag = null, onProgress = onProgress)
+                    syncEngine.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
                 }
                 val bytes = Files.size(cachePath)
                 _events.emit(HydrationEvent.Hydrated(path, bytes))

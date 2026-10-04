@@ -36,8 +36,8 @@ import kotlin.test.assertTrue
  */
 internal class MinimalFakeProvider(
     private val remoteFiles: MutableMap<String, ByteArray> = mutableMapOf(),
+    override val id: String = "fake-hydration",
 ) : CloudProvider {
-    override val id = "fake-hydration"
     override val displayName = "Fake (hydration test)"
     override var isAuthenticated = true
 
@@ -283,10 +283,11 @@ internal class HydrationTestEnv(
     val uploadProgressMinIntervalMs: Long = 400,
     /** #493: delay of the replay of rows whose last upload failed; 0 = at once. */
     val failedReplayDelayMs: Long = HydrationImpl.DEFAULT_FAILED_REPLAY_DELAY_MS,
+    providerId: String = "fake-hydration",
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
-    private val fakeProvider = MinimalFakeProvider()
+    private val fakeProvider = MinimalFakeProvider(id = providerId)
 
     /** Staging area for cache files written by write-path tests. */
     val tempDir: Path = Files.createTempDirectory("unidrive-hydration-tmp")
@@ -345,12 +346,16 @@ internal class HydrationTestEnv(
             )
         }
 
-        fun insertHydratedEntry(path: String, localSize: Long) {
+        fun insertHydratedEntry(
+            path: String,
+            localSize: Long,
+            remoteHash: String = "hash-$path",
+        ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
                     remoteId = "id-$path",
-                    remoteHash = "hash-$path",
+                    remoteHash = remoteHash,
                     remoteSize = localSize,
                     remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
                     localMtime = Instant.parse("2026-03-28T12:00:00Z").toEpochMilli(),
@@ -876,7 +881,7 @@ class HydrationImplTest {
 
     @Test
     fun `open_write with the current base_etag uploads normally`() = runTest {
-        val env = HydrationTestEnv(recoveryUploadScope = this)
+        val env = HydrationTestEnv(recoveryUploadScope = this, providerId = "onedrive")
         env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5)
         val cacheFile = env.tempDir.resolve("doc.txt").also { java.nio.file.Files.writeString(it, "mine") }
 
@@ -886,6 +891,20 @@ class HydrationImplTest {
         advanceUntilIdle()
         assertEquals("mine", env.syncEngine.remoteContentSeen("/doc.txt"))
         assertNull(env.syncEngine.lastUploadIfMatch(), "the content-hash base token is not a provider If-Match token (#511)")
+    }
+
+    @Test
+    fun `a mount write preserves Internxt's version token`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, providerId = "internxt")
+        val versionToken = "uuid-1|2026-10-04T12:00:00Z|5"
+        env.stateDb.insertHydratedEntry("/doc.txt", localSize = 5, remoteHash = versionToken)
+        val cacheFile = env.tempDir.resolve("doc.txt").also { Files.writeString(it, "mine") }
+
+        val r = env.hydration.openForWrite("conn1", "h1", "/doc.txt", cacheFile, baseEtag = versionToken)
+
+        assertTrue(r is OpenResult.Ok)
+        advanceUntilIdle()
+        assertEquals(versionToken, env.syncEngine.lastUploadIfMatch())
     }
 
     @Test

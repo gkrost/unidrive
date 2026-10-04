@@ -1024,6 +1024,24 @@ open class SyncEngine(
         )
     }
 
+    /**
+     * A mount's base token comes from [SyncEntry.remoteHash]. OneDrive stores a
+     * content hash there, not Graph's opaque eTag, while Internxt stores its
+     * replace-version token there. Keep the latter guard, but do not hand the
+     * former to Graph as an If-Match value.
+     */
+    suspend fun uploadMountWriteFromCache(
+        path: String,
+        cachePath: Path,
+        baseToken: String?,
+        onProgress: ((Long, Long) -> Unit)? = null,
+    ) = uploadFromCache(
+        path = path,
+        cachePath = cachePath,
+        ifMatchETag = if (provider.id == "onedrive") null else baseToken,
+        onProgress = onProgress,
+    )
+
     // #449 write side, for a row that describes no sync-root file. Places the bytes just uploaded from
     // [cachePath] at the row's path in the sync root and returns the (mtime, size) of that file, which
     // become the row's baseline; null means nothing was written and the row keeps recording the cache
