@@ -32,6 +32,26 @@ object HashVerifier {
         }
     }
 
+    /**
+     * Strict content equality — the counterpart [verify] needs for conflict resolution:
+     * false whenever either side cannot be compared (no remote hash, no provider algorithm),
+     * where [verify]'s "true when unverifiable" contract would silently adopt. The engine
+     * wires this into the reconciler's identical-edits branch (#532).
+     */
+    internal fun matches(
+        localPath: java.nio.file.Path,
+        remoteHash: String?,
+        algorithm: org.krost.unidrive.HashAlgorithm?,
+    ): Boolean {
+        if (remoteHash.isNullOrEmpty() || algorithm == null) return false
+
+        return when (algorithm) {
+            org.krost.unidrive.HashAlgorithm.QuickXor -> computeQuickXorHash(localPath) == remoteHash
+            org.krost.unidrive.HashAlgorithm.Md5Hex -> computeMd5Hex(localPath).equals(remoteHash, ignoreCase = true)
+            org.krost.unidrive.HashAlgorithm.Sha256Hex -> computeSha256Hex(localPath).equals(remoteHash, ignoreCase = true)
+        }
+    }
+
     private fun verifySha256Hex(
         localPath: java.nio.file.Path,
         expectedHex: String,

@@ -205,6 +205,10 @@ open class SyncEngine(
         // aliased local folder names to their cloud-canonical equivalents.
         xdgUserDirsOverrides = xdgUserDirsOverrides,
         isHydrationCachePresent = { path -> Files.isRegularFile(resolveCachePath(path)) },
+        // #532: identical edits on both sides are convergence, not a conflict — compare the
+        // local file against the remote item with the provider's own content hash. Strict
+        // (matches, not verify): a provider without a hash keeps the conflict.
+        sameContent = { localFile, item -> HashVerifier.matches(localFile, item.hash, provider.hashAlgorithm()) },
     )
 
     // Debounce state for remote-change wake hints (Internxt notifications WS).
