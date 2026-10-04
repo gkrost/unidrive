@@ -177,17 +177,14 @@ class EnumerationTracker(
                 phase = if (running) phase else null,
                 listing = if (progressShown) listing else null,
                 startedAtMs = startedAtMs,
-                elapsedMs = if (running) {
-                    startedAtMs?.let {
-                        // #136: during the saving phase the listing is over — report its frozen
-                        // duration, not a count that grows while state.db is written.
-                        if (phase == EnumerationStatus.Phase.SAVING) {
-                            listingElapsedMs
-                        } else {
-                            max(now - it, 0)
-                        }
-                    }
-                } else null,
+                elapsedMs =
+                    when {
+                        !running -> null
+                        // unidrive-windows#136: the listing is over, so report its duration, not a count that keeps
+                        // growing while state.db is written.
+                        phase == EnumerationStatus.Phase.SAVING -> listingElapsedMs
+                        else -> startedAtMs?.let { max(now - it, 0) }
+                    },
                 items = if (progressShown) items else null,
                 foldersDone = if (progressShown) foldersDone else null,
                 foldersKnown = if (progressShown) foldersKnown else null,
