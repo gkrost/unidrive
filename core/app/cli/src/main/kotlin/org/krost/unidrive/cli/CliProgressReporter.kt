@@ -320,15 +320,14 @@ class CliProgressReporter(
         if (lastSecs == null || lastSecs <= 0) return null
         val wallClockRemaining = lastSecs - elapsedSecs
 
+        val progressFraction: Double? =
+            if (lastCount != null && lastCount > 0 && currentCount > 0) {
+                currentCount.toDouble() / lastCount
+            } else {
+                null
+            }
         val countAwareRemaining: Long? =
-            if (
-                lastCount != null &&
-                lastCount > 0 &&
-                currentCount > 0 &&
-                currentCount.toDouble() / lastCount >= 0.05 &&
-                elapsedSecs >= 1
-            ) {
-                val progressFraction = currentCount.toDouble() / lastCount
+            if (progressFraction != null && progressFraction >= 0.05 && elapsedSecs >= 1) {
                 val estimatedTotalSec = (elapsedSecs / progressFraction).toLong()
                 (estimatedTotalSec - elapsedSecs).coerceAtLeast(0)
             } else {

@@ -700,21 +700,22 @@ class InternxtProvider(
         // content drifted past the fingerprint windows. Discard and
         // cold-restart with fresh indexBytes instead. At ENCRYPTING no shard
         // was ever started, so a re-encrypt there stays first-use.
-        if (tomb != null &&
-            tomb.stage != UploadTombstone.Stage.ENCRYPTING &&
-            (tomb.encryptedSize == null ||
-                tomb.hashHex == null ||
-                !withContext(Dispatchers.IO) { Files.exists(tempFile) } ||
-                withContext(Dispatchers.IO) { Files.size(tempFile) } != tomb.encryptedSize)
-        ) {
-            log.info(
-                "discarding upload tombstone for {} (re-encrypt required at stage {} with unverifiable .enc — " +
-                    "backend may hold prior ciphertext; rotating indexBytes)",
-                localPath,
-                tomb.stage,
-            )
-            withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
-            tomb = null
+        if (tomb != null && tomb.stage != UploadTombstone.Stage.ENCRYPTING) {
+            val pinnedCiphertextVerifiable =
+                tomb.encryptedSize != null &&
+                    tomb.hashHex != null &&
+                    withContext(Dispatchers.IO) { Files.exists(tempFile) } &&
+                    withContext(Dispatchers.IO) { Files.size(tempFile) } == tomb.encryptedSize
+            if (!pinnedCiphertextVerifiable) {
+                log.info(
+                    "discarding upload tombstone for {} (re-encrypt required at stage {} with unverifiable .enc — " +
+                        "backend may hold prior ciphertext; rotating indexBytes)",
+                    localPath,
+                    tomb.stage,
+                )
+                withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
+                tomb = null
+            }
         }
 
         // #333 review: a tombstone whose index is not valid hex cannot be resumed (hexToBytes

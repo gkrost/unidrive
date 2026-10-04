@@ -521,10 +521,10 @@ open class SyncEngine(
         // remoteId == null is NOT the UD-901 pending-upload predicate — it means "no
         // remote to compare against", and isHydrated here carries the warm-trust
         // meaning, so the split check is intentional.
-        if (entry.isHydrated && Files.exists(cachePath) &&
-            (entry.remoteId == null ||
-                runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize)
-        ) {
+        val warmCacheUsable =
+            entry.remoteId == null ||
+                runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize
+        if (entry.isHydrated && Files.exists(cachePath) && warmCacheUsable) {
             // #449: a row from before cache_backed existed whose baseline still describes the sync-root file
             // is settled here, so a later delete of that file is not mistaken for a cache-only row.
             if (entry.cacheBacked == null && rowDescribesSyncRootFile(entry, path)) {
@@ -698,9 +698,8 @@ open class SyncEngine(
                 // The cache copy is the row's local file: clean only while it is exactly what was recorded.
                 return if (cacheIsBaseline) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
             }
-            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path) &&
-                Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
-            ) {
+            val placeholderMatchesCache = Files.mismatch(placeholder.resolveLocal(path), cache) == -1L
+            if (entry.isHydrated && rowDescribesSyncRootFile(entry, path) && placeholderMatchesCache) {
                 return CacheDisposition.REDUNDANT
             }
             if (cacheMatchesRecordedVersion(entry, cache, size)) CacheDisposition.DISPOSABLE else CacheDisposition.PROTECTED
@@ -1631,10 +1630,10 @@ open class SyncEngine(
                 // Cache-backed rows and queued uploads belong to the hydration layer. A not-hydrated
                 // row is a stub, a partial download or an edited placeholder: whether the bytes are
                 // an edit is the Reconciler's call (it may need a download to keep both).
-                if (entry == null || !entry.isHydrated || uploadInFlight(path) ||
-                    (entry.cacheBacked == true && Files.isRegularFile(resolveCachePath(path))) ||
-                    failedFolders.any { path.startsWith("$it/") }
-                ) {
+                val hydrationOwned =
+                    entry == null || !entry.isHydrated || uploadInFlight(path) ||
+                        (entry.cacheBacked == true && Files.isRegularFile(resolveCachePath(path)))
+                if (hydrationOwned || failedFolders.any { path.startsWith("$it/") }) {
                     skipped++
                     continue
                 }
@@ -1956,9 +1955,8 @@ open class SyncEngine(
         // wiped local and wants the cloud copy back (a legitimate
         // rehydrate) must not be blocked here.
         val hydratedEntryCount = db.getHydratedEntryCount()
-        if (!forceDelete && syncDirection != SyncDirection.DOWNLOAD &&
-            hydratedEntryCount > 10 && isSyncRootEffectivelyEmpty()
-        ) {
+        val localDeletesAllowed = !forceDelete && syncDirection != SyncDirection.DOWNLOAD
+        if (localDeletesAllowed && hydratedEntryCount > 10 && isSyncRootEffectivelyEmpty()) {
             val msg =
                 "Local sync_root '$syncRoot' is empty, but state DB knows " +
                     "$hydratedEntryCount previously-hydrated entries (of " +
@@ -2032,7 +2030,8 @@ open class SyncEngine(
         val allRemoteChanges: Map<String, CloudItem>
         // A dry-run always takes the accumulate-then-reconcile path: streaming dispatches transfers from
         // inside the gather, which a preview must never do.
-        if (streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply && !dryRun) {
+        val streamingViable = streamingReconciliation && !skipRemoteGather && !shrinkGateMayApply
+        if (streamingViable && !dryRun) {
             db.getSyncState("last_scan_secs_local")?.toLongOrNull()?.let {
                 reporter.onScanHistoricalHint("local", it)
             }
