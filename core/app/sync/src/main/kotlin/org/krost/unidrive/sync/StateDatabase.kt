@@ -1056,8 +1056,10 @@ class StateDatabase(
         val out = mutableListOf<String>()
         conn.createStatement().use { stmt ->
             val rs = stmt.executeQuery(
+                // GLOB, not LIKE (#552): it is case-sensitive like the `startsWith("local:")` the rest of the code
+                // uses for the synthetic, and it can walk the remote_id index from 'local:' on instead of every row.
                 "SELECT path FROM sync_entries WHERE status='EXISTS' " +
-                    "AND remote_id LIKE 'local:%' AND is_folder=0 AND is_hydrated<>0 " +
+                    "AND remote_id GLOB 'local:*' AND is_folder=0 AND is_hydrated<>0 " +
                     "ORDER BY path",
             )
             while (rs.next()) out += rs.getString(1)
@@ -1518,16 +1520,16 @@ class StateDatabase(
             parentUuid = getString("parent_uuid"),
             remoteHash = getString("remote_hash"),
             remoteSize = getLong("remote_size"),
-            remoteModified = getString("remote_modified")?.let { Instant.parse(it) },
+            remoteModified = getString("remote_modified")?.let { IsoInstants.parse(it) },
             localMtime = getLong("local_mtime").let { if (wasNull()) null else it },
             localSize = getLong("local_size").let { if (wasNull()) null else it },
             isFolder = getInt("is_folder") == 1,
             isPinned = getInt("is_pinned") == 1,
             isHydrated = getInt("is_hydrated") == 1,
-            lastSynced = Instant.parse(getString("last_synced")),
+            lastSynced = IsoInstants.parse(getString("last_synced")),
             status = EntryStatus.valueOf(getString("status")),
             downloadQuarantined = getInt("download_quarantined") == 1,
-            lastErrorAt = getString("last_error_at")?.let { Instant.parse(it) },
+            lastErrorAt = getString("last_error_at")?.let { IsoInstants.parse(it) },
             localHash = getString("local_hash"),
             cacheBacked = getInt("cache_backed").let { if (wasNull()) null else it == 1 },
         )
