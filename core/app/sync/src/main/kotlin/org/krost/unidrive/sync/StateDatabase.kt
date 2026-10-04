@@ -892,11 +892,17 @@ class StateDatabase(
         beginWrite()
         val folder = PathNormalizer.nfc(folderPathRaw)
         val prefix = if (folder.endsWith("/")) folder else "$folder/"
+        // A range, not substr(path, 1, prefix.length): SQLite's substr counts code points, Kotlin's
+        // length counts UTF-16 units, so a folder name with a character outside the BMP (an emoji)
+        // matched nothing. Under BINARY collation every path that starts with "<folder>/" sorts in
+        // ["<folder>/", "<folder>0") — '0' is the character after '/' — and the range can use the
+        // alive-path index.
+        val upperBound = prefix.dropLast(1) + "0"
         conn.prepareStatement(
-            "UPDATE sync_entries SET status = 'DELETED' WHERE status = 'EXISTS' AND substr(path, 1, ?) = ?",
+            "UPDATE sync_entries SET status = 'DELETED' WHERE status = 'EXISTS' AND path >= ? AND path < ?",
         ).use { stmt ->
-            stmt.setInt(1, prefix.length)
-            stmt.setString(2, prefix)
+            stmt.setString(1, prefix)
+            stmt.setString(2, upperBound)
             return stmt.executeUpdate()
         }
     }
@@ -907,7 +913,10 @@ class StateDatabase(
      */
     @Synchronized
     fun statusOf(pathRaw: String): EntryStatus? {
-        conn.prepareStatement("SELECT status FROM sync_entries WHERE path = ?").use { stmt ->
+        // An alive row wins over a tombstone left at the same path by an earlier delete.
+        conn.prepareStatement(
+            "SELECT status FROM sync_entries WHERE path = ? ORDER BY status = 'EXISTS' DESC LIMIT 1",
+        ).use { stmt ->
             stmt.setString(1, PathNormalizer.nfc(pathRaw))
             val rs = stmt.executeQuery()
             return if (rs.next()) EntryStatus.valueOf(rs.getString(1)) else null

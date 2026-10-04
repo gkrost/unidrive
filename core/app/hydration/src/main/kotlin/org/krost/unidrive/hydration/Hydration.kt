@@ -175,6 +175,13 @@ sealed class RmdirResult {
     data class Failed(val error: HydrationError) : RmdirResult()
     data object PathIsFile : RmdirResult()
     data object NotEmpty : RmdirResult()
+
+    /**
+     * WB-3 (#87): an upload is queued or in flight for a file below the folder. The delete would
+     * tombstone that file's row and evict its cache copy under the upload. Wire token `busy`, as
+     * for [UnlinkResult.Busy]; the client retries after the upload's completed event.
+     */
+    data object Busy : RmdirResult()
 }
 
 sealed class CreateResult {

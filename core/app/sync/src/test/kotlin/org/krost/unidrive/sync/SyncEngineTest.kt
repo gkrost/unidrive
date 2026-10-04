@@ -319,6 +319,26 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#87 a folder whose name has a character outside the BMP forgets its subtree too`() =
+        runTest {
+            // A surrogate pair is two UTF-16 units but one SQLite character: a length-based
+            // substr match tombstoned nothing below such a folder. The sibling whose name only
+            // shares the prefix without the slash must stay alive.
+            val folder = "/photos \uD83D\uDCF7"
+            db.upsertEntry(trackedRow(folder, isFolder = true))
+            db.upsertEntry(trackedRow("$folder/a.jpg", isFolder = false))
+            db.upsertEntry(trackedRow("$folder/sub/b.jpg", isFolder = false))
+            db.upsertEntry(trackedRow("${folder}0.txt", isFolder = false))
+            db.upsertEntry(trackedRow("$folder.txt", isFolder = false))
+
+            engine.deleteRemote(folder)
+
+            assertEquals(org.krost.unidrive.sync.model.EntryStatus.DELETED, db.statusOf("$folder/a.jpg"))
+            assertEquals(org.krost.unidrive.sync.model.EntryStatus.DELETED, db.statusOf("$folder/sub/b.jpg"))
+            assertEquals(org.krost.unidrive.sync.model.EntryStatus.EXISTS, db.statusOf("${folder}0.txt"))
+            assertEquals(org.krost.unidrive.sync.model.EntryStatus.EXISTS, db.statusOf("$folder.txt"))
+        }
+    @Test
     fun `#87 a delta that reports the trashed subtree leaves the tombstones alone`() =
         runTest {
             db.upsertEntry(trackedRow("/big", isFolder = true))

@@ -51,8 +51,12 @@ internal class MinimalFakeProvider(
     // WB-3 (#87): the local paths whose staged upload copies unlink asked to discard.
     val discardedStagedUploads = mutableListOf<String>()
 
+    // When set, discardStagedUpload throws this after recording the call.
+    var discardFailure: Exception? = null
+
     override suspend fun discardStagedUpload(localPath: String) {
         discardedStagedUploads.add(localPath)
+        discardFailure?.let { throw it }
     }
 
     // Optional gate: when set, upload() suspends until this deferred completes.
@@ -781,6 +785,82 @@ class HydrationImplTest {
         assertTrue(result is UnlinkResult.Busy, "the delete answers busy: $result")
         assertNotNull(env.stateDb.statusOf("/busy.txt"), "the row was not deleted under the upload")
         gate.complete(Unit)
+    }
+
+    // #87 review: rmdir tombstones the rows below the folder and evicts its cache tree, so an
+    // upload in flight for a file below it must hold the folder delete off, exactly as unlink.
+    @Test
+    fun `#87 rmdir answers busy while an upload below the folder is in flight`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/dir", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/dir/deep/busy.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/dir/deep/busy.txt", "the bytes")
+
+        val opened = env.hydration.openForWrite(
+            "conn1",
+            "h1",
+            "/dir/deep/busy.txt",
+            env.syncEngine.resolveCachePath("/dir/deep/busy.txt"),
+        )
+        assertTrue(opened is OpenResult.Ok, "open_write queued the upload: $opened")
+
+        val result = env.hydration.rmdir("/dir")
+
+        assertEquals(RmdirResult.Busy, result, "the folder delete answers busy")
+        assertEquals(
+            org.krost.unidrive.sync.model.EntryStatus.EXISTS,
+            env.stateDb.statusOf("/dir/deep/busy.txt"),
+            "the uploading file's row was not tombstoned under its upload",
+        )
+        assertTrue(Files.exists(env.syncEngine.resolveCachePath("/dir/deep/busy.txt")), "its cache copy stays")
+        gate.complete(Unit)
+    }
+
+    // #87 review: a sibling whose name merely starts with the folder's name is not below it.
+    @Test
+    fun `#87 an upload of a same-prefix sibling does not hold the folder delete`() = runTest {
+        val env = HydrationTestEnv()
+        val gate = CompletableDeferred<Unit>()
+        env.syncEngine.setUploadGate(gate)
+        env.stateDb.insertUnhydratedEntry("/dir", remoteSize = 0, isFolder = true)
+        env.stateDb.insertUnhydratedEntry("/dir2.txt", remoteSize = 5)
+        env.syncEngine.seedCacheContent("/dir2.txt", "the bytes")
+        env.hydration.openForWrite("conn1", "h1", "/dir2.txt", env.syncEngine.resolveCachePath("/dir2.txt"))
+
+        assertEquals(RmdirResult.Ok, env.hydration.rmdir("/dir"))
+        gate.complete(Unit)
+    }
+
+    // #87 review: the staged copy is discarded best-effort — a failing discard must not turn a
+    // delete that already happened into an error (the resume store's TTL GC is the backstop).
+    @Test
+    fun `#87 a failing discard of the staged copy does not fail the unlink`() = runTest {
+        val env = HydrationTestEnv()
+        env.providerForTest.discardFailure = java.io.IOException("disk says no")
+        env.stateDb.insertUnhydratedEntry("/pending.txt", remoteSize = 5, remoteId = null)
+
+        val result = env.hydration.unlink("/pending.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertNull(env.stateDb.statusOf("/pending.txt"), "the row is hard-deleted")
+    }
+
+    // #87 review: a tracked file whose last edit's upload failed has a staged copy as well; its
+    // delete discards it too.
+    @Test
+    fun `#87 unlink of a tracked file discards its staged upload copy`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/tracked.txt", remoteSize = 5)
+
+        val result = env.hydration.unlink("/tracked.txt")
+
+        assertTrue(result is UnlinkResult.Ok, "unlink succeeded: $result")
+        assertTrue(
+            env.providerForTest.discardedStagedUploads.any { it.replace('\\', '/').endsWith("/tracked.txt") },
+            "the discard names the file's cache path; got ${env.providerForTest.discardedStagedUploads}",
+        )
     }
 
     @Test

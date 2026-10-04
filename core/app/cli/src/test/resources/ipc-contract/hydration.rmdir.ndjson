@@ -4,3 +4,5 @@
 {"ok":false,"error":"path_is_file"}
 {"verb":"hydration.rmdir","path":"/docs/nonempty"}
 {"ok":false,"error":"not_empty"}
+{"verb":"hydration.rmdir","path":"/docs/uploading"}
+{"ok":false,"error":"busy"}

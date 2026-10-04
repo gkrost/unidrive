@@ -315,6 +315,7 @@ class IpcContractCorpusTest {
         override suspend fun rmdir(path: String): RmdirResult = when (path) {
             "/docs/report.txt" -> RmdirResult.PathIsFile
             "/docs/nonempty" -> RmdirResult.NotEmpty
+            "/docs/uploading" -> RmdirResult.Busy
             else -> RmdirResult.Ok
         }
 
