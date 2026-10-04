@@ -90,9 +90,29 @@ sealed interface HydrationError {
         override val message: String = CANCELLED_TOKEN
     }
 
+    /**
+     * The stored object is shorter than the size the drive reports (#536) — a multipart upload
+     * another client truncated. The refusal is correct (the cloud copy cannot decrypt to a whole
+     * file), but it is not a gone file: its own wire form carries the STABLE token
+     * `remote_incomplete` plus the numbers, `remote_incomplete: got <stored> of <declared> bytes`.
+     * A mount crate matches tokens verbatim and falls to the EIO catch-all (correct: the download
+     * failed); a client column parses the prefix to say "the cloud copy is incomplete". The numbers
+     * are the stored object's bytes and the declared drive size, in bytes. Changing the token
+     * prefix breaks that contract.
+     */
+    data class RemoteIncomplete(
+        val storedBytes: Long,
+        val declaredBytes: Long,
+    ) : HydrationError {
+        override val message: String = "$REMOTE_INCOMPLETE_TOKEN: got $storedBytes of $declaredBytes bytes"
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
+
+        /** Wire token prefix for [RemoteIncomplete]; the numbers follow after ": got ". */
+        const val REMOTE_INCOMPLETE_TOKEN = "remote_incomplete"
 
         /** Wire token for [UnknownPath]; shared verbatim with the mount crate. */
         const val UNKNOWN_PATH_TOKEN = "unknown_path"
