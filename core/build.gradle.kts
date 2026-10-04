@@ -233,6 +233,19 @@ subprojects {
     tasks.withType<Test>().configureEach {
         jvmArgs("--enable-native-access=ALL-UNNAMED")
         finalizedBy(tasks.withType<JacocoReport>())
+        // #453: redirect the test JVM's home to the build dir. Tests that build a
+        // provider config without an explicit path (OneDriveConfig's default
+        // tokenPath, the XDG/user-dir resolvers, …) then read and write under
+        // build/test-home instead of the developer's real ~/.config/unidrive —
+        // a test run must never reset a real profile's delta cursor. The marker
+        // property is what the guard test (OneDriveTestHomeRedirectTest) asserts.
+        val testHome = layout.buildDirectory.dir("test-home").get().asFile.absolutePath
+        doFirst { java.io.File(testHome).mkdirs() }
+        // environment() does not unwrap providers (it stringified one into a
+        // literal directory name once) — eager values here.
+        environment("HOME", testHome)
+        systemProperty("user.home", testHome)
+        systemProperty("unidrive.test.home", testHome)
     }
 }
 
