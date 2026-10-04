@@ -586,8 +586,8 @@ class TrackingEngine(
                     // incomplete suppresses delete actions for it (no wrong-twin reap
                     // on a name the provider resolves arbitrarily). No migration: the
                     // tracking store is frozen; the standing detector is the guard.
-                    val prior = out[item.path]
-                    if (prior != null && prior.exists && !item.deleted && prior.remoteFileId != item.id) {
+                    val prior = out[item.path]?.takeIf { it.exists }
+                    if (prior != null && !item.deleted && prior.remoteFileId != item.id) {
                         log.warn(
                             "#401: two live remote items share the path {} (ids {} and {}); " +
                                 "marking this pass incomplete so deletes stay suppressed. " +

@@ -366,28 +366,6 @@ open class Main : Runnable {
         return warnings
     }
 
-    private fun requireEnv(
-        name: String,
-        usageBlock: String,
-    ): String =
-        System.getenv(name) ?: run {
-            System.err.println("Missing required environment variable: $name\n")
-            System.err.println(usageBlock)
-            System.exit(1)
-            throw IllegalStateException("unreachable")
-        }
-
-    private fun warnIfEnvSet(
-        envName: String,
-        profileName: String,
-    ) {
-        if (System.getenv(envName) != null) {
-            System.err.println("Warning: Profile '$profileName' has credentials in config.toml.")
-            System.err.println("Ignoring $envName environment variable. To use env vars instead,")
-            System.err.println("remove the credentials from config.toml.\n")
-        }
-    }
-
     class VersionProvider : CommandLine.IVersionProvider {
         override fun getVersion(): Array<String> = arrayOf("unidrive ${BuildInfo.versionString()}")
     }

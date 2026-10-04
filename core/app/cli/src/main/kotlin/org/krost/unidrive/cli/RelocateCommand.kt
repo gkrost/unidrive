@@ -33,9 +33,6 @@ class RelocateCommand : Runnable {
     @Option(names = ["--delete-source"], description = ["Delete source files after successful migration (requires confirmation)"])
     var deleteSource: Boolean = false
 
-    @Option(names = ["--buffer-mb"], description = ["Streaming buffer size in MB (default: 8)"])
-    var bufferMb: Int = 8
-
     @Option(
         names = ["--force"],
         description = [
@@ -130,7 +127,6 @@ class RelocateCommand : Runnable {
             CloudRelocator(
                 source = fromProviderObj,
                 target = toProviderObj,
-                bufferSize = bufferMb.toLong() * 1024 * 1024,
                 skipExisting = !force,
                 maxConcurrentTransfers = maxConcurrent,
             )
@@ -229,7 +225,6 @@ class RelocateCommand : Runnable {
         println("\nStarting migration...")
         println("  from: $fromProvider:$sourcePath")
         println("  to:   $toProvider:$targetPath")
-        println("  buffer: $bufferMb MB")
         println()
 
         // UD-269: register a shutdown hook so CTRL-C / SIGTERM produces a

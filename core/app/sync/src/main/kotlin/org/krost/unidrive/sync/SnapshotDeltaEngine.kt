@@ -1,3 +1,5 @@
+@file:Suppress("MatchingDeclarationName")
+
 package org.krost.unidrive.sync
 
 import kotlinx.serialization.KSerializer
@@ -19,6 +21,11 @@ import org.krost.unidrive.DeltaPage
  * providers that need a non-default id (S3 uses `api.pathToKey(path)`,
  * not the raw path) still pass an explicit `deletedItem` lambda to
  * [computeSnapshotDelta].
+ *
+ * The file-level MatchingDeclarationName suppress: the file is named for
+ * its engine function [computeSnapshotDelta], which the rule cannot see —
+ * it only matches class-like declarations, and renaming the file after
+ * the supporting interface would misname it.
  */
 interface SnapshotEntry {
     val isFolder: Boolean

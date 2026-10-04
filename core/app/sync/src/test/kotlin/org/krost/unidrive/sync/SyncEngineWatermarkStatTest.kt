@@ -51,7 +51,7 @@ class SyncEngineWatermarkStatTest {
     // Edits the file being uploaded while the (fake) transfer is in flight and
     // moves its mtime clearly past the pre-upload stat, so mtime granularity
     // cannot hide the difference.
-    private fun editDuringUpload(engine: SyncEngine, newContent: String, newMtime: Long) {
+    private fun editDuringUpload(newContent: String, newMtime: Long) {
         provider.duringUpload = { path ->
             Files.writeString(path, newContent)
             Files.setLastModifiedTime(path, FileTime.fromMillis(newMtime))
@@ -92,7 +92,7 @@ class SyncEngineWatermarkStatTest {
             val file = syncRoot.resolve("doc.txt")
             Files.writeString(file, "first version")
             Files.setLastModifiedTime(file, FileTime.fromMillis(1_000_000_000L))
-            editDuringUpload(engine, "edited version", 1_000_060_000L)
+            editDuringUpload("edited version", 1_000_060_000L)
 
             engine.syncOnce()
 
@@ -164,7 +164,7 @@ class SyncEngineWatermarkStatTest {
                 )
             provider.deltaItems = listOf(deletedItem)
             provider.deltaCursor = "cursor-tombstone"
-            editDuringUpload(engine, "edited during the conflict upload", editedMtime + 60_000L)
+            editDuringUpload("edited during the conflict upload", editedMtime + 60_000L)
 
             engine.syncOnce()
 
@@ -197,7 +197,7 @@ class SyncEngineWatermarkStatTest {
             Files.writeString(cacheCopy, "first version")
             val preUploadMtime = Files.getLastModifiedTime(cacheCopy).toMillis()
 
-            editDuringUpload(engine, "edited version", preUploadMtime + 60_000L)
+            editDuringUpload("edited version", preUploadMtime + 60_000L)
             engine.uploadFromCache("/local.txt", cacheCopy)
 
             val row = assertNotNull(db.getEntry("/local.txt"))

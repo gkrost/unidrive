@@ -4,7 +4,6 @@ import org.krost.unidrive.sync.ProgressReporter
 import java.util.Locale
 
 class CliProgressReporter(
-    private val verbose: Boolean = false,
     private val dryRun: Boolean = false,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ProgressReporter {
@@ -269,15 +268,6 @@ class CliProgressReporter(
         System.err.println("  WARN: $message")
     }
 
-    // UD-408: commitInline is no longer needed — printInline now lands a real
-    // line per call (no mid-line cursor state to commit). The companion-stub
-    // is left so any external caller that referenced it still compiles, but
-    // the body is a no-op.
-    @Suppress("UNUSED")
-    private fun commitInline() {
-        // intentionally empty — see UD-408
-    }
-
     // UD-757: format M:SS for under one hour, H:MM:SS above. Shared by both
     // the elapsed and ETA segments of the scan-progress line so the two
     // numbers are visually parallel ("0:18 · ETA 1:02").
@@ -330,15 +320,14 @@ class CliProgressReporter(
         if (lastSecs == null || lastSecs <= 0) return null
         val wallClockRemaining = lastSecs - elapsedSecs
 
+        val progressFraction: Double? =
+            if (lastCount != null && lastCount > 0 && currentCount > 0) {
+                currentCount.toDouble() / lastCount
+            } else {
+                null
+            }
         val countAwareRemaining: Long? =
-            if (
-                lastCount != null &&
-                lastCount > 0 &&
-                currentCount > 0 &&
-                currentCount.toDouble() / lastCount >= 0.05 &&
-                elapsedSecs >= 1
-            ) {
-                val progressFraction = currentCount.toDouble() / lastCount
+            if (progressFraction != null && progressFraction >= 0.05 && elapsedSecs >= 1) {
                 val estimatedTotalSec = (elapsedSecs / progressFraction).toLong()
                 (estimatedTotalSec - elapsedSecs).coerceAtLeast(0)
             } else {

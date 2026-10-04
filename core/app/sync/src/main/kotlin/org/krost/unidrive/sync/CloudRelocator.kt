@@ -71,7 +71,6 @@ sealed class MigrateEvent {
 class CloudRelocator(
     private val source: CloudProvider,
     private val target: CloudProvider,
-    private val bufferSize: Long = 8 * 1024 * 1024,
     private val skipExisting: Boolean = true,
     /**
      * UD-289: maximum number of files transferred in parallel during the

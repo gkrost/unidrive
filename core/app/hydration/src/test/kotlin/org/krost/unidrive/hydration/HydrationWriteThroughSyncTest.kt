@@ -130,7 +130,7 @@ class HydrationWriteThroughSyncTest {
         }
 
     /** create + write the cache + open_write, drained to upload and mirror. */
-    private suspend fun TestScope.writeThroughMount(env: Env, hydration: Hydration, path: String): Path {
+    private suspend fun TestScope.writeThroughMount(hydration: Hydration, path: String): Path {
         val created = hydration.create("conn", "h-create", path)
         assertTrue(created is CreateResult.Ok, "expected Ok, got $created")
         Files.write(created.cachePath, "bytes of $path".toByteArray())
@@ -150,7 +150,7 @@ class HydrationWriteThroughSyncTest {
             val env = freshEnv()
             val hydration = HydrationImpl(env.engine, env.db, recoveryUploadScope = this)
             env.engine.syncOnce()
-            writeThroughMount(env, hydration, "/doomed.txt")
+            writeThroughMount(hydration, "/doomed.txt")
             val mirror = env.syncRoot.resolve("doomed.txt")
             assertTrue(Files.isRegularFile(mirror), "precondition: the write was mirrored")
 
@@ -193,7 +193,7 @@ class HydrationWriteThroughSyncTest {
             val env = freshEnv()
             val hydration = HydrationImpl(env.engine, env.db, recoveryUploadScope = this)
             env.engine.syncOnce()
-            writeThroughMount(env, hydration, "/a.txt")
+            writeThroughMount(hydration, "/a.txt")
             assertTrue(Files.isRegularFile(env.syncRoot.resolve("a.txt")), "precondition: the write was mirrored")
 
             assertEquals(RenameResult.Ok, hydration.rename("/a.txt", "/b.txt"))

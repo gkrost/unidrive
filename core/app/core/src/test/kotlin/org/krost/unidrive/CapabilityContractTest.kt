@@ -17,19 +17,6 @@ import kotlin.test.assertTrue
  * [CapabilityResult.Success] when it does declare the capability.
  */
 class CapabilityContractTest {
-    private val stubItem =
-        CloudItem(
-            id = "1",
-            name = "f",
-            path = "/f",
-            size = 0,
-            isFolder = false,
-            modified = Instant.EPOCH,
-            created = Instant.EPOCH,
-            hash = null,
-            mimeType = null,
-        )
-
     private class CapableProvider : CloudProvider {
         override val id = "capable"
         override val displayName = "Capable"

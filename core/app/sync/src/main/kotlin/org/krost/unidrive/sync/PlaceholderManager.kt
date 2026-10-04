@@ -46,8 +46,11 @@ fun safeResolveLocal(
         // NFD); a pure-ASCII name has no decomposed variant, so skip the O(n) parent
         // scan for it — that keeps a bulk download of ASCII-named files from going
         // O(n²) (every not-yet-created target would otherwise scan the growing dir).
-        if (parent != null && leaf != null && leaf.any { it.code > 0x7F } && Files.isDirectory(parent)) {
-            val leafNfc = PathNormalizer.nfc(leaf)
+        // A null leaf behaves like an empty one below: no non-ASCII chars, so the
+        // NFC lookup is skipped for it.
+        val nonAsciiLeafName = leaf.orEmpty().any { it.code > 0x7F }
+        if (parent != null && nonAsciiLeafName && Files.isDirectory(parent)) {
+            val leafNfc = PathNormalizer.nfc(leaf.orEmpty())
             val match =
                 runCatching {
                     Files.newDirectoryStream(parent).use { ds ->

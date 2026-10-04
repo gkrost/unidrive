@@ -74,11 +74,6 @@ class RelocateCommandTest {
         assertTrue("--target-path" in options)
     }
 
-    @Test
-    fun `--buffer-mb option is registered`() {
-        val options = relocateCmd.commandSpec.options().map { it.longestName() }
-        assertTrue("--buffer-mb" in options)
-    }
 
     @Test
     fun `--force flag is registered`() {

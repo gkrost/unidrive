@@ -54,7 +54,6 @@ class OneDriveExpiryTest {
     fun `createSharingLink signature accepts expiryHours parameter`() {
         val method = GraphApiService::class.java.declaredMethods.find { it.name == "createSharingLink" }
         assertNotNull(method, "GraphApiService should have createSharingLink method")
-        val paramNames = method.parameters.map { it.name }
         assertTrue(
             method.parameterCount >= 4,
             "createSharingLink should have at least 4 parameters (including continuation), has ${method.parameterCount}",

@@ -100,14 +100,6 @@ class InternxtCreateCollisionTest {
     private val localFileId = "local-bucket-entry-id"       // what we just uploaded
     private val remoteFileId = "remote-bucket-entry-different" // a DIFFERENT remote content
 
-    private fun uploadPreambleRoutes(
-        request: io.ktor.client.request.HttpRequestData,
-        startCalls: AtomicInteger,
-        putCalls: AtomicInteger,
-        finishCalls: AtomicInteger,
-    ): io.ktor.client.engine.mock.MockRequestHandleScope.() -> io.ktor.client.engine.mock.MockRequestHandleScope.() -> Unit =
-        { -> { -> } } // unused — inlined below for readability
-
     // -------------------------------------------------------------------------
     // TEST 1 (non-negotiable regression guard)
     // -------------------------------------------------------------------------

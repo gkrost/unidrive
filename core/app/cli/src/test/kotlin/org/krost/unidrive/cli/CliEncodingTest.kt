@@ -91,7 +91,7 @@ class CliEncodingTest {
         val originalOut = System.out
         System.setOut(PrintStream(buffer, true, chosen))
         try {
-            val reporter = CliProgressReporter(verbose = false, dryRun = true)
+            val reporter = CliProgressReporter(dryRun = true)
             reporter.onActionCount(1558, preFilterTotal = 1558, filterReason = null)
             reporter.onActionProgress(5, 1558, "mkdir", name)
         } finally {
