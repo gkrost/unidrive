@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.ProviderMetadata
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isProfileAuthenticated
@@ -33,6 +34,15 @@ class ProfileCommand : Runnable {
 
 // ── profile add ──────────────────────────────────────────────────────────────
 
+/**
+ * The "no account yet?" lines the wizard prints for a provider that carries an affiliate link (Internxt's referral link);
+ * empty for the others. Only the create path (`profile add`) asks for it, so a re-auth of an existing profile stays silent.
+ */
+internal fun newAccountHint(metadata: ProviderMetadata?): List<String> {
+    val url = metadata?.affiliateUrl ?: return emptyList()
+    return listOf("No ${metadata.displayName} account yet? Creating one through this link supports the project:", "  $url")
+}
+
 @Command(name = "add", description = ["Add a new provider profile (interactive wizard)"], mixinStandardHelpOptions = true)
 class ProfileAddCommand : Runnable {
     @ParentCommand
@@ -59,6 +69,12 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
         val type = types[choice!! - 1]
+        val accountHint = newAccountHint(org.krost.unidrive.ProviderRegistry.getMetadata(type))
+        if (accountHint.isNotEmpty()) {
+            println()
+            accountHint.forEach { println(it) }
+            println()
+        }
 
         // Step 2: Profile name
         print("Profile name [$type]: ")

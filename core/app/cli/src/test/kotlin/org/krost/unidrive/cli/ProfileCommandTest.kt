@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isValidProfileName
@@ -250,5 +251,26 @@ class ProfileCommandTest {
                 """.trimIndent(),
             )
         assertNull(SyncConfig.detectDuplicateSyncRoots(raw))
+    }
+
+    // ── New-account hint (#457) ──────────────────────────────────────────────
+
+    @Test
+    fun `the new-account hint for Internxt carries the referral link`() {
+        val hint = newAccountHint(ProviderRegistry.getMetadata("internxt"))
+        assertEquals(2, hint.size, "one sentence and the link: $hint")
+        assertContains(hint[0], "Internxt Drive")
+        assertEquals("  https://internxt.cello.so/wboSPv4MM19", hint[1])
+    }
+
+    @Test
+    fun `providers without an affiliate link print no hint`() {
+        for (id in listOf("onedrive", "localfs")) {
+            val metadata = ProviderRegistry.getMetadata(id)
+            assertNotNull(metadata, "$id is registered")
+            assertNull(metadata.affiliateUrl, "$id has no affiliate link")
+            assertTrue(newAccountHint(metadata).isEmpty(), "$id prints no hint")
+        }
+        assertTrue(newAccountHint(null).isEmpty(), "an unknown provider prints no hint")
     }
 }

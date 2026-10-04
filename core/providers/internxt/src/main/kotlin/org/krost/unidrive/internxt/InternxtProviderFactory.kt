@@ -29,7 +29,8 @@ class InternxtProviderFactory : ProviderFactory {
             tier = "EU-hosted",
             userRating = 4.3,
             benchmarkGrade = "C",
-            affiliateUrl = "https://internxt.com",
+            // #457: the wizard for a NEW profile prints this ("no account yet?"); a sign-up through it credits the project.
+            affiliateUrl = "https://internxt.cello.so/wboSPv4MM19",
             // UD-263: matches the official Internxt SDK's 2-drive Bottleneck
             // pacer. The encryption-vs-retry boundary in the 5-stage upload
             // pipeline (audit §4.3) makes higher concurrency dangerous —
