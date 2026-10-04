@@ -1595,13 +1595,16 @@ class InternxtProvider(
         val scopeRoots = scanContext?.scopeRoots.orEmpty()
         val onProgress = scanContext?.onProgress
         if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress)
-        // #517 R3: once a gather ended in an unavailable account-wide listing, later
-        // gathers skip the doomed attempt for a while — with the listing watchdog at
+        // #517 R3: once a full gather ended in an unavailable account-wide listing, later
+        // full gathers skip the doomed attempt for a while — with the listing watchdog at
         // 330 s even one doomed attempt is minutes of heavy load the walk was going
         // to replace anyway (the live account re-bought it every ~7 min for 4 h).
+        // Full gathers only: an incremental poll is one cheap updatedAt-filtered query,
+        // the walk in its place costs a whole enumeration, and a first sync that ended
+        // in the walk would be followed by a second walk at its first poll.
         // In-process on purpose: a restart pays one attempt to re-learn what the
         // engine's enumerate_failure_streak already covers on the poll cadence.
-        if (Instant.now().isBefore(heavyListingsUnavailableUntil.get())) {
+        if (cursor == null && Instant.now().isBefore(heavyListingsUnavailableUntil.get())) {
             log.warn(
                 "Account-wide listings unavailable until {}; walking the folder tree directly{}",
                 heavyListingsUnavailableUntil.get(),
@@ -1745,14 +1748,15 @@ class InternxtProvider(
             }
         } catch (e: InternxtApiException) {
             if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
-            heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
+            // Only a full gather opens the window: a failing poll falls back to the walk, as it always
+            // did, but must not make the full gathers after it skip the account-wide listings.
+            if (cursor == null) heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
             log.warn(
-                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}; " +
-                    "skipping the account-wide attempt until {}",
+                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}{}",
                 e.statusCode,
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
-                heavyListingsUnavailableUntil.get(),
+                if (cursor == null) "; skipping the account-wide attempt until ${heavyListingsUnavailableUntil.get()}" else "",
             )
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
@@ -2180,9 +2184,9 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicInteger(0)
 
-    // #517 R3: until when a gather should skip the account-wide listings and walk
-    // the folder tree straight away. Set for LISTING_UNAVAILABLE_TTL when a gather
-    // ends in an unavailable account-wide listing; nothing reads it before then.
+    // #517 R3: until when a full gather should skip the account-wide listings and walk
+    // the folder tree straight away. Set for LISTING_UNAVAILABLE_TTL when a full gather
+    // ends in an unavailable account-wide listing; only full gathers read it.
     private val heavyListingsUnavailableUntil =
         java.util.concurrent.atomic
             .AtomicReference(java.time.Instant.MIN)
@@ -2290,7 +2294,7 @@ class InternxtProvider(
         // request-shape problem a walk cannot fix: it ends the attempt with the marker intact.
         private fun isServerSideListingFailure(statusCode: Int): Boolean = statusCode >= 500 || statusCode == 0
 
-        // #517 R3: how long a gather remembers an unavailable account-wide listing
+        // #517 R3: how long a full gather remembers an unavailable account-wide listing
         // before it pays one attempt to re-learn. The live account cycled the doomed
         // attempt every ~7 min for over 4 h; 30 min cuts that to ~8 attempts a day
         // while still re-trying often enough to notice a recovery.
