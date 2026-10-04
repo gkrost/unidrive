@@ -1607,7 +1607,9 @@ open class SyncEngine(
                 return LocalRescanResult(notRun = true)
             }
             val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
-            val changes = scanner.scan()
+            // #552: the pass only looks at NEW and MODIFIED, so it does not ask the scanner for deletions: that
+            // would check every cloud-only row against the exclude patterns and the file system, for nothing.
+            val changes = scanner.scan(detectDeletions = false)
             val newFolders = ArrayList<String>()
             val candidates = LinkedHashSet<String>()
             for ((path, state) in changes) {
@@ -1625,14 +1627,15 @@ open class SyncEngine(
                 }
             }
             // A first upload that failed leaves a pending row the scanner no longer reports.
-            for (entry in db.getAllEntries()) {
-                if (entry.isFolder || !entry.isPendingUpload) continue
-                if (isExcludedPath(entry.path) || isOutOfScope(entry.path) || !SyncScope.contains(entry.path, syncPaths)) continue
-                val local = runCatching { placeholder.resolveLocal(entry.path) }.getOrNull()
+            // pendingUploadPaths() is the SQL form of "file row, never uploaded, hydrated": a few rows instead of
+            // every row of state.db parsed (#552).
+            for (path in db.pendingUploadPaths()) {
+                if (isExcludedPath(path) || isOutOfScope(path) || !SyncScope.contains(path, syncPaths)) continue
+                val local = runCatching { placeholder.resolveLocal(path) }.getOrNull()
                 if (local == null) {
-                    log.warn("#526: rescan skipped pending row with an invalid local name: {}", entry.path)
+                    log.warn("#526: rescan skipped pending row with an invalid local name: {}", path)
                 } else if (Files.isRegularFile(local, noFollow)) {
-                    candidates.add(entry.path)
+                    candidates.add(path)
                 }
             }
             var uploaded = 0

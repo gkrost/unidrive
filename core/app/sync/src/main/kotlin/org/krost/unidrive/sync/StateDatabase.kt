@@ -1056,8 +1056,10 @@ class StateDatabase(
         val out = mutableListOf<String>()
         conn.createStatement().use { stmt ->
             val rs = stmt.executeQuery(
+                // GLOB, not LIKE (#552): it is case-sensitive like the `startsWith("local:")` the rest of the code
+                // uses for the synthetic, and it can walk the remote_id index from 'local:' on instead of every row.
                 "SELECT path FROM sync_entries WHERE status='EXISTS' " +
-                    "AND remote_id LIKE 'local:%' AND is_folder=0 AND is_hydrated<>0 " +
+                    "AND remote_id GLOB 'local:*' AND is_folder=0 AND is_hydrated<>0 " +
                     "ORDER BY path",
             )
             while (rs.next()) out += rs.getString(1)

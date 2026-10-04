@@ -87,15 +87,30 @@ class LocalScanner(
 
     private fun isExcluded(relativePath: String): Boolean = excludePatterns.any { pattern -> Reconciler.matchesGlob(relativePath, pattern) }
 
-    fun scan(onProgress: ((Int) -> Unit)? = null): Map<String, ChangeState> {
+    /**
+     * Walks the sync root and reports what differs from state.db.
+     *
+     * With [detectDeletions] (a full sync) every alive row the walk did not see is also checked against
+     * the file system and reported as DELETED, which loads all rows once and costs one exclude-pattern
+     * run and a file-system call per row. The daemon's rescan (#504, #552) only uploads and never acts on
+     * a deletion, so it passes `false`: rows are then looked up by path for the files the walk visits,
+     * and the cost follows the files on disk instead of the rows in state.db.
+     */
+    fun scan(
+        detectDeletions: Boolean = true,
+        onProgress: ((Int) -> Unit)? = null,
+    ): Map<String, ChangeState> {
         val changes = mutableMapOf<String, ChangeState>()
         blockedPaths.clear()
         blockedKeys.clear()
         val seenPaths = mutableSetOf<String>()
         var skipped = 0
 
-        // Load all DB entries once — avoids N+1 queries during file tree walk
-        val dbEntries = db.getAllEntries().associateBy { it.path }
+        // Load all DB entries once — avoids N+1 queries during file tree walk. Without deletion detection the
+        // walk asks for the few rows it needs instead (#552).
+        val dbEntries = if (detectDeletions) db.getAllEntries().associateBy { it.path } else null
+
+        fun knownEntry(path: String): SyncEntry? = if (dbEntries != null) dbEntries[path] else db.getEntry(path)
 
         // UD-742 / UD-352: heartbeat — fire onProgress every 5000 items OR
         // every 10s wall-clock since the last fire, whichever comes first.
@@ -140,7 +155,7 @@ class LocalScanner(
                     seenPaths.add(relativePath)
                     visited++
 
-                    val entry = dbEntries[relativePath]
+                    val entry = knownEntry(relativePath)
                     if (entry == null) {
                         changes[relativePath] = ChangeState.NEW
                         // UD-901: write a pending-upload row immediately so the file's
@@ -252,7 +267,7 @@ class LocalScanner(
                     refuseNfcTwins(dir)
                     seenPaths.add(relativePath)
 
-                    if (dbEntries[relativePath] == null) {
+                    if (knownEntry(relativePath) == null) {
                         changes[relativePath] = ChangeState.NEW
                     }
                     return FileVisitResult.CONTINUE
@@ -284,14 +299,16 @@ class LocalScanner(
 
         lastScanSkipped = skipped
 
-        for (entry in dbEntries.values) {
-            if (entry.path !in seenPaths) {
-                if (isExcluded(entry.path)) continue
-                if (!onScopePath(entry.path)) continue
-                if (underBlockedKey(entry.path)) continue
-                val localPath = safeResolveLocal(syncRoot, entry.path)
-                if (!Files.exists(localPath)) {
-                    changes[entry.path] = ChangeState.DELETED
+        if (dbEntries != null) {
+            for (entry in dbEntries.values) {
+                if (entry.path !in seenPaths) {
+                    if (isExcluded(entry.path)) continue
+                    if (!onScopePath(entry.path)) continue
+                    if (underBlockedKey(entry.path)) continue
+                    val localPath = safeResolveLocal(syncRoot, entry.path)
+                    if (!Files.exists(localPath)) {
+                        changes[entry.path] = ChangeState.DELETED
+                    }
                 }
             }
         }
