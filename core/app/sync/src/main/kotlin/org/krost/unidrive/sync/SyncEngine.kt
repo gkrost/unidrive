@@ -2075,6 +2075,7 @@ open class SyncEngine(
             val (remoteMap, actions) =
                 gatherStreamingChanges(
                     localChanges = localChangesPre,
+                    scope = runScope,
                     downloaded = downloaded,
                     uploaded = uploaded,
                     transferFailures = transferFailures,
@@ -3390,6 +3391,7 @@ open class SyncEngine(
 
     private suspend fun gatherStreamingChanges(
         localChanges: Map<String, ChangeState>,
+        scope: List<String>,
         downloaded: AtomicInteger,
         uploaded: AtomicInteger,
         transferFailures: AtomicInteger,
@@ -3623,7 +3625,7 @@ open class SyncEngine(
                             reconciler.resolveSlice(
                                 pageSlice.slice,
                                 localChanges,
-                                syncPaths,
+                                scope,
                                 pageSlice.stableRemoteTopLevelNames,
                                 downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
                             )

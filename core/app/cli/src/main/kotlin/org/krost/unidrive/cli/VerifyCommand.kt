@@ -60,7 +60,6 @@ class VerifyCommand : Callable<Int> {
             "Audit only a subtree, e.g. --sync-path /Documents. Repeatable. The remote walk starts " +
                 "inside the scope instead of listing the whole drive (#532: 170 folder listings in 150 s).",
         ],
-        arity = "1..*",
     )
     var syncPaths: MutableList<String> = mutableListOf()
 
