@@ -43,6 +43,8 @@ The user's mid-term plan retires the legacy `SyncEngine` once the tracking-set e
 
 ## 2. Goals & non-goals
 
+> **Superseded in part (2026-10-05), see [`docs/adr/independent-profiles.md`](../../adr/independent-profiles.md) and #560.** One mode per profile (G1, NG2) stays. First-writer-wins (G3) and "no profile-level mode flag" (NG3) are replaced by an explicit `mode = mirror | mount` per profile; a mirror and a mount on the same account are two profiles. The coordinated behaviour decided in unidrive-windows#84 (cache ⇄ `sync_root` mirroring, the #459 guard, the daemon's `sync_root` rescan) still runs until the #560 cutover lands.
+
 **Goal G1:** A profile can be in `sync` mode (legacy `SyncEngine` mirror under `~/Onedrive/`) OR `mount` mode (FUSE on-demand view), never both simultaneously.
 
 **Goal G2:** The second mode launched fails fast with an actionable error naming the holder's mode + PID + the command to stop it.
