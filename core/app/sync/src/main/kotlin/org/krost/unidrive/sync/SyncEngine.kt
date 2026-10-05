@@ -1211,9 +1211,12 @@ open class SyncEngine(
     // #449 review fix: the remote path is gone and its row tombstoned — the sync-root
     // mirror must not survive them, or the next scan reads the orphan file as NEW and
     // re-uploads the path the user just deleted (a resurrection through the mirror).
-    // A row whose baseline is the cache copy (cacheBacked == true: a failed or skipped
-    // mirror) has no sync-root file by definition, so the delete is a no-op there and
-    // legacy rows (null) are covered too. A folder's empty mirror directory goes with
+    // A file goes only when it is the copy the row describes (#568): a row whose
+    // baseline is the cache copy (cacheBacked == true) got no mirror because the sync
+    // root held a DIFFERENT, unsynced version (#423/#427), and a mirrored file the user
+    // edited since no longer matches its baseline. Either is the only copy of an edit:
+    // it stays, and the next sync uploads it as new — the deleted path coming back is
+    // the price of never losing that edit. A folder's empty mirror directory goes with
     // it (a non-empty one holds files of rows that are not deleted — deleteIfExists
     // refuses it, and that is correct). Files the caller removed already (a mount
     // unlink evicts its own copies, a sync-root-side delete is what triggered this)
@@ -1224,6 +1227,12 @@ open class SyncEngine(
         entryBefore: SyncEntry?,
     ) {
         if (entryBefore == null) return
+        if (!entryBefore.isFolder && (entryBefore.cacheBacked == true || !rowDescribesSyncRootFile(entryBefore, path))) {
+            if (runCatching { Files.isRegularFile(placeholder.resolveLocal(path)) }.getOrDefault(false)) {
+                log.warn("#568: kept the sync-root file of the deleted {}: it is not the synced copy (an unsynced edit)", path)
+            }
+            return
+        }
         runCatching {
             val target = placeholder.resolveLocal(path)
             withEchoSuppression(path) {
