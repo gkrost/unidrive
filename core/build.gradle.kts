@@ -322,6 +322,63 @@ tasks.register<JacocoReport>("jacocoMergedReport") {
     }
 }
 
+// #560 (4A.5): module dependency edges between our own modules, main source
+// sets only. A cloud provider implements the SPI in :app:core and must not
+// reach into the sync engine, the mount, or the CLI; :app:sync-tracking
+// implements the CLI extension SPI (:app:cli-spi) and must not depend on the
+// CLI that loads it. Wired into every module's `check`. Run with --info to
+// print the graph.
+val mainProjectEdges: () -> Map<String, Set<String>> = {
+    val mainConfigs = setOf("api", "implementation", "compileOnly", "runtimeOnly")
+    subprojects.associate { sp ->
+        sp.path to sp.configurations
+            .filter { it.name in mainConfigs }
+            .flatMap { c -> c.dependencies.withType<ProjectDependency>().map { it.path } }
+            .toSortedSet()
+    }
+}
+
+tasks.register("checkModuleEdges") {
+    group = "verification"
+    description = "Fails on a forbidden module dependency edge (#560) or a cycle between modules."
+    doLast {
+        val edges = mainProjectEdges()
+        edges.toSortedMap().forEach { (from, to) ->
+            if (to.isNotEmpty()) logger.info("module edge: $from -> ${to.joinToString(", ")}")
+        }
+        val violations = mutableListOf<String>()
+        edges.forEach { (from, to) ->
+            if (from.startsWith(":providers:")) {
+                (to - ":app:core").forEach { violations += "$from -> $it (a provider may depend only on :app:core)" }
+            }
+            if (from == ":app:sync-tracking" && ":app:cli" in to) {
+                violations += "$from -> :app:cli (the extension depends on :app:cli-spi, the CLI loads it at runtime)"
+            }
+        }
+        // Cycle check (depth-first, three colours).
+        val state = mutableMapOf<String, Int>()
+        fun visit(node: String, trail: List<String>) {
+            when (state[node]) {
+                1 -> violations += "cycle: ${(trail.dropWhile { it != node } + node).joinToString(" -> ")}"
+                2 -> return
+                else -> {
+                    state[node] = 1
+                    edges[node].orEmpty().forEach { visit(it, trail + node) }
+                    state[node] = 2
+                }
+            }
+        }
+        edges.keys.sorted().forEach { visit(it, emptyList()) }
+        if (violations.isNotEmpty()) {
+            throw GradleException("Forbidden module dependency edges:\n  " + violations.joinToString("\n  "))
+        }
+    }
+}
+
+subprojects {
+    tasks.matching { it.name == "check" }.configureEach { dependsOn(":checkModuleEdges") }
+}
+
 tasks.register("generateNotice") {
     dependsOn(":app:cli:shadowJar")
     doLast {
