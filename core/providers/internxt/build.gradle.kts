@@ -9,7 +9,6 @@ kotlin {
 
 dependencies {
     implementation(project(":app:core"))
-    implementation(project(":app:sync"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
@@ -28,6 +27,9 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
+    // InternxtSmokeLiveTest drives a real SyncEngine against the provider;
+    // main sources depend only on :app:core (#560).
+    testImplementation(project(":app:sync"))
     // UD-203: MockEngine for request-id propagation tests.
     testImplementation(libs.ktor.client.mock)
 }

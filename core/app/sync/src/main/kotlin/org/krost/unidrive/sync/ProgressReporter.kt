@@ -66,7 +66,7 @@ interface ProgressReporter {
     /**
      * UD-240g: progress heartbeat for the reconcile phase. Fired by
      * [Reconciler.reconcile] every 5k iterations / 10s wall-clock (see
-     * [ScanHeartbeat]) so the CLI / IPC clients show movement instead of
+     * [org.krost.unidrive.ScanHeartbeat]) so the CLI / IPC clients show movement instead of
      * looking hung. On a 67k-local + 19k-remote first-sync the pre-fix
      * reconcile was many seconds of total silence; this event closes the
      * UX gap symmetric to [onScanProgress].

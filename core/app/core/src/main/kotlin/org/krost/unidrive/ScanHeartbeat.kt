@@ -1,4 +1,4 @@
-package org.krost.unidrive.sync
+package org.krost.unidrive
 
 /**
  * Heartbeat helper for long-running scans.
@@ -16,6 +16,10 @@ package org.krost.unidrive.sync
  * cross-provider remote-scan heartbeat (UD-352) and the local-scan heartbeat
  * stay in sync. Tests can inject [clock] for deterministic time-threshold
  * assertions.
+ *
+ * Lives in `:app:core` next to the [CloudProvider] SPI (#560, moved from
+ * `org.krost.unidrive.sync`) so a provider can use it without depending on
+ * the sync engine.
  *
  * Not thread-safe: each scan should own its own instance.
  */

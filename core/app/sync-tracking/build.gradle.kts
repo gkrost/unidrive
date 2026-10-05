@@ -8,9 +8,10 @@ kotlin {
 
 dependencies {
     implementation(project(":app:core"))
-    implementation(project(":app:cli"))
-    // SyncConfig data type returned by CliServices.loadSyncConfig() lives in :app:sync.
-    // If a future change lifts SyncConfig to :app:core, this dep goes away.
+    // The CliExtension SPI this module implements; the CLI loads it at runtime (#560).
+    implementation(project(":app:cli-spi"))
+    // TrackingEngine uses the sync engine's types, and the SyncConfig returned
+    // by CliServices.loadSyncConfig() lives in :app:sync.
     implementation(project(":app:sync"))
 
     implementation(libs.kotlinx.coroutines.core)

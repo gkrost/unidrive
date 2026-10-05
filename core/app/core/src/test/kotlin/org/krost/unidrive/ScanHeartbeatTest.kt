@@ -1,4 +1,4 @@
-package org.krost.unidrive.sync
+package org.krost.unidrive
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
