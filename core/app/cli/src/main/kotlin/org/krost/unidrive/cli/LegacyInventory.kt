@@ -169,7 +169,7 @@ internal object LegacyInventory {
 
     fun collect(inputs: Inputs): Outcome {
         val lock = ProcessLock(inputs.profileDir.resolve(".lock"))
-        val hold = lock.tryHoldReadOnly() ?: return Outcome.Refused(heldMessage(inputs.profileName, lock.readHolderInfo()))
+        val hold = lock.tryHoldReadOnly() ?: return Outcome.Refused(heldMessage(inputs.profileName, lock.readLiveHolderInfo()))
         try {
             val lockFacts = LockFacts(Files.exists(inputs.profileDir.resolve(".lock")), lock.readHolderPid())
             val rows =

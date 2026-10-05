@@ -168,6 +168,18 @@ class ProcessLock(
         }.getOrNull()
 
     /**
+     * [readHolderInfo], but only while that PID is alive. The PID file is stamped by `sync`/`daemon` and removed on a
+     * clean unlock; after a crash it stays, and a holder that writes no PID (the read-only hold of #560 U5a) leaves the
+     * previous run's file in place. A contention message built on a dead PID names the wrong holder, and its
+     * `taskkill`/`kill` hint can hit an unrelated process that reused the PID. Null here means "someone holds the lock,
+     * identity unknown".
+     */
+    fun readLiveHolderInfo(): HolderInfo? =
+        readHolderInfo()?.takeIf { info ->
+            runCatching { ProcessHandle.of(info.pid).map { it.isAlive }.orElse(false) }.getOrDefault(false)
+        }
+
+    /**
      * Release the lock and close the underlying file channel.
      * Idempotent.
      */

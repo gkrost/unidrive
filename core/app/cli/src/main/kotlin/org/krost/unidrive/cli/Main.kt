@@ -560,7 +560,7 @@ open class Main : Runnable {
         val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.SYNC)) {
             val profile = resolveCurrentProfile()
-            val holder = lock.readHolderInfo()
+            val holder = lock.readLiveHolderInfo()
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"
@@ -607,7 +607,7 @@ open class Main : Runnable {
         val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.DAEMON)) {
             val profile = resolveCurrentProfile()
-            val holder = lock.readHolderInfo()
+            val holder = lock.readLiveHolderInfo()
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"

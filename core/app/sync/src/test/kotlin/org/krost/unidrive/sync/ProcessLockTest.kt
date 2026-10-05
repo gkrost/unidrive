@@ -148,6 +148,28 @@ class ProcessLockTest {
         }
     }
 
+    // #570 review: a crash leaves the PID file of the last holder behind, and the read-only hold writes none. A
+    // contention message must not name that dead PID (its kill hint could hit an unrelated process reusing it).
+    @Test
+    fun read_live_holder_info_ignores_a_dead_pid_left_by_a_crash() {
+        val lockFile = Files.createTempFile("live-holder", ".lock")
+        val reader = ProcessLock(lockFile)
+        try {
+            val exited = ProcessBuilder(if (System.getProperty("os.name").lowercase().contains("win")) listOf("cmd", "/c", "exit") else listOf("true")).start()
+            exited.waitFor()
+            val deadPid = exited.pid()
+            Files.writeString(reader.pidFile, "$deadPid daemon\n")
+            assertNotNull(reader.readHolderInfo(), "precondition: the stale file parses")
+            assertEquals(null, reader.readLiveHolderInfo(), "a dead PID is not reported as the holder")
+
+            Files.writeString(reader.pidFile, "${ProcessHandle.current().pid()} daemon\n")
+            assertEquals(ProcessHandle.current().pid(), reader.readLiveHolderInfo()?.pid, "a live PID still is")
+        } finally {
+            Files.deleteIfExists(reader.pidFile)
+            Files.deleteIfExists(lockFile)
+        }
+    }
+
     @Test
     fun read_holder_info_returns_pid_and_mode_for_locked_file() {
         val lockFile = Files.createTempFile("holder-info", ".lock")
