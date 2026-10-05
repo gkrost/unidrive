@@ -15,7 +15,6 @@ import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
 import org.krost.unidrive.internxt.model.tryParseInternxtInstant
-import org.krost.unidrive.sync.ScanHeartbeat
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant

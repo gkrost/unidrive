@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import org.krost.unidrive.HashAlgorithm
+import org.krost.unidrive.ScanHeartbeat
 import org.krost.unidrive.sync.model.ChangeState
 import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.LoggerFactory

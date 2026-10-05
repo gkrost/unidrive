@@ -1,6 +1,7 @@
 package org.krost.unidrive.sync
 
 import org.krost.unidrive.CloudItem
+import org.krost.unidrive.ScanHeartbeat
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
