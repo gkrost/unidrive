@@ -325,6 +325,9 @@ data class RawProvider(
     // #504: how often the daemon rescans the sync root for files that arrived there out of band, in
     // minutes. 0 = off. Absent = the default (10).
     val sync_root_rescan_minutes: Int? = null,
+    // #463: how often `daemon run` polls the cloud for changes made elsewhere, in seconds. 0 = off.
+    // Absent = the default (60). `daemon run --poll-interval` overrides it.
+    val daemon_poll_seconds: Int? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -449,6 +452,10 @@ data class SyncConfig(
     fun syncRootRescanMinutes(profileName: String): Int =
         (providers[profileName]?.syncRootRescanMinutes ?: DEFAULT_SYNC_ROOT_RESCAN_MINUTES).coerceAtLeast(0)
 
+    /** #463: seconds between the daemon's polls of the cloud for this profile; 0 = off. */
+    fun daemonPollSeconds(profileName: String): Int =
+        (providers[profileName]?.daemonPollSeconds ?: DEFAULT_DAEMON_POLL_SECONDS).coerceAtLeast(0)
+
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
@@ -459,6 +466,7 @@ data class SyncConfig(
         val excludePatterns: List<String> = emptyList(),
         val hydrationCacheMaxBytes: Long? = null,
         val syncRootRescanMinutes: Int? = null,
+        val daemonPollSeconds: Int? = null,
     )
 
     companion object {
@@ -467,6 +475,13 @@ data class SyncConfig(
 
         /** #504: default interval of the daemon's sync root rescan, in minutes. */
         const val DEFAULT_SYNC_ROOT_RESCAN_MINUTES: Int = 10
+
+        /**
+         * #463: default interval of the daemon's poll for remote changes, in seconds. An incremental
+         * poll is one cheap delta query per provider (Internxt: two updatedAt-filtered listings, about
+         * 0.24 s on a large account; OneDrive: one delta request), the same cadence `sync --watch` uses.
+         */
+        const val DEFAULT_DAEMON_POLL_SECONDS: Int = 60
 
         /**
          * Patterns excluded from sync for every profile, before any user
@@ -800,6 +815,7 @@ data class SyncConfig(
                         excludePatterns = rp.exclude_patterns ?: emptyList(),
                         hydrationCacheMaxBytes = rp.hydration_cache_max_bytes,
                         syncRootRescanMinutes = rp.sync_root_rescan_minutes,
+                        daemonPollSeconds = rp.daemon_poll_seconds,
                     )
                 }
             val pollInt = general.poll_interval ?: 60

@@ -395,6 +395,36 @@ class DaemonRuntimeTest {
         }
     }
 
+    // #463: a status client shows how often the daemon polls the cloud (0 = off).
+    @Test
+    fun `daemon_status reports the effective poll interval`() = runBlocking {
+        val runtime = DaemonRuntime(
+            profileName = "test_profile",
+            lockFile = lockFile,
+            dbPath = dbPath,
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+            pollIntervalMs = 60_000,
+        )
+        val daemonJob = launch { runtime.start() }
+        repeat(50) {
+            if (Files.exists(socketPath)) return@repeat
+            delay(50)
+        }
+        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        try {
+            val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+            val interval = kotlinx.serialization.json.Json.parseToJsonElement(reply)
+                .let { it as kotlinx.serialization.json.JsonObject }["poll_interval_ms"]
+                .let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+            assertEquals("60000", interval, "daemon.status must report poll_interval_ms; got: $reply")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
     private fun sendOneRequest(request: String): String {
         val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
         try {

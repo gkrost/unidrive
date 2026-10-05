@@ -51,7 +51,9 @@ class DaemonRuntime(
     private val excludePatterns: List<String> = emptyList(),
     // > 0 enables the in-process auto-poll (mount-view-refresh-design.md §5):
     // one periodic enumerate on serveScope, serialised by the sync.enumerate
-    // in-flight guard. 0 = off (strictly reactive, the daemon default).
+    // in-flight guard. 0 = off. `daemon run` passes the profile's daemon_poll_seconds
+    // (default 60 s, #463) or --poll-interval; 0 stays the default here so tests that
+    // construct a runtime do not poll.
     private val pollIntervalMs: Long = 0,
     // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited.
     private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
@@ -180,8 +182,7 @@ class DaemonRuntime(
                 // The enumerate pulls remote changes into state.db and, when anything changed,
                 // the engine's viewInvalidationSink pushes view.invalidated back over this same
                 // subscribe stream — so a freshly-mounted view reflects remote renames/deletes
-                // without a manual `refresh`. This stays strictly reactive (triggered by the
-                // subscribe verb, daemon-design G3): no always-on poll loop. Serialised through
+                // without a manual `refresh`, without waiting for the next poll (#463). Serialised through
                 // the same in-flight guard as sync.enumerate/the poller, so a concurrent
                 // enumeration is skipped rather than overlapped.
                 for (verb in HydrationIpcHandler.VERBS) {
@@ -203,7 +204,16 @@ class DaemonRuntime(
                 server.registerConnectionCloseListener { connId ->
                     hydrationIpc.onSubscriberDisconnect(connId)
                 }
-                serveScope.launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
+                // #463: a hydration or upload that succeeded is (nearly always) a provider round trip
+                // that worked, so it cuts the poller's back-off short. Even when it was not, the poller
+                // polls at most once per plain interval. Late-bound: the poller is built further down.
+                var pollerRef: EnumeratePoller? = null
+                serveScope.launch {
+                    hydration.events.collect {
+                        hydrationIpc.dispatchEvent(it)
+                        if (it is HydrationEvent.Hydrated || (it is HydrationEvent.Completed && it.ok)) pollerRef?.providerReachable()
+                    }
+                }
 
                 // Engine-side upload recovery: re-enqueue rows written through the
                 // mount whose upload never landed (still queued or failed when the
@@ -272,23 +282,25 @@ class DaemonRuntime(
                     enumerateHandler.handle(connId, json)
                 }
 
-                // Optional auto-poll (mount-view-refresh-design.md §5). Polls
-                // unconditionally when enabled — the enumerate path is cheap on a
-                // no-change incremental delta and a profile served by the daemon is
-                // assumed to back a mount view. Shares the sync.enumerate in-flight
-                // guard (never overlaps a manual refresh/enumerate). Launched on
-                // serveScope so it cancels with the daemon at shutdown. The backoff
-                // starts escalated when the previous run ended in enumerate
-                // failures (#517 R3): a restart into a known-bad remote doesn't
-                // re-run the doomed cycle at full cadence.
-                EnumeratePoller(
-                    enumerateHandler,
-                    pollIntervalMs,
-                    serveScope,
-                    onNextAttempt = engine.enumerationTracker::nextAttemptAt,
-                    consecutiveFailuresAtStart =
-                        db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
-                ).start()
+                // Remote-change discovery (mount-view-refresh-design.md §5, #463), on by default in
+                // `daemon run`: the notification channel is not reliable, and a mount profile has no
+                // other way to learn what changed in the cloud. The enumerate path is cheap on a
+                // no-change incremental delta. The first poll runs at start (catch-up after a stop or
+                // an outage). Shares the sync.enumerate in-flight guard and skips while a refresh runs,
+                // so it never overlaps either. Launched on serveScope so it cancels with the daemon at
+                // shutdown. The backoff starts escalated when the previous run ended in enumerate
+                // failures (#517 R3): a restart into a known-bad remote doesn't re-run the doomed
+                // cycle at full cadence.
+                pollerRef =
+                    EnumeratePoller(
+                        enumerateHandler,
+                        pollIntervalMs,
+                        serveScope,
+                        onNextAttempt = engine.enumerationTracker::nextAttemptAt,
+                        consecutiveFailuresAtStart =
+                            db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
+                        isBusy = { refreshHandler.isInFlight() },
+                    ).also { it.start() }
 
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
@@ -314,10 +326,12 @@ class DaemonRuntime(
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
                     val enumerationJson = engine.enumerationStatus().toJson().toString()
                     val engineVersionJson = kotlinx.serialization.json.JsonPrimitive(BuildInfo.versionString()).toString()
+                    // poll_interval_ms (#463): the effective interval of the remote poll (0 = off). The
+                    // next attempt after a failure is enumeration.next_attempt_at_ms (additive, read-only).
                     // engine_version (#554): the build a co-client is talking to — behaviour fixes do
                     // not move IPC_PROTOCOL_VERSION, so this is the age signal a client gates its
                     // engine minimum on (additive, read-only).
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson}"""
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson,"poll_interval_ms":$pollIntervalMs}"""
                 }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every

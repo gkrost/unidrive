@@ -97,6 +97,72 @@ class UploadFromCacheKeepsWriteTest {
             assertTrue(survivors.any { it == localEdit.toList() }, "the local edit must still exist after the next sync (as f.txt or a conflict copy)")
         }
 
+    // #568: the mirror was skipped because the sync root held an unsynced edit (the test above). Deleting the file
+    // through the mount afterwards must not delete that edit with the remote item: it is the only copy of it.
+    @Test
+    fun `a delete through the mount keeps an unsynced edit the mirror skipped`() =
+        runTest {
+            provider.files["/f.txt"] = oldBytes
+            provider.deltaItems = listOf(remoteItem(oldBytes.size.toLong()))
+            engine.syncOnce()
+            val syncFile = syncRoot.resolve("f.txt")
+            val localEdit = "local edit C, made in the sync root, not uploaded".toByteArray()
+            Files.write(syncFile, localEdit)
+            Files.setLastModifiedTime(syncFile, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 5000))
+            val cacheCopy = engine.resolveCachePath("/f.txt")
+            Files.createDirectories(cacheCopy.parent)
+            Files.write(cacheCopy, newBytes)
+            engine.uploadFromCache("/f.txt", cacheCopy)
+            assertEquals(true, db.getEntry("/f.txt")?.cacheBacked, "precondition: the mirror was skipped")
+
+            engine.deleteRemote("/f.txt")
+
+            assertTrue(provider.deletedPaths.contains("/f.txt"), "the remote item is deleted")
+            assertContentEquals(localEdit, Files.readAllBytes(syncFile), "the unsynced local edit survives the delete")
+        }
+
+    // #568: a mirrored file the user edited in the sync root after the mirror is no longer the copy the row describes.
+    @Test
+    fun `a delete through the mount keeps a mirrored file edited since`() =
+        runTest {
+            provider.files["/f.txt"] = oldBytes
+            provider.deltaItems = listOf(remoteItem(oldBytes.size.toLong()))
+            engine.syncOnce()
+            val syncFile = syncRoot.resolve("f.txt")
+            val cacheCopy = engine.resolveCachePath("/f.txt")
+            Files.createDirectories(cacheCopy.parent)
+            Files.write(cacheCopy, newBytes)
+            engine.uploadFromCache("/f.txt", cacheCopy)
+            assertEquals(false, db.getEntry("/f.txt")?.cacheBacked, "precondition: the mirror wrote the sync-root file")
+            val laterEdit = "edited in the sync root after the mirror".toByteArray()
+            Files.write(syncFile, laterEdit)
+            Files.setLastModifiedTime(syncFile, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 5000))
+
+            engine.deleteRemote("/f.txt")
+
+            assertContentEquals(laterEdit, Files.readAllBytes(syncFile), "the edit made after the mirror survives the delete")
+        }
+
+    // #449 review fix, unchanged by #568: the untouched mirror copy goes with the delete, so the next scan does not
+    // read an orphan file as new and bring the deleted path back.
+    @Test
+    fun `a delete through the mount removes the untouched mirror copy`() =
+        runTest {
+            provider.files["/f.txt"] = oldBytes
+            provider.deltaItems = listOf(remoteItem(oldBytes.size.toLong()))
+            engine.syncOnce()
+            val syncFile = syncRoot.resolve("f.txt")
+            val cacheCopy = engine.resolveCachePath("/f.txt")
+            Files.createDirectories(cacheCopy.parent)
+            Files.write(cacheCopy, newBytes)
+            engine.uploadFromCache("/f.txt", cacheCopy)
+            assertEquals(false, db.getEntry("/f.txt")?.cacheBacked, "precondition: the mirror wrote the sync-root file")
+
+            engine.deleteRemote("/f.txt")
+
+            assertTrue(Files.notExists(syncFile), "the mirror copy goes with the remote item")
+        }
+
     @Test
     fun `a write through the cache is not reverted by the next sync`() =
         runTest {

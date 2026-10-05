@@ -20,7 +20,7 @@ import java.nio.file.Path
  * provider + a real temp StateDatabase; no engine internals run.
  */
 class RecordingEngine(
-    private val enumerateResult: EnumerateResult = EnumerateResult(ok = true),
+    @Volatile var enumerateResult: EnumerateResult = EnumerateResult(ok = true),
     private val gate: CompletableDeferred<Unit>? = null,
     private val enumerateFailure: Throwable? = null,
 ) : SyncEngine(
@@ -31,6 +31,9 @@ class RecordingEngine(
     @Volatile var enumerateCalled = false
     @Volatile var syncOnceCalled = false
     @Volatile var lastReset: Boolean? = null
+
+    // #560 U1: the flags the last syncOnce ran with, (skipTransfers, skipRemoteGather).
+    @Volatile var lastSyncOnceFlags: Pair<Boolean, Boolean>? = null
     val enumerateCount = java.util.concurrent.atomic.AtomicInteger(0)
 
     override suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
@@ -51,6 +54,7 @@ class RecordingEngine(
     ) {
         syncOnceCalled = true
         lastReset = null
+        lastSyncOnceFlags = skipTransfers to skipRemoteGather
         gate?.await()
     }
 

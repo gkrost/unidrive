@@ -1779,18 +1779,44 @@ class InternxtProvider(
             }
         } catch (e: InternxtApiException) {
             if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
-            // Only a full gather opens the window: a failing poll falls back to the walk, as it always
-            // did, but must not make the full gathers after it skip the account-wide listings.
-            if (cursor == null) heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
+            if (cursor != null) {
+                // #463: an incremental delta is the daemon's poll, and the daemon polls by default. Its
+                // updatedAt-filtered listing is one cheap query (0.24 s live, #517); the walk in its place
+                // costs a whole enumeration (about half an hour on a large drive) for what is usually a
+                // blip. So a blip fails the poll: the poller backs off and the next poll asks the cheap
+                // listing again from the same cursor, and nothing changed in between is lost.
+                // But the walk is also the only way out when the cheap listing STAYS unavailable (an old
+                // cursor whose query the gateway keeps cutting, #517): failing forever would freeze the
+                // mount's view. Once the listing has failed for INCREMENTAL_WALK_AFTER, the poll walks
+                // once, as it always did, and the walk's fresh cursor starts the cheap polls over.
+                val now = clock()
+                val since = incrementalUnavailableSince.updateAndGet { it ?: now }!!
+                if (java.time.Duration.between(since, now) < INCREMENTAL_WALK_AFTER) throw e
+                incrementalUnavailableSince.set(null)
+                log.warn(
+                    "Incremental listing unavailable since {} ({}: {}), walking the folder tree once{}",
+                    since,
+                    e.statusCode,
+                    e.message,
+                    if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
+                )
+                // An incremental walk does not open the full-gather window (#517 R3).
+                return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
+            }
+            // Only a full gather opens the window.
+            heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
             log.warn(
-                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}{}",
+                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}; " +
+                    "skipping the account-wide attempt until {}",
                 e.statusCode,
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
-                if (cursor == null) "; skipping the account-wide attempt until ${heavyListingsUnavailableUntil.get()}" else "",
+                heavyListingsUnavailableUntil.get(),
             )
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
+        // The cheap listing answered: an earlier run of failures is over (#463).
+        if (cursor != null) incrementalUnavailableSince.set(null)
 
         // Cursor = max(updatedAt) seen across successfully-fetched pages.
         // Skipped (500/503 fallback) folders contribute nothing — their items
@@ -2222,6 +2248,15 @@ class InternxtProvider(
         java.util.concurrent.atomic
             .AtomicReference(java.time.Instant.MIN)
 
+    // #463: since when the incremental (cursor) listing keeps answering unavailable; null while it
+    // answers. Read by delta() to decide when a failing poll must walk once instead of failing again.
+    private val incrementalUnavailableSince =
+        java.util.concurrent.atomic
+            .AtomicReference<java.time.Instant?>(null)
+
+    // Test seam for the incremental fallback's time bound.
+    internal var clock: () -> java.time.Instant = { java.time.Instant.now() }
+
     private suspend fun resolveFolder(path: String): String {
         val creds = authService.getValidCredentials()
         val segments = pathSegments(path)
@@ -2330,6 +2365,11 @@ class InternxtProvider(
         // attempt every ~7 min for over 4 h; 30 min cuts that to ~8 attempts a day
         // while still re-trying often enough to notice a recovery.
         private val LISTING_UNAVAILABLE_TTL: java.time.Duration = java.time.Duration.ofMinutes(30)
+
+        // #463: how long the incremental listing may keep failing before a poll walks the tree once.
+        // Long enough that blips and short outages (the poller backs off up to 10 min) cost no walk;
+        // short enough that a cursor the gateway keeps cutting does not freeze the view for good.
+        internal val INCREMENTAL_WALK_AFTER: java.time.Duration = java.time.Duration.ofMinutes(30)
 
         // Cap on consecutive 409 collisions tolerated when the destructive-
         // overwrite guard tries to rename the prior cloud file to an archive

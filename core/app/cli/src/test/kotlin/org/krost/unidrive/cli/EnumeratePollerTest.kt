@@ -24,7 +24,7 @@ class EnumeratePollerTest {
         val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
         val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
         val handler = EnumerateRpcHandler(engine, scope, emit = {})
-        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it })
+        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it }, firstPollDelayMs = intervalMs)
         poller.start()
 
         advanceTimeBy(stepOneInterval())
@@ -43,7 +43,7 @@ class EnumeratePollerTest {
         val gate = CompletableDeferred<Unit>()
         val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true), gate = gate)
         val handler = EnumerateRpcHandler(engine, scope, emit = {})
-        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it })
+        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it }, firstPollDelayMs = intervalMs)
 
         // A manual sync.enumerate occupies the shared in-flight guard (gated open).
         val reply = handler.handle("conn-manual", """{"verb":"sync.enumerate"}""")
@@ -75,6 +75,7 @@ class EnumeratePollerTest {
             handler = handler,
             intervalMs = intervalMs,
             scope = scope,
+            firstPollDelayMs = intervalMs,
             jitter = { it },
             backoffMultiplier = 3,
         )
@@ -108,6 +109,7 @@ class EnumeratePollerTest {
             handler = handler,
             intervalMs = intervalMs,
             scope = scope,
+            firstPollDelayMs = intervalMs,
             jitter = { it },
             backoffMultiplier = 3,
             clock = { testScheduler.currentTime },
@@ -142,6 +144,7 @@ class EnumeratePollerTest {
                 handler = handler,
                 intervalMs = intervalMs,
                 scope = scope,
+                firstPollDelayMs = intervalMs,
                 jitter = { base ->
                     sleeps.add(base)
                     base
@@ -166,6 +169,7 @@ class EnumeratePollerTest {
             handler = handler,
             intervalMs = intervalMs,
             scope = scope,
+            firstPollDelayMs = intervalMs,
             jitter = { it + 7_000 },
             backoffMultiplier = 3,
             clock = { testScheduler.currentTime },
@@ -217,6 +221,7 @@ class EnumeratePollerTest {
             handler = handler,
             intervalMs = intervalMs,
             scope = scope,
+            firstPollDelayMs = intervalMs,
             jitter = { it },
             backoffMultiplier = 3,
             clock = { testScheduler.currentTime },
@@ -241,6 +246,7 @@ class EnumeratePollerTest {
             handler = handler,
             intervalMs = intervalMs,
             scope = scope,
+            firstPollDelayMs = intervalMs,
             jitter = { it },
             clock = { testScheduler.currentTime },
             onNextAttempt = { reported += it },
@@ -281,6 +287,190 @@ class EnumeratePollerTest {
         assertEquals(2, engine.enumerateCount.get())
         assertEquals(listOf(600_000L, 60_000L), sleeps.take(2), "recovery drops the escalation")
         scope.cancel()
+    }
+
+    // ---- #463: discovery for a daemon that serves a mount ---------------------------------------------------------
+
+    // A loop left running after a failed assertion makes runTest advance its virtual clock forever: the build would
+    // hang instead of failing. These tests cancel the loop in a finally.
+    private fun pollTest(body: suspend kotlinx.coroutines.test.TestScope.(CoroutineScope) -> Unit) =
+        runTest {
+            val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+            try {
+                body(scope)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    // A daemon that starts (a boot, a restart after an outage, a redeploy) catches up with what changed in the
+    // cloud while it was down at once, not one interval later.
+    @Test
+    fun `the first poll runs promptly after start`() = pollTest { scope ->
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it })
+        poller.start()
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "the catch-up poll runs at start")
+
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "then one per interval")
+    }
+
+    // A refresh (the legacy reconcile or the mount's enumerate) works on the same state database; a poll that
+    // starts while one runs is skipped, like one that meets an enumerate holding the guard.
+    @Test
+    fun `no poll starts while a refresh is in flight`() = pollTest { scope ->
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val refreshRunning = java.util.concurrent.atomic.AtomicBoolean(true)
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { it },
+                isBusy = { refreshRunning.get() },
+            )
+        poller.start()
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(0, engine.enumerateCount.get(), "the poll at start meets the refresh and is skipped")
+
+        refreshRunning.set(false)
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "the next interval's poll runs once the refresh is done")
+    }
+
+    // Polls never overlap each other: a poll that takes longer than the interval delays the next one.
+    @Test
+    fun `a slow poll is never overlapped by the next one`() = pollTest { scope ->
+        val gate = CompletableDeferred<Unit>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true), gate = gate)
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it })
+        poller.start()
+
+        advanceTimeBy(5 * intervalMs)
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "the first poll is still running five intervals later; no second one")
+
+        gate.complete(Unit)
+        runCurrent()
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "the next poll follows one interval after the slow one ended")
+    }
+
+    // After a failure the poller backs off. A sign that the provider answers again (a download or upload through
+    // the daemon succeeded) ends the backoff: the next poll runs at the plain cadence, not up to ten minutes later.
+    @Test
+    fun `a sign that the provider is reachable again cuts a backoff short`() = pollTest { scope ->
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { it },
+                clock = { testScheduler.currentTime },
+                onNextAttempt = { reported += it },
+            )
+        poller.start()
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "the poll at start fails; the next is 240 s away")
+
+        engine.enumerateResult = EnumerateResult(ok = true)
+        advanceTimeBy(100_000)
+        poller.providerReachable()
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "100 s after the failure, more than one interval: the poll runs now")
+        assertEquals(listOf(null, 240_000L, null), reported, "the backed-off attempt was reported, then cleared by the run")
+
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        assertEquals(3, engine.enumerateCount.get(), "and the cadence is the plain interval again")
+    }
+
+    @Test
+    fun `a reachable sign right after a failure waits for the plain interval, not for the backoff`() = pollTest { scope ->
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val reported = mutableListOf<Long?>()
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { it },
+                clock = { testScheduler.currentTime },
+                onNextAttempt = { reported += it },
+            )
+        poller.start()
+        advanceTimeBy(1)
+        runCurrent()
+
+        advanceTimeBy(10_000)
+        poller.providerReachable()
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "10 s after a failed poll is too early for the next one")
+        assertEquals(listOf(null, 240_000L, 60_000L), reported, "the next attempt moved from the backoff to the plain interval")
+
+        advanceTimeBy(50_001)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "one plain interval after the failure, the poll runs")
+    }
+
+    @Test
+    fun `a reachable sign outside a backoff changes nothing`() = pollTest { scope ->
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                jitter = { it },
+                clock = { testScheduler.currentTime },
+            )
+        poller.start()
+        advanceTimeBy(1)
+        runCurrent()
+
+        repeat(5) {
+            advanceTimeBy(5_000)
+            poller.providerReachable()
+            runCurrent()
+        }
+        assertEquals(1, engine.enumerateCount.get(), "every download is such a sign; none of them adds a poll")
+
+        advanceTimeBy(intervalMs - 25_000 + 1)
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "the regular poll comes on time")
+    }
+
+    @Test
+    fun `the daemon polls by default and the command line overrides the profile`() {
+        assertEquals(60_000L, EnumeratePoller.effectiveIntervalMs(cliValue = null, configSeconds = 60), "the default profile value")
+        assertEquals(300_000L, EnumeratePoller.effectiveIntervalMs(cliValue = null, configSeconds = 300))
+        assertEquals(0L, EnumeratePoller.effectiveIntervalMs(cliValue = null, configSeconds = 0), "0 in the profile turns it off")
+        assertEquals(0L, EnumeratePoller.effectiveIntervalMs(cliValue = "0", configSeconds = 60), "--poll-interval 0 turns it off")
+        assertEquals(30_000L, EnumeratePoller.effectiveIntervalMs(cliValue = "30s", configSeconds = 60))
+        // The option has no default of its own: absent, the profile decides.
+        val run = DaemonRunCommand()
+        picocli.CommandLine(run).parseArgs()
+        assertEquals(null, run.pollInterval)
+        picocli.CommandLine(run).parseArgs("--poll-interval", "5m")
+        assertEquals("5m", run.pollInterval)
     }
 
     @Test

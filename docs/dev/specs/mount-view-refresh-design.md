@@ -56,11 +56,11 @@ New verb **`sync.enumerate`** (JSON-line, daemon-internal), parallel to `refresh
 
 `refresh.run` stays for the legacy real-`sync_root` use. `RefreshRpcHandler` routes: **mount client connected → `sync.enumerate`; else → legacy `syncOnce`.** (Keeps `unidrive refresh` working for both; the operator need not learn a new verb.)
 
-## 5. Auto-poll (`--poll-interval`)
+## 5. Auto-poll (`daemon_poll_seconds`, `--poll-interval`)
 
-Add `--poll-interval <duration>` to `unidrive daemon run` (default `0` = off; recommended `60s`). When > 0, the daemon fires `sync.enumerate` on a timer **with ±10% jitter**, serialized by the in-flight guard, and **honours provider `Retry-After`** (on 429 from a provider, pause that profile's poll and back off). On each enumeration that changes `state.db`, the daemon **invalidates the FUSE co-daemon's dir/attr cache** for affected paths (see §6) so the next `ls` re-reads the DB.
+`unidrive daemon run` polls by default (#463): the profile key `daemon_poll_seconds` (default 60 s) sets the interval, `--poll-interval <duration>` overrides it, `0` turns it off. The first poll runs at start (catch-up after a stop or an outage); a poll is skipped while an enumerate holds the guard or a `refresh.run` is in flight; a failure backs off (×4, capped at 10 min) and a successful hydration or upload ends the back-off. `daemon.status` reports the interval as `poll_interval_ms`. (Originally: `--poll-interval` with default `0` = off.) When > 0, the daemon fires `sync.enumerate` on a timer **with ±10% jitter**, serialized by the in-flight guard, and **honours provider `Retry-After`** (on 429 from a provider, pause that profile's poll and back off). On each enumeration that changes `state.db`, the daemon **invalidates the FUSE co-daemon's dir/attr cache** for affected paths (see §6) so the next `ls` re-reads the DB.
 
-**Spec amendment required:** `unidrive-daemon-design.md` G3 ("strictly reactive") gets a documented `--poll-interval` exception (BACKLOG-58 already files this). The verb (`sync.enumerate`) itself is reactive; only the optional in-process timer is the exception.
+**Spec amendment (done, #463):** `unidrive-daemon-design.md` G3 describes the default poll. The verb (`sync.enumerate`) itself is reactive; the poll is an in-process timer over the same path.
 
 Defaults rationale (prior-art doc): 60s balances freshness vs API cost on a 195k-file account (a no-change incremental delta is one cheap call); jitter avoids thundering-herd across profiles; Internxt has no push so polling is the only signal (and its deletion-visibility lag is inherent — documented, not fixable client-side).
 
