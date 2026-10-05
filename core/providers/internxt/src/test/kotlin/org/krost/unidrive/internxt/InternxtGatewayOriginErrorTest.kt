@@ -339,4 +339,38 @@ class InternxtGatewayOriginErrorTest {
 
             assertEquals(404, failure.statusCode)
         }
+
+    // #463: the daemon polls by default, so an incremental delta is the poll. One unavailable answer on its cheap
+    // updatedAt-filtered listing used to send the poll into a walk of the whole folder tree (about half an hour on a
+    // large drive, for one blip). It ends the poll instead: the poller backs off and the next poll asks the cheap
+    // listing again from the same cursor. Only a full gather has a reason to walk.
+    @Test
+    fun `an unavailable listing ends an incremental delta instead of walking the whole tree`() =
+        runTest {
+            for (status in listOf(503, 524)) {
+                val walked = AtomicInteger(0)
+                val (code, headers) = if (status == 524) answer(524, retryAfter = "120") else (HttpStatusCode.ServiceUnavailable to json)
+                val engine =
+                    MockEngine { request ->
+                        val url = request.url.toString()
+                        when {
+                            contentOf(url) != null -> {
+                                walked.incrementAndGet()
+                                respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                            }
+                            isCursorListing(request.url.encodedPath) -> error("an incremental delta never asks the cursor listing: $url")
+                            isAccountWideListing(request.url.encodedPath) -> respond(errorBody(status), code, headers)
+                            else -> error("unexpected request: $url")
+                        }
+                    }
+
+                val failure =
+                    assertFailsWith<InternxtApiException> {
+                        provider(engine).delta("2026-10-01T00:00:00.000Z", null, fullGather)
+                    }
+
+                assertEquals(503, failure.statusCode, "status $status")
+                assertEquals(0, walked.get(), "status $status: no folder of the tree was listed")
+            }
+        }
 }

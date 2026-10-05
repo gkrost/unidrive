@@ -1780,15 +1780,21 @@ class InternxtProvider(
             }
         } catch (e: InternxtApiException) {
             if (e.statusCode !in SERVER_UNAVAILABLE_STATUSES) throw e
-            // Only a full gather opens the window: a failing poll falls back to the walk, as it always
-            // did, but must not make the full gathers after it skip the account-wide listings.
-            if (cursor == null) heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
+            // #463: an incremental delta is the daemon's poll, and the daemon polls by default. Its
+            // updatedAt-filtered listing is one cheap query (0.24 s live, #517); the walk in its place
+            // costs a whole enumeration (about half an hour on a large drive) for what is usually a
+            // blip. The poll fails instead: the poller backs off and the next poll asks the cheap
+            // listing again from the same cursor, so nothing changed in between is lost.
+            if (cursor != null) throw e
+            // Only a full gather opens the window.
+            heavyListingsUnavailableUntil.set(Instant.now().plus(LISTING_UNAVAILABLE_TTL))
             log.warn(
-                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}{}",
+                "Account-wide listing unavailable ({}: {}), falling back to the folder tree walk{}; " +
+                    "skipping the account-wide attempt until {}",
                 e.statusCode,
                 e.message,
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
-                if (cursor == null) "; skipping the account-wide attempt until ${heavyListingsUnavailableUntil.get()}" else "",
+                heavyListingsUnavailableUntil.get(),
             )
             return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, combinedTotal())
         }
