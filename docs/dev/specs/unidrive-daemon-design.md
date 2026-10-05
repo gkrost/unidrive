@@ -20,6 +20,8 @@ This spec introduces `unidrive daemon` — a per-profile, long-lived JVM that ow
 
 ### Goals
 
+> **Note (2026-10-05):** G3's discovery default and the daemon's timers (the `sync_root` rescan of #510) are revisited under [`docs/adr/independent-profiles.md`](../../adr/independent-profiles.md) (#560, #463).
+
 - **G1:** `unidrive mount` works end-to-end without requiring a concurrent `sync` process.
 - **G2:** One daemon process per profile. Multiple profiles run multiple daemons.
 - **G3:** Daemon is strictly reactive — it only acts when an IPC verb arrives. No background reconcile loops, no scheduled enumeration, no auto-bootstrap. **Documented exception (`--poll-interval`, mount-view-refresh-design.md §5):** `unidrive daemon run --poll-interval <duration>` (default `0` = off) opts into ONE in-process timer that fires the reactive `sync.enumerate` path on an interval (±10% jitter, serialised by that verb's in-flight guard, backs off on provider failure/429, cancelled at shutdown). The verb itself stays reactive; only the optional timer is the exception, and it is off unless the operator sets the flag.
@@ -337,6 +339,7 @@ Unchanged from existing IPC contract. The new verbs follow the same conventions 
 
 - **I1: One daemon per profile.** Enforced by `ProcessLock.Mode.DAEMON` acquisition before any other startup work. If the lock is held, the second daemon refuses to start with a clear contention message.
 - **I2: Sync ⇄ Daemon mutual exclusion per profile.** Same lock file, two-way mutex. `Mode.MOUNT` is removed.
+  > **Superseded in part (2026-10-05), see [`docs/adr/independent-profiles.md`](../../adr/independent-profiles.md) and #560.** The exclusion stays, but becomes a consequence of the profile's explicit `mode = mirror | mount`: a command for the wrong mode is refused before any write, instead of whichever process starts first winning. Until the cutover, the daemon still mirrors into and rescans the profile's `sync_root` (#478, #510).
 - **I3: Socket existence implies serving daemon.** If `/run/user/<uid>/unidrive-<profile>.sock` exists, a daemon process is bound to it. Stale sockets are detected and cleaned by `IpcServer.reclaimStaleSocket()` (at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt:341`) on next startup.
 - **I4: `.lock.pid` and bound socket are atomic.** Either both exist (daemon running) or neither (daemon stopped). The sequence is: acquire lock + write `.lock.pid` → authenticate → bind socket. On clean shutdown: close socket → release lock + remove `.lock.pid`. On `kill -9`: the kernel releases the file lock, but `.lock.pid` and the socket file may remain. Stale-pid detection (existing in `acquireProfileLock`) and `reclaimStaleSocket` handle this on the next start.
 - **I5: Auth state is binary at startup.** Authenticated or refuses to bind. Token expiry mid-run does NOT shut down the daemon — the provider HTTP client handles refresh on 401; only an unrecoverable auth failure surfaces as `provider_error` to clients.
