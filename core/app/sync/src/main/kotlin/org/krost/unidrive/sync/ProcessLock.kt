@@ -182,6 +182,55 @@ class ProcessLock(
     }
 
     /**
+     * #560 U5a: hold the profile for a report that must read it stopped, without writing anything. Takes a SHARED
+     * lock on the existing lock file through a read-only channel: no file is created, no PID is stamped, and an
+     * existing holder's exclusive lock makes it fail. While the hold is open, a `sync` or `daemon` start for the
+     * profile fails its [tryLock]. Returns null when another process (or another [ProcessLock] in this JVM) holds
+     * the lock; it never breaks one.
+     *
+     * A missing lock file gives a hold without a lock ([ReadOnlyHold.locked] false): nothing holds the profile, but
+     * nothing keeps a writer from starting either, so the caller checks [ReadOnlyHold.stillFree] when it is done.
+     */
+    fun tryHoldReadOnly(): ReadOnlyHold? {
+        if (!Files.exists(lockFile)) return ReadOnlyHold(null, null)
+        val ch = FileChannel.open(lockFile, StandardOpenOption.READ)
+        val shared =
+            try {
+                ch.tryLock(0L, Long.MAX_VALUE, true)
+            } catch (_: Exception) {
+                null // OverlappingFileLockException: held by this JVM
+            }
+        if (shared == null) {
+            ch.close()
+            return null
+        }
+        return ReadOnlyHold(ch, shared)
+    }
+
+    /** The result of [tryHoldReadOnly]. [close] releases it; idempotent. */
+    inner class ReadOnlyHold internal constructor(
+        private var channel: FileChannel?,
+        private var lock: FileLock?,
+    ) : AutoCloseable {
+        val locked: Boolean get() = lock != null
+
+        /** True when no writer can have held the profile since the hold was taken. */
+        fun stillFree(): Boolean {
+            if (lock != null) return true
+            val probe = tryHoldReadOnly() ?: return false
+            probe.close()
+            return true
+        }
+
+        override fun close() {
+            lock?.let { runCatching { it.close() } }
+            lock = null
+            channel?.let { runCatching { it.close() } }
+            channel = null
+        }
+    }
+
+    /**
      * Execute [block] while holding the lock.
      * @param timeout maximum wait time for the lock
      * @throws IllegalStateException if the lock cannot be acquired within [timeout]

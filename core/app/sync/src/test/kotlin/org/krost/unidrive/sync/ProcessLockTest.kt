@@ -224,4 +224,63 @@ class ProcessLockTest {
             Files.deleteIfExists(lockFile)
         }
     }
+
+    // -- #560 U5a: a read-only hold for the legacy-profile inventory ------------------------------
+
+    @Test
+    fun `read-only hold on a missing lock file creates nothing`() {
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        try {
+            assertEquals(false, hold.locked)
+            assertTrue(hold.stillFree())
+            assertEquals(emptyList(), Files.list(tmpDir).use { it.toList() }, "no lock or pid file may be created")
+        } finally {
+            hold.close()
+        }
+    }
+
+    @Test
+    fun `read-only hold on a free lock file keeps writers out without stamping a pid`() {
+        Files.writeString(lockFile, "")
+        val pidFile = lockFile.resolveSibling(".lock.pid")
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(hold.locked)
+            assertEquals(false, Files.exists(pidFile), "the hold must not stamp a pid file")
+            assertEquals(false, writer.tryLock(ProcessLock.Mode.DAEMON), "a daemon must not start while the hold is open")
+        } finally {
+            hold.close()
+        }
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.DAEMON), "the lock is free again after the hold closes")
+        } finally {
+            writer.unlock()
+        }
+        assertEquals(0L, Files.size(lockFile))
+    }
+
+    @Test
+    fun `read-only hold is refused while a writer holds the lock`() {
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.SYNC))
+            assertNull(ProcessLock(lockFile).tryHoldReadOnly())
+        } finally {
+            writer.unlock()
+        }
+    }
+
+    @Test
+    fun `read-only hold without a lock file notices a writer that started meanwhile`() {
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.DAEMON))
+            assertEquals(false, hold.stillFree())
+        } finally {
+            writer.unlock()
+            hold.close()
+        }
+    }
 }
