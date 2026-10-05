@@ -1,7 +1,7 @@
 # Lane: engine quick wins (gkrost/unidrive) — for a Sonnet-class agent
 
 Prepared 2026-10-05 against `main` `0d239bf`. Small, low-risk, no design decision; verified against the code. Same rules as
-`docs/lanes/lane-engine-bugs.md`: claim on the issue, own worktree off `origin/main`, one draft PR per item (Q4 and Q5 may share one), owner
+`docs/dev/plans/lane-engine-bugs.md`: claim on the issue, own worktree off `origin/main`, one draft PR per item (Q4 and Q5 may share one), owner
 merges, `cd core && ./gradlew check` green, hands off the #560/#578 areas, no live stack, public repo.
 
 ## Q1 — #394 `ls --live` lists trashed and removed Internxt children
