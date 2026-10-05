@@ -61,4 +61,20 @@ class PendingUploadPathsTest {
         assertEquals(listOf("/pending-a.txt", "/pending-b.txt"), expected, "the fixture holds two pending file rows")
         assertEquals(expected, db.pendingUploadPaths())
     }
+
+    // #560 U1: the KDoc of pendingUploadPaths says rows LocalScanner writes are excluded. They are not: a new file in
+    // the sync root gets a hydrated `local:` row, which the query returns. The replay drops it later only because it
+    // has no hydration cache copy (HydrationImpl.replayable); the rescan (#504) relies on getting it.
+    @Test
+    fun `current behaviour - a LocalScanner row for a new sync-root file is a pending upload path`() {
+        val syncRoot = Files.createTempDirectory("unidrive-pending-root")
+        Files.writeString(syncRoot.resolve("dropped.txt"), "from a backup")
+
+        LocalScanner(syncRoot, db).scan()
+
+        val row = db.getEntry("/dropped.txt")!!
+        assertEquals(null, row.remoteId, "never uploaded")
+        assertEquals(true, row.isHydrated, "the scanner records real bytes in the sync root")
+        assertEquals(listOf("/dropped.txt"), db.pendingUploadPaths())
+    }
 }
