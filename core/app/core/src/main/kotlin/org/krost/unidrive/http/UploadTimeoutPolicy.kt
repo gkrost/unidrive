@@ -25,11 +25,16 @@ package org.krost.unidrive.http
  * "the server prematurely closed the connection", indistinguishable from a
  * real close; every observed cut landed within ~1.5 s of the limit. The flat
  * 60 s watchdog therefore capped uploads at what 60 s carries (~362 MB on the
- * measured 48 Mbit/s line) and discarded every byte on the way — so pair this
- * policy with [computeSocketTimeoutMs], which gives the watchdog the time the
- * body needs at a pessimistic floor throughput. A genuinely stuck connection
- * is still caught, by the raised watchdog: a stuck peer sends no response
- * bytes either, and the stall eventually crosses the same read-idle limit.
+ * measured 48 Mbit/s line) and discarded every byte on the way. #517 R1 then
+ * sized the watchdog for the body at an assumed 2 MiB/s floor, which still cut
+ * every large upload on a slower link at the same point (#571: 1.36 GB at
+ * 1.98 MB/s, cut at 650 s on every attempt). A read-idle timer cannot tell
+ * "slow but moving" from "stuck" during a PUT at any size, so a PUT whose
+ * body can be watched runs under [withUploadWatchdog] instead: cut only when
+ * no body byte was written for [UPLOAD_IDLE_WINDOW_MS], or when the server
+ * did not answer within [computeResponseWaitMs] after the body was sent. The
+ * engine's own socket and request timeouts for that PUT become the outer net
+ * of [computeWatchedOuterLimitMs].
  *
  * **History.** Originally lived as `WebDavTimeoutPolicy` in the WebDAV
  * provider (UD-277). Lifted to `:app:core` under UD-337 so Internxt /
@@ -103,21 +108,69 @@ public object UploadTimeoutPolicy {
     }
 
     /**
-     * Compute the socket (read-idle) watchdog for a data-plane PUT of
-     * [fileSize] bytes. The watchdog fires when nothing has been RECEIVED for
-     * this long, which during a PUT is the whole silent-upload window — so it
-     * must cover the time the body needs at [minThroughputBytesPerSecond],
-     * not a flat guess. Small uploads keep [floorMs].
-     *
-     * Same math as [computeRequestTimeoutMs] (which must stay the larger of
-     * the two at the call site, so the read-idle watchdog — not the flat
-     * whole-request cap — is what a stalled upload trips).
+     * #571: how long a watched upload may go without writing a single body
+     * byte before [withUploadWatchdog] cuts it as stalled. Twice the 60 s
+     * socket timeout that is the stall detector of every other call: long
+     * enough for a Wi-Fi roam or a TCP retransmission backoff to recover, short
+     * against the 11 minutes a single attempt of the live case took. Progress
+     * is counted per 64 KiB chunk the engine's body channel accepted, and that
+     * channel takes chunks again only once its 1 MiB buffer was handed on
+     * (Ktor's CHANNEL_MAX_SIZE): progress moves in steps of up to 1 MiB, 102 s
+     * at the 10 KiB/s floor of the Internxt outer net — still inside the window.
      */
-    public fun computeSocketTimeoutMs(
+    public const val UPLOAD_IDLE_WINDOW_MS: Long = 120_000L
+
+    /**
+     * #571: the least time a watched upload's server gets to answer after the
+     * last body byte was written. In that time what still sits in the socket
+     * buffers (a few MB at most, under a minute down to ~100 KB/s) reaches the
+     * server and the server stores the object. Not measured for the shard
+     * backend; five minutes is generous for both. Larger bodies get more
+     * through [RESPONSE_WAIT_MIN_THROUGHPUT_BYTES_PER_SECOND].
+     */
+    public const val RESPONSE_WAIT_FLOOR_MS: Long = 300_000L
+
+    /**
+     * #571: the rate at which the server is assumed to at least store what it
+     * received, for the size-dependent part of [computeResponseWaitMs]. 10 MiB/s
+     * gives a 5 GiB body 512 s; below ~3 GB the floor wins.
+     */
+    public const val RESPONSE_WAIT_MIN_THROUGHPUT_BYTES_PER_SECOND: Long = 10L * 1024 * 1024
+
+    /**
+     * #571: how long [withUploadWatchdog] waits for the server's answer after
+     * the last body byte of a [fileSize]-byte upload was written: the larger
+     * of [floorMs] and the size at
+     * [RESPONSE_WAIT_MIN_THROUGHPUT_BYTES_PER_SECOND].
+     */
+    public fun computeResponseWaitMs(
         fileSize: Long,
-        floorMs: Long,
+        floorMs: Long = RESPONSE_WAIT_FLOOR_MS,
+    ): Long = computeRequestTimeoutMs(fileSize, floorMs, RESPONSE_WAIT_MIN_THROUGHPUT_BYTES_PER_SECOND)
+
+    /**
+     * #571: the engine's own socket AND request timeout for a watched upload
+     * of [fileSize] bytes — the outer safety net behind [withUploadWatchdog].
+     * The read-idle socket timer runs from the start of the request (the
+     * server is silent while the body flows), so it must not fire before the
+     * watchdog's limits can: the time the body needs at
+     * [minThroughputBytesPerSecond] (with the [DEFAULT_FLOOR_MS] floor), plus
+     * one idle window and the response wait. An upload slower than
+     * [minThroughputBytesPerSecond] on average is the only one this net can
+     * cut while it still moves; the caller picks a floor far below any usable
+     * link (10 KiB/s for the Internxt shard backend).
+     */
+    public fun computeWatchedOuterLimitMs(
+        fileSize: Long,
         minThroughputBytesPerSecond: Long,
-    ): Long = computeRequestTimeoutMs(fileSize, floorMs, minThroughputBytesPerSecond)
+        idleWindowMs: Long,
+        responseWaitMs: Long,
+    ): Long {
+        val body = computeRequestTimeoutMs(fileSize, DEFAULT_FLOOR_MS, minThroughputBytesPerSecond)
+        val sum = body + idleWindowMs + responseWaitMs
+        // Saturate: an opted-out body bound (Long.MAX_VALUE) stays unbounded.
+        return if (sum < body) Long.MAX_VALUE else sum
+    }
 
     /**
      * True when an IOException surfaced after roughly the connection's own
@@ -127,7 +180,8 @@ public object UploadTimeoutPolicy {
      * landed within ~1.5 s of the limit (59.84–61.48 s for a 60 s watchdog,
      * n=64), so elapsed ≈ limit identifies it. The 5 % slack absorbs the
      * teardown between timer fire and catch; a real close at 58 s is
-     * misclassified, which only costs the difference in log wording.
+     * misclassified, which only costs the difference in log wording. Watched
+     * uploads (#571) use it against [computeWatchedOuterLimitMs].
      */
     public fun isSocketWatchdogCut(elapsedMs: Long, socketTimeoutMs: Long): Boolean =
         elapsedMs >= socketTimeoutMs * 95L / 100L

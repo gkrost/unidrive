@@ -335,27 +335,24 @@ class InternxtApiServiceTest {
     }
 
     @Test
-    fun `small shard PUTs keep the 60 s socket watchdog`() {
-        // 10 MiB at the 2 MiB/s shard floor needs 5 s — under the floor, so
-        // the watchdog stays at the installed 60 s and small-file behaviour
-        // is unchanged (#517 R1).
-        val sizeBytes = 10L * 1024 * 1024
-        val socketMs =
-            org.krost.unidrive.http.UploadTimeoutPolicy
-                .computeSocketTimeoutMs(sizeBytes, floorMs = 60_000L, minThroughputBytesPerSecond = 2L * 1024 * 1024)
-        assertEquals(60_000L, socketMs)
-    }
-
-    @Test
-    fun `a 545 MB shard PUT gets a watchdog beyond the 60 s cut`() {
-        // The live account's A file (545.5 MB, 90 s at the measured 48 Mbit/s)
-        // was cut at 60 s in every attempt, nine times per run (#517 F2). At
-        // the 2 MiB/s floor the watchdog gives it 261 s.
-        val sizeBytes = 545_500_000L
-        val socketMs =
-            org.krost.unidrive.http.UploadTimeoutPolicy
-                .computeSocketTimeoutMs(sizeBytes, floorMs = 60_000L, minThroughputBytesPerSecond = 2L * 1024 * 1024)
-        assertEquals(261_000L, socketMs)
+    fun `the live 1_36 GB shard at 1_98 MB-s fits under the outer net of a watched PUT`() {
+        // #571: 1,361,366,128 bytes at 1.98 MB/s need ~688 s; the #517 R1 socket
+        // timeout (size at 2 MiB/s) cut them at 650 s on every attempt. A watched
+        // PUT's engine timers are only the outer net: the body at the 10 KiB/s
+        // OVH floor plus the idle window and the response wait, ~37 h.
+        val sizeBytes = 1_361_366_128L
+        val policy = org.krost.unidrive.http.UploadTimeoutPolicy
+        val responseWaitMs = policy.computeResponseWaitMs(sizeBytes)
+        val outerMs =
+            policy.computeWatchedOuterLimitMs(
+                fileSize = sizeBytes,
+                minThroughputBytesPerSecond = 10L * 1024, // mirrors InternxtApiService.OVH_PUT_MIN_THROUGHPUT_BPS
+                idleWindowMs = policy.UPLOAD_IDLE_WINDOW_MS,
+                responseWaitMs = responseWaitMs,
+            )
+        assertEquals(300_000L, responseWaitMs, "the 300 s floor wins below ~3 GB")
+        assertEquals(132_946_000L + 120_000L + 300_000L, outerMs)
+        assertTrue(outerMs > 688_000L * 100, "the outer net is two orders of magnitude above the live upload")
     }
 
     @Test
