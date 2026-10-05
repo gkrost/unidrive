@@ -11,9 +11,10 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.PermanentDownloadFailureException
-import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
+import org.krost.unidrive.engine.RemoteEnumeration
+import org.krost.unidrive.engine.RemoteGather
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
 import java.nio.file.AtomicMoveNotSupportedException
@@ -227,8 +228,12 @@ open class SyncEngine(
     // that would 409 — the pre-existing cloud tree is invisible to the planner
     // under fast-bootstrap, so the local scanner emits a spurious mkdir for every
     // top-level folder that matches one. Reset at the start of every doSyncOnce.
-    @Volatile
-    private var fastBootstrapActive = false
+    // The gather sets it, so the flag lives in RemoteGather (#560 U2b).
+    private var fastBootstrapActive: Boolean
+        get() = remoteGather.fastBootstrapActive
+        set(value) {
+            remoteGather.fastBootstrapActive = value
+        }
 
     // #116: per-run cache of the remote root's direct children indexed by name,
     // populated lazily on the first top-level CreateRemoteFolder while
@@ -239,174 +244,90 @@ open class SyncEngine(
     private var remoteTopLevelByName: Map<String, CloudItem>? = null
     private val remoteTopLevelMutex = kotlinx.coroutines.sync.Mutex()
 
-    // Paths a prior COMPLETE enumeration flagged missing-but-deferred under the
-    // bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2).
-    // Carried in-memory across enumerations on a long-lived daemon engine; a path
-    // is reaped only once a second consecutive complete enumeration still shows it
-    // missing. Resets on restart (conservative: re-defers).
-    private var deferredMissing: Set<String> = emptySet()
+    // #560 U2b: the remote gather — delta paging, the scan staging and the cursor, the
+    // #401 collision rule, the absence sweep, the tracked-scope transition and the
+    // commit into sync_entries — lives in :app:engine-core's RemoteGather, and the
+    // mount's enumeration in RemoteEnumeration. Both take what they used to read from
+    // this engine's fields explicitly; the private wrappers below keep the sync pass's
+    // call sites as they were.
+    private val remoteGather =
+        RemoteGather(
+            provider = provider,
+            db = db,
+            guard = guard,
+            options =
+                RemoteGather.Options(
+                    providerId = providerId,
+                    fastBootstrap = fastBootstrap,
+                    includeShared = includeShared,
+                ),
+            listener =
+                object : RemoteGather.Listener {
+                    override fun onScanProgress(count: Int) = reporter.onScanProgress("remote", count)
 
-    // Paths the engine itself uploaded, mapped to the upload instant. Consulted by
-    // detectMissingAfterFullSync to defer the absence-implies-deletion verdict for a
-    // path whose remote write the eventually-consistent delta feed hasn't reflected
-    // yet — the re-upload churn class. Daemon-scoped in-memory state (same lifetime as
-    // deferredMissing); pruned past RECENT_UPLOAD_REAP_GRACE so a genuinely-deleted
-    // path is reaped once the window lapses and the map can't grow unbounded.
-    private val recentlyUploaded = java.util.concurrent.ConcurrentHashMap<String, Instant>()
+                    override fun onWarning(message: String) = reporter.onWarning(message)
 
-    private fun markRecentlyUploaded(path: String) {
-        recentlyUploaded[path] = Instant.now()
-    }
+                    override fun onSkippedOp(
+                        label: String,
+                        path: String,
+                        reason: String,
+                        dryRun: Boolean,
+                    ) = logSkippedOp(label, path, reason, dryRun)
 
-    private fun pruneRecentlyUploaded() {
-        val cutoff = Instant.now().minus(RECENT_UPLOAD_REAP_GRACE)
-        recentlyUploaded.entries.removeIf { it.value.isBefore(cutoff) }
-    }
+                    override fun onViewInvalidated(
+                        changedPaths: Set<String>,
+                        full: Boolean,
+                    ) = viewInvalidationSink(changedPaths, full)
+                },
+            localTopAliases = { buildCanonicalToLocalTopMap(it) },
+            log = log,
+        )
 
-    // #401: paths the last gather flagged as collided — two live remote items resolving
-    // to one path key. A path-addressed delete/move on one of these could hit either
-    // twin, so apply refuses them unless the action carries a real remote id (#402).
-    // Rebuilt by every gather: the collision exists for as long as the twins do.
-    private val collidedPaths: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val enumeration =
+        RemoteEnumeration(
+            gather = remoteGather,
+            db = db,
+            tracker = enumerationTracker,
+            reapGuards =
+                RemoteEnumeration.ReapGuards(
+                    uploadInFlight = uploadInFlight,
+                    cachePathOf = { resolveCachePath(it) },
+                ),
+            log = log,
+        )
 
-    // #401/#309: the collision key folds case when the local filesystem is
-    // case-insensitive, so case-only twins collide (and get reported) instead of
-    // writing two rows that map to one local file. NFC is already applied by
-    // resolveItemPath. Windows check mirrors sameSyncRoot.
-    private val foldGatherKeys: Boolean = System.getProperty("os.name", "").lowercase().contains("win")
+    private fun markRecentlyUploaded(path: String) = remoteGather.markRecentlyUploaded(path)
 
-    private fun gatherKey(path: String): String = if (foldGatherKeys) path.lowercase() else path
-
-    // #401: one collision path's winner and the twins it displaced.
-    private inner class CollisionRecord(
-        val winner: CloudItem,
-    ) {
-        val losers = mutableListOf<CloudItem>()
-    }
-
-    /**
-     * #401: deterministic admission of remote delta items into the gather map.
-     *
-     * Named justification (structural-safety property): reconcile keys are injective
-     * and nothing the provider emits is dropped unreported. Replaces the gather's
-     * `changes[path] = item` sites, where last-one-wins let the provider's emit
-     * order decide which same-named item survived — the other was dropped silently.
-     *
-     * Where a key is already taken, the winner is folder > file > the id state.db
-     * already tracks at that path > smallest id — a pure function of the two items
-     * plus the DB, independent of emission order. The loser is recorded (reported
-     * after the gather via [reportGatheredCollisions]) and dropped.
-     *
-     * @return the item now holding the key (the winner), so callers can tell whether
-     *   [item] survived.
-     */
     private fun admit(
         changes: MutableMap<String, CloudItem>,
         keyToPath: MutableMap<String, String>,
-        collisions: MutableMap<String, CollisionRecord>,
+        collisions: MutableMap<String, RemoteGather.CollisionRecord>,
         item: CloudItem,
-    ): CloudItem {
-        val key = gatherKey(item.path)
-        val incumbentPath = keyToPath[key]
-        if (incumbentPath == null) {
-            changes[item.path] = item
-            keyToPath[key] = item.path
-            return item
-        }
-        val incumbent = changes.getValue(incumbentPath)
-        if (incumbent.id == item.id) {
-            // Same remote item re-reported on a later page — a mid-gather remote edit
-            // surfacing a newer version. Fresh data wins (pre-#401 last-wins), and a
-            // version refresh is not a twin collision.
-            changes[incumbentPath] = item
-            keyToPath[key] = item.path
-            return item
-        }
-        val winner = collisionWinner(incumbent, item)
-        val loser = if (winner === incumbent) item else incumbent
-        if (winner !== incumbent) {
-            changes.remove(incumbentPath)
-            changes[winner.path] = winner
-            keyToPath[key] = winner.path
-        }
-        // A tombstone losing to the live replacement at its own path is a normal
-        // create-after-delete sequence, not a twin — drop it without reporting.
-        if (!loser.deleted) {
-            collisions.getOrPut(winner.path) { CollisionRecord(winner) }.losers.add(loser)
-        }
-        return winner
-    }
+    ): CloudItem = remoteGather.admit(changes, keyToPath, collisions, item)
 
-    // #401 winner rule: a live item beats a tombstone (the replacement at the same
-    // path is the current truth); then folder beats file (the folder owns the path
-    // space); then the id state.db already tracks at this path (stability across
-    // runs — the engine keeps syncing the twin it has been syncing); then the
-    // smallest id, so two never-tracked twins resolve identically under any emit
-    // order.
-    private fun collisionWinner(
-        a: CloudItem,
-        b: CloudItem,
-    ): CloudItem =
-        when {
-            a.deleted != b.deleted -> if (b.deleted) a else b
-            a.isFolder != b.isFolder -> if (a.isFolder) a else b
-            else -> {
-                val tracked = runCatching { db.getEntryByRemotePath(a.path)?.remoteId }.getOrNull()
-                when {
-                    tracked != null && a.id == tracked -> a
-                    tracked != null && b.id == tracked -> b
-                    a.id <= b.id -> a
-                    else -> b
-                }
-            }
-        }
-
-    /**
-     * #401: report what the gather suppressed. Per collision: WARN with both ids,
-     * sizes and mtimes, `reporter.onWarning`, a skipped-ops.jsonl entry; then the
-     * run-level `sync_state` counters `status` renders. The loser ids come back so
-     * the absence sweep (detectMissingAfterFullSync) keeps treating them as seen —
-     * a suppressed twin must never be reaped via a path-addressed delete.
-     * Deliberately does NOT mark the gather incomplete: that would suspend reaping
-     * and new uploads for the whole profile for as long as one twin exists.
-     */
     private fun reportGatheredCollisions(
-        collisions: Map<String, CollisionRecord>,
+        collisions: Map<String, RemoteGather.CollisionRecord>,
         dryRun: Boolean,
-    ): Set<String> {
-        collidedPaths.clear()
-        collidedPaths.addAll(collisions.keys)
-        if (collisions.isEmpty()) {
-            db.setSyncState(REMOTE_COLLISIONS_KEY, "0")
-            // clearSyncState is private to StateDatabase; an empty value reads the
-            // same as absent ("0 collisions", no paths) through getSyncState.
-            db.setSyncState(REMOTE_COLLISION_PATHS_KEY, "")
-            return emptySet()
-        }
-        val losers = mutableSetOf<String>()
-        for ((path, record) in collisions) {
-            val w = record.winner
-            for (l in record.losers) {
-                losers.add(l.id)
-                val msg =
-                    "Remote path collision at $path: keeping id=${w.id} (size=${w.size}, mtime=${w.modified}); " +
-                        "suppressing id=${l.id} (size=${l.size}, mtime=${l.modified}). The twin stays cloud-only — " +
-                        "resolve or remove the duplicate in the cloud to sync it."
-                log.warn(msg)
-                reporter.onWarning(msg)
-                logSkippedOp("remote-collision", path, "duplicate remote item; winner=${w.id} loser=${l.id}", dryRun)
-            }
-        }
-        db.setSyncState(REMOTE_COLLISIONS_KEY, collisions.size.toString())
-        db.setSyncState(REMOTE_COLLISION_PATHS_KEY, collisions.keys.take(COLLISION_PATHS_STATUS_LIMIT).joinToString("\t"))
-        return losers
-    }
+    ): Set<String> = remoteGather.reportCollisions(collisions, dryRun)
+
+    private suspend fun gatherRemoteChanges(readOnly: Boolean = false): Map<String, CloudItem> = remoteGather.gather(readOnly = readOnly)
+
+    private fun applyScopeTransition() = remoteGather.applyScopeTransition()
+
+    private fun promotePendingCursor() = remoteGather.promotePendingCursor()
+
+    private fun resolveItemPath(item: CloudItem): CloudItem? = remoteGather.resolveItemPath(item)
+
+    private fun detectMissingAfterFullSync(
+        remoteChanges: MutableMap<String, CloudItem>,
+        admittedLoserIds: Set<String> = emptySet(),
+    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds)
 
     // #401: a path-addressed mutation on a collided path could hit either twin and
     // the action carries no remote id to aim it with. Skip; the action re-plans
     // once the duplicate is resolved in the cloud. Internal for the wrong-twin test.
     internal fun refuseCollidedPath(action: SyncAction): Boolean {
-        if (action.path !in collidedPaths) return false
+        if (!remoteGather.isCollided(action.path)) return false
         val msg =
             "Not applying ${actionLabel(action)} for ${action.path}: two remote items share this path and " +
                 "the action has no remote id to aim at. Resolve the duplicate in the cloud first."
@@ -416,14 +337,6 @@ open class SyncEngine(
         return true
     }
 
-    // Single-flight guard for enumerateRemoteIntoState across ALL callers: the
-    // --poll-interval poller, the sync.enumerate verb (EnumerateRpcHandler), and
-    // mount-routed refresh.run (RefreshRpcHandler calls the engine directly).
-    // Per-handler guards don't serialize across handlers, so two passes could
-    // otherwise race delta_cursor promotion and deferredMissing corroboration
-    // state. A caller that loses the CAS is a no-op (skipped=true).
-    private val enumerateInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
-
     // #318: per-path serialization for ensureHydrated's warm-cache check + download.
     // Without it, a second open whose warm-cache size check fails re-downloads with
     // TRUNCATE_EXISTING into the cache file while a first handle is still reading it
@@ -432,9 +345,6 @@ open class SyncEngine(
     // same lifetime tradeoff as HydrationImpl.createMutexes, bounded by the number
     // of distinct paths ever hydrated.
     private val hydrateMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
-
-    // #301: paths whose reap was deferred and already warned about (see the enumerate-reap).
-    private val deferredReapWarned: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * Wire the provider's server-pushed change feed (Internxt's socket.io
@@ -1333,229 +1243,18 @@ open class SyncEngine(
      * One-way remote→state.db refresh for view consumers (the FUSE mount). Reuses the remote
      * gather + state.db upsert, but NEVER scans sync_root, NEVER plans/executes a local→remote
      * delete, and NEVER evaluates the empty-sync_root / max_delete_* guards. Remote-observed
-     * deletions flip state.db rows only on a COMPLETE enumeration (see reaping below). See
+     * deletions flip state.db rows only on a COMPLETE enumeration. Single-flight: an overlapping
+     * call returns `skipped = true`. See [RemoteEnumeration] (#560 U2b) and
      * docs/dev/specs/mount-view-refresh-design.md.
      */
-    open suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult {
-        // Single-flight: a caller that loses the CAS returns immediately as a no-op so
-        // it can never run a concurrent pass against the same engine/DB state (cursor
-        // promotion, corroboration). The winning pass is already refreshing the view.
-        if (!enumerateInFlight.compareAndSet(false, true)) {
-            return EnumerateResult(ok = true, skipped = true)
-        }
-        return try {
-            enumerateRemoteIntoStateLocked(reset)
-        } finally {
-            enumerateInFlight.set(false)
-        }
-    }
-
-    // Records the attempt for enumerationStatus: its start, its end, and a failure that escapes. The
-    // provider failures that end as an EnumerateResult are recorded where they are caught.
-    //
-    // #517 R3: the failure side of ENUMERATE_FAILURE_STREAK_KEY — one write per
-    // failed gather, read by the daemon's enumerate poller at start.
-    private fun recordEnumerateFailureStreak() {
-        val streak = (db.getSyncState(ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0) + 1
-        db.setSyncState(ENUMERATE_FAILURE_STREAK_KEY, streak.toString())
-    }
-
-    private suspend fun enumerateRemoteIntoStateLocked(reset: Boolean): EnumerateResult {
-        enumerationTracker.begin()
-        try {
-            val result = runEnumeration(reset)
-            if (result.ok) enumerationTracker.succeeded()
-            return result
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            enumerationTracker.failed(e.message ?: e.javaClass.simpleName)
-            throw e
-        } finally {
-            // A no-op once the attempt succeeded or failed; a cancelled one is neither.
-            enumerationTracker.aborted()
-        }
-    }
+    open suspend fun enumerateRemoteIntoState(reset: Boolean): EnumerateResult = enumeration.enumerate(reset)
 
     /**
      * What a client may be told about the enumeration right now. A running attempt is answered from
      * memory alone: state.db is held by the batch that saves the result, and a status request must
-     * not wait for it. Otherwise the cursor decides whether the view is still incomplete, and the
-     * last completed scan, when this process has not run one, comes from state.db.
+     * not wait for it. See [RemoteEnumeration.status].
      */
-    fun enumerationStatus(): EnumerationStatus {
-        val status = enumerationTracker.snapshot()
-        if (status.state == EnumerationStatus.State.RUNNING) return status
-        return runCatching {
-            status.copy(
-                first = db.getSyncState("delta_cursor").isNullOrEmpty(),
-                lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
-                lastSuccessAtMs =
-                    status.lastSuccessAtMs
-                        ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
-            )
-        }.getOrDefault(status)
-    }
-
-    // What the last complete full enumeration found, as the next full one's estimate.
-    private fun previousFullEnumeration(): EnumerationTracker.Expected? {
-        val items = db.getSyncState(FULL_ENUMERATION_ITEMS_KEY)?.toIntOrNull() ?: return null
-        return EnumerationTracker.Expected(
-            items = items,
-            folders = db.getSyncState(FULL_ENUMERATION_FOLDERS_KEY)?.toIntOrNull(),
-            durationMs = db.getSyncState(FULL_ENUMERATION_MS_KEY)?.toLongOrNull(),
-        )
-    }
-
-    private fun recordFullEnumeration(
-        remoteChanges: Map<String, CloudItem>,
-        listingMs: Long,
-    ) {
-        val live = remoteChanges.values.filter { !it.deleted }
-        db.setSyncState(FULL_ENUMERATION_ITEMS_KEY, live.size.toString())
-        db.setSyncState(FULL_ENUMERATION_FOLDERS_KEY, live.count { it.isFolder }.toString())
-        db.setSyncState(FULL_ENUMERATION_MS_KEY, listingMs.toString())
-    }
-
-    private suspend fun runEnumeration(reset: Boolean): EnumerateResult {
-        // reset clears only delta_cursor (NOT db.resetAll) so a gather that then fails never
-        // leaves the mount serving an empty view. A reset forces a full re-enumeration whose
-        // complete-reap below sweeps stale rows (mark-and-sweep), with no empty-view window.
-        applyScopeTransition()
-        if (reset) db.setSyncState("delta_cursor", "")
-        // Only a full listing is measured against a previous one; a delta of a few items must not
-        // inherit the total of the whole drive.
-        val cursorEmpty = db.getSyncState("delta_cursor").isNullOrEmpty()
-        enumerationTracker.baseline(
-            first = cursorEmpty,
-            expected = if (cursorEmpty || provider.deltaIsFullListing) previousFullEnumeration() else null,
-        )
-        val remoteChanges: Map<String, CloudItem> =
-            try {
-                gatherRemoteChanges(progress = enumerationTracker).filterKeys { isTracked(it) }
-            } catch (e: ProviderException) {
-                enumerationTracker.failed(e.message ?: e.javaClass.simpleName)
-                recordEnumerateFailureStreak()
-                return EnumerateResult(ok = false, error = e.message)
-            }
-        val listingMs = enumerationTracker.saving(remoteChanges.count { !it.value.deleted })
-        db.setSyncState(ENUMERATE_FAILURE_STREAK_KEY, "0")
-        // Completeness is recorded in sync_state by the gather, not on its return value.
-        val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
-        val canonicalToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
-        val upsertedViewPaths = remoteChanges.filterValues { !it.deleted }.keys
-            .mapTo(mutableSetOf()) { applyReverseTop(it, canonicalToLocalTop) }
-        val upserted = upsertedViewPaths.size
-        // Bulk-disappearance corroboration guard (spec §3.2). A complete enumeration that
-        // would flip more than max(50, 20% of tracked rows) to deleted is suspicious (e.g.
-        // Internxt /files lag); reap only paths a PRIOR complete enumeration also saw
-        // missing, defer the rest, and carry the candidate set to the next enumeration.
-        val trackedRows = db.getEntryCount()
-        val bulkThreshold = maxOf(BULK_REAP_ABSOLUTE, (trackedRows * BULK_REAP_FRACTION).toInt())
-        var reaped = 0
-        val reapedViewPaths = mutableSetOf<String>()
-        var nextDeferred = emptySet<String>()
-        // #149: cache files are evicted AFTER the batch commits — a filesystem
-        // delete is a non-transactional side effect and must not lengthen the
-        // SQLite lock window.
-        val cacheEvictions = mutableListOf<Triple<String, Path, Long?>>()
-        db.batch {
-            updateRemoteEntries(remoteChanges)
-            if (complete) {
-                // Reap ONLY on a complete enumeration (spec §3.1). The deleted items are
-                // already present in remoteChanges: gatherRemoteChanges runs
-                // detectMissingAfterFullSync on a full (cursor-null) gather, injecting
-                // deleted=true CloudItems for DB rows absent from the live set; incremental
-                // gathers carry provider tombstones the same way. updateRemoteEntries skips
-                // them, so we flip state.db here directly — never via provider.delete.
-                val missingNow = remoteChanges.filterValues { it.deleted }.keys
-                val bulk = missingNow.size > bulkThreshold
-                val toReap =
-                    if (bulk) missingNow.intersect(deferredMissing) else missingNow
-                for (path in toReap) {
-                    // #301: refuse to reap a path whose hydration cache may hold the
-                    // only copy of user bytes. A queued or in-flight upload means an
-                    // edit written through the mount has not landed yet; a cache file
-                    // newer than the row's last-synced watermark means the same for an
-                    // edit whose upload crashed or failed (the co-daemon's recovery
-                    // scanner replays exactly this watermark). Deleting the cache in
-                    // that window destroyed the bytes everywhere — the upload then hit
-                    // a missing cache path, and the remote copy (if any) was stale.
-                    // Defer the whole reap: the row stays alive and the next complete
-                    // enumeration re-evaluates once the upload has landed (or failed).
-                    val row = db.getEntry(path)
-                    val cachePath = resolveCachePath(path)
-                    val cacheDirty =
-                        if (row == null) {
-                            false
-                        } else {
-                            runCatching {
-                                Files.exists(cachePath) &&
-                                    Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
-                            }.getOrDefault(false)
-                        }
-                    if (uploadInFlight(path) || row?.isPendingUpload == true || cacheDirty) {
-                        // The daemon enumerates every poll interval: warn once per path, not once per poll.
-                        val msg = "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit"
-                        if (deferredReapWarned.add(path)) log.warn(msg, path) else log.debug(msg, path)
-                        continue
-                    }
-                    deferredReapWarned.remove(path)
-                    db.markDeleted(path)
-                    cacheEvictions.add(
-                        Triple(path, cachePath, runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull()),
-                    )
-                    reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
-                    reaped++
-                }
-                if (bulk) {
-                    val deferred = missingNow - toReap
-                    nextDeferred = missingNow
-                    if (deferred.isNotEmpty()) {
-                        log.warn(
-                            "enumerate: bulk disappearance ({} paths > threshold {}); " +
-                                "deferring {} uncorroborated path(s) to the next complete enumeration",
-                            missingNow.size,
-                            bulkThreshold,
-                            deferred.size,
-                        )
-                    }
-                }
-            }
-        }
-        // #149: same per-file behaviour as before (errors swallowed — the row
-        // flip is the truth and the cache copy is a disk-space concern), just
-        // outside the transaction now.
-        // The lock window is gone, so a hydration write may have recreated the path
-        // in between (#301 class): skip the delete when an upload is queued for it or
-        // the cache file is no longer the one the reap decided on.
-        for ((path, cachePath, mtimeAtReap) in cacheEvictions) {
-            runCatching {
-                val unchanged = runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull() == mtimeAtReap
-                if (!uploadInFlight(path) && unchanged) Files.deleteIfExists(cachePath)
-            }
-        }
-        // A bulk disappearance must be corroborated by CONSECUTIVE complete enumerations.
-        // On a complete pass, carry this pass's candidate set forward. On an INCOMPLETE
-        // pass, RESET the deferred set: an incomplete pass means we had no clean run, so
-        // a later complete pass must re-defer rather than reap against stale corroboration
-        // state (conservative — favors not reaping, since reaping evicts cache + marks
-        // deleted).
-        deferredMissing = if (complete) nextDeferred else emptySet()
-        promotePendingCursor()
-        // A complete full listing becomes the estimate for the next one (the gather recorded whether it was full).
-        if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
-        // Notify the view-invalidation sink once, with all paths that changed in state.db
-        // during this pass. Only fires when something actually changed so quiescent polls
-        // do not produce spurious cache-invalidation traffic. The sink is a plain lambda so
-        // app:hydration can wire HydrationEvent.ViewInvalidated without creating a circular
-        // import (app:hydration depends on app:sync, not vice versa).
-        if (upserted > 0 || reaped > 0) {
-            val changedPaths: Set<String> = upsertedViewPaths + reapedViewPaths
-            viewInvalidationSink(changedPaths, false)
-        }
-        return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
-    }
+    fun enumerationStatus(): EnumerationStatus = enumeration.status()
 
     /** What one [rescanSyncRootForUpload] pass did. */
     data class LocalRescanResult(
@@ -2959,349 +2658,6 @@ open class SyncEngine(
         return out
     }
 
-    // [readOnly]: a dry-run preview, told to the provider through ScanContext.readOnly so it persists nothing.
-    // [progress]: the tracker an enumeration reports to, fed by the page callbacks and by the provider.
-    private suspend fun gatherRemoteChanges(
-        readOnly: Boolean = false,
-        progress: EnumerationTracker? = null,
-    ): Map<String, CloudItem> = withContext(Priority.Background) {
-        val storedCursor = db.getSyncState("delta_cursor")
-        val cursor = storedCursor?.ifEmpty { null }
-        var isFullSync = cursor == null || provider.deltaIsFullListing
-        var changes = mutableMapOf<String, CloudItem>()
-        // #401: every `changes[path] = item` site goes through admit() so same-named
-        // remote items cannot silently drop a twin (see the admit doc).
-        val keyToPath = HashMap<String, String>()
-        val collisions = HashMap<String, CollisionRecord>()
-        fun admitChange(item: CloudItem) {
-            admit(changes, keyToPath, collisions, item)
-        }
-        // After every page the gather holds: the reporter's heartbeat and the enumeration's item count.
-        fun reportGathered() {
-            reporter.onScanProgress("remote", changes.size)
-            progress?.onItems(changes.size)
-        }
-        val providerProgress: ((org.krost.unidrive.ScanProgress) -> Unit)? = progress?.let { it::onProgress }
-
-        // UD-223 fast-bootstrap: on first-sync only, adopt the remote's current
-        // cursor without enumerating. Provider must declare FastBootstrap; otherwise
-        // log a warning and fall through. On success, the subsequent full-sync
-        // deletion sweep (detectMissingAfterFullSync) is skipped — no enumeration
-        // means no authoritative item set to diff against, so we must NOT treat
-        // absence as deletion.
-        if (fastBootstrap && cursor == null) {
-            if (Capability.FastBootstrap in provider.capabilities()) {
-                // #532: the preview's bootstrap carries readOnly, so a dry-run --fast-bootstrap
-                // stamps nothing in the provider's own storage (OneDrive's delta_last_seen).
-                when (
-                    val result =
-                        provider.deltaFromLatest(
-                            org.krost.unidrive.ScanContext(
-                                resumeMarker = null,
-                                resumedItems = emptyList(),
-                                persistPage = { _, _ -> },
-                                readOnly = readOnly,
-                            ),
-                        )
-                ) {
-                    is CapabilityResult.Success -> {
-                        val page = result.value
-                        for (item in page.items) {
-                            val resolved = resolveItemPath(item) ?: continue
-                            admitChange(resolved)
-                        }
-                        reportGatheredCollisions(collisions, readOnly)
-                        // UD-223: promote the cursor directly. Bootstrap guarantees no transfers
-                        // fire on this run (the action list is empty by construction), so the
-                        // usual "pending → delta after zero failures" dance is skipped —
-                        // otherwise syncOnce's `if (actions.isEmpty()) return` short-circuits
-                        // the promotion and the next run re-bootstraps forever.
-                        db.setSyncState("delta_cursor", page.cursor)
-                        db.setSyncState("last_full_scan", Instant.now().toString())
-                        // Invalidate any in-progress scan checkpoint. The offsets persisted
-                        // in `scan_in_progress_marker` correspond to the previous gather's
-                        // cursor (cursor=null full enum, or an earlier delta cursor); they
-                        // index into a different result set than what the new cursor=now
-                        // delta will return. Resuming with the old offsets would silently
-                        // page past items modified in the seam. Clearing the staging slice
-                        // is cheap (no live `sync_entries` rows touched).
-                        db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { staleScanId ->
-                            log.info(
-                                "UD-223 fast-bootstrap: invalidating stale scan checkpoint scan={} marker={}",
-                                staleScanId,
-                                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER),
-                            )
-                            db.completeScan(staleScanId)
-                        }
-                        val stamp = Instant.now().toString()
-                        val msg =
-                            "UD-223 fast-bootstrap: adopted remote cursor as of $stamp. " +
-                                "Items that already exist on the remote will stay invisible until they next mutate. " +
-                                "Upload-direction sync is unaffected."
-                        // The log line only — reporter.onWarning duplicated it on every CLI
-                        // one-shot run (console appender + progress reporter, #532); the
-                        // daemon runs with the Silent reporter either way.
-                        log.warn(msg)
-                        // #116: arm adopt-on-name-match for this run's apply pass.
-                        fastBootstrapActive = true
-                        return@withContext changes
-                    }
-                    is CapabilityResult.Unsupported -> {
-                        log.warn(
-                            "UD-223 fast-bootstrap requested but provider '{}' does not support it ({}). " +
-                                "Falling back to full first-sync enumeration.",
-                            providerId,
-                            result.reason,
-                        )
-                    }
-                }
-            } else {
-                log.warn(
-                    "UD-223 fast-bootstrap requested but provider '{}' does not declare the capability. " +
-                        "Falling back to full first-sync enumeration.",
-                    providerId,
-                )
-            }
-        }
-
-        // If includeShared is requested but the provider doesn't actually support
-        // delta-with-shared, silently fall back to plain delta — this is the
-        // long-standing behaviour preserved across the UD-301 refactor.
-        val useShared =
-            includeShared &&
-                Capability.DeltaShared in provider.capabilities()
-
-        // UD-352: forward per-page progress to reporter.onScanProgress("remote", N).
-        // The provider's delta() invokes this callback on each accumulated page
-        // (where supported); the engine just fans it out to the reporter so the
-        // heartbeat fires inside the gather loop instead of only at start/end.
-        // Snapshot/all-at-once providers (HiDrive, rclone) leave this unused —
-        // the engine still emits a final tick once gather returns. Note that
-        // [provider.deltaWithShared] does not yet accept the callback (its
-        // pagination path is OneDrive-only and ALREADY emits progress via the
-        // outer loop in this method); only the plain [provider.delta] path
-        // forwards it.
-        val onPageProgress: (Int) -> Unit = { itemsSoFar ->
-            reporter.onScanProgress("remote", itemsSoFar)
-            progress?.onItems(itemsSoFar)
-        }
-
-        // UD-360: providers signal partial gathers via DeltaPage.complete=false.
-        // We track that across pages and skip the absence-implies-deletion sweep
-        // (detectMissingAfterFullSync) when any page was incomplete — otherwise
-        // a transient subtree error on the provider side would synthesize bogus
-        // DeleteLocal actions for every file under that subtree.
-        var allComplete = true
-
-        // Resumable-scan lifecycle: a non-null activeScanId means this gather
-        // pass either resumes a prior daemon's interrupted scan or has just
-        // started a fresh one. The scanContext threads the engine's staging
-        // hooks into provider.delta(); on a successful return the staging
-        // slice is cleared. A throw mid-scan leaves both the slice and the
-        // checkpoint intact so the next launch can pick up from there.
-        val activeScan = db.getActiveScan(staleThreshold = java.time.Duration.ofHours(SCAN_CHECKPOINT_STALE_HOURS))
-        val resumedItems: List<CloudItem> =
-            if (activeScan != null) db.loadStagedItems(activeScan.scanId) else emptyList()
-        val scanId =
-            activeScan?.scanId
-                ?: db.beginScan(initialMarker = null)
-        if (activeScan != null) {
-            log.info(
-                "Resuming Internxt-style scan id={} marker={} ({} previously-staged items)",
-                scanId,
-                activeScan.marker,
-                resumedItems.size,
-            )
-        }
-        val scanContext =
-            org.krost.unidrive.ScanContext(
-                resumeMarker = activeScan?.marker,
-                resumedItems = resumedItems,
-                persistPage = { items, marker -> db.persistScanPage(scanId, items, marker) },
-                scopeRoots = trackScope,
-                readOnly = readOnly,
-                onProgress = providerProgress,
-            )
-
-        suspend fun nextPage(c: String?): DeltaPage {
-            val page =
-                if (useShared) {
-                    when (val r = provider.deltaWithShared(c)) {
-                        is CapabilityResult.Success -> r.value
-                        is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress, scanContext)
-                    }
-                } else {
-                    provider.delta(c, onPageProgress, scanContext)
-                }
-            // UD-751: single canonical "Delta: N items, hasMore=X" line, lifted out
-            // of the five providers that used to emit the same data per-page.
-            log.debug("Delta: {} items, hasMore={}", page.items.size, page.hasMore)
-            if (!page.complete) {
-                allComplete = false
-            }
-            return page
-        }
-
-        // Persist the running completeness flag alongside the cursor.
-        // Promotion now happens unconditionally (see promotePendingCursor):
-        // pinning the cursor at its prior value on an incomplete sweep
-        // forced a full re-scan every launch on a hot account whenever any
-        // subtree returned 500/503. The flag is still recorded so the doctor
-        // surface and warnings can tell the user the last scan was incomplete
-        // and recommend `--reset` if the skipped subtree matters.
-        //
-        // The monotonicity floor (cursor never regresses below the prior
-        // value) lives inside each provider's delta() — only providers know
-        // whether their cursor is timestamp-comparable (Internxt) or opaque
-        // (OneDrive's @odata.nextLink URLs), and only providers can do the
-        // comparison correctly.
-        fun persistPendingCursor(cursor: String) {
-            db.setSyncState("pending_cursor", cursor)
-            db.setSyncState("pending_cursor_complete", if (allComplete) "true" else "false")
-        }
-
-        // #110: a persisted delta cursor can age out (OneDrive Graph 410 Gone).
-        // Catch DeltaCursorExpiredException specifically — NOT the generic
-        // ProviderException — so non-410 failures keep their existing behaviour.
-        // On 410: clear the cursor, discard partial results, and re-run a full
-        // enumeration from cursor=null so genuine deletes in the stale window
-        // are reaped and unchanged paths are spared. If the recovery pass itself
-        // throws ProviderException the exception propagates to the caller which
-        // treats it as an enumeration failure (deletes suppressed) — no infinite
-        // loop, no recursive recovery.
-        try {
-            var page = nextPage(cursor)
-            for (item in page.items) {
-                val resolved = resolveItemPath(item) ?: continue
-                admitChange(resolved)
-            }
-            persistPendingCursor(page.cursor)
-            // UD-742: heartbeat after each remote page. Internxt paginates
-            // LISTING_PAGE_SIZE = 999 per page (measured + source-verified, #392
-            // 2026-09-29), so a 113k-item drive emits ~113 update events — cheap,
-            // and the reporter is responsible for throttling display
-            // (CliProgressReporter overwrites the same line via printInline).
-            reportGathered()
-
-            while (page.hasMore) {
-                page = nextPage(page.cursor)
-                for (item in page.items) {
-                    val resolved = resolveItemPath(item) ?: continue
-                    admitChange(resolved)
-                }
-                persistPendingCursor(page.cursor)
-                reportGathered()
-            }
-        } catch (e: DeltaCursorExpiredException) {
-            // The resumed cursor aged out / the drive re-keyed (Graph 410). Clear the
-            // persisted cursor and re-enumerate the FULL inventory from a null cursor
-            // (incremental = false), so genuine deletes during the stale window are
-            // reaped and unchanged paths are not.
-            log.warn(
-                "#110: delta cursor expired ({}); clearing it and re-enumerating the full inventory.",
-                e.message,
-            )
-            db.setSyncState("delta_cursor", "")
-            // Abandon the stale scan context and start a fresh one for the full re-enum.
-            db.completeScan(scanId)
-            val recoveryScanId = db.beginScan(initialMarker = null)
-            val recoveryScanContext =
-                org.krost.unidrive.ScanContext(
-                    resumeMarker = null,
-                    resumedItems = emptyList(),
-                    persistPage = { items, marker -> db.persistScanPage(recoveryScanId, items, marker) },
-                    scopeRoots = trackScope,
-                    readOnly = readOnly,
-                    onProgress = providerProgress,
-                )
-            suspend fun nextPageRecovery(c: String?): DeltaPage {
-                val p =
-                    if (useShared) {
-                        when (val r = provider.deltaWithShared(c)) {
-                            is CapabilityResult.Success -> r.value
-                            is CapabilityResult.Unsupported -> provider.delta(c, onPageProgress, recoveryScanContext)
-                        }
-                    } else {
-                        provider.delta(c, onPageProgress, recoveryScanContext)
-                    }
-                log.debug("Delta (recovery): {} items, hasMore={}", p.items.size, p.hasMore)
-                if (!p.complete) allComplete = false
-                return p
-            }
-            // Reset all mutable accumulation state for the recovery pass.
-            changes = mutableMapOf()
-            keyToPath.clear()
-            collisions.clear()
-            allComplete = true
-            isFullSync = true
-            // Recovery: full enumeration from null cursor. Any ProviderException here
-            // propagates to the caller (treated as an enumeration failure, deletes
-            // suppressed) — never recover recursively.
-            var rPage = nextPageRecovery(null)
-            for (item in rPage.items) {
-                val resolved = resolveItemPath(item) ?: continue
-                admitChange(resolved)
-            }
-            persistPendingCursor(rPage.cursor)
-            reportGathered()
-            while (rPage.hasMore) {
-                rPage = nextPageRecovery(rPage.cursor)
-                for (item in rPage.items) {
-                    val resolved = resolveItemPath(item) ?: continue
-                    admitChange(resolved)
-                }
-                persistPendingCursor(rPage.cursor)
-                reportGathered()
-            }
-            if (allComplete) {
-                db.completeScan(recoveryScanId)
-            }
-        }
-
-        // Staged inventory has been consumed by this gather pass — the live
-        // sync_entries write happens downstream via updateRemoteEntries — so
-        // the per-page durability slice can be cleared. A daemon crash now,
-        // or on any subsequent step, will retry from the freshly-persisted
-        // delta_cursor (or pending_cursor if no transfers ran), not from the
-        // staged offsets.
-        //
-        // Cross-session resume: when the gather returned `complete=false`
-        // (e.g. Internxt's 503 subtree skip or a partial ancestor-uuid drop),
-        // the marker + staged rows are deliberately preserved so the NEXT
-        // daemon launch can pick up at the same offset rather than restarting
-        // at 0. Pairs with the best-effort `delta_cursor` advance in
-        // `promotePendingCursor` — the cursor moves forward by `max(updatedAt)`
-        // over completed pages while the offset doesn't regress, so a
-        // throttle-cliff'd account makes monotonic progress across restarts
-        // even if no individual run reaches `complete=true`. The stale-
-        // threshold check inside `getActiveScan` is the safety net against
-        // an indefinitely-preserved marker drifting past Internxt's
-        // change-detection window.
-        if (allComplete) {
-            db.completeScan(scanId)
-        }
-
-        // #401: report suppressed twins BEFORE the absence sweep so their ids are
-        // excluded from reaping.
-        val collisionLoserIds = reportGatheredCollisions(collisions, readOnly)
-
-        if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds)
-        } else if (isFullSync) {
-            val msg =
-                "UD-360: at least one delta page returned complete=false; " +
-                    "skipping detectMissingAfterFullSync to avoid spurious del-local actions. " +
-                    "The missing inventory will be picked up on the next sync run."
-            log.warn(msg)
-            reporter.onWarning(msg)
-        }
-        // Record the gather's ACTUAL full-enumeration verdict (a 410 recovery above
-        // can upgrade an incremental pass to full) so the sync-path remote-shrink
-        // guard judges the real mode, not just the pre-gather cursor state.
-        db.setSyncState("last_gather_full", isFullSync.toString())
-        changes
-    }
-
     private suspend fun dispatchStreamingDownload(
         action: SyncAction.DownloadContent,
         downloaded: AtomicInteger,
@@ -3438,7 +2794,7 @@ open class SyncEngine(
         // #401: the streaming path admits through the same collision winner-rule as
         // the buffered gather (see gatherRemoteChanges).
         val keyToPath = HashMap<String, String>()
-        val collisions = HashMap<String, CollisionRecord>()
+        val collisions = HashMap<String, RemoteGather.CollisionRecord>()
         val buffer = StreamingReconcileBuffer()
         val safeAccumulator = mutableListOf<SyncAction>()
         // resolveSlice processes the full localChanges map on every delta page,
@@ -3881,154 +3237,6 @@ open class SyncEngine(
 
         val deferred = buffer.drainDeferred()
         changes to (safeAccumulator + deferred)
-    }
-
-    private fun loadTrackedScope(): List<String> =
-        db.getSyncState("tracked_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
-
-    // Reconcile what state.db tracks with the standing scope. Narrowing drops rows
-    // outside the new scope without planning any delete: the local files stay and
-    // the remote is untouched. Widening clears the delta cursor so the next gather
-    // enumerates the newly in-scope subtrees; rows outside the old scope were never
-    // tracked, so an incremental delta could not find them. A dry-run runs this on its disposable copy,
-    // so the preview shows exactly what the real run will do.
-    private fun applyScopeTransition() {
-        val prior = loadTrackedScope()
-        if (prior == trackScope) return
-        val narrowed =
-            if (prior.isEmpty()) {
-                trackScope.isNotEmpty()
-            } else {
-                trackScope.isNotEmpty() && prior.any { !SyncScope.contains(it, trackScope) }
-            }
-        val widened =
-            trackScope.isEmpty() || (prior.isNotEmpty() && trackScope.any { !SyncScope.contains(it, prior) })
-        db.batch {
-            if (narrowed) {
-                var untracked = 0
-                for (entry in db.getAllEntries()) {
-                    if (isTracked(entry.remotePath ?: entry.path)) continue
-                    db.deleteEntry(entry.path)
-                    untracked++
-                }
-                // Silent when nothing was untracked: the first run of a new profile
-                // narrows from "whole drive" to its scope over an empty db, and a
-                // "stopped tracking 0 row(s)" line reads as if state were lost (#395).
-                if (untracked > 0) {
-                    log.info("Sync scope narrowed to {}: stopped tracking {} row(s); local files left in place", trackScope, untracked)
-                }
-            }
-            if (widened) {
-                db.setSyncState("delta_cursor", "")
-                db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let { db.completeScan(it) }
-                val msg = "Sync scope widened to ${trackScope.ifEmpty { listOf("whole drive") }}: re-enumerating the drive."
-                log.warn(msg)
-                reporter.onWarning(msg)
-            }
-            db.setSyncState("tracked_scope", trackScope.joinToString("\t"))
-        }
-        // The tracked set just reshaped: narrowing untracked rows the mount may
-        // still hold in cache (no reap event fires for them — they were deleted,
-        // not reaped), and widening re-enumerates from scratch. Neither is
-        // expressible as a per-path delta, so invalidate the whole view.
-        viewInvalidationSink(emptySet(), true)
-    }
-
-    private fun promotePendingCursor() {
-        val pendingCursor = db.getSyncState("pending_cursor") ?: return
-        db.setSyncState("delta_cursor", pendingCursor)
-        val complete = db.getSyncState("pending_cursor_complete") ?: "true"
-        if (complete == "true") {
-            db.setSyncState("last_full_scan", Instant.now().toString())
-        }
-    }
-
-    private fun resolveItemPath(item: CloudItem): CloudItem? {
-        // #171: canonicalize the remote path to NFC so it matches the NFC local key
-        // in the reconciler (copy only when the form actually changes).
-        if (item.path != "/" && item.path.isNotEmpty()) {
-            val n = PathNormalizer.nfc(item.path)
-            return if (n == item.path) item else item.copy(path = n)
-        }
-        // #183: access-revoked tombstone — Graph `@microsoft.graph.removed` state="removed",
-        // no parentReference, so path resolved to "/". The item still physically exists on the
-        // remote; the local file MUST be kept. Retire the DB row via TRASHED (removed from the
-        // alive view, no longer an unreapable orphan) and return null so the item doesn't flow
-        // into the normal reconciler path.
-        if (!item.deleted && item.accessRevoked) {
-            val retired = db.setStatusTrashed(item.id)
-            if (retired) {
-                log.info(
-                    "#183: access-revoked tombstone id={}: DB row retired (TRASHED), local file preserved",
-                    item.id,
-                )
-            } else {
-                log.debug(
-                    "#183: access-revoked tombstone id={}: no alive row found (already retired or never tracked)",
-                    item.id,
-                )
-            }
-            return null
-        }
-        if (!item.deleted) return null // non-deleted root item without a known path, skip
-        val entry = db.getEntryByRemoteId(item.id) ?: return null
-        log.debug("Resolved deleted item id={} to path={}", item.id, entry.path)
-        return item.copy(path = entry.path, name = entry.path.substringAfterLast("/"))
-    }
-
-    private fun detectMissingAfterFullSync(
-        remoteChanges: MutableMap<String, CloudItem>,
-        admittedLoserIds: Set<String> = emptySet(),
-    ) {
-        val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
-        // #401: a twin suppressed by the gather collision winner-rule keeps its DB row
-        // alive but holds no key in remoteChanges; without this it would look absent
-        // and the sweep would synthesize a path-addressed DeleteRemote for it — the
-        // wrong-twin delete #402 closed. Suppressed ≠ deleted.
-        seenRemoteIds.addAll(admittedLoserIds)
-        pruneRecentlyUploaded()
-
-        for (entry in db.getAllEntries()) {
-            if (entry.remoteId == null) continue
-            if (entry.remoteId in seenRemoteIds) continue
-            // #115: the delta and the recently-uploaded marks live in the REMOTE
-            // namespace, so test against the row's effective remote path
-            // (`remotePath ?: path`). For a non-aliased row this is just
-            // entry.path — byte-identical to pre-#115 behaviour.
-            val effectiveRemote = entry.remotePath ?: entry.path
-            if (!isTracked(effectiveRemote)) continue
-            if (effectiveRemote in remoteChanges) continue
-
-            val uploadedAt = recentlyUploaded[effectiveRemote]
-            if (uploadedAt != null) {
-                log.debug(
-                    "Full sync: DB entry {} (remoteId={}) not in delta but uploaded {}s ago; " +
-                        "within the recent-upload grace window, deferring the deletion verdict",
-                    entry.path,
-                    entry.remoteId,
-                    java.time.Duration.between(uploadedAt, Instant.now()).seconds,
-                )
-                continue
-            }
-
-            log.debug("Full sync: DB entry {} (remoteId={}) not in delta, marking deleted", entry.path, entry.remoteId)
-            // Key the synthesized tombstone at the effective remote path so it
-            // flows through the reconciler's canonical→real-local reverse map
-            // alongside genuine deltas.
-            remoteChanges[effectiveRemote] =
-                CloudItem(
-                    id = entry.remoteId!!, // checked above; no smart cast across modules (#560 U2)
-                    name = effectiveRemote.substringAfterLast("/"),
-                    path = effectiveRemote,
-                    size = 0,
-                    isFolder = entry.isFolder,
-                    modified = null,
-                    created = null,
-                    hash = null,
-                    mimeType = null,
-                    deleted = true,
-                )
-        }
     }
 
     private suspend fun applyCreatePlaceholder(action: SyncAction.CreatePlaceholder) {
@@ -5065,78 +4273,7 @@ open class SyncEngine(
         return rev
     }
 
-    private fun applyReverseTop(path: String, canonicalToLocalTop: Map<String, String>): String {
-        if (canonicalToLocalTop.isEmpty()) return path
-        val noSlash = path.removePrefix("/")
-        val slash = noSlash.indexOf('/')
-        val top = if (slash < 0) noSlash else noSlash.substring(0, slash)
-        val localTop = canonicalToLocalTop[top] ?: return path
-        val rest = if (slash < 0) "" else noSlash.substring(slash)
-        return "/$localTop$rest"
-    }
-
-    private fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>) {
-        // #115: the remoteChanges keys are canonical remote paths. Build a
-        // canonical→real-local reverse map so a newly-arrived aliased item is
-        // persisted at its REAL-LOCAL path (with the canonical in remote_path),
-        // not as a phantom canonical-keyed row that LocalScanner can never find
-        // on disk. Existing rows are matched by effective remote path so the
-        // merge preserves their real-local path + remote_path. No alias active
-        // → both helpers are identity and this is byte-identical to pre-#115.
-        val remoteToLocalTop = buildCanonicalToLocalTopMap(remoteChanges)
-        for ((path, item) in remoteChanges) {
-            if (item.deleted) continue // skip deleted items
-            val realLocalPath = applyReverseTop(path, remoteToLocalTop)
-            val isAliased = realLocalPath != path
-            // Match an existing row by effective remote path (handles aliased
-            // rows keyed at their real-local path).
-            val existing = db.getEntryByRemotePath(path)
-            val merged =
-                existing?.copy(
-                    remoteId = item.id,
-                    remoteHash = item.hash,
-                    remoteSize = item.size,
-                    remoteModified = item.modified,
-                    lastSynced = Instant.now(),
-                    // A fresh delta event for a previously-quarantined row
-                    // means the cloud is reporting it alive again — drop the
-                    // quarantine and let the next reconcile re-emit the
-                    // download. Belt-and-braces with
-                    // StateDatabase.clearDownloadQuarantine below: that call
-                    // wins on the canonical SQL UPDATE; this copy ensures
-                    // any consumer reading the merged value inside this loop
-                    // sees the cleared state too.
-                    downloadQuarantined = false,
-                    lastErrorAt = null,
-                    // preserve path, remotePath, localMtime, localSize, isHydrated, isFolder
-                ) ?: SyncEntry(
-                    // #115: key a newly-arrived aliased item at its real-local
-                    // path; record the canonical in remotePath so LocalScanner
-                    // finds the row and the next delta matches by effective
-                    // remote path.
-                    path = realLocalPath,
-                    remotePath = if (isAliased) path else null,
-                    remoteId = item.id,
-                    remoteHash = item.hash,
-                    remoteSize = item.size,
-                    remoteModified = item.modified,
-                    localMtime = null,
-                    localSize = null,
-                    isFolder = item.isFolder,
-                    isPinned = false,
-                    isHydrated = false,
-                    lastSynced = Instant.now(),
-                )
-            db.upsertEntry(merged)
-            // Belt-and-braces (matches the .copy() above): explicitly clear
-            // the quarantine flag on the canonical row in case a future
-            // upsertEntry call path mutates the row without going through
-            // the merged.copy() construction above.
-            if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
-                db.clearDownloadQuarantine(existing.remoteId!!) // checked above; no smart cast across modules (#560 U2)
-            }
-        }
-    }
+    private fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>) = remoteGather.updateRemoteEntries(remoteChanges)
 
     private fun actionLabel(action: SyncAction): String =
         when (action) {
@@ -5421,17 +4558,11 @@ open class SyncEngine(
     companion object {
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
 
-        // #517 R3: sync_state key counting consecutive enumerations that ended in a
-        // provider failure. The daemon's enumerate poller seeds its backoff from it
-        // at start, so a restart into a known-bad remote doesn't re-run the doomed
-        // cycle at full cadence. Reset to "0" by any gather that comes back.
-        const val ENUMERATE_FAILURE_STREAK_KEY: String = "enumerate_failure_streak"
-
-        // Bulk-disappearance corroboration guard (mount-view-refresh-design.md §3.2):
-        // a complete enumeration flipping more than max(absolute, fraction × tracked
-        // rows) to deleted defers reaping until a second complete enumeration corroborates.
-        const val BULK_REAP_ABSOLUTE: Int = 50
-        const val BULK_REAP_FRACTION: Double = 0.20
+        // #560 U2b: the enumeration's and the gather's constants live in
+        // RemoteEnumeration and RemoteGather (see there); these names stay for callers.
+        const val ENUMERATE_FAILURE_STREAK_KEY: String = RemoteEnumeration.FAILURE_STREAK_KEY
+        const val BULK_REAP_ABSOLUTE: Int = RemoteEnumeration.BULK_REAP_ABSOLUTE
+        const val BULK_REAP_FRACTION: Double = RemoteEnumeration.BULK_REAP_FRACTION
 
         // Remote-shrink trust gate. A *full* enumeration is trusted as complete
         // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked
@@ -5465,27 +4596,23 @@ open class SyncEngine(
         }
 
         @JvmField
-        val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)
+        val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = RemoteGather.RECENT_UPLOAD_REAP_GRACE
 
-        const val SCAN_CHECKPOINT_STALE_HOURS: Long = 6L
+        const val SCAN_CHECKPOINT_STALE_HOURS: Long = RemoteGather.SCAN_CHECKPOINT_STALE_HOURS
 
         const val REMOTE_WAKE_DEBOUNCE_MS: Long = 5_000L
 
         const val STREAMING_RECONCILE_CHANNEL_CAPACITY: Int = 4
 
-        // #401: sync_state keys backing the `status` collision surface. The paths
-        // value is TAB-joined, capped so a drive-wide naming collision cannot bloat
-        // either the row or the status output.
-        const val REMOTE_COLLISIONS_KEY: String = "remote_collisions"
-        const val REMOTE_COLLISION_PATHS_KEY: String = "remote_collisions_paths"
-        const val COLLISION_PATHS_STATUS_LIMIT: Int = 50
+        // #401: the status collision surface (see RemoteGather).
+        const val REMOTE_COLLISIONS_KEY: String = RemoteGather.REMOTE_COLLISIONS_KEY
+        const val REMOTE_COLLISION_PATHS_KEY: String = RemoteGather.REMOTE_COLLISION_PATHS_KEY
+        const val COLLISION_PATHS_STATUS_LIMIT: Int = RemoteGather.COLLISION_PATHS_STATUS_LIMIT
 
-        // sync_state keys: what the last complete full enumeration found (live items, live folders)
-        // and how long its listing took, the estimate behind the next one's ETA. Not the
-        // last_scan_*_remote hints: a sync pass writes those for deltas too, so they are no total.
-        const val FULL_ENUMERATION_ITEMS_KEY: String = "last_full_enumeration_items"
-        const val FULL_ENUMERATION_FOLDERS_KEY: String = "last_full_enumeration_folders"
-        const val FULL_ENUMERATION_MS_KEY: String = "last_full_enumeration_ms"
+        // The estimate behind the next full enumeration's ETA (see RemoteEnumeration).
+        const val FULL_ENUMERATION_ITEMS_KEY: String = RemoteEnumeration.FULL_ENUMERATION_ITEMS_KEY
+        const val FULL_ENUMERATION_FOLDERS_KEY: String = RemoteEnumeration.FULL_ENUMERATION_FOLDERS_KEY
+        const val FULL_ENUMERATION_MS_KEY: String = RemoteEnumeration.FULL_ENUMERATION_MS_KEY
 
         internal fun formatSkippedOpJson(
             action: String,
