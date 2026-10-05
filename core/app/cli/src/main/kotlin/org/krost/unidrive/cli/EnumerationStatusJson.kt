@@ -27,6 +27,7 @@ internal fun EnumerationStatus.toJson(): JsonObject =
         etaS?.let { put("eta_s", it) }
         etaKind?.let { put("eta_kind", it.wire) }
         lastSuccessAtMs?.let { put("last_success_at_ms", it) }
+        lastScanComplete?.let { put("last_scan_complete", it) }
         lastError?.let { put("last_error", it) }
         nextAttemptAtMs?.let { put("next_attempt_at_ms", it) }
     }

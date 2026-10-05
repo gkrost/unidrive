@@ -236,7 +236,9 @@ class DoctorCommand : Runnable {
         }
         if (pendingComplete == "false") {
             severity = Severity.WARN
-            summary = "pending_cursor_complete=false (mid-pass interruption — re-run sync)"
+            // #523: the promotion is unconditional, so this flag survives the run — a skipped
+            // folder (the walk could not list it) reads the same as a mid-pass interruption.
+            summary = "pending_cursor_complete=false (the last gather was incomplete: a folder could not be listed, or the pass was interrupted — re-run sync; consider --reset if the skipped subtree matters)"
         }
         return CheckResult(name, severity, summary, detail)
     }

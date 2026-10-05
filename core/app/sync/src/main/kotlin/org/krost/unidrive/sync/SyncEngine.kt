@@ -560,7 +560,11 @@ open class SyncEngine(
         // truncated under it by TRUNCATE_EXISTING (silent short/garbage reads).
         val staged =
             cachePath.resolveSibling(
-                cachePath.fileName.toString() + ".hydrating-" + java.util.UUID.randomUUID(),
+                // #529: a long cache name cannot take the full suffix — stage short when over the limit.
+                org.krost.unidrive.io.stagingSiblingName(
+                    cachePath.fileName.toString(),
+                    ".hydrating-" + java.util.UUID.randomUUID(),
+                ),
             )
         try {
             val downloadedSize = downloadByIdOrPath(remoteItem, path, staged)
@@ -1406,6 +1410,7 @@ open class SyncEngine(
         return runCatching {
             status.copy(
                 first = db.getSyncState("delta_cursor").isNullOrEmpty(),
+                lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
                 lastSuccessAtMs =
                     status.lastSuccessAtMs
                         ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
@@ -4649,6 +4654,52 @@ open class SyncEngine(
             try {
                 provider.createFolder(remotePath)
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // #531: under a fast-bootstrap-adopted cursor the pre-existing cloud tree is
+                // invisible to state.db, so the planner emits mkdir-remote for folders that exist
+                // remotely (a second device, a lost row) and each one fails with 409
+                // nameAlreadyExists — the same failure, run after run. Resolve it here: when the
+                // create fails because the folder is already there, adopt the existing folder's
+                // remote identity instead of failing the run, at any depth and on any run.
+                // Anything else rethrows.
+                val existing =
+                    try {
+                        provider.getMetadata(remotePath).takeIf { it.isFolder }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) {
+                        null
+                    }
+                if (existing != null) {
+                    log.info(
+                        "#531: adopted existing remote folder {} (remoteId={}) instead of mkdir",
+                        action.path,
+                        existing.id,
+                    )
+                    auditLog?.emit(
+                        action = "CreateRemoteFolder",
+                        path = action.path,
+                        result = "adopted-existing",
+                    )
+                    db.upsertEntry(
+                        SyncEntry(
+                            path = action.path,
+                            remotePath = action.remoteTarget,
+                            remoteId = existing.id,
+                            remoteHash = null,
+                            remoteSize = 0,
+                            remoteModified = existing.modified,
+                            localMtime = Files.getLastModifiedTime(placeholder.resolveLocal(action.path)).toMillis(),
+                            localSize = 0,
+                            isFolder = true,
+                            isPinned = false,
+                            isHydrated = true,
+                            lastSynced = Instant.now(),
+                            parentUuid = existing.parentId,
+                        ),
+                    )
+                    return
+                }
                 auditLog?.emit(
                     action = "CreateRemoteFolder",
                     path = action.path,

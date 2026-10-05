@@ -30,6 +30,15 @@ data class EnumerationStatus(
     val etaS: Long? = null,
     val etaKind: EtaKind? = null,
     val lastSuccessAtMs: Long? = null,
+
+    /**
+     * #523: whether the last completed gather was complete — null when nothing has gathered yet
+     * or the field is unknown. A false here is the honest after-state the status UI and
+     * daemon.status lacked: the walk skipped a folder it could not list, and items under it are
+     * not in state.db until something mutates them. Set by the engine from
+     * pending_cursor_complete once a gather ends; the tracker leaves it null while running.
+     */
+    val lastScanComplete: Boolean? = null,
     /** One sanitised line: no paths, at most [EnumerationTracker.ERROR_MAX_CHARS] characters. */
     val lastError: String? = null,
     /** When the poller tries again after a failure. */

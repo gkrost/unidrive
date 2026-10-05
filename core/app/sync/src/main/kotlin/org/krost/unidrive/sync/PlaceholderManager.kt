@@ -75,6 +75,24 @@ private val WINDOWS_RESERVED_NAMES: Set<String> =
 private const val WINDOWS_RESERVED_CHARS = "<>:\"/\\|?*"
 
 /**
+ * #526: [safeResolveLocal] for row-driven passes (the pending-upload recovery, the delta's
+ * resurrection arm). A name the filesystem cannot represent — a trailing space, creatable
+ * through an extended-length path or a Linux tool — makes [Path.resolve] throw
+ * [java.nio.file.InvalidPathException] on Windows, which aborted the whole sync from the
+ * recovery loop. The row-driven passes skip such rows (null) instead; the scanner and the
+ * plan function never see them (the walk's localNameIssue guard filters them first).
+ */
+internal fun safeResolveLocalOrNull(
+    syncRoot: Path,
+    remotePath: String,
+): Path? =
+    if (localNameIssue(remotePath) != null) {
+        null
+    } else {
+        runCatching { safeResolveLocal(syncRoot, remotePath) }.getOrNull()
+    }
+
+/**
  * Returns a human-readable reason if any component of [remotePath] cannot be
  * represented as a file/directory name on the local filesystem, else null.
  *

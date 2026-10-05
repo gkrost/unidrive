@@ -741,6 +741,23 @@ class HydrationImplTest {
         assertFalse(Files.exists(cacheFile), "the hydration-cache copy went with the folder")
     }
 
+    // #529: a 255-character name cannot stage as <name>.hydrating-<uuid> (48 extra characters put
+    // the component at 303 bytes, over the 255-byte limit of NTFS characters and ext4 bytes alike) —
+    // the download failed every time. The staging sibling falls back to a short prefix that keeps
+    // the suffix the daemon-start sweeper matches.
+    @Test
+    fun `a 255-character name hydrates — the staging sibling stays inside the component limit`() = runTest {
+        val env = HydrationTestEnv()
+        val name = "/" + "d2-" + "y".repeat(248) + ".txt"
+        assertEquals(255, name.length - 1)
+        env.providerForTest.seedContent(name, "the bytes")
+        env.stateDb.insertUnhydratedEntry(name, remoteSize = 10)
+
+        val result = env.hydration.openForRead("conn1", "h1", name)
+
+        assertTrue(result is OpenResult.Ok, "a maximal-length name must hydrate: $result")
+    }
+
     // #87 (WB-3): the delete of a never-uploaded file must remove the staged encrypted copy of its
     // failed upload — it is the only other copy of the content, and the resume path would otherwise
     // keep it until the resume TTL (7 days) expires.

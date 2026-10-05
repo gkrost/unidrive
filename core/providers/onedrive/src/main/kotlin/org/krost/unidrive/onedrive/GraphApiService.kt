@@ -263,7 +263,10 @@ class GraphApiService(
                         val written =
                             withContext(Dispatchers.IO) {
                                 Files.createDirectories(destPath.parent)
-                                val tmpPath = destPath.parent.resolve("${destPath.fileName}.unidrive-tmp")
+                                // #529: a name near the 255-byte component limit cannot take the suffix — stage short.
+                                val tmpPath = destPath.parent.resolve(
+                                    org.krost.unidrive.io.stagingSiblingName(destPath.fileName.toString(), ".unidrive-tmp"),
+                                )
                                 try {
                                     val w =
                                         Files.newOutputStream(tmpPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { out ->

@@ -398,7 +398,7 @@ class IpcContractCorpusTest {
     }
 
     companion object {
-        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id")
+        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id", "engine_version")
         private const val FIXED_MTIME_MS = 1234567890123L
         private const val FIXED_REMOTE_MS = 1234567890000L
     }
