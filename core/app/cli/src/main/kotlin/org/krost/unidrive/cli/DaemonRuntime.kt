@@ -402,7 +402,7 @@ class DaemonRuntime(
     }
 
     private fun renderLockContentionAndExit(lock: ProcessLock) {
-        val holder = lock.readHolderInfo()
+        val holder = lock.readLiveHolderInfo()
         val holderDesc = when {
             holder?.mode == ProcessLock.Mode.SYNC ->
                 "Another `unidrive sync` is running for profile '$profileName'"

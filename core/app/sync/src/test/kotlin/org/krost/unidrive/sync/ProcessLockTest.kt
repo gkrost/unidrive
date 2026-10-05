@@ -148,6 +148,28 @@ class ProcessLockTest {
         }
     }
 
+    // #570 review: a crash leaves the PID file of the last holder behind, and the read-only hold writes none. A
+    // contention message must not name that dead PID (its kill hint could hit an unrelated process reusing it).
+    @Test
+    fun read_live_holder_info_ignores_a_dead_pid_left_by_a_crash() {
+        val lockFile = Files.createTempFile("live-holder", ".lock")
+        val reader = ProcessLock(lockFile)
+        try {
+            val exited = ProcessBuilder(if (System.getProperty("os.name").lowercase().contains("win")) listOf("cmd", "/c", "exit") else listOf("true")).start()
+            exited.waitFor()
+            val deadPid = exited.pid()
+            Files.writeString(reader.pidFile, "$deadPid daemon\n")
+            assertNotNull(reader.readHolderInfo(), "precondition: the stale file parses")
+            assertEquals(null, reader.readLiveHolderInfo(), "a dead PID is not reported as the holder")
+
+            Files.writeString(reader.pidFile, "${ProcessHandle.current().pid()} daemon\n")
+            assertEquals(ProcessHandle.current().pid(), reader.readLiveHolderInfo()?.pid, "a live PID still is")
+        } finally {
+            Files.deleteIfExists(reader.pidFile)
+            Files.deleteIfExists(lockFile)
+        }
+    }
+
     @Test
     fun read_holder_info_returns_pid_and_mode_for_locked_file() {
         val lockFile = Files.createTempFile("holder-info", ".lock")
@@ -222,6 +244,65 @@ class ProcessLockTest {
         } finally {
             Files.deleteIfExists(pidFile)
             Files.deleteIfExists(lockFile)
+        }
+    }
+
+    // -- #560 U5a: a read-only hold for the legacy-profile inventory ------------------------------
+
+    @Test
+    fun `read-only hold on a missing lock file creates nothing`() {
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        try {
+            assertEquals(false, hold.locked)
+            assertTrue(hold.stillFree())
+            assertEquals(emptyList(), Files.list(tmpDir).use { it.toList() }, "no lock or pid file may be created")
+        } finally {
+            hold.close()
+        }
+    }
+
+    @Test
+    fun `read-only hold on a free lock file keeps writers out without stamping a pid`() {
+        Files.writeString(lockFile, "")
+        val pidFile = lockFile.resolveSibling(".lock.pid")
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(hold.locked)
+            assertEquals(false, Files.exists(pidFile), "the hold must not stamp a pid file")
+            assertEquals(false, writer.tryLock(ProcessLock.Mode.DAEMON), "a daemon must not start while the hold is open")
+        } finally {
+            hold.close()
+        }
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.DAEMON), "the lock is free again after the hold closes")
+        } finally {
+            writer.unlock()
+        }
+        assertEquals(0L, Files.size(lockFile))
+    }
+
+    @Test
+    fun `read-only hold is refused while a writer holds the lock`() {
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.SYNC))
+            assertNull(ProcessLock(lockFile).tryHoldReadOnly())
+        } finally {
+            writer.unlock()
+        }
+    }
+
+    @Test
+    fun `read-only hold without a lock file notices a writer that started meanwhile`() {
+        val hold = assertNotNull(ProcessLock(lockFile).tryHoldReadOnly())
+        val writer = ProcessLock(lockFile)
+        try {
+            assertTrue(writer.tryLock(ProcessLock.Mode.DAEMON))
+            assertEquals(false, hold.stillFree())
+        } finally {
+            writer.unlock()
+            hold.close()
         }
     }
 }

@@ -54,6 +54,7 @@ import java.nio.file.Paths
         ShareCommand::class,
         TrashCommand::class,
         VersionsCommand::class,
+        MigrateCommand::class,
     ],
 )
 // open so tests can drive a command against a fake provider by overriding [createProvider]
@@ -559,7 +560,7 @@ open class Main : Runnable {
         val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.SYNC)) {
             val profile = resolveCurrentProfile()
-            val holder = lock.readHolderInfo()
+            val holder = lock.readLiveHolderInfo()
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"
@@ -606,7 +607,7 @@ open class Main : Runnable {
         val lock = org.krost.unidrive.sync.ProcessLock(lockFile)
         if (!lock.tryLock(org.krost.unidrive.sync.ProcessLock.Mode.DAEMON)) {
             val profile = resolveCurrentProfile()
-            val holder = lock.readHolderInfo()
+            val holder = lock.readLiveHolderInfo()
             val holderDesc = when {
                 holder?.mode == org.krost.unidrive.sync.ProcessLock.Mode.SYNC ->
                     "Another `unidrive sync` is running for profile '${profile.name}'"
@@ -643,7 +644,7 @@ open class Main : Runnable {
     override fun run() {
         val profile = resolveCurrentProfile()
         val authenticated = isProviderAuthenticated()
-        val alwaysAvailable = setOf("log", "profile", "vault")
+        val alwaysAvailable = setOf("log", "profile", "vault", "migrate")
         val cmd = spec.commandLine()
 
         // Print standard PicoCLI help header (synopsis + options)

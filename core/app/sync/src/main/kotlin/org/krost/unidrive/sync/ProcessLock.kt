@@ -168,6 +168,18 @@ class ProcessLock(
         }.getOrNull()
 
     /**
+     * [readHolderInfo], but only while that PID is alive. The PID file is stamped by `sync`/`daemon` and removed on a
+     * clean unlock; after a crash it stays, and a holder that writes no PID (the read-only hold of #560 U5a) leaves the
+     * previous run's file in place. A contention message built on a dead PID names the wrong holder, and its
+     * `taskkill`/`kill` hint can hit an unrelated process that reused the PID. Null here means "someone holds the lock,
+     * identity unknown".
+     */
+    fun readLiveHolderInfo(): HolderInfo? =
+        readHolderInfo()?.takeIf { info ->
+            runCatching { ProcessHandle.of(info.pid).map { it.isAlive }.orElse(false) }.getOrDefault(false)
+        }
+
+    /**
      * Release the lock and close the underlying file channel.
      * Idempotent.
      */
@@ -179,6 +191,55 @@ class ProcessLock(
         // UD-272: clean up the PID sibling so a future contender that races
         // between unlock + reacquire doesn't see a stale PID.
         runCatching { Files.deleteIfExists(pidFile) }
+    }
+
+    /**
+     * #560 U5a: hold the profile for a report that must read it stopped, without writing anything. Takes a SHARED
+     * lock on the existing lock file through a read-only channel: no file is created, no PID is stamped, and an
+     * existing holder's exclusive lock makes it fail. While the hold is open, a `sync` or `daemon` start for the
+     * profile fails its [tryLock]. Returns null when another process (or another [ProcessLock] in this JVM) holds
+     * the lock; it never breaks one.
+     *
+     * A missing lock file gives a hold without a lock ([ReadOnlyHold.locked] false): nothing holds the profile, but
+     * nothing keeps a writer from starting either, so the caller checks [ReadOnlyHold.stillFree] when it is done.
+     */
+    fun tryHoldReadOnly(): ReadOnlyHold? {
+        if (!Files.exists(lockFile)) return ReadOnlyHold(null, null)
+        val ch = FileChannel.open(lockFile, StandardOpenOption.READ)
+        val shared =
+            try {
+                ch.tryLock(0L, Long.MAX_VALUE, true)
+            } catch (_: Exception) {
+                null // OverlappingFileLockException: held by this JVM
+            }
+        if (shared == null) {
+            ch.close()
+            return null
+        }
+        return ReadOnlyHold(ch, shared)
+    }
+
+    /** The result of [tryHoldReadOnly]. [close] releases it; idempotent. */
+    inner class ReadOnlyHold internal constructor(
+        private var channel: FileChannel?,
+        private var lock: FileLock?,
+    ) : AutoCloseable {
+        val locked: Boolean get() = lock != null
+
+        /** True when no writer can have held the profile since the hold was taken. */
+        fun stillFree(): Boolean {
+            if (lock != null) return true
+            val probe = tryHoldReadOnly() ?: return false
+            probe.close()
+            return true
+        }
+
+        override fun close() {
+            lock?.let { runCatching { it.close() } }
+            lock = null
+            channel?.let { runCatching { it.close() } }
+            channel = null
+        }
     }
 
     /**
