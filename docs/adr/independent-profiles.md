@@ -28,7 +28,7 @@ Two options were weighed in #560 section 3: keep the coordinated folders and fin
 
 **Option 2. A profile is either a mirror or a mount, never both. Someone who wants both on one cloud account uses two profiles; they meet only in the cloud.**
 
-- A profile has an explicit `mode = mirror | mount`. A new profile gets its mode at creation; an existing profile gets one only through an explicit conversion (see Migration).
+- A profile has an explicit `mode = mirror | mount`, chosen when the profile is created and fixed afterwards. There is no command to switch a profile's mode; someone who wants the other mode creates a second profile. (A switch for advanced users is deferred, see Re-opening criteria.) Profiles that exist before the cutover get their mode once, through the legacy conversion under Migration.
 - Each profile owns its own state database, local bytes, cache and staging, IPC endpoint, process lock and lifecycle. Two profiles on the same account exchange changes through the provider, like any two independent clients.
 - **Mirror profiles** run `unidrive sync`. They do not construct the hydration runtime and have no cache semantics.
 - **Mount profiles** run `unidrive daemon run`, which serves `hydration.*` to the platform client. They have no `sync_root` scan, no mirror writes and no `sync_root`-to-cache fallback. `refresh.run` on a mount profile always enumerates, with or without a connected client.
@@ -48,11 +48,22 @@ Costs, and the conditions under which the cutover may ship (#560 sections 3 and 
 
 ### Migration
 
+This is a one-time conversion of the profiles that exist in the coordinated state before the cutover (legacy profiles), not a general mode switch. It must exist because the cutover removes the bridges that keep those profiles safe today: a legacy profile is converted, or refused before any mutation, before those bridges go.
+
 Existing rows cannot prove which front-end wrote them, so there is no automatic "mirror unless mount-written rows exist" rule and no upload on first start. Conversion is:
 
-- **Explicit.** The owner picks the destination mode for an existing profile; no ordinary startup assigns one. A read-only dry-run inventory of a stopped profile (config, state, cache and staging, `sync_root`, client-side recovery files) comes first and reports unknowns as unknown, not as clean.
+- **Explicit.** The owner picks the destination mode for each legacy profile; no ordinary startup assigns one. A read-only dry-run inventory of a stopped profile (config, state, cache and staging, `sync_root`, client-side recovery files) comes first and reports unknowns as unknown, not as clean.
 - **Journalled.** Writers are quiesced, an idempotent journal records phases, the original configuration and schema, and a file manifest. Every unique local version is preserved; an interrupted conversion resumes without duplicate uploads, and the new mode is published only after the state and byte checks pass. Older incompatible binaries are refused against converted state.
-- **Free of implicit cloud writes.** No conflict uploads, deletions or remote reset happen because a process starts or a conversion runs. After a conversion to mount, the old `sync_root` stays intact and is reported as unmanaged.
+- **Free of implicit cloud writes.** No conflict uploads, deletions or remote reset happen because a process starts or a conversion runs.
+
+#### The old `sync_root` after a conversion to mount
+
+Under the coordinated model the `sync_root` of a mount profile was never a full copy: it holds what earlier `sync` runs left plus what the mount mirrored into it (#478). Left in place after the conversion it would look like a synced folder while nothing syncs it, so an edit there would never reach the cloud. Its only value is the files that exist nowhere else. The conversion therefore ends with an explicit choice, made by the owner per profile, after every file in it has been compared with the cloud by content hash (an unavailable or metadata-only comparison counts as *differs*):
+
+- **Retire (default).** Files identical to the cloud go to the operating system's trash or recycle bin, so they stay recoverable. Files that differ or exist only locally move to a quarantine folder next to the profile's state, with a manifest. One explicit command uploads them as conflict copies; nothing uploads them automatically. Afterwards the folder is gone.
+- **Adopt as a new mirror profile.** The folder becomes the `sync_root` of a new mirror profile on the same account. This is ordinary profile creation over an existing folder, with a baseline check so that files missing from the folder are not read as deletes. It is not a mode switch of the converted profile.
+
+Until the owner chooses, the folder stays untouched, a marker in it and the profile's status say it is not synced, and the conversion counts as unfinished.
 
 ## What this supersedes
 
@@ -65,3 +76,5 @@ Existing rows cannot prove which front-end wrote them, so there is no automatic 
 ## Re-opening criteria
 
 If two profiles on one account cannot be made safe enough for the providers in use (conflict rate, throttling, or the cost of duplicate storage), the coordinated model of #84 (Option 1 in #560) is the fallback. Re-opening needs a recorded owner decision on #560 or its successor; until then, units already merged keep their behaviour-preserving guarantees.
+
+A command that switches an existing profile's mode (for advanced users) is deferred as P3 ([#564](https://github.com/gkrost/unidrive/issues/564)); if it is ever built, it reuses the legacy conversion's machinery and rules.
