@@ -334,24 +334,9 @@ class MountOperationsParityTest {
             assertNotNull(db.getEntry("/dx/z.txt"), "a same-prefix sibling is not below the folder")
         }
 
-    // The row's baseline is the cache copy (the mirror was skipped because an unsynced local edit sat in the
-    // sync root), yet dropSyncRootCopy only checks that a row existed: the sync-root file goes with the delete.
-    @Test
-    fun `current behaviour - deleteRemote removes the sync-root file even when the row's baseline is the cache copy`() =
-        runTest {
-            val e = engine()
-            syncDown(e, "/doc.txt")
-            val syncFile = syncRoot.resolve("doc.txt")
-            Files.write(syncFile, "edited in the sync root, not synced".toByteArray())
-            Files.setLastModifiedTime(syncFile, FileTime.from(Instant.parse("2026-04-01T08:00:00Z")))
-            val cache = writeCache(e, "/doc.txt", "mount bytes".toByteArray())
-            e.uploadFromCache("/doc.txt", cache)
-            assertEquals(true, db.getEntry("/doc.txt")?.cacheBacked, "precondition: the mirror was skipped")
-
-            e.deleteRemote("/doc.txt")
-
-            assertFalse(Files.exists(syncFile), "the sync-root file is deleted with the remote item")
-        }
+    // deleteRemote and the sync-root copy of a deleted file: found here as a bug (an unsynced edit the mirror skipped
+    // was deleted with the remote item) and fixed in #568, whose tests in UploadFromCacheKeepsWriteTest pin the
+    // corrected behaviour. Deliberately not pinned here, so the two land in either order.
 
     @Test
     fun `renameRemote of a folder repaths every row below it`() =
