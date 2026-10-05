@@ -10,6 +10,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.URLProtocol
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.http.HttpRetryBudget
+import org.krost.unidrive.http.UploadWatchdogLimits
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.io.BufferedInputStream
 import java.io.EOFException
@@ -90,6 +91,41 @@ internal class LoopbackServer(
             return text.lines().first()
         }
 
+        /**
+         * Reads [length] request-body bytes, [chunkBytes] at a time with a pause of [pauseMs] after each chunk: a slow
+         * uplink as the client sees it, because the client's writes block once the socket buffers are full. Returns the
+         * number of bytes read, which is short when the client closed the connection first.
+         */
+        fun readBody(
+            length: Long,
+            chunkBytes: Int = 64 * 1024,
+            pauseMs: Long = 0,
+        ): Long {
+            val buf = ByteArray(chunkBytes)
+            var read = 0L
+            while (read < length) {
+                // A whole chunk per pause: over TLS a single read returns one record (16 KiB) at most.
+                val want = minOf(chunkBytes.toLong(), length - read).toInt()
+                var got = 0
+                while (got < want) {
+                    val n = input.read(buf, got, want - got)
+                    if (n < 0) return read + got
+                    got += n
+                }
+                read += got
+                if (pauseMs > 0) Thread.sleep(pauseMs)
+            }
+            return read
+        }
+
+        /** True when the client closed the connection: the next read sees the end of the stream or a reset. */
+        fun clientClosed(): Boolean =
+            try {
+                input.read() < 0
+            } catch (_: java.io.IOException) {
+                true
+            }
+
         fun respond(
             status: Int,
             reason: String,
@@ -133,10 +169,14 @@ internal fun loopbackClient(
         }
     }
 
-/** The service on [client], with a listing socket timeout of [listingSocketMs] instead of the production 330 s. */
+/**
+ * The service on [client], with a listing socket timeout of [listingSocketMs] instead of the production 330 s and the
+ * shard PUT watchdog limits [shardPutWatchdog].
+ */
 internal fun loopbackService(
     client: HttpClient,
     listingSocketMs: Long,
+    shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
 ): InternxtApiService =
     InternxtApiService(
         InternxtConfig(),
@@ -147,6 +187,7 @@ internal fun loopbackService(
         bridgeBudget = HttpRetryBudget(maxConcurrency = 4, minSpacingMs = 0, stormSpacingMs = 0),
         listingSocketTimeoutMs = listingSocketMs,
         httpClient = client,
+        shardPutWatchdog = shardPutWatchdog,
     )
 
 // The first TLS request of a JVM pays for class loading and key generation. Done once, before any test timer runs, so that

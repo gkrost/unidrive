@@ -111,4 +111,37 @@ class UploadTimeoutPolicyTest {
         assertEquals(expected, policy.computeRequestTimeoutMs(fiveGiB))
         assertTrue(expected > 600_000L, "5 GiB should exceed the floor with default throughput")
     }
+
+    // #571 — the limits of a watched upload.
+
+    @Test
+    fun `571 the response wait is the 300 s floor below 3 GB and grows with the size above`() {
+        assertEquals(300_000L, policy.computeResponseWaitMs(1_361_366_128L))
+        // 5 GiB at 10 MiB/s = 512 s.
+        assertEquals(512_000L, policy.computeResponseWaitMs(5L * 1024 * 1024 * 1024))
+        assertEquals(1_000L, policy.computeResponseWaitMs(1024L, floorMs = 1_000L), "the floor is a test seam")
+    }
+
+    @Test
+    fun `571 the outer net covers the body at the floor rate plus the idle window and the response wait`() {
+        // 10 MiB at 10 KiB/s = 1024 s, above the 600 s floor.
+        val outer =
+            policy.computeWatchedOuterLimitMs(
+                fileSize = 10L * 1024 * 1024,
+                minThroughputBytesPerSecond = 10L * 1024,
+                idleWindowMs = 120_000L,
+                responseWaitMs = 300_000L,
+            )
+        assertEquals(1_024_000L + 120_000L + 300_000L, outer)
+        // A small body keeps the 600 s floor for its body part.
+        assertEquals(
+            600_000L + 120_000L + 300_000L,
+            policy.computeWatchedOuterLimitMs(1024L, 10L * 1024, 120_000L, 300_000L),
+        )
+    }
+
+    @Test
+    fun `571 an opted-out body bound stays unbounded instead of overflowing`() {
+        assertEquals(Long.MAX_VALUE, policy.computeWatchedOuterLimitMs(1024L, 0L, 120_000L, 300_000L))
+    }
 }
