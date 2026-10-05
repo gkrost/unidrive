@@ -590,6 +590,8 @@ dependencies {
     implementation(project(":providers:onedrive"))
     implementation(project(":providers:localfs"))
     implementation(project(":app:sync"))
+    // StateDatabase, SyncEntry, PathNormalizer and SyncScope live in :app:engine-core (#560 U2).
+    implementation(project(":app:engine-core"))
     // The CliExtension SPI that CliExtensionLoader discovers implementations of (#560).
     implementation(project(":app:cli-spi"))
     // Runtime-only: the tracking-set engine implements the CliExtension SPI

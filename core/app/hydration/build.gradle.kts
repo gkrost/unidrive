@@ -9,6 +9,8 @@ kotlin {
 dependencies {
     implementation(project(":app:core"))
     implementation(project(":app:sync"))
+    // StateDatabase, SyncEntry and PathNormalizer live in :app:engine-core (#560 U2).
+    implementation(project(":app:engine-core"))
     implementation(libs.kotlinx.coroutines.core)
 
     // slf4j-api for the upload-failure WARN line (same route app:sync takes).

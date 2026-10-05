@@ -71,8 +71,10 @@ class StateDatabase(
 
     // Test seam (#149): fired after a top-level [batch] has COMMITTED, before control
     // returns to the caller. Lets the sync tests observe filesystem side effects that
-    // must happen outside the transaction (the reap's cache eviction).
-    internal var batchCommitHook: (() -> Unit)? = null
+    // must happen outside the transaction (the reap's cache eviction). Public, not internal,
+    // since #560 U2: the class lives in :app:engine-core and the tests that use the seam
+    // drive SyncEngine in :app:sync. Production code never sets it.
+    var batchCommitHook: (() -> Unit)? = null
 
     val recovery: Recovery = Recovery()
 

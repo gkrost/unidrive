@@ -4047,7 +4047,7 @@ open class SyncEngine(
             // alongside genuine deltas.
             remoteChanges[effectiveRemote] =
                 CloudItem(
-                    id = entry.remoteId,
+                    id = entry.remoteId!!, // checked above; no smart cast across modules (#560 U2)
                     name = effectiveRemote.substringAfterLast("/"),
                     path = effectiveRemote,
                     size = 0,
@@ -5163,7 +5163,7 @@ open class SyncEngine(
             // upsertEntry call path mutates the row without going through
             // the merged.copy() construction above.
             if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
-                db.clearDownloadQuarantine(existing.remoteId)
+                db.clearDownloadQuarantine(existing.remoteId!!) // checked above; no smart cast across modules (#560 U2)
             }
         }
     }

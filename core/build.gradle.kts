@@ -326,8 +326,10 @@ tasks.register<JacocoReport>("jacocoMergedReport") {
 // sets only. A cloud provider implements the SPI in :app:core and must not
 // reach into the sync engine, the mount, or the CLI; :app:sync-tracking
 // implements the CLI extension SPI (:app:cli-spi) and must not depend on the
-// CLI that loads it. Wired into every module's `check`. Run with --info to
-// print the graph.
+// CLI that loads it. :app:engine-core holds the primitives the mirror engine
+// and the mount share (#560 U2) and depends only on :app:core, so neither
+// orchestration can leak into it. Wired into every module's `check`. Run
+// with --info to print the graph.
 val mainProjectEdges: () -> Map<String, Set<String>> = {
     val mainConfigs = setOf("api", "implementation", "compileOnly", "runtimeOnly")
     subprojects.associate { sp ->
@@ -353,6 +355,11 @@ tasks.register("checkModuleEdges") {
             }
             if (from == ":app:sync-tracking" && ":app:cli" in to) {
                 violations += "$from -> :app:cli (the extension depends on :app:cli-spi, the CLI loads it at runtime)"
+            }
+            if (from == ":app:engine-core") {
+                (to - ":app:core").forEach {
+                    violations += "$from -> $it (the shared engine core may depend only on :app:core; :app:sync and :app:hydration depend on it)"
+                }
             }
         }
         // Cycle check (depth-first, three colours).
