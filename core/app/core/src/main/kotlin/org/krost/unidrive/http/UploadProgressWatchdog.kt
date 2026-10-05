@@ -192,7 +192,10 @@ public suspend fun <T> withUploadWatchdog(
 ): T =
     coroutineScope {
         val verdict = AtomicReference<UploadWatchdogException?>(null)
-        val work = async { block() }
+        // The request's own failure is caught inside the child: a child that FAILS cancels this scope, and
+        // coroutineScope then rethrows that failure instead of the verdict below (#572 review: an engine that turns
+        // the cut into its own IOException would report "Socket closed" instead of "stalled").
+        val work = async { runCatching { block() } }
         // On Dispatchers.Default: the ticks are wall-clock time even when the caller runs on a test dispatcher.
         val watchdog =
             launch(Dispatchers.Default) {
@@ -205,7 +208,7 @@ public suspend fun <T> withUploadWatchdog(
                 }
             }
         try {
-            work.await()
+            work.await().getOrThrow()
         } catch (e: Throwable) {
             // The engine may turn our cancellation into an exception of its own; the verdict is what happened.
             val cut = verdict.get()

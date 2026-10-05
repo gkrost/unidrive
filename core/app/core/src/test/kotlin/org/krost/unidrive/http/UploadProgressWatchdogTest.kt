@@ -119,6 +119,26 @@ class UploadProgressWatchdogTest {
             assertEquals(UploadWatchdogException.Reason.STALLED, e.reason)
         }
 
+    // #572 review: an HTTP engine may turn the watchdog's cancellation into an IOException of its own ("socket closed").
+    // The user must still see the verdict (stalled), not the engine's generic text.
+    @Test
+    fun `the verdict wins when the engine turns the cut into an IOException of its own`() =
+        runBlocking {
+            val p = UploadProgress(100)
+            val e =
+                assertFailsWith<UploadWatchdogException> {
+                    withUploadWatchdog(p, idleWindowMs = 200, responseWaitMs = 200, tickMs = 20, what = "Upload") {
+                        p.bodyStarted()
+                        try {
+                            awaitCancellation()
+                        } catch (c: CancellationException) {
+                            throw java.io.IOException("Socket closed", c)
+                        }
+                    }
+                }
+            assertEquals(UploadWatchdogException.Reason.STALLED, e.reason)
+        }
+
     @Test
     fun `a block that finishes in time returns its value`() =
         runBlocking {
