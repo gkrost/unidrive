@@ -46,11 +46,12 @@ class DaemonRunCommand : Runnable {
         names = ["--poll-interval"],
         paramLabel = "<duration>",
         description = [
-            "Auto-poll the remote into the mount view on a timer (e.g. 60s, 5m). " +
-                "Default 0 = off (strictly reactive).",
+            "How often to poll the cloud for changes made elsewhere (e.g. 60s, 5m; a bare number is seconds). " +
+                "The first poll runs at start; after a provider failure the interval backs off (up to 10 min). " +
+                "0 = off. Default: the profile's daemon_poll_seconds (60).",
         ],
     )
-    var pollInterval: String = "0"
+    var pollInterval: String? = null
 
     override fun run() {
         val parent = daemonCmd.parent
@@ -60,7 +61,7 @@ class DaemonRunCommand : Runnable {
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val socketPath = IpcServer.defaultSocketPath(profile.name)
-        val pollIntervalMs = EnumeratePoller.parseIntervalMs(pollInterval)
+        val pollIntervalMs = EnumeratePoller.effectiveIntervalMs(pollInterval, config.daemonPollSeconds(profile.name))
 
         val runtime = DaemonRuntime(
             profileName = profile.name,
