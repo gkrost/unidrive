@@ -39,7 +39,7 @@ class HelpAndConfigErrorTest {
     fun `every sub-subcommand registers --help`() {
         val cmd = CommandLine(Main())
         val nested =
-            listOf("backup", "profile", "vault", "conflicts", "trash", "versions")
+            listOf("backup", "profile", "vault", "conflicts", "trash", "versions", "migrate")
         for (parent in nested) {
             val parentCmd =
                 cmd.subcommands[parent]

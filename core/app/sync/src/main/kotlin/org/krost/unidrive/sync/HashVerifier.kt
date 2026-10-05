@@ -36,9 +36,10 @@ object HashVerifier {
      * Strict content equality — the counterpart [verify] needs for conflict resolution:
      * false whenever either side cannot be compared (no remote hash, no provider algorithm),
      * where [verify]'s "true when unverifiable" contract would silently adopt. The engine
-     * wires this into the reconciler's identical-edits branch (#532).
+     * wires this into the reconciler's identical-edits branch (#532); the legacy-profile inventory
+     * (#560) uses it to tell a clean copy from an unknown one.
      */
-    internal fun matches(
+    fun matches(
         localPath: java.nio.file.Path,
         remoteHash: String?,
         algorithm: org.krost.unidrive.HashAlgorithm?,
@@ -91,7 +92,7 @@ object HashVerifier {
             null -> null
         }
 
-    internal fun computeSha256Hex(path: Path): String {
+    fun computeSha256Hex(path: Path): String {
         val md = java.security.MessageDigest.getInstance("SHA-256")
         Files.newInputStream(path).use { input ->
             val buffer = ByteArray(8192)
