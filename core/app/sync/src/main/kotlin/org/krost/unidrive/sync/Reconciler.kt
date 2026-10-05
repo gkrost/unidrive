@@ -157,7 +157,7 @@ class Reconciler(
                 // #526: an unresolvable local name plans the download; its apply quarantines
                 // the row (#230) instead of aborting the resurrection pass.
                 val localPath = safeResolveLocalOrNull(syncRoot, path)
-                if (localPath == null || (!item.isFolder && !Files.isRegularFile(localPath))) {
+                if (!item.isFolder && (localPath == null || !Files.isRegularFile(localPath))) {
                     resurrectedActions.add(SyncAction.DownloadContent(path, item))
                 }
                 // Local copy present + hash matches → no-op (main loop's

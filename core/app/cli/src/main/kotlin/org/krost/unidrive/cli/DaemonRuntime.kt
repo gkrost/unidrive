@@ -313,10 +313,11 @@ class DaemonRuntime(
                     val providerJson = kotlinx.serialization.json.JsonPrimitive(provider.id).toString()
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
                     val enumerationJson = engine.enumerationStatus().toJson().toString()
+                    val engineVersionJson = kotlinx.serialization.json.JsonPrimitive(BuildInfo.versionString()).toString()
                     // engine_version (#554): the build a co-client is talking to — behaviour fixes do
                     // not move IPC_PROTOCOL_VERSION, so this is the age signal a client gates its
                     // engine minimum on (additive, read-only).
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":"${BuildInfo.versionString()}","uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson}"""
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson}"""
                 }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every

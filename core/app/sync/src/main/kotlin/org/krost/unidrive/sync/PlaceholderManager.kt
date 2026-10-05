@@ -75,14 +75,6 @@ private val WINDOWS_RESERVED_NAMES: Set<String> =
 private const val WINDOWS_RESERVED_CHARS = "<>:\"/\\|?*"
 
 /**
- * Returns a human-readable reason if any component of [remotePath] cannot be
- * represented as a file/directory name on the local filesystem, else null.
- *
- * [windows] defaults to the host OS but is a parameter so the Win32 rules can be
- * unit-tested deterministically on any platform. POSIX accepts essentially any
- * byte in a name except '/' (the separator, already split out) and NUL.
- */
-/**
  * #526: [safeResolveLocal] for row-driven passes (the pending-upload recovery, the delta's
  * resurrection arm). A name the filesystem cannot represent — a trailing space, creatable
  * through an extended-length path or a Linux tool — makes [Path.resolve] throw
@@ -100,6 +92,14 @@ internal fun safeResolveLocalOrNull(
         runCatching { safeResolveLocal(syncRoot, remotePath) }.getOrNull()
     }
 
+/**
+ * Returns a human-readable reason if any component of [remotePath] cannot be
+ * represented as a file/directory name on the local filesystem, else null.
+ *
+ * [windows] defaults to the host OS but is a parameter so the Win32 rules can be
+ * unit-tested deterministically on any platform. POSIX accepts essentially any
+ * byte in a name except '/' (the separator, already split out) and NUL.
+ */
 internal fun localNameIssue(
     remotePath: String,
     windows: Boolean = System.getProperty("os.name", "").lowercase().contains("win"),

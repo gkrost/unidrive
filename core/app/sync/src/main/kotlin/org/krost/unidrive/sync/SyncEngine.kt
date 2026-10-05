@@ -4654,6 +4654,7 @@ open class SyncEngine(
             try {
                 provider.createFolder(remotePath)
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 // #531: under a fast-bootstrap-adopted cursor the pre-existing cloud tree is
                 // invisible to state.db, so the planner emits mkdir-remote for folders that exist
                 // remotely (a second device, a lost row) and each one fails with 409
@@ -4662,8 +4663,13 @@ open class SyncEngine(
                 // remote identity instead of failing the run, at any depth and on any run.
                 // Anything else rethrows.
                 val existing =
-                    runCatching { provider.getMetadata(remotePath) }.getOrNull()
-                        ?.takeIf { it.isFolder }
+                    try {
+                        provider.getMetadata(remotePath).takeIf { it.isFolder }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) {
+                        null
+                    }
                 if (existing != null) {
                     log.info(
                         "#531: adopted existing remote folder {} (remoteId={}) instead of mkdir",

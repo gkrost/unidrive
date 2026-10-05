@@ -1806,6 +1806,32 @@ class ReconcilerTest {
         )
     }
 
+    // #526 review: a folder whose name the local filesystem cannot represent (trailing space; the
+    // resolve throws on Windows) must stay a metadata-only flip — no DownloadContent for a folder.
+    @Test
+    fun `restore from trash — unresolvable folder name is a metadata flip, no DownloadContent`() {
+        val folder =
+            SyncEntry(
+                path = "/folder ",
+                remoteId = "id-/folder ",
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            )
+        db.upsertEntry(folder)
+        assertTrue(db.setStatusTrashed("id-/folder "))
+
+        val actions = reconciler.reconcile(mapOf("/folder " to cloudItem("/folder ", isFolder = true, hash = null)), emptyMap())
+
+        assertTrue(actions.none { it is SyncAction.DownloadContent }, "a folder never plans a download; got $actions")
+    }
+
     @Test
     fun `restore from trash — folder flip is metadata only, no DownloadContent`() {
         // Folders never download content; the alive flip is sufficient.
