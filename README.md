@@ -9,6 +9,7 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 ├── core/
 │   ├── app/
 │   │   ├── cli/            # CLI entry point and subcommand mapping
+│   │   ├── cli-spi/        # CLI extension SPI (`org.krost.unidrive.cli.ext`)
 │   │   ├── core/           # Engine, crypto, model sets
 │   │   ├── hydration/      # De/hydration pipeline
 │   │   ├── sync/           # Sync engine (ships the MVP), state.db, IPC server

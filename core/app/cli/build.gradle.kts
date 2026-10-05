@@ -590,11 +590,12 @@ dependencies {
     implementation(project(":providers:onedrive"))
     implementation(project(":providers:localfs"))
     implementation(project(":app:sync"))
+    // The CliExtension SPI that CliExtensionLoader discovers implementations of (#560).
+    implementation(project(":app:cli-spi"))
     // Runtime-only: the tracking-set engine implements the CliExtension SPI
-    // that lives in this module, so :app:sync-tracking depends on :app:cli.
-    // Declaring it runtimeOnly puts TrackingCliExtension (+ its
-    // META-INF/services registration) on the shadowJar runtime classpath for
-    // ServiceLoader discovery without forming a compile-time dependency cycle.
+    // from :app:cli-spi. Declaring it runtimeOnly puts TrackingCliExtension
+    // (+ its META-INF/services registration) on the shadowJar runtime
+    // classpath for ServiceLoader discovery; the CLI never compiles against it.
     runtimeOnly(project(":app:sync-tracking"))
     implementation(project(":app:hydration"))
 
