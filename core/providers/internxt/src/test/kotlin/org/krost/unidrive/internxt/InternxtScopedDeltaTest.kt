@@ -175,8 +175,11 @@ class InternxtScopedDeltaTest {
             assertTrue(page.complete)
         }
 
+    // #463: an incremental delta is the daemon's poll. A cut listing ends it (the poller backs off and asks the
+    // cheap listing again from the same cursor); it used to walk the scope, which on a large scope is a whole
+    // enumeration for one blip.
     @Test
-    fun `an incremental delta of a scoped profile, listings cut, walks the scope only`() =
+    fun `an incremental delta of a scoped profile, listings cut, fails without walking`() =
         runTest {
             val requested = Collections.synchronizedList(mutableListOf<String>())
             val engine =
@@ -190,15 +193,15 @@ class InternxtScopedDeltaTest {
                     }
                 }
 
-            val page =
+            kotlin.test.assertFailsWith<InternxtApiException> {
                 provider(engine).delta(
                     cursor = "2026-10-01T00:00:00Z",
                     onPageProgress = null,
                     scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/_INBOX")),
                 )
+            }
 
-            assertEquals(setOf("/_INBOX", "/_INBOX/a.txt"), page.items.map { it.path }.toSet())
-            assertTrue(requested.none { it.endsWith("/folders/content/other") }, "a sibling of the scope is not listed: $requested")
+            assertTrue(requested.none { it.contains("/folders/content/") }, "no folder was walked: $requested")
         }
 
     @Test
@@ -373,12 +376,9 @@ class InternxtScopedDeltaTest {
             val p = provider(engine)
             val scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = emptyList())
 
-            val poll = p.delta("2026-10-03T10:00:00Z", null, scanContext)
-            assertEquals(
-                setOf("/_INBOX", "/other", "/top.txt", "/_INBOX/a.txt", "/other/o.txt"),
-                poll.items.map { it.path }.toSet(),
-                "a failed poll still ends in the walk, as before",
-            )
+            // #463: the failed poll ends as a failure, without a walk.
+            kotlin.test.assertFailsWith<InternxtApiException> { p.delta("2026-10-03T10:00:00Z", null, scanContext) }
+            assertTrue(requested.none { it.contains("/folders/content/") }, "the failed poll walked the folder tree: $requested")
             val before = requested.size
             val full = p.delta(null, null, scanContext)
 

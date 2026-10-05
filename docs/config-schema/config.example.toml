@@ -31,4 +31,10 @@ sync_root = "~/Internxt"
 # once at start, then every this many minutes. Upload-only, never downloads or deletes. 0 = off.
 # sync_root_rescan_minutes = 10
 
+# `unidrive daemon run` polls the cloud for changes made elsewhere (web UI, another device, another
+# profile on the same account) every this many seconds, starting at daemon start. Each poll is an
+# incremental delta; after a provider failure the interval backs off (up to 10 min). 0 = off.
+# `daemon run --poll-interval` overrides it.
+# daemon_poll_seconds = 60
+
 # exclude_patterns = ["/dev/git/**"]

@@ -20,7 +20,7 @@ import java.nio.file.Path
  * provider + a real temp StateDatabase; no engine internals run.
  */
 class RecordingEngine(
-    private val enumerateResult: EnumerateResult = EnumerateResult(ok = true),
+    @Volatile var enumerateResult: EnumerateResult = EnumerateResult(ok = true),
     private val gate: CompletableDeferred<Unit>? = null,
     private val enumerateFailure: Throwable? = null,
 ) : SyncEngine(

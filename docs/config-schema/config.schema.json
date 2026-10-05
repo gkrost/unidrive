@@ -67,6 +67,11 @@
             "type": "integer",
             "minimum": 0
           },
+          "daemon_poll_seconds": {
+            "description": "How often `unidrive daemon run` polls the cloud for changes made elsewhere (web UI, another device, another profile on the same account), in seconds. The first poll runs at daemon start; after a provider failure the interval backs off (up to 10 min). Each poll is an incremental delta from the stored cursor. 0 turns polling off. Default 60. `daemon run --poll-interval` overrides it.",
+            "type": "integer",
+            "minimum": 0
+          },
           "bucket": { "type": "string" },
           "region": { "type": "string" },
           "endpoint": { "type": "string" },
