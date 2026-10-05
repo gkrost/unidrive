@@ -373,4 +373,79 @@ class InternxtGatewayOriginErrorTest {
                 assertEquals(0, walked.get(), "status $status: no folder of the tree was listed")
             }
         }
+
+    // #463 review: failing fast on a blip must not become failing forever. When the cheap incremental listing stays
+    // unavailable (a cursor whose query the gateway keeps cutting), the poll walks the tree once after
+    // INCREMENTAL_WALK_AFTER, as it always did; the walk's fresh cursor starts the cheap polls over.
+    @Test
+    fun `an incremental listing that stays unavailable walks the tree once after the bound`() =
+        runTest {
+            val walked = AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> {
+                            walked.incrementAndGet()
+                            respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        }
+                        isAccountWideListing(request.url.encodedPath) -> respond(errorBody(503), HttpStatusCode.ServiceUnavailable, json)
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val provider = provider(engine)
+            val t0 = java.time.Instant.parse("2026-10-05T10:00:00Z")
+            var now = t0
+            provider.clock = { now }
+            val cursor = "2026-10-01T00:00:00.000Z"
+
+            assertFailsWith<InternxtApiException> { provider.delta(cursor, null, fullGather) }
+            now = t0.plus(InternxtProvider.INCREMENTAL_WALK_AFTER).minusSeconds(60)
+            assertFailsWith<InternxtApiException> { provider.delta(cursor, null, fullGather) }
+            assertEquals(0, walked.get(), "within the bound a failing poll walks nothing")
+
+            now = t0.plus(InternxtProvider.INCREMENTAL_WALK_AFTER).plusSeconds(1)
+            provider.delta(cursor, null, fullGather)
+            assertTrue(walked.get() > 0, "past the bound the poll walks the tree instead of failing again")
+
+            val afterWalk = walked.get()
+            now = now.plusSeconds(60)
+            assertFailsWith<InternxtApiException> { provider.delta(cursor, null, fullGather) }
+            assertEquals(afterWalk, walked.get(), "the walk restarts the bound: the next failing poll fails fast again")
+        }
+
+    @Test
+    fun `an incremental listing that answers in between restarts the bound`() =
+        runTest {
+            var unavailable = true
+            val walked = AtomicInteger(0)
+            val engine =
+                MockEngine { request ->
+                    val url = request.url.toString()
+                    when {
+                        contentOf(url) != null -> {
+                            walked.incrementAndGet()
+                            respond(contentOf(url)!!, HttpStatusCode.OK, json)
+                        }
+                        isAccountWideListing(request.url.encodedPath) ->
+                            if (unavailable) respond(errorBody(503), HttpStatusCode.ServiceUnavailable, json) else respond("[]", HttpStatusCode.OK, json)
+                        else -> error("unexpected request: $url")
+                    }
+                }
+            val provider = provider(engine)
+            val t0 = java.time.Instant.parse("2026-10-05T10:00:00Z")
+            var now = t0
+            provider.clock = { now }
+            val cursor = "2026-10-01T00:00:00.000Z"
+
+            assertFailsWith<InternxtApiException> { provider.delta(cursor, null, fullGather) }
+            now = t0.plusSeconds(600)
+            unavailable = false
+            provider.delta(cursor, null, fullGather)
+            unavailable = true
+            now = t0.plus(InternxtProvider.INCREMENTAL_WALK_AFTER).plusSeconds(60)
+            assertFailsWith<InternxtApiException> { provider.delta(cursor, null, fullGather) }
+
+            assertEquals(0, walked.get(), "a success in between restarts the bound: one later blip walks nothing")
+        }
 }
