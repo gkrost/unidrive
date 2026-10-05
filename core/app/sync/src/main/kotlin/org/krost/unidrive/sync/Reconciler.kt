@@ -878,7 +878,7 @@ class Reconciler(
                     localState,
                     remoteState,
                     remoteItem ?: CloudItem(
-                        id = entry.remoteId,
+                        id = entry.remoteId!!, // checked above; no smart cast across modules (#560 U2)
                         name = path.substringAfterLast('/'),
                         path = entry.remotePath ?: path,
                         size = entry.remoteSize,
@@ -1203,7 +1203,7 @@ class Reconciler(
                     // derived in the executor from the source row. remoteTarget
                     // carries the canonical destination.
                     fromPath = del.path,
-                    remoteId = entry.remoteId,
+                    remoteId = entry.remoteId!!, // checked above; no smart cast across modules (#560 U2)
                     remoteTarget = aliasTarget(alias, candidate.path),
                 ),
             )

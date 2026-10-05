@@ -151,22 +151,9 @@ open class SyncEngine(
         )
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm(), syncPaths)
 
-    // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,
-    // and the folders leading to them. Empty = the whole drive.
-    private val trackScope: List<String> =
-        if (standingScope.isEmpty()) emptyList() else SyncScope.normalize(standingScope + syncPaths)
-    private val trackAncestors: Set<String> = SyncScope.ancestors(trackScope)
-
-    private fun isTracked(remotePath: String): Boolean = SyncScope.contains(remotePath, trackScope) || remotePath in trackAncestors
-
-    /**
-     * True when [path] lies outside the standing sync scope (config
-     * `sync_path`); empty scope means the whole drive, so nothing is out of
-     * scope. The hydration write verbs use this to refuse writes that would
-     * create or move cloud data the mounted view can never show.
-     */
-    fun isOutOfScope(path: String): Boolean = !SyncScope.contains(path, trackScope)
-
+    // #560 U2: scope, excludes and the transfer budget live in :app:engine-core's
+    // RemoteOperationGuard, shared by the sync pass and the mount operations below.
+    //
     // UD-263: per-provider transfer concurrency cap, computed once at
     // construction. Audit values flow from docs/providers/<id>-robustness.md
     // §5 → ProviderMetadata → here. One daemon-wide semaphore shared by the
@@ -175,18 +162,32 @@ open class SyncEngine(
     // provider's cap (Internxt allows 2) no matter which path the transfers
     // come from. Memory-pressure protection on big files is delegated to the
     // provider's HttpRetryBudget (UD-232).
-    private val perProviderConcurrency: Int =
-        org.krost.unidrive.ProviderRegistry
-            .getMetadata(providerId)
-            ?.maxConcurrentTransfers ?: 4
-    private val transferBudget = kotlinx.coroutines.sync.Semaphore(perProviderConcurrency)
+    private val guard =
+        org.krost.unidrive.engine.RemoteOperationGuard(
+            standingScope = standingScope,
+            syncPaths = syncPaths,
+            excludePatterns = effectiveExcludePatterns,
+            maxConcurrentTransfers =
+                org.krost.unidrive.ProviderRegistry
+                    .getMetadata(providerId)
+                    ?.maxConcurrentTransfers ?: 4,
+            matchesGlob = { path, pattern -> Reconciler.matchesGlob(path, pattern) },
+        )
 
-    /**
-     * Run [block] holding one permit of the daemon-wide per-provider transfer
-     * budget. The hydration upload path goes through this so mount writes and
-     * sync passes share one cap instead of each running unbounded.
-     */
-    suspend fun <T> withTransferPermit(block: suspend () -> T): T = transferBudget.withPermit { block() }
+    // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,
+    // and the folders leading to them. Empty = the whole drive.
+    private val trackScope: List<String> get() = guard.trackScope
+
+    private fun isTracked(remotePath: String): Boolean = guard.isTracked(remotePath)
+
+    /** See [org.krost.unidrive.engine.RemoteOperationGuard.isOutOfScope]. */
+    fun isOutOfScope(path: String): Boolean = guard.isOutOfScope(path)
+
+    private val perProviderConcurrency: Int get() = guard.maxConcurrentTransfers
+    private val transferBudget: kotlinx.coroutines.sync.Semaphore get() = guard.transferBudget
+
+    /** See [org.krost.unidrive.engine.RemoteOperationGuard.withTransferPermit]. */
+    suspend fun <T> withTransferPermit(block: suspend () -> T): T = guard.withTransferPermit(block)
 
     // #115: read once at construction — a locale change requires a daemon
     // restart. Shared by the reconciler (alias detection) and updateRemoteEntries
@@ -794,14 +795,8 @@ open class SyncEngine(
             }
         }.getOrDefault(false)
 
-    /**
-     * True when [path] matches the effective exclude patterns (configured
-     * excludes union the defaults). Keep-local rule: such paths are never
-     * uploaded. Shared by the upload path and the hydration write verbs, which
-     * must report an excluded write instead of letting it present as in-sync.
-     */
-    fun isExcludedPath(path: String): Boolean =
-        effectiveExcludePatterns.any { Reconciler.matchesGlob(path, it) }
+    /** See [org.krost.unidrive.engine.RemoteOperationGuard.isExcludedPath]. */
+    fun isExcludedPath(path: String): Boolean = guard.isExcludedPath(path)
 
     suspend fun uploadFromCache(
         path: String,
@@ -1243,34 +1238,9 @@ open class SyncEngine(
         }
     }
 
-    /**
-     * Returns true if and only if [e] is a typed provider signal that the
-     * remote path is already gone — making deleteRemote idempotent on that
-     * outcome. Two specific shapes qualify:
-     *
-     * 1. **Path-resolution failure** — InternxtProvider.resolveFolder walks
-     *    the path tree and throws `ProviderException("Folder not found: <seg>
-     *    in <path>")` when a parent folder no longer exists on the remote. This
-     *    was the shape observed in the live bug.
-     *
-     * 2. **Direct metadata miss** — InternxtProvider.getMetadata throws
-     *    `ProviderException("Item not found: <path>")` when the target itself
-     *    is absent (parent exists, but the leaf is gone).
-     *
-     * OneDrive's provider handles HTTP 404 internally and never propagates it
-     * here — OneDriveProvider.delete returns normally when Graph returns 404.
-     *
-     * Anything that is NOT a [ProviderException] (e.g. a bare RuntimeException,
-     * IOException) returns false and will be re-thrown. A [ProviderException]
-     * with a different message prefix (e.g. a 5xx body that happens to contain
-     * "not found" or "404") also returns false — the anchored prefix match
-     * closes the free-text misclassification hole.
-     */
-    private fun isAlreadyGone(e: Throwable): Boolean {
-        if (e !is ProviderException) return false
-        val msg = e.message ?: return false
-        return msg.startsWith("Folder not found: ") || msg.startsWith("Item not found: ")
-    }
+    // #560 U2: the classification lives in :app:engine-core (RemoteErrors), shared with the mount.
+    // See [org.krost.unidrive.engine.RemoteErrors.isAlreadyGone] for the two shapes it accepts.
+    private fun isAlreadyGone(e: Throwable): Boolean = org.krost.unidrive.engine.RemoteErrors.isAlreadyGone(e)
 
     /**
      * Rename a remote item from [oldPath] to [newPath] and update state.db.
@@ -4047,7 +4017,7 @@ open class SyncEngine(
             // alongside genuine deltas.
             remoteChanges[effectiveRemote] =
                 CloudItem(
-                    id = entry.remoteId,
+                    id = entry.remoteId!!, // checked above; no smart cast across modules (#560 U2)
                     name = effectiveRemote.substringAfterLast("/"),
                     path = effectiveRemote,
                     size = 0,
@@ -5163,7 +5133,7 @@ open class SyncEngine(
             // upsertEntry call path mutates the row without going through
             // the merged.copy() construction above.
             if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
-                db.clearDownloadQuarantine(existing.remoteId)
+                db.clearDownloadQuarantine(existing.remoteId!!) // checked above; no smart cast across modules (#560 U2)
             }
         }
     }

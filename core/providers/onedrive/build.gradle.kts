@@ -27,6 +27,7 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.ktor.client.mock)
     testImplementation(project(":app:sync"))
+    testImplementation(project(":app:engine-core"))
 }
 
 tasks.test {

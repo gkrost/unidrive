@@ -30,6 +30,7 @@ dependencies {
     // InternxtSmokeLiveTest drives a real SyncEngine against the provider;
     // main sources depend only on :app:core (#560).
     testImplementation(project(":app:sync"))
+    testImplementation(project(":app:engine-core"))
     // UD-203: MockEngine for request-id propagation tests.
     testImplementation(libs.ktor.client.mock)
 }
