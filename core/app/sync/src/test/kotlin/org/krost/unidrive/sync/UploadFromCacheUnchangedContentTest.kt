@@ -94,6 +94,11 @@ class UploadFromCacheUnchangedContentTest {
         cacheBacked = true,
     )
 
+    // The decision must rest on what the row already records (the SHA-256 or provider hash of the last exchanged bytes): 
+    // fetching the cloud copy to compare it would only trade the upload for a download.
+    private fun assertNoDownload() =
+        assertEquals(0, provider.downloadByIdCalls.size + provider.downloadByPathCalls.size, "skipping an identical upload must not download the cloud copy")
+
     private fun cacheFile(name: String, content: ByteArray): Path = cacheRoot.resolve(name).also { Files.write(it, content) }
 
     @Test
@@ -107,6 +112,7 @@ class UploadFromCacheUnchangedContentTest {
             engine().uploadFromCache("/same.bin", cache)
 
             assertTrue(provider.uploadedPaths.isEmpty(), "no PUT for bytes the cloud already holds; got ${provider.uploadedPaths}")
+            assertNoDownload()
             val row = db.getEntry("/same.bin")
             assertNotNull(row)
             assertEquals("id-/same.bin", row.remoteId, "the row keeps its cloud identity")
@@ -196,6 +202,7 @@ class UploadFromCacheUnchangedContentTest {
             engine().uploadFromCache("/hashed.bin", cache)
 
             assertTrue(provider.uploadedPaths.isEmpty(), "the provider's own content hash proves the equality")
+            assertNoDownload()
         }
 
     @Test
