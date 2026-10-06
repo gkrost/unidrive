@@ -909,7 +909,7 @@ class HydrationImpl(
         if (mount.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
         return runCatching {
             _events.emit(HydrationEvent.Hydrating(normalised))
-            syncEngine.createRemoteFolder(normalised)
+            mount.createRemoteFolder(normalised)
             _events.emit(HydrationEvent.Hydrated(normalised, bytes = 0L))
             MkdirResult.Ok
         }.getOrElse { e ->
@@ -964,7 +964,7 @@ class HydrationImpl(
             // otherwise the cloud copy is orphaned. Probe the remote; on a hit,
             // delete it cloud-side, else hard-delete the genuinely-local row.
             val ghost = try {
-                syncEngine.remoteItemOrNull(normalised)
+                mount.remoteItemOrNull(normalised)
             } catch (e: Exception) {
                 // Transient remote-probe failure: fail the unlink rather than
                 // hard-delete the row and orphan a ghost's cloud copy.
@@ -972,7 +972,7 @@ class HydrationImpl(
             }
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
-                    syncEngine.deleteRemote(normalised)
+                    mount.deleteRemote(normalised)
                     discardStagedUploadBestEffort(normalised)
                     evictCacheFile(normalised)
                     UnlinkResult.Ok
@@ -996,7 +996,7 @@ class HydrationImpl(
         }
 
         return runCatching {
-            syncEngine.deleteRemote(normalised)
+            mount.deleteRemote(normalised)
             // A tracked file whose last edit's upload failed has a staged copy too.
             discardStagedUploadBestEffort(normalised)
             evictCacheFile(normalised)
@@ -1011,7 +1011,7 @@ class HydrationImpl(
     // resume store's TTL GC is the backstop.
     private suspend fun discardStagedUploadBestEffort(path: String) {
         try {
-            syncEngine.discardStagedUpload(path)
+            mount.discardStagedUpload(path)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1032,7 +1032,7 @@ class HydrationImpl(
         if (uploadSlots.keys.any { it.startsWith(below) }) return RmdirResult.Busy
 
         return runCatching {
-            syncEngine.deleteRemote(normalised)
+            mount.deleteRemote(normalised)
             evictCacheTree(normalised)
             RmdirResult.Ok
         }.getOrElse { e ->
@@ -1305,7 +1305,7 @@ class HydrationImpl(
             // there, treat it as a ghost — move it on the cloud and adopt its real
             // id — otherwise fall through to the genuinely-local rename.
             val ghost = try {
-                syncEngine.remoteItemOrNull(oldNorm)
+                mount.remoteItemOrNull(oldNorm)
             } catch (e: Exception) {
                 // Transient remote-probe failure: fail the rename rather than risk a
                 // local-only rename that would silently skip a ghost's cloud move.
@@ -1313,7 +1313,7 @@ class HydrationImpl(
             }
             if (ghost != null && !ghost.isFolder) {
                 return runCatching {
-                    syncEngine.renameRemote(oldNorm, newNorm)
+                    mount.renameRemote(oldNorm, newNorm)
                     moveCacheFile(oldNorm, newNorm)
                     rekeyUploadSlot(oldNorm, newNorm)
                     stateDb.getEntry(newNorm)?.let { moved ->
@@ -1350,7 +1350,7 @@ class HydrationImpl(
         // moved cache and the co-daemon's recovery scanner replays them at the new
         // path, instead of the upload resurrecting the old remote path.
         return runCatching {
-            syncEngine.renameRemote(oldNorm, newNorm)
+            mount.renameRemote(oldNorm, newNorm)
             moveCacheFile(oldNorm, newNorm)
             rekeyUploadSlot(oldNorm, newNorm)
             RenameResult.Ok
@@ -1386,7 +1386,7 @@ class HydrationImpl(
     ): RenameResult? {
         if (destEntry.remoteId != null) {
             return try {
-                syncEngine.deleteRemote(destNorm)
+                mount.deleteRemote(destNorm)
                 evictCacheFile(destNorm)
                 null
             } catch (e: Exception) {
@@ -1394,7 +1394,7 @@ class HydrationImpl(
             }
         }
         val ghost = try {
-            syncEngine.remoteItemOrNull(destNorm)
+            mount.remoteItemOrNull(destNorm)
         } catch (e: Exception) {
             // Transient remote-probe failure: fail the rename rather than
             // hard-delete the row and orphan a ghost's cloud copy.
@@ -1402,7 +1402,7 @@ class HydrationImpl(
         }
         if (ghost != null && !ghost.isFolder) {
             return try {
-                syncEngine.deleteRemote(destNorm)
+                mount.deleteRemote(destNorm)
                 evictCacheFile(destNorm)
                 null
             } catch (e: Exception) {

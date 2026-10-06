@@ -26,3 +26,16 @@ internal suspend fun SyncEngine.uploadMountWriteFromCache(
     baseToken: String?,
     onProgress: ((Long, Long) -> Unit)? = null,
 ) = mount.uploadMountWriteFromCache(path, cachePath, baseToken, onProgress)
+
+internal suspend fun SyncEngine.createRemoteFolder(path: String) = mount.createRemoteFolder(path)
+
+internal suspend fun SyncEngine.deleteRemote(path: String) = mount.deleteRemote(path)
+
+internal suspend fun SyncEngine.discardStagedUpload(logicalPath: String) = mount.discardStagedUpload(logicalPath)
+
+internal suspend fun SyncEngine.renameRemote(
+    oldPath: String,
+    newPath: String,
+) = mount.renameRemote(oldPath, newPath)
+
+internal suspend fun SyncEngine.remoteItemOrNull(path: String) = mount.remoteItemOrNull(path)

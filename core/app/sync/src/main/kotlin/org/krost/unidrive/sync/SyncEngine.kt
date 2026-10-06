@@ -477,33 +477,6 @@ open class SyncEngine(
         }
     }
 
-    // #418: true when [entry] is about the regular file in the sync root rather than about the
-    // cache copy. Two cases:
-    //  - a NOT hydrated row with a file there that has a placeholder shape (see
-    //    [looksLikePlaceholder]): it holds no real bytes and must stay flagged as such until
-    //    a sync fills it;
-    //  - a hydrated row whose baseline still matches the file (same mtime and size).
-    // No file, a hydrated row whose file changed, a not-hydrated row whose file does NOT look
-    // like a placeholder (real user content: treat it as an edit, not as a placeholder — the
-    // recovery download must never overwrite it), or an unresolvable name answer false and keep
-    // the cache-as-local-file behaviour (mount mode).
-    private fun rowDescribesSyncRootFile(
-        entry: SyncEntry,
-        path: String,
-    ): Boolean =
-        runCatching {
-            val local = placeholder.resolveLocal(path)
-            when {
-                !Files.isRegularFile(local) -> false
-                !entry.isHydrated -> looksLikePlaceholder(local, entry)
-                else ->
-                    entry.localMtime != null &&
-                        entry.localSize != null &&
-                        Files.getLastModifiedTime(local).toMillis() == entry.localMtime &&
-                        Files.size(local) == entry.localSize
-            }
-        }.getOrDefault(false)
-
     /** See [org.krost.unidrive.engine.RemoteOperationGuard.isExcludedPath]. */
     fun isExcludedPath(path: String): Boolean = guard.isExcludedPath(path)
 
@@ -522,203 +495,14 @@ open class SyncEngine(
             .resolve(path.trimStart('/'))
     }
 
-    /**
-     * Create a folder on the remote provider and record it in state.db.
-     * Used by the hydration SPI (HydrationImpl.mkdir) to back FUSE mkdir
-     * requests. Separate code path from the legacy applyActions loop.
-     *
-     * Throws ProviderException on cloud-side failure. state.db is only
-     * updated after the provider call succeeds.
-     */
-    suspend fun createRemoteFolder(path: String): CloudItem {
-        val item = provider.createFolder(path)
-        db.insertFolder(path = path, remoteId = item.id, mtime = item.modified ?: Instant.now())
-        mirrorFolderIntoSyncRoot(path)
-        return item
-    }
-
-    // #500: the sync root is the same tree as the mount (#449), empty folders included. A file's upload creates its
-    // parents there ([mirrorIntoSyncRoot]); a folder made through the mount that stays empty had no such step, so the
-    // mirror missed every empty folder. Same guards as for a file; a failure is logged, the folder exists in the cloud.
-    private fun mirrorFolderIntoSyncRoot(path: String) {
-        if (!isTracked(path) || localNameIssue(path) != null || !Files.isDirectory(syncRoot)) return
-        try {
-            val target = placeholder.resolveLocal(path)
-            val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
-            if (Files.isDirectory(target, noFollow)) return
-            if (Files.exists(target, noFollow)) {
-                log.info("#500: not mirroring the folder {} into the sync root: a file is already there, the next sync decides", path)
-                return
-            }
-            withEchoSuppression(path) { Files.createDirectories(target) }
-        } catch (e: Exception) {
-            log.warn("#500: could not mirror the folder {} into the sync root: {}", path, e.message)
-        }
-    }
-
-    /**
-     * Delete a path on the remote provider and update state.db.
-     * Handles both files and folders — provider distinguishes by
-     * remoteId/path. Caller (HydrationImpl.unlink or .rmdir) is
-     * responsible for type-checking.
-     *
-     * Idempotent on "remote already gone": if [provider.delete] throws a
-     * [ProviderException] that [isAlreadyGone] recognises as a typed not-found
-     * signal, the deletion is treated as already complete — the exception is
-     * swallowed and markDeleted still runs, since the postcondition "path no
-     * longer on cloud" is satisfied. Every other exception (auth, 5xx, network,
-     * throttle) is re-thrown unchanged so real failures surface as EIO rather
-     * than being silently eaten.
-     *
-     * The idempotency gate is type-gated, not free-text: only the two specific
-     * provider-originated not-found shapes (path-resolution failure, direct
-     * metadata miss) are recognised. A 5xx/proxy error whose body happens to
-     * contain "404" or "not found" does NOT satisfy [isAlreadyGone] and will
-     * re-throw as expected.
-     *
-     * state.db is only updated after the provider call succeeds (or is
-     * determined to be a no-op because the remote is already gone).
-     */
-    suspend fun deleteRemote(path: String) {
-        // #449 review: read before the delete — once the row is tombstoned the alive
-        // view no longer answers "did this row's baseline live in the sync root?".
-        val entryBefore = db.getEntry(path)
-        try {
-            provider.delete(path)
-        } catch (e: Exception) {
-            if (isAlreadyGone(e)) {
-                // Remote is already gone; fall through to markDeleted below.
-            } else {
-                throw e
-            }
-        }
-        db.markDeleted(path)
-        // #87: a folder's rows below it are part of the same user delete — leave none of
-        // them EXISTS, or the next fresh mount plans their re-download (the live 133k case).
-        if (entryBefore?.isFolder == true) db.markDescendantsDeleted(path)
-        dropSyncRootCopy(path, entryBefore)
-    }
-
-    /**
-     * WB-3 (#87): the delete of a never-uploaded file discards the provider's staged upload copy —
-     * the encrypted ciphertext (and its resume sidecar) is the only other copy of the content, the
-     * user deleted the file, so it goes with the row and the cache copy instead of sitting in the
-     * tombstone directory until the resume TTL passes. The path is the logical one; the engine
-     * resolves it to the local cache path the uploader staged, which is what the tombstone is keyed
-     * by. A provider without staged uploads ignores this (the default is a no-op).
-     */
-    suspend fun discardStagedUpload(logicalPath: String) {
-        provider.discardStagedUpload(resolveCachePath(logicalPath).toAbsolutePath().toString())
-    }
-
-    // #449 review fix: the remote path is gone and its row tombstoned — the sync-root
-    // mirror must not survive them, or the next scan reads the orphan file as NEW and
-    // re-uploads the path the user just deleted (a resurrection through the mirror).
-    // A file goes only when it is the copy the row describes (#568): a row whose
-    // baseline is the cache copy (cacheBacked == true) got no mirror because the sync
-    // root held a DIFFERENT, unsynced version (#423/#427), and a mirrored file the user
-    // edited since no longer matches its baseline. Either is the only copy of an edit:
-    // it stays, and the next sync uploads it as new — the deleted path coming back is
-    // the price of never losing that edit. A folder's empty mirror directory goes with
-    // it (a non-empty one holds files of rows that are not deleted — deleteIfExists
-    // refuses it, and that is correct). Files the caller removed already (a mount
-    // unlink evicts its own copies, a sync-root-side delete is what triggered this)
-    // make this a no-op. Best effort either way: the delete already succeeded, and the
-    // sweep of a later session can still reclaim.
-    private fun dropSyncRootCopy(
-        path: String,
-        entryBefore: SyncEntry?,
-    ) {
-        if (entryBefore == null) return
-        if (!entryBefore.isFolder && (entryBefore.cacheBacked == true || !rowDescribesSyncRootFile(entryBefore, path))) {
-            if (runCatching { Files.isRegularFile(placeholder.resolveLocal(path)) }.getOrDefault(false)) {
-                log.warn("#568: kept the sync-root file of the deleted {}: it is not the synced copy (an unsynced edit)", path)
-            }
-            return
-        }
-        runCatching {
-            val target = placeholder.resolveLocal(path)
-            withEchoSuppression(path) {
-                Files.deleteIfExists(target)
-            }
-        }.onFailure { e ->
-            log.warn("#449: could not remove the sync-root copy of the deleted {}: {}", path, e.message)
-        }
-    }
-
     // #560 U2: the classification lives in :app:engine-core (RemoteErrors), shared with the mount.
     // See [org.krost.unidrive.engine.RemoteErrors.isAlreadyGone] for the two shapes it accepts.
     private fun isAlreadyGone(e: Throwable): Boolean = org.krost.unidrive.engine.RemoteErrors.isAlreadyGone(e)
 
-    /**
-     * Rename a remote item from [oldPath] to [newPath] and update state.db.
-     * Used by the hydration SPI (HydrationImpl.rename) to back FUSE rename
-     * requests. Pre-flight checks (source-exists, destination-doesn't-exist,
-     * destination-parent-exists) live in HydrationImpl; this entry point
-     * trusts its caller and performs the remote move plus the state.db
-     * row update unconditionally.
-     *
-     * Throws ProviderException on cloud-side failure. state.db is only
-     * updated after the provider call succeeds. For folders, the path
-     * rewrite also moves all descendant rows under the new prefix
-     * (db.renamePrefix), matching the rename's recursive semantics on
-     * both OneDrive and Internxt.
-     */
-    suspend fun renameRemote(oldPath: String, newPath: String) {
-        // #449 review: read before the move — renamePrefix repaths the rows, and the
-        // alive view then answers for the NEW path only.
-        val entryBefore = db.getEntry(oldPath)
-        provider.move(oldPath, newPath)
-        db.renamePrefix(oldPath, newPath)
-        moveSyncRootCopy(oldPath, newPath, entryBefore)
-    }
-
-    // #449 review fix: a mount rename moves the remote item, the row(s) and the cache
-    // file, but until now left the sync-root mirror at the old path — an orphan file
-    // with no row, which the next scan read as NEW and re-uploaded under the old name
-    // (the #319 resurrection shape, reintroduced through the mirror). The mirror
-    // follows the rename; rows whose baseline is the cache copy (cacheBacked == true)
-    // and legacy rows (null) have no sync-root file to move. Best effort: a file that
-    // appeared at the destination in the meantime is not ours to replace — the old
-    // copy stays and the next sync decides, exactly as the mirror-skip rule does.
-    private fun moveSyncRootCopy(
-        oldPath: String,
-        newPath: String,
-        entryBefore: SyncEntry?,
-    ) {
-        if (entryBefore?.cacheBacked != false) return
-        runCatching {
-            val from = placeholder.resolveLocal(oldPath)
-            if (!Files.exists(from)) return
-            val to = placeholder.resolveLocal(newPath)
-            withEchoSuppression(newPath) {
-                withEchoSuppression(oldPath) {
-                    Files.createDirectories(to.parent)
-                    // No REPLACE_EXISTING: a file at the destination is not ours to replace.
-                    Files.move(from, to)
-                }
-            }
-        }.onFailure { e ->
-            log.warn(
-                "#449: could not move the sync-root copy of {} to {}: {}",
-                oldPath,
-                newPath,
-                e.message,
-            )
-        }
-    }
-
-    // The remote item at [path], or null only when the provider proves it ABSENT.
-    // The mount's rename/unlink use this to tell a genuinely-never-uploaded local:
-    // row from a "ghost" — a local: row whose content actually landed on the cloud
-    // (an upload whose response was lost) and must therefore be moved/deleted
-    // remotely, not handled locally. A genuine not-found maps to null; transient
-    // failures (auth expiry, throttling, 5xx, network) are PROPAGATED, never read
-    // as absence — otherwise a ghost probed during a blip would fall to the
-    // local-only path and silently skip the cloud move/delete (orphan/duplicate).
-    // isAlreadyGone covers the typed Internxt "not found"; statusCode 404 covers
-    // OneDrive's GraphApiException.
-    open suspend fun remoteItemOrNull(path: String): CloudItem? =
+    // The remote item at [path], or null only when the provider proves it ABSENT; transient failures
+    // propagate, never read as absence. The mirror's copy of MountEngine.remoteItemOrNull (#560 U3),
+    // for the #421 move-source probe.
+    private suspend fun remoteItemIfPresent(path: String): CloudItem? =
         try {
             provider.getMetadata(path)
         } catch (e: Exception) {
@@ -3120,7 +2904,7 @@ open class SyncEngine(
      */
     private suspend fun moveSourceStillRemote(fromPath: String): Boolean =
         try {
-            remoteItemOrNull(fromPath) != null
+            remoteItemIfPresent(fromPath) != null
         } catch (e: Exception) {
             log.debug(
                 "#421: probing the move source {} failed ({}); guarding the delete anyway",
