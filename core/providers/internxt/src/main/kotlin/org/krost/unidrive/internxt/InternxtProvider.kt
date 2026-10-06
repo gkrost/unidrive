@@ -745,7 +745,7 @@ class InternxtProvider(
         val indexHex = indexBytes.joinToString("") { "%02x".format(it) }
 
         val creds = authService.getValidCredentials()
-        val parentUuid = resolveFolder(parentPath)
+        val parentUuid = resolveUploadParent(parentPath, remotePath)
         val bucket =
             creds.bucket.ifEmpty {
                 throw ProviderException("No bucket in credentials — re-authenticate with 'unidrive auth --provider internxt'")
@@ -1154,6 +1154,32 @@ class InternxtProvider(
     // #485: an empty file is a drive entry with size 0 and no fileId; nothing goes to the bridge. The same decisions as the
     // non-empty path: a replace keeps the prior content when keepOverwritten is on, and a create that collides adopts the
     // remote only when it is provably the same content (here: also empty) and otherwise keeps both under a conflict name.
+    /**
+     * The parent resolution for an upload (both the normal and the empty-file flow).
+     *
+     * #580: a folder trashed in the cloud while rows below it still exist (#132 trash
+     * lag) makes the walk fail with "Folder not found" — but that is a POSITIVE proof
+     * of absence: the listing succeeded and the segment is not in it. The same call
+     * with the same bytes would fail again forever, so surface it as a permanent
+     * refusal: the hydration queue skips its retry ladder, the replay and a
+     * resubmission of the same bytes skip the provider (#493's upload_refused stamp),
+     * and the user's bytes stay in the cache until their next edit or the lagging
+     * tombstone cleans the subtree. A listing that FAILED (5xx, timeout) is not
+     * absence — that keeps its retryable type.
+     */
+    private suspend fun resolveUploadParent(parentPath: String, remotePath: String): String =
+        try {
+            resolveFolder(parentPath)
+        } catch (e: ProviderException) {
+            if (e.message?.startsWith("Folder not found:") == true) {
+                throw org.krost.unidrive.PermanentUploadFailureException(
+                    "parent folder of $remotePath is gone in the cloud (trashed?): ${e.message}",
+                    cause = e,
+                )
+            }
+            throw e
+        }
+
     private suspend fun uploadEmpty(
         segments: List<String>,
         plainName: String,
@@ -1165,7 +1191,7 @@ class InternxtProvider(
         localMtime: Instant,
     ): CloudItem {
         val creds = authService.getValidCredentials()
-        val parentUuid = resolveFolder(parentPath)
+        val parentUuid = resolveUploadParent(parentPath, remotePath)
         val bucket =
             creds.bucket.ifEmpty {
                 throw ProviderException("No bucket in credentials — re-authenticate with 'unidrive auth --provider internxt'")
