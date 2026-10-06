@@ -255,11 +255,11 @@ class HydrationImpl(
         // and answer hydrated, marking a file in sync that is not in the
         // cloud. The skipped event (not hydrating/hydrated) plus a Completed
         // carrying the excluded token tell the client both facts.
-        if (syncEngine.isExcludedPath(path)) {
+        if (mount.isExcludedPath(path)) {
             // The engine's keep-local branch uploads nothing but advances the row's
             // local watermark (last_synced); without it the co-daemon's recovery
             // scanner replays this file's open_write on every mount, forever.
-            runCatching { syncEngine.uploadFromCache(path, cachePath) }
+            runCatching { mount.uploadFromCache(path, cachePath) }
                 .onFailure { e ->
                     if (e is CancellationException) throw e
                     log.warn("keep-local watermark update failed for {}: {}", path, e.message)
@@ -330,7 +330,7 @@ class HydrationImpl(
     // upload queue. Same-path uploads queue FIFO (the per-path mutex in
     // [uploadSlots] is fair); different-path uploads run up to the daemon-wide
     // per-provider transfer budget shared with the sync engine
-    // ([SyncEngine.withTransferPermit]) — an Explorer copy burst can never
+    // ([MountEngine.withTransferPermit]) — an Explorer copy burst can never
     // exceed the provider's cap, whatever path the transfers come from.
     //
     // Back-pressure: while [uploadQueueDepth] uploads are waiting (per-path
@@ -470,10 +470,10 @@ class HydrationImpl(
         var lastError: HydrationError = HydrationError.Generic("upload failed")
         for (attempt in 1..maxUploadAttempts) {
             try {
-                syncEngine.withTransferPermit {
+                mount.withTransferPermit {
                     onPermitAcquired()
                     _events.emit(HydrationEvent.Hydrating(path))
-                    syncEngine.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
+                    mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
                 }
                 val bytes = Files.size(cachePath)
                 _events.emit(HydrationEvent.Hydrated(path, bytes))
@@ -584,7 +584,7 @@ class HydrationImpl(
         var refused = 0
         for (path in stateDb.pendingUploadPaths()) {
             if (!replayable(path)) continue
-            val cachePath = syncEngine.resolveCachePath(path)
+            val cachePath = mount.resolveCachePath(path)
             if (refusedEarlier(path, cachePath) != null) { refused++; continue } // #493: not replayed at every start
             if (failedReplayDelayMs > 0 && stateDb.getEntry(path)?.lastErrorAt != null) {
                 deferred++
@@ -594,8 +594,8 @@ class HydrationImpl(
                     val entry = stateDb.getEntry(path)
                     if (entry == null || entry.remoteId != null || !entry.isHydrated) return@launch // gone or uploaded
                     if (uploadSlots.containsKey(path) || !replayable(path)) return@launch
-                    if (refusedEarlier(path, syncEngine.resolveCachePath(path)) != null) return@launch // refused meanwhile
-                    launchSerializedUpload(path, syncEngine.resolveCachePath(path), handleId, baseEtag = null)
+                    if (refusedEarlier(path, mount.resolveCachePath(path)) != null) return@launch // refused meanwhile
+                    launchSerializedUpload(path, mount.resolveCachePath(path), handleId, baseEtag = null)
                 }
                 continue
             }
@@ -614,9 +614,9 @@ class HydrationImpl(
     }
 
     private fun replayable(path: String): Boolean =
-        !syncEngine.isExcludedPath(path) &&
-            !syncEngine.isOutOfScope(path) &&
-            runCatching { Files.exists(syncEngine.resolveCachePath(path)) }
+        !mount.isExcludedPath(path) &&
+            !mount.isOutOfScope(path) &&
+            runCatching { Files.exists(mount.resolveCachePath(path)) }
                 .getOrElse {
                     log.warn("#526: not replaying pending upload with an invalid local name: {}", path)
                     false
@@ -819,7 +819,7 @@ class HydrationImpl(
         if (entry.isPendingUpload) return DehydrateResult.Busy
 
         return try {
-            val cachePath = syncEngine.resolveCachePath(path)
+            val cachePath = mount.resolveCachePath(path)
             java.nio.file.Files.deleteIfExists(cachePath)
             stateDb.markUnhydrated(path)
             _events.emit(HydrationEvent.Dehydrated(path))
@@ -875,7 +875,7 @@ class HydrationImpl(
                         // the predicate (remoteId == null) cannot see.
                         pendingUpload = pendingUpload,
                         hasError = e.lastErrorAt != null,
-                        excluded = syncEngine.isExcludedPath(e.path),
+                        excluded = mount.isExcludedPath(e.path),
                     )
                 },
             )
@@ -897,7 +897,7 @@ class HydrationImpl(
         val recorded = (if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize).coerceAtLeast(0L)
         if (!pendingUpload || e.isFolder) return recorded
         return runCatching {
-            Files.size(syncEngine.resolveCachePath(e.path)).coerceAtLeast(0L)
+            Files.size(mount.resolveCachePath(e.path)).coerceAtLeast(0L)
         }.getOrDefault(recorded)
     }
 
@@ -906,7 +906,7 @@ class HydrationImpl(
         // Scope guard: a folder created outside the profile's sync_path set
         // would land in the cloud but never show in the mounted view (the view
         // only lists the scope). Refuse before touching the provider.
-        if (syncEngine.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
+        if (mount.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
         return runCatching {
             _events.emit(HydrationEvent.Hydrating(normalised))
             syncEngine.createRemoteFolder(normalised)
@@ -982,7 +982,7 @@ class HydrationImpl(
             }
             return runCatching {
                 runCatching {
-                    java.nio.file.Files.deleteIfExists(syncEngine.resolveCachePath(normalised))
+                    java.nio.file.Files.deleteIfExists(mount.resolveCachePath(normalised))
                 }
                 // WB-3 (#87): the staged encrypted copy of a failed upload is the only other copy of
                 // the content — the user deleted the file, so it goes too, instead of staying in the
@@ -1060,8 +1060,8 @@ class HydrationImpl(
     // cache file is tolerated (a zero-byte temp that was never written, or an
     // unhydrated placeholder). Shared by the genuinely-local and ghost rename paths.
     private fun moveCacheFile(oldNorm: String, newNorm: String) {
-        val oldCache = syncEngine.resolveCachePath(oldNorm)
-        val newCache = syncEngine.resolveCachePath(newNorm)
+        val oldCache = mount.resolveCachePath(oldNorm)
+        val newCache = mount.resolveCachePath(newNorm)
         try {
             Files.createDirectories(newCache.parent)
             Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
@@ -1075,7 +1075,7 @@ class HydrationImpl(
     // IO failure is swallowed — the cloud delete already committed, so a stale
     // cache byte is a disk-space concern, never a reason to fail the unlink.
     private fun evictCacheFile(path: String) {
-        runCatching { Files.deleteIfExists(syncEngine.resolveCachePath(path)) }
+        runCatching { Files.deleteIfExists(mount.resolveCachePath(path)) }
     }
 
     // Recursively evict a folder's hydration-cache subtree after a successful
@@ -1084,7 +1084,7 @@ class HydrationImpl(
     // already succeeded). Deletes children before parents so the directory
     // empties before it is removed.
     private fun evictCacheTree(path: String) {
-        val root = syncEngine.resolveCachePath(path)
+        val root = mount.resolveCachePath(path)
         runCatching {
             if (!Files.exists(root)) return
             Files.walk(root).use { stream ->
@@ -1096,7 +1096,7 @@ class HydrationImpl(
     }
 
     private fun prepareEmptyCache(path: String): java.nio.file.Path {
-        val cachePath = syncEngine.resolveCachePath(path)
+        val cachePath = mount.resolveCachePath(path)
         java.nio.file.Files.createDirectories(cachePath.parent)
         java.nio.file.Files.newByteChannel(
             cachePath,
@@ -1113,7 +1113,7 @@ class HydrationImpl(
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
         // Scope guard: same rationale as mkdir — a truncate outside the
         // profile's sync_path set would touch cloud data the view never shows.
-        if (syncEngine.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
+        if (mount.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
@@ -1130,7 +1130,7 @@ class HydrationImpl(
             if (handleId != null) {
                 openSets.computeIfAbsent(connectionId) { ConcurrentHashMap() }[handleId] = normalised
             }
-            OpenResult.Ok(cachePath, excluded = syncEngine.isExcludedPath(normalised))
+            OpenResult.Ok(cachePath, excluded = mount.isExcludedPath(normalised))
         } catch (e: Exception) {
             OpenResult.Failed(HydrationError.Generic(e.message ?: "open_write_begin failed"))
         }
@@ -1142,7 +1142,7 @@ class HydrationImpl(
         return mutex.withLock {
             // Scope guard: a file created outside the profile's sync_path set
             // would upload to the cloud but never show in the mounted view.
-            if (syncEngine.isOutOfScope(normalised)) return@withLock CreateResult.Failed(HydrationError.OutOfScope)
+            if (mount.isOutOfScope(normalised)) return@withLock CreateResult.Failed(HydrationError.OutOfScope)
 
             if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
 
@@ -1159,7 +1159,7 @@ class HydrationImpl(
             // created (the file exists locally and must be served), but the
             // reply carries excluded so the client knows the content will never
             // reach the cloud.
-            val excluded = syncEngine.isExcludedPath(normalised)
+            val excluded = mount.isExcludedPath(normalised)
 
             try {
                 val cachePath = prepareEmptyCache(normalised)
@@ -1207,7 +1207,7 @@ class HydrationImpl(
         // in the view. A destination outside it would strand the row in cloud
         // data the mount never shows; a source outside it is data the profile
         // does not own. Either end out of scope → refuse, nothing is moved.
-        if (syncEngine.isOutOfScope(oldNorm) || syncEngine.isOutOfScope(newNorm)) {
+        if (mount.isOutOfScope(oldNorm) || mount.isOutOfScope(newNorm)) {
             return RenameResult.Failed(HydrationError.OutOfScope)
         }
 
@@ -1231,7 +1231,7 @@ class HydrationImpl(
         // renamed onto an excluded name: the move is purely local.) Placed after
         // the source lookup so a missing source still answers old_path_not_found,
         // and before the replace-destination deletion so a refusal destroys nothing.
-        if (sourceEntry.remoteId != null && syncEngine.isExcludedPath(newNorm)) {
+        if (sourceEntry.remoteId != null && mount.isExcludedPath(newNorm)) {
             return RenameResult.Failed(HydrationError.Excluded)
         }
 
@@ -1414,7 +1414,7 @@ class HydrationImpl(
         // and evict its cache copy. Cache eviction failure is non-fatal (the row
         // is the truth); the row delete is not.
         return try {
-            runCatching { Files.deleteIfExists(syncEngine.resolveCachePath(destNorm)) }
+            runCatching { Files.deleteIfExists(mount.resolveCachePath(destNorm)) }
             stateDb.deleteEntry(destNorm)
             null
         } catch (e: Exception) {
