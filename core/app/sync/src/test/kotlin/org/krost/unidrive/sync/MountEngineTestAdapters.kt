@@ -39,3 +39,13 @@ internal suspend fun SyncEngine.renameRemote(
 ) = mount.renameRemote(oldPath, newPath)
 
 internal suspend fun SyncEngine.remoteItemOrNull(path: String) = mount.remoteItemOrNull(path)
+
+internal suspend fun SyncEngine.rescanSyncRootForUpload() = mount.rescanSyncRootForUpload()
+
+internal fun SyncEngine.enumerationStatus() = mount.enumerationStatus()
+
+internal fun SyncEngine.isOutOfScope(path: String) = mount.isOutOfScope(path)
+
+internal fun SyncEngine.isExcludedPath(path: String) = mount.isExcludedPath(path)
+
+internal suspend fun <T> SyncEngine.withTransferPermit(block: suspend () -> T): T = mount.withTransferPermit(block)

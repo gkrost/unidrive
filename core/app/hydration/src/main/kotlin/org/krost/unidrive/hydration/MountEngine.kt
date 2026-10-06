@@ -2,7 +2,9 @@ package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.PermanentDownloadFailureException
@@ -10,6 +12,7 @@ import org.krost.unidrive.engine.AuditSink
 import org.krost.unidrive.engine.EnumerationEntryPoint
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.engine.MountWiring
+import org.krost.unidrive.engine.RemoteGather
 import org.krost.unidrive.engine.RemoteOperationGuard
 import org.krost.unidrive.engine.SyncRootBridge
 import org.krost.unidrive.engine.Transfers
@@ -18,6 +21,7 @@ import org.krost.unidrive.sync.EnumerationStatus
 import org.krost.unidrive.sync.EnumerationTracker
 import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncScope
 import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.Logger
 import java.nio.file.AtomicMoveNotSupportedException
@@ -74,6 +78,11 @@ class MountEngine private constructor(
     // UD-113: the host's audit log of mutations, or null.
     private val auditLog: AuditSink? = wiring.auditLog
 
+    private val gather: RemoteGather = wiring.gather
+    private val transferBudget: Semaphore get() = guard.transferBudget
+    private val uploadInFlight: (path: String) -> Boolean = wiring.uploadInFlight
+    private val syncPaths: List<String> = options.syncPaths
+
     // The host's logger: the moved log lines keep their logger name.
     private val log: Logger = wiring.log
 
@@ -108,6 +117,195 @@ class MountEngine private constructor(
 
     /** The enumeration's tracker; the daemon's poller records its next attempt on it. */
     val enumerationTracker: EnumerationTracker get() = wiring.enumeration.tracker
+
+    /** What one [rescanSyncRootForUpload] pass did. */
+    data class LocalRescanResult(
+        val uploaded: Int = 0,
+        val foldersCreated: Int = 0,
+        val failed: Int = 0,
+        // Candidates deliberately left alone (hydration owns them, or only a full sync can decide).
+        val skipped: Int = 0,
+        // True when the pass did not run: another was under way, or the sync root is not usable.
+        val notRun: Boolean = false,
+        // Edited files whose cloud copy changed (or went away) since the row was recorded: not uploaded,
+        // so the remote change is never overwritten; a full sync resolves them (keep both).
+        val conflicts: Int = 0,
+    )
+
+    private val rescanInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * #504: the daemon's local safety net. Walks the sync root and uploads the plain files that
+     * are new or changed there, the way a sync pass would, and nothing else.
+     *
+     * It deliberately reuses the mirror's scanner and its upload and folder executors (through
+     * [SyncRootBridge], #560 U3) but not a sync pass (`syncOnce`): a full pass also gathers the
+     * remote, and its Reconciler turns a missing local
+     * file into DeleteRemote / DownloadContent and an edited unhydrated stub into a keep-both
+     * conflict (a download). A daemon that serves a mount has remote-only rows with no file in the
+     * sync root by design, so this pass:
+     *  - never downloads, never deletes anywhere (a local delete is only noticed, never acted on),
+     *    never touches a row that has no file in the sync root (cloud-only entries);
+     *  - never touches a row whose baseline is the hydration cache copy (cacheBacked == true with a
+     *    cache file present) or a path whose upload the hydration layer has queued or in flight
+     *    ([uploadInFlight]): mount writes own those;
+     *  - leaves an edited not-hydrated row alone (a conflict only a full sync resolves);
+     *  - respects the scope, the exclude patterns and the sync_root drift guard (UD-299).
+     * Transfers go through the daemon-wide [transferBudget]. New folders are created remotely
+     * first (parents before children). Rows the scan or an upload changed are announced through
+     * the gather's view invalidation (the host's `viewInvalidationSink`) so a mount re-lists them.
+     * Single-flight: an overlapping call returns
+     * [LocalRescanResult.notRun]. A failing upload is logged and the pass goes on; the row stays a
+     * pending upload and is retried by the next pass.
+     */
+    suspend fun rescanSyncRootForUpload(): LocalRescanResult {
+        if (!Files.isDirectory(syncRoot)) return LocalRescanResult(notRun = true)
+        if (!rescanInFlight.compareAndSet(false, true)) return LocalRescanResult(notRun = true)
+        try {
+            val storedRoot = db.getSyncState("sync_root")
+            val currentRoot = syncRoot.toAbsolutePath().normalize().toString()
+            if (!storedRoot.isNullOrEmpty() && !mirror.sameRoot(storedRoot, currentRoot)) {
+                log.warn("#504: sync root rescan skipped: sync_root changed from '{}' to '{}'", storedRoot, currentRoot)
+                return LocalRescanResult(notRun = true)
+            }
+            val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+            // #552: the pass only looks at NEW and MODIFIED, so it does not ask the scanner for deletions: that
+            // would check every cloud-only row against the exclude patterns and the file system, for nothing.
+            val changes = mirror.scanNewAndModified()
+            val newFolders = ArrayList<String>()
+            val candidates = LinkedHashSet<String>()
+            for ((path, isNew) in changes) {
+                if (isExcludedPath(path) || isOutOfScope(path)) continue
+                val local = runCatching { mirror.resolveLocal(path) }.getOrNull()
+                if (local == null) {
+                    log.warn("#526: rescan skipped local name the filesystem cannot represent: {}", path)
+                    continue
+                }
+                if (Files.isDirectory(local, noFollow)) {
+                    if (isNew && db.getEntry(path) == null) newFolders.add(path)
+                } else if (Files.isRegularFile(local, noFollow)) {
+                    candidates.add(path)
+                }
+            }
+            // A first upload that failed leaves a pending row the scanner no longer reports.
+            // pendingUploadPaths() is the SQL form of "file row, never uploaded, hydrated": a few rows instead of
+            // every row of state.db parsed (#552).
+            for (path in db.pendingUploadPaths()) {
+                if (isExcludedPath(path) || isOutOfScope(path) || !SyncScope.contains(path, syncPaths)) continue
+                val local = runCatching { mirror.resolveLocal(path) }.getOrNull()
+                if (local == null) {
+                    log.warn("#526: rescan skipped pending row with an invalid local name: {}", path)
+                } else if (Files.isRegularFile(local, noFollow)) {
+                    candidates.add(path)
+                }
+            }
+            var uploaded = 0
+            var foldersCreated = 0
+            var failed = 0
+            var skipped = 0
+            var conflicts = 0
+            val touched = LinkedHashSet<String>()
+            val failedFolders = HashSet<String>()
+            for (folder in newFolders.sortedWith(compareBy({ it.count { c -> c == '/' } }, { it }))) {
+                if (failedFolders.any { folder.startsWith("$it/") }) continue
+                try {
+                    transferBudget.withPermit { mirror.createRemoteFolder(folder) }
+                    foldersCreated++
+                    touched.add(folder)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failed++
+                    failedFolders.add(folder)
+                    log.warn("#504: rescan could not create remote folder {}: {}", folder, e.message)
+                }
+            }
+            for (path in candidates.sorted()) {
+                val entry = db.getEntry(path)
+                // Cache-backed rows and queued uploads belong to the hydration layer. A not-hydrated
+                // row is a stub, a partial download or an edited placeholder: whether the bytes are
+                // an edit is the Reconciler's call (it may need a download to keep both).
+                val hydrationOwned =
+                    entry == null || !entry.isHydrated || uploadInFlight(path) ||
+                        (entry.cacheBacked == true && Files.isRegularFile(resolveCachePath(path)))
+                if (hydrationOwned || failedFolders.any { path.startsWith("$it/") }) {
+                    skipped++
+                    continue
+                }
+                // An edit of a file the cloud already has replaces it there: only while the cloud copy is still the one
+                // this row recorded. A full sync would see a remote change and keep both; this pass does not reconcile,
+                // so it must not overwrite what it has not seen.
+                if (entry.remoteId != null) {
+                    when (remoteVersionSince(entry)) {
+                        RemoteVersion.SAME -> {}
+                        RemoteVersion.CHANGED, RemoteVersion.GONE -> {
+                            conflicts++
+                            log.warn("#504: rescan did not upload {}: its cloud copy changed since the last sync; run 'unidrive sync' to keep both", path)
+                            continue
+                        }
+                        RemoteVersion.UNKNOWN -> {
+                            skipped++
+                            log.debug("#504: rescan could not check the cloud copy of {}; trying again next pass", path)
+                            continue
+                        }
+                    }
+                }
+                try {
+                    transferBudget.withPermit {
+                        // The slot may have been taken while this upload waited for its permit.
+                        if (uploadInFlight(path)) {
+                            skipped++
+                        } else {
+                            mirror.upload(path, remoteId = entry.remoteId, remoteTarget = entry.remotePath)
+                            uploaded++
+                            touched.add(path)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failed++
+                    touched.add(path)
+                    log.warn("#504: rescan could not upload {}: {}", path, e.message)
+                }
+            }
+            // The scan wrote a pending row for every new file: a mount may list those now.
+            for ((path, isNew) in changes) if (isNew && path in candidates) touched.add(path)
+            if (touched.isNotEmpty()) gather.invalidateView(touched, false)
+            if (uploaded + foldersCreated + failed + skipped + conflicts > 0) {
+                log.info("#504: sync root rescan: {} uploaded, {} folder(s) created, {} failed, {} skipped, {} conflict(s)", uploaded, foldersCreated, failed, skipped, conflicts)
+            }
+            return LocalRescanResult(uploaded, foldersCreated, failed, skipped, conflicts = conflicts)
+        } finally {
+            rescanInFlight.set(false)
+        }
+    }
+
+    private enum class RemoteVersion { SAME, CHANGED, GONE, UNKNOWN }
+
+    // #504 review: is the cloud copy still the one [entry] recorded? Provider-neutral on purpose: the row's remoteHash is a
+    // content hash on OneDrive (quickXor) but a version token on Internxt, so it cannot be sent as an If-Match everywhere;
+    // comparing it with the provider's own current metadata works for every provider. Same remote id and same hash, or,
+    // without hashes, same size and modification time.
+    private suspend fun remoteVersionSince(entry: SyncEntry): RemoteVersion {
+        val current =
+            try {
+                provider.getMetadata(entry.remotePath ?: entry.path)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return if (isAlreadyGone(e)) RemoteVersion.GONE else RemoteVersion.UNKNOWN
+            }
+        if (current.isFolder || current.id != entry.remoteId) return RemoteVersion.CHANGED
+        val same =
+            if (entry.remoteHash != null && current.hash != null) {
+                entry.remoteHash == current.hash
+            } else {
+                entry.remoteSize == current.size && entry.remoteModified == current.modified
+            }
+        return if (same) RemoteVersion.SAME else RemoteVersion.CHANGED
+    }
+
 
     // #318: per-path serialization for ensureHydrated's warm-cache check + download.
     // Without it, a second open whose warm-cache size check fails re-downloads with
@@ -1008,7 +1206,7 @@ class MountEngine private constructor(
     private fun localNameIssue(path: String): String? = mirror.localNameIssue(path)
 
     // Defer the absence sweep's deletion verdict for a path this process just wrote (the gather's state).
-    private fun markRecentlyUploaded(path: String) = wiring.gather.markRecentlyUploaded(path)
+    private fun markRecentlyUploaded(path: String) = gather.markRecentlyUploaded(path)
 
     // The bytes are hashed as the host's transfers do (#396), see Transfers.withLocalHash.
     private fun withLocalHash(

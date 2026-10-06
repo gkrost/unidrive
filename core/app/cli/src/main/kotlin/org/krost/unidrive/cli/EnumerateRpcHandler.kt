@@ -5,8 +5,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.krost.unidrive.engine.EnumerationEntryPoint
 import org.krost.unidrive.sync.EnumerateResult
-import org.krost.unidrive.sync.SyncEngine
 import org.slf4j.LoggerFactory
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
@@ -23,9 +23,11 @@ import java.util.concurrent.atomic.AtomicReference
  * wires `IpcServer::emit`). At most one enumeration per daemon at a time —
  * serialised via [inFlight] with a compareAndSet-before-launch guard so a second
  * concurrent request can never slip through the gap between launch and registration.
+ *
+ * [engine] is the daemon's MountEngine (#560 U3); either front-end runs the same enumeration.
  */
 class EnumerateRpcHandler(
-    private val engine: SyncEngine,
+    private val engine: EnumerationEntryPoint,
     private val scope: CoroutineScope,
     private val emit: (String) -> Unit,
 ) {
