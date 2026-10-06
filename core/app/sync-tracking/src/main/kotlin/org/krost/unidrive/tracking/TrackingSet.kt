@@ -103,8 +103,15 @@ class SqliteTrackingSet(
 ) : TrackingSet {
     private var conn: Connection? = null
 
-    private companion object {
-        const val DELTA_CURSOR_KEY = "delta_cursor"
+    companion object {
+        private const val DELTA_CURSOR_KEY = "delta_cursor"
+
+        // #323 (tracking.db half): the format is frozen as of this stamp. A db written
+        // by a NEWER build refuses to open — an older jar must never stamp the version
+        // downward, or the next upgrade would believe nothing changed and skip
+        // migrations. Mirrors the state.db guard in StateDatabase.
+        internal const val SCHEMA_VERSION: Int = 1
+        internal const val SCHEMA_VERSION_KEY: String = "schema_version"
     }
 
     @Synchronized
@@ -118,7 +125,54 @@ class SqliteTrackingSet(
             }
         conn = DriverManager.getConnection(url)
         conn!!.autoCommit = true
+        try {
+            bootstrapSchema()
+        } catch (e: Throwable) {
+            // A refused open (#323) must not leak the connection it opened.
+            runCatching { conn?.takeIf { !it.isClosed }?.close() }
+            conn = null
+            throw e
+        }
+    }
+
+    private fun bootstrapSchema() {
+        val recorded = readSchemaVersion()
+        if (recorded != null) {
+            check(recorded <= SCHEMA_VERSION) {
+                "tracking.db was written by a newer unidrive (schema $recorded, this build supports $SCHEMA_VERSION); " +
+                    "upgrade unidrive or use a different tracking db."
+            }
+        }
         createTables()
+        stampSchemaVersion()
+    }
+
+    /** The recorded schema version, or null on a fresh or pre-version database (adopted, then stamped). */
+    private fun readSchemaVersion(): Int? {
+        val c = conn ?: error("not initialized")
+        val hasMeta = c.metaData.getTables(null, null, "tracking_meta", null).use { rs -> rs.next() }
+        if (!hasMeta) return null
+        c.prepareStatement("SELECT value FROM tracking_meta WHERE key = ?").use { ps ->
+            ps.setString(1, SCHEMA_VERSION_KEY)
+            ps.executeQuery().use { rs ->
+                return if (rs.next()) rs.getString(1)?.toIntOrNull() else null
+            }
+        }
+    }
+
+    private fun stampSchemaVersion() {
+        val c = conn ?: error("not initialized")
+        c.prepareStatement(
+            """
+            INSERT INTO tracking_meta (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+        ).use { ps ->
+            ps.setString(1, SCHEMA_VERSION_KEY)
+            ps.setString(2, SCHEMA_VERSION.toString())
+            ps.executeUpdate()
+        }
     }
 
     @Synchronized
