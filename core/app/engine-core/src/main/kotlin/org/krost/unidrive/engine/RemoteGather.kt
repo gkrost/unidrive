@@ -876,7 +876,9 @@ class RemoteGather(
                     existing.remoteId != item.id ||
                     existing.remoteHash != item.hash ||
                     existing.remoteSize != item.size ||
-                    existing.remoteModified != item.modified
+                    existing.remoteModified != item.modified ||
+                    existing.downloadQuarantined ||
+                    existing.lastErrorAt != null
             if (contentChanged) changed += realLocalPath
             if (renamedFrom != null) {
                 moved += RemoteMerge.Move(from = renamedFrom, to = realLocalPath)

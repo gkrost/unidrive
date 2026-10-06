@@ -221,6 +221,22 @@ class RemoteEnumerationTest {
         }
 
     @Test
+    fun `a delta that clears download quarantine invalidates the error shown in the view`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"))
+            enumeration().enumerate(reset = false)
+            assertTrue(db.setDownloadQuarantine("1", java.time.Instant.now()))
+            assertNotNull(db.getEntry("/a.txt")?.lastErrorAt)
+            invalidations.clear()
+
+            val result = enumeration().enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertNull(db.getEntry("/a.txt")?.lastErrorAt)
+            assertEquals(setOf("/a.txt"), invalidations.single().first)
+        }
+
+    @Test
     fun `a genuinely changed item still invalidates its path`() =
         runTest {
             provider.items = listOf(file("1", "/a.txt"))
