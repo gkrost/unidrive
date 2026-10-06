@@ -77,11 +77,12 @@ After `enumerateRemoteIntoStateLocked` mutates `state.db` (upserts **and/or** re
 | Condition | Emitted line |
 |---|---|
 | ≤ 256 changed paths | `{"event":"view.invalidated","paths":["/a","/b",…]}` |
+| … with renames (#595) | `…,"moved":[{"from":"/a","to":"/b"}]` — additive, omitted when there are none |
 | > 256 changed paths | `{"event":"view.invalidated","full":true}` |
 
-The cap (256) is `HydrationEvent.VIEW_INVALIDATED_PATH_CAP`. A `full:true` event means the co-daemon should invalidate its entire cache, not just the listed paths.
+The cap (256) is `HydrationEvent.VIEW_INVALIDATED_PATH_CAP`. A `full:true` event means the co-daemon should invalidate its entire cache, not just the listed paths. A rename's old and new path always both appear in `paths`; `moved` is a hint a co-daemon may use to move its placeholder (keeping hydration state and pins) instead of deleting and recreating it — ignoring it and reconciling from `paths` is always correct.
 
-**When it fires:** after a `state.db`-mutating enumeration, once per pass, only when `upserted > 0 || reaped > 0`. A quiescent incremental delta (no cloud changes) does not fire the sink.
+**When it fires:** after a `state.db`-mutating enumeration, once per pass, only when `upserted > 0 || reaped > 0` — and `upserted` counts only rows whose view-relevant content actually changed (new row, or a different remote id, hash, size or modified time, #595). A quiescent incremental delta that re-delivers unchanged items (Internxt's cursor rewinds 120 s on purpose) does not fire the sink.
 
 **Skipped/failed enumeration:** the sink is never called when `enumerateRemoteIntoState` returns `skipped=true` (single-flight no-op) or `ok=false` (provider error) — state.db was not mutated in those cases.
 

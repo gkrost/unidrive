@@ -349,7 +349,7 @@ class EnumerateRemoteIntoStateTest {
                     reporter = ProgressReporter.Silent,
                     cacheRoot = cacheRoot,
                     cacheKey = "enum-test",
-                    viewInvalidationSink = { paths, _full -> sinkInvocations.add(paths) },
+                    viewInvalidationSink = { paths, _full, _moved -> sinkInvocations.add(paths) },
                 )
 
             // Scenario: two remote files added (upserted), then one is deleted (reaped).
@@ -384,7 +384,7 @@ class EnumerateRemoteIntoStateTest {
                     reporter = ProgressReporter.Silent,
                     cacheRoot = cacheRoot,
                     cacheKey = "enum-test",
-                    viewInvalidationSink = { paths, _full -> sinkInvocations.add(paths) },
+                    viewInvalidationSink = { paths, _full, _moved -> sinkInvocations.add(paths) },
                 )
 
             // Empty remote — no upserts, no reaps.
@@ -410,7 +410,7 @@ class EnumerateRemoteIntoStateTest {
                     reporter = ProgressReporter.Silent,
                     cacheRoot = cacheRoot,
                     cacheKey = "enum-test",
-                    viewInvalidationSink = { paths, _full -> sinkInvocations.add(paths) },
+                    viewInvalidationSink = { paths, _full, _moved -> sinkInvocations.add(paths) },
                     xdgUserDirsOverridesForTest = emptyMap(),
                 )
 

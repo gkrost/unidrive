@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
+import org.krost.unidrive.engine.RemoteGather
 import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.krost.unidrive.sync.model.SyncEntry
@@ -3955,7 +3956,7 @@ class SyncEngineTest {
         allowFullTreeReconciliation: Boolean = false,
         syncPaths: List<String> = listOfNotNull(syncPath),
         standingScope: List<String> = emptyList(),
-        viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
+        viewInvalidationSink: (changedPaths: Set<String>, full: Boolean, moved: List<RemoteGather.RemoteMerge.Move>) -> Unit = { _, _, _ -> },
     ) = SyncEngine(
         provider = provider,
         db = db,
@@ -4149,7 +4150,7 @@ class SyncEngineTest {
                 engineForScope(
                     syncPaths = listOf("/a"),
                     standingScope = listOf("/a"),
-                    viewInvalidationSink = { paths, full -> invalidations += paths to full },
+                    viewInvalidationSink = { paths, full, _moved -> invalidations += paths to full },
                 ).enumerateRemoteIntoState(reset = false)
 
             assertTrue(result.ok)
@@ -4168,7 +4169,7 @@ class SyncEngineTest {
             val invalidations = mutableListOf<Pair<Set<String>, Boolean>>()
             val result =
                 engineForScope(
-                    viewInvalidationSink = { paths, full -> invalidations += paths to full },
+                    viewInvalidationSink = { paths, full, _moved -> invalidations += paths to full },
                 ).enumerateRemoteIntoState(reset = false)
 
             assertTrue(result.ok)

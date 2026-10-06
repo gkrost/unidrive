@@ -14,6 +14,7 @@ import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.engine.RemoteEnumeration
+import org.krost.unidrive.engine.RemoteGather.RemoteMerge
 import org.krost.unidrive.engine.RemoteGather
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
@@ -131,7 +132,10 @@ open class SyncEngine(
     // unaffected. app:hydration is the intended wiring site; keeping this as a
     // plain lambda avoids a circular import (HydrationEvent lives in app:hydration
     // which depends on app:sync, not the other way around).
-    private val viewInvalidationSink: (changedPaths: Set<String>, full: Boolean) -> Unit = { _, _ -> },
+    // #595: [moved] carries the renames the merge detected (old path -> new path);
+    // consumers that only need the paths can ignore it — changedPaths always holds
+    // both ends of every move regardless.
+    private val viewInvalidationSink: (changedPaths: Set<String>, full: Boolean, moved: List<RemoteMerge.Move>) -> Unit = { _, _, _ -> },
     // #301: whether a background hydration upload of [path] is queued or in flight
     // (an open_write returned Ok but its upload has not landed yet). The
     // enumerate-reap consults it before evicting a hydration-cache file, so a
@@ -277,7 +281,8 @@ open class SyncEngine(
                     override fun onViewInvalidated(
                         changedPaths: Set<String>,
                         full: Boolean,
-                    ) = viewInvalidationSink(changedPaths, full)
+                        moved: List<RemoteMerge.Move>,
+                    ) = viewInvalidationSink(changedPaths, full, moved)
                 },
             localTopAliases = { buildCanonicalToLocalTopMap(it) },
             log = log,
@@ -1451,7 +1456,7 @@ open class SyncEngine(
             }
             // The scan wrote a pending row for every new file: a mount may list those now.
             for ((path, state) in changes) if (state == ChangeState.NEW && path in candidates) touched.add(path)
-            if (touched.isNotEmpty()) viewInvalidationSink(touched, false)
+            if (touched.isNotEmpty()) viewInvalidationSink(touched, false, emptyList())
             if (uploaded + foldersCreated + failed + skipped + conflicts > 0) {
                 log.info("#504: sync root rescan: {} uploaded, {} folder(s) created, {} failed, {} skipped, {} conflict(s)", uploaded, foldersCreated, failed, skipped, conflicts)
             }

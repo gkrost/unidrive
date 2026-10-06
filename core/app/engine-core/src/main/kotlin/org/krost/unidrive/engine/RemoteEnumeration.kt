@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.engine.RemoteGather.Companion.applyReverseTop
+import org.krost.unidrive.engine.RemoteGather.RemoteMerge
 import org.krost.unidrive.sync.EnumerateResult
 import org.krost.unidrive.sync.EnumerationStatus
 import org.krost.unidrive.sync.EnumerationTracker
@@ -180,9 +181,6 @@ class RemoteEnumeration(
         // Completeness is recorded in sync_state by the gather, not on its return value.
         val complete = db.getSyncState("pending_cursor_complete")?.equals("true", ignoreCase = true) ?: true
         val canonicalToLocalTop = gather.canonicalToLocalTop(remoteChanges)
-        val upsertedViewPaths = remoteChanges.filterValues { !it.deleted }.keys
-            .mapTo(mutableSetOf()) { applyReverseTop(it, canonicalToLocalTop) }
-        val upserted = upsertedViewPaths.size
         // Bulk-disappearance corroboration guard (spec §3.2). A complete enumeration that
         // would flip more than max(50, 20% of tracked rows) to deleted is suspicious (e.g.
         // Internxt /files lag); reap only paths a PRIOR complete enumeration also saw
@@ -196,8 +194,22 @@ class RemoteEnumeration(
         // delete is a non-transactional side effect and must not lengthen the
         // SQLite lock window.
         val cacheEvictions = mutableListOf<Triple<String, Path, Long?>>()
+        // #595: only the rows the merge actually changed (new, or a different remote id,
+        // hash, size or modified time) invalidate the view — the Internxt delta rewinds
+        // its cursor on purpose and re-delivers the same items every poll, which used to
+        // re-invalidate unchanged paths forever. The merge also reports renames (an item
+        // re-delivered under a new path used to replace its own row silently, leaving
+        // the old path in the view unannounced). The merge's paths are engine-local;
+        // map them through the alias reverse map like the reap paths.
+        var upsertedViewPaths: Set<String> = emptySet()
+        var movedView: List<RemoteMerge.Move> = emptyList()
         db.batch {
-            gather.updateRemoteEntries(remoteChanges)
+            val merge = gather.updateRemoteEntries(remoteChanges)
+            upsertedViewPaths = merge.changedPaths
+            movedView =
+                merge.moved.map {
+                    RemoteMerge.Move(applyReverseTop(it.from, canonicalToLocalTop), applyReverseTop(it.to, canonicalToLocalTop))
+                }
             if (complete) {
                 // Reap ONLY on a complete enumeration (spec §3.1). The deleted items are
                 // already present in remoteChanges: RemoteGather.gather runs
@@ -284,12 +296,14 @@ class RemoteEnumeration(
         if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
         // Notify the view-invalidation sink once, with all paths that changed in state.db
         // during this pass. Only fires when something actually changed so quiescent polls
-        // do not produce spurious cache-invalidation traffic. The sink is a plain lambda so
+        // do not produce spurious cache-invalidation traffic (#595: a re-delivering delta
+        // no longer counts as "something"). The sink is a plain lambda so
         // app:hydration can wire HydrationEvent.ViewInvalidated without creating a circular
         // import (app:hydration depends on app:sync, not vice versa).
+        val upserted = upsertedViewPaths.size
         if (upserted > 0 || reaped > 0) {
             val changedPaths: Set<String> = upsertedViewPaths + reapedViewPaths
-            gather.invalidateView(changedPaths, false)
+            gather.invalidateView(changedPaths, false, movedView)
         }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
     }

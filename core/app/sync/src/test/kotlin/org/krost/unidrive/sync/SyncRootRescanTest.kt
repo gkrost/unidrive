@@ -56,7 +56,7 @@ class SyncRootRescanTest {
         standingScope = syncPaths,
         cacheRoot = cacheRoot,
         uploadInFlight = { it in busyPaths },
-        viewInvalidationSink = { paths, _ -> invalidated.add(paths) },
+        viewInvalidationSink = { paths, _, _moved -> invalidated.add(paths) },
     )
 
     private fun write(

@@ -605,7 +605,15 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
             """{"event":"view.invalidated","full":true}"""
         } else {
             val paths = e.paths.joinToString(",") { jsonEsc(it) }
-            """{"event":"view.invalidated","paths":[$paths]}"""
+            // #595: the rename hint is additive — omitted when empty, so consumers
+            // written before it parse the line unchanged.
+            val base = """{"event":"view.invalidated","paths":[$paths]"""
+            if (e.moved.isEmpty()) {
+                "$base}"
+            } else {
+                val moved = e.moved.joinToString(",") { """{"from":${jsonEsc(it.from)},"to":${jsonEsc(it.to)}}""" }
+                "$base,\"moved\":[$moved]}"
+            }
         }
     }
 }

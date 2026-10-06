@@ -76,10 +76,16 @@ class RemoteGather(
             dryRun: Boolean,
         ) {}
 
-        /** Rows changed in state.db: [changedPaths], or the whole view when [full]. */
+        /**
+         * Rows changed in state.db: [changedPaths], or the whole view when [full].
+         * [moved] carries the renames the merge detected (#595) — a consumer can move
+         * a placeholder instead of deleting and recreating it; consumers that only
+         * read [changedPaths] see both the old and the new path there regardless.
+         */
         fun onViewInvalidated(
             changedPaths: Set<String>,
             full: Boolean,
+            moved: List<RemoteMerge.Move> = emptyList(),
         ) {}
     }
 
@@ -103,7 +109,8 @@ class RemoteGather(
     fun invalidateView(
         changedPaths: Set<String>,
         full: Boolean,
-    ) = listener.onViewInvalidated(changedPaths, full)
+        moved: List<RemoteMerge.Move> = emptyList(),
+    ) = listener.onViewInvalidated(changedPaths, full, moved)
 
     /** #401: true when the last gather found two live remote items at [path]. */
     fun isCollided(path: String): Boolean = path in collidedPaths
@@ -755,7 +762,26 @@ class RemoteGather(
         }
     }
 
-    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>) {
+    /**
+     * What one [updateRemoteEntries] pass changed, as the view consumers need it (#595):
+     * [changedPaths] holds exactly the paths whose row is new or whose view-relevant
+     * content (remote id, hash, size, modified time, path) changed — a delta that
+     * re-delivers unchanged items (Internxt's rewound cursor) changes nothing and must
+     * not invalidate the view. [moved] holds the renames the merge detected: an item
+     * re-delivered under a new path replaces its own row (remote id is the primary
+     * key), and without this the old path would vanish from the view unannounced.
+     */
+    class RemoteMerge(
+        val changedPaths: Set<String>,
+        val moved: List<Move>,
+    ) {
+        data class Move(
+            val from: String,
+            val to: String,
+        )
+    }
+
+    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>): RemoteMerge {
         // #115: the remoteChanges keys are canonical remote paths. Build a
         // canonical→real-local reverse map so a newly-arrived aliased item is
         // persisted at its REAL-LOCAL path (with the canonical in remote_path),
@@ -764,49 +790,76 @@ class RemoteGather(
         // merge preserves their real-local path + remote_path. No alias active
         // → both helpers are identity and this is byte-identical to pre-#115.
         val remoteToLocalTop = localTopAliases(remoteChanges)
+        val changed = java.util.LinkedHashSet<String>()
+        val moved = mutableListOf<RemoteMerge.Move>()
         for ((path, item) in remoteChanges) {
             if (item.deleted) continue // skip deleted items
             val realLocalPath = applyReverseTop(path, remoteToLocalTop)
             val isAliased = realLocalPath != path
             // Match an existing row by effective remote path (handles aliased
             // rows keyed at their real-local path).
-            val existing = db.getEntryByRemotePath(path)
+            var existing = db.getEntryByRemotePath(path)
+            var renamedFrom: String? = null
+            if (existing == null) {
+                // #595: a renamed item arrives under its new path and matches no row
+                // by path — but its remote id still owns a row at the OLD path, and
+                // upsertEntry would replace it silently (remote id is the primary
+                // key), vanishing the old name from the view. Merge into that row
+                // instead and report the move.
+                val byId = db.getEntryByRemoteId(item.id)
+                if (byId != null && byId.path != realLocalPath) {
+                    existing = byId
+                    renamedFrom = byId.path
+                }
+            }
             val merged =
-                existing?.copy(
-                    remoteId = item.id,
-                    remoteHash = item.hash,
-                    remoteSize = item.size,
-                    remoteModified = item.modified,
-                    lastSynced = Instant.now(),
-                    // A fresh delta event for a previously-quarantined row
-                    // means the cloud is reporting it alive again — drop the
-                    // quarantine and let the next reconcile re-emit the
-                    // download. Belt-and-braces with
-                    // StateDatabase.clearDownloadQuarantine below: that call
-                    // wins on the canonical SQL UPDATE; this copy ensures
-                    // any consumer reading the merged value inside this loop
-                    // sees the cleared state too.
-                    downloadQuarantined = false,
-                    lastErrorAt = null,
-                    // preserve path, remotePath, localMtime, localSize, isHydrated, isFolder
-                ) ?: SyncEntry(
-                    // #115: key a newly-arrived aliased item at its real-local
-                    // path; record the canonical in remotePath so LocalScanner
-                    // finds the row and the next delta matches by effective
-                    // remote path.
-                    path = realLocalPath,
-                    remotePath = if (isAliased) path else null,
-                    remoteId = item.id,
-                    remoteHash = item.hash,
-                    remoteSize = item.size,
-                    remoteModified = item.modified,
-                    localMtime = null,
-                    localSize = null,
-                    isFolder = item.isFolder,
-                    isPinned = false,
-                    isHydrated = false,
-                    lastSynced = Instant.now(),
-                )
+                if (existing == null) {
+                    SyncEntry(
+                        // #115: key a newly-arrived aliased item at its real-local
+                        // path; record the canonical in remotePath so LocalScanner
+                        // finds the row and the next delta matches by effective
+                        // remote path.
+                        path = realLocalPath,
+                        remotePath = if (isAliased) path else null,
+                        remoteId = item.id,
+                        remoteHash = item.hash,
+                        remoteSize = item.size,
+                        remoteModified = item.modified,
+                        localMtime = null,
+                        localSize = null,
+                        isFolder = item.isFolder,
+                        isPinned = false,
+                        isHydrated = false,
+                        lastSynced = Instant.now(),
+                    )
+                } else {
+                    existing.copy(
+                        remoteId = item.id,
+                        remoteHash = item.hash,
+                        remoteSize = item.size,
+                        remoteModified = item.modified,
+                        lastSynced = Instant.now(),
+                        // A fresh delta event for a previously-quarantined row
+                        // means the cloud is reporting it alive again — drop the
+                        // quarantine and let the next reconcile re-emit the
+                        // download. Belt-and-braces with
+                        // StateDatabase.clearDownloadQuarantine below: that call
+                        // wins on the canonical SQL UPDATE; this copy ensures
+                        // any consumer reading the merged value inside this loop
+                        // sees the cleared state too.
+                        downloadQuarantined = false,
+                        lastErrorAt = null,
+                        // A rename moves the row to the new path (preserving
+                        // localMtime, localSize, isHydrated and isPinned — the
+                        // hydration cache and pins travel with it, so a client can
+                        // move the placeholder instead of redownloading, #595). A
+                        // path-matched merge keeps its path and remote_path: the
+                        // row was found BY that effective remote path, and only a
+                        // rename — never a re-delivery — may re-key it.
+                        path = if (renamedFrom != null) realLocalPath else existing.path,
+                        remotePath = if (renamedFrom != null) (if (isAliased) path else null) else existing.remotePath,
+                    )
+                }
             db.upsertEntry(merged)
             // Belt-and-braces (matches the .copy() above): explicitly clear
             // the quarantine flag on the canonical row in case a future
@@ -815,7 +868,25 @@ class RemoteGather(
             if (existing != null && existing.downloadQuarantined && existing.remoteId != null) {
                 db.clearDownloadQuarantine(existing.remoteId)
             }
+            // #595: the view only learns what actually changed. lastSynced moves on
+            // every pass by design; a re-delivered unchanged item (Internxt's rewound
+            // cursor re-names the same items every poll) must not invalidate it.
+            val contentChanged =
+                existing == null ||
+                    existing.remoteId != item.id ||
+                    existing.remoteHash != item.hash ||
+                    existing.remoteSize != item.size ||
+                    existing.remoteModified != item.modified
+            if (contentChanged) changed += realLocalPath
+            if (renamedFrom != null) {
+                moved += RemoteMerge.Move(from = renamedFrom, to = realLocalPath)
+                // Both ends of the move leave and enter the view, even when the
+                // content fields read equal (a pure rename changes nothing else).
+                changed += renamedFrom
+                changed += realLocalPath
+            }
         }
+        return RemoteMerge(changedPaths = changed, moved = moved)
     }
 
     companion object {

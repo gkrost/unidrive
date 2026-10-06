@@ -97,6 +97,8 @@ sealed class HydrationEvent {
      *
      * Wire shape (NDJSON line on `hydration.subscribe` stream):
      *   - Up to [VIEW_INVALIDATED_PATH_CAP] paths: `{"event":"view.invalidated","paths":["/a","/b",…]}`
+     *   - With renames (#595): `…"paths":["/a","/b"],"moved":[{"from":"/a","to":"/b"}]` —
+     *     additive and optional for consumers; `paths` always holds both ends of a move.
      *   - More than [VIEW_INVALIDATED_PATH_CAP] paths:  `{"event":"view.invalidated","full":true}`
      *
      * [path] is always the empty string — this event is not tied to a single path.
@@ -106,8 +108,20 @@ sealed class HydrationEvent {
         val paths: List<String>,
         /** True when the changed-path count exceeded [VIEW_INVALIDATED_PATH_CAP]; co-daemon should invalidate all cache entries. */
         val full: Boolean = false,
+        /**
+         * #595: the remote renames behind some of [paths] (old path → new path). A
+         * co-daemon may move its placeholder instead of deleting and recreating it,
+         * keeping hydration state and pins; ignoring this and reconciling from
+         * [paths] is always correct.
+         */
+        val moved: List<Moved> = emptyList(),
     ) : HydrationEvent() {
         override val path: String get() = ""
+
+        data class Moved(
+            val from: String,
+            val to: String,
+        )
     }
 
     companion object {
