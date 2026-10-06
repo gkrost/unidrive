@@ -171,7 +171,7 @@ class DaemonRuntime(
                 // (guard, gather, enumeration: one of each per daemon). The engine itself stays for the
                 // refresh.run fallback (RefreshRpcHandler, U4). See MountEngine for who owns what.
                 val mount = MountEngine.over(engine)
-                val hydration = HydrationImpl(engine, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
+                val hydration = HydrationImpl(mount, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
                 hydrationRef = hydration
                 // #450: what a stopped daemon left in the hydration cache (staging temp files, the
                 // copies of synced files read through the mount) is trimmed to the budget at start.

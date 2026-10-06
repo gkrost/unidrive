@@ -18,9 +18,8 @@ import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.StateDatabase
-import org.krost.unidrive.sync.SyncConfig
-import org.krost.unidrive.sync.SyncEngine
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
@@ -33,7 +32,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class HydrationImpl(
-    private val syncEngine: SyncEngine,
+    // #560 U3: the mount operations (hydrate, upload, remote create/delete/rename) run on the mount
+    // front-end; this class owns the upload queue, the open set and the cache budget on top of it.
+    private val mount: MountEngine,
     private val stateDb: StateDatabase,
     private val recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     // Upload-queue tuning. The waiting depth bounds how many submitted-but-
@@ -65,8 +66,36 @@ class HydrationImpl(
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) : Hydration {
 
-    // #560 U3: the mount operations, over the shared core of [syncEngine] (one front-end per engine).
-    private val mount: MountEngine = MountEngine.over(syncEngine)
+    /**
+     * #560 U3 compatibility adapter: hydration over the mount front-end of [syncEngine] (`MountEngine.over`,
+     * the one instance per engine the daemon wiring uses too). It keeps the call sites that build hydration on
+     * a `SyncEngine` (`unidrive sync`, the tests) as they were until mount profiles get their own host (U4, U6).
+     */
+    constructor(
+        syncEngine: MountHost,
+        stateDb: StateDatabase,
+        recoveryUploadScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+        uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
+        maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
+        uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
+        uploadProgressMinIntervalMs: Long = DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS,
+        cacheMaxBytes: Long = DEFAULT_CACHE_MAX_BYTES,
+        cacheAccessGraceMs: Long = CACHE_ACCESS_GRACE_MS,
+        evictionDelayMs: Long = EVICTION_DELAY_MS,
+        failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
+    ) : this(
+        MountEngine.over(syncEngine),
+        stateDb,
+        recoveryUploadScope,
+        uploadQueueDepth,
+        maxUploadAttempts,
+        uploadRetryDelaysMs,
+        uploadProgressMinIntervalMs,
+        cacheMaxBytes,
+        cacheAccessGraceMs,
+        evictionDelayMs,
+        failedReplayDelayMs,
+    )
 
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
 
@@ -155,7 +184,9 @@ class HydrationImpl(
         const val DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS = 400L
 
         /** #450: default hydration cache budget per profile, 20 GiB. */
-        const val DEFAULT_CACHE_MAX_BYTES: Long = SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES
+        // The value of SyncConfig.DEFAULT_HYDRATION_CACHE_MAX_BYTES (:app:sync, which this module no longer
+        // depends on, #560 U3); HydrationCacheDefaultTest in :app:cli pins that the two agree.
+        const val DEFAULT_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
         const val CACHE_ACCESS_GRACE_MS: Long = 60_000
         const val EVICTION_DELAY_MS: Long = 5_000
 
@@ -177,10 +208,10 @@ class HydrationImpl(
         touch(path)
 
         val cachePath = try {
-            // Always emit Hydrating + Hydrated, even when SyncEngine returns a warm cache
+            // Always emit Hydrating + Hydrated, even when MountEngine returns a warm cache
             // without downloading: subscribers should see a consistent event stream
             // regardless of cache state; the cache layer is an implementation detail of
-            // SyncEngine, not part of the Hydration SPI contract.
+            // MountEngine, not part of the Hydration SPI contract.
             _events.emit(HydrationEvent.Hydrating(path))
             val p = mount.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
