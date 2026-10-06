@@ -774,26 +774,34 @@ open class SyncEngine(
         val remotePath = existingEntry.remotePath ?: path
         val sizeForLog = Files.size(cachePath)
         val sent = statBeforeUpload(cachePath)
+        // #583: bytes identical to the version the row records, and the cloud still holds that version: there is
+        // nothing to send. The copy is adopted below exactly as an upload would rebaseline the row.
+        val unchanged = unchangedCloudVersionOrNull(existingEntry, remotePath, cachePath, sizeForLog)
+        if (unchanged != null) {
+            log.info("uploadFromCache: {} has the bytes the cloud already holds ({} bytes); upload skipped", path, sizeForLog)
+        }
         val result =
-            try {
-                provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
-                    reporter.onTransferProgress(path, transferred, total)
-                    onProgress?.invoke(transferred, total)
+            unchanged
+                ?: try {
+                    provider.upload(cachePath, remotePath, existingRemoteId = existingRemoteId, ifMatchETag = ifMatchETag) { transferred, total ->
+                        reporter.onTransferProgress(path, transferred, total)
+                        onProgress?.invoke(transferred, total)
+                    }
+                } catch (e: Exception) {
+                    auditLog?.emit(
+                        action = "Upload",
+                        path = path,
+                        size = sizeForLog,
+                        oldHash = prevHash,
+                        result = "failed:${e.javaClass.simpleName}: ${e.message}",
+                    )
+                    throw e
                 }
-            } catch (e: Exception) {
-                auditLog?.emit(
-                    action = "Upload",
-                    path = path,
-                    size = sizeForLog,
-                    oldHash = prevHash,
-                    result = "failed:${e.javaClass.simpleName}: ${e.message}",
-                )
-                throw e
-            }
+        val auditResult = if (unchanged != null) "skipped:unchanged" else "success"
         // Defer the absence sweep's deletion verdict while the delta feed catches up
         // to this just-written remote item (see markRecentlyUploaded). Keyed by the
-        // REMOTE path so the absence sweep (remote namespace) matches.
-        markRecentlyUploaded(remotePath)
+        // REMOTE path so the absence sweep (remote namespace) matches. Nothing was written when the upload was skipped.
+        if (unchanged == null) markRecentlyUploaded(remotePath)
         // #337/#148: the row records the cache copy's stats as they were BEFORE
         // the transfer (same rule as applyUpload). A write landing mid-upload
         // keeps a newer mtime than the recorded watermark, so a later re-upload
@@ -824,7 +832,7 @@ open class SyncEngine(
                 size = size,
                 oldHash = prevHash,
                 newHash = result.hash,
-                result = "success",
+                result = auditResult,
             )
             return
         }
@@ -932,8 +940,43 @@ open class SyncEngine(
             size = size,
             oldHash = prevHash,
             newHash = result.hash,
-            result = "success",
+            result = auditResult,
         )
+    }
+
+    /**
+     * #583: the cloud item the cache copy is already identical to, or null when the copy has to be uploaded.
+     * Skipping needs both: the bytes equal the version the row records ([cacheMatchesRecordedVersion]: the provider's
+     * content hash, or the SHA-256 the engine recorded for hashless providers), AND the cloud still holds that version
+     * (same item, size and modified time as the row; the provider's version token when both sides have one). Anything
+     * else (a pending `local:` row, no recorded hash, a cloud copy that moved on, a lookup that fails) returns null and
+     * the upload runs as before, so a changed cloud copy still meets the provider's write-token and conflict handling.
+     */
+    private suspend fun unchangedCloudVersionOrNull(
+        entry: SyncEntry,
+        remotePath: String,
+        cachePath: Path,
+        size: Long,
+    ): CloudItem? {
+        val remoteId = entry.remoteId ?: return null
+        if (entry.isFolder || remoteId.startsWith("local:")) return null
+        if (size != entry.remoteSize) return null
+        if (!cacheMatchesRecordedVersion(entry, cachePath, size)) return null
+        val current =
+            try {
+                provider.getMetadata(remotePath)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.debug("uploadFromCache: cloud lookup for {} failed ({}); not skipping", remotePath, e.message)
+                return null
+            }
+        if (current.isFolder || current.id != remoteId || current.size != entry.remoteSize) return null
+        val recordedModified = entry.remoteModified
+        if (recordedModified != null && current.modified != recordedModified) return null
+        val recordedToken = entry.remoteHash
+        if (!recordedToken.isNullOrEmpty() && !current.hash.isNullOrEmpty() && current.hash != recordedToken) return null
+        return current
     }
 
     /**
