@@ -96,6 +96,95 @@ class UploadProgressWatchdogTest {
         assertTrue(!p.bodySent)
     }
 
+    // #592: the verdict is wall-clock time, so a process that was not running (a stop-the-world GC, a starved CI runner, a
+    // suspended VM) looked like an upload that stopped moving. The watchdog notices that its OWN ticks came late and gives
+    // the time back.
+    @Test
+    fun `a pause of the whole process is not a stalled upload`() {
+        val p = progress(1_000_000)
+        p.bodyStarted()
+        advanceMs(100)
+        p.wrote(64 * 1024)
+        p.noteTick(tickMs = 50)
+        advanceMs(2_000) // nothing ran for two seconds: the writer and the watchdog alike
+        p.noteTick(tickMs = 50) // ... and the watchdog's tick is two seconds late
+        assertNull(p.check(idleWindowMs = 1_000, responseWaitMs = 1_000, what = "Upload"), "the pause is not idle time")
+
+        // The upload really stops afterwards: ticks on time, no write; cut one idle window after the pause ended.
+        repeat(18) {
+            advanceMs(50)
+            p.noteTick(50)
+            assertNull(p.check(1_000, 1_000, "Upload"))
+        }
+        advanceMs(50)
+        p.noteTick(50)
+        assertEquals(UploadWatchdogException.Reason.STALLED, p.check(1_000, 1_000, "Upload")!!.reason)
+    }
+
+    @Test
+    fun `a stall seen by ticks that come on time is still cut at the window`() {
+        val p = progress(1_000_000)
+        p.bodyStarted()
+        repeat(19) {
+            advanceMs(50)
+            p.noteTick(50)
+            assertNull(p.check(1_000, 1_000, "Upload"))
+        }
+        advanceMs(50)
+        p.noteTick(50)
+        assertEquals(UploadWatchdogException.Reason.STALLED, p.check(1_000, 1_000, "Upload")!!.reason)
+    }
+
+    @Test
+    fun `a pause while the server is answering extends the response wait`() {
+        val p = progress(1_000)
+        p.bodyStarted()
+        p.wrote(1_000)
+        p.bodyComplete()
+        p.noteTick(50)
+        advanceMs(5_000) // a paused process
+        p.noteTick(50)
+        assertNull(p.check(1_000, 1_000, "Upload"), "the server had no time to answer while nothing ran")
+        repeat(18) { // the server stays silent while the ticks come on time: the wait counts again
+            advanceMs(50)
+            p.noteTick(50)
+            assertNull(p.check(1_000, 1_000, "Upload"))
+        }
+        advanceMs(50)
+        p.noteTick(50)
+        assertEquals(UploadWatchdogException.Reason.NO_RESPONSE, p.check(1_000, 1_000, "Upload")?.reason)
+    }
+
+    @Test
+    fun `ordinary jitter of a few ticks is not a pause`() {
+        val p = progress(1_000_000)
+        p.bodyStarted()
+        p.noteTick(100)
+        repeat(3) {
+            advanceMs(400) // four ticks between two ticks: a busy machine, not a stopped process
+            p.noteTick(100)
+        }
+        assertEquals(UploadWatchdogException.Reason.STALLED, p.check(1_000, 1_000, "Upload")?.reason)
+    }
+
+    @Test
+    fun `the watchdog does not cut a block whose process was paused`() =
+        runBlocking {
+            // The progress clock is the test's: the jump stands for a pause of the whole process while the real ticks go on.
+            val p = progress(100)
+            val value =
+                withUploadWatchdog(p, idleWindowMs = 200, responseWaitMs = 200, tickMs = 20, what = "Upload") {
+                    p.bodyStarted()
+                    delay(60)
+                    advanceMs(10_000)
+                    delay(300) // real time: many ticks, none of them with a stall (the clock stands still)
+                    p.wrote(100)
+                    p.bodyComplete()
+                    "answer"
+                }
+            assertEquals("answer", value)
+        }
+
     @Test
     fun `rates and durations read plainly`() {
         assertEquals("1.98 MB/s", UploadProgress.formatRate(1_980_000))

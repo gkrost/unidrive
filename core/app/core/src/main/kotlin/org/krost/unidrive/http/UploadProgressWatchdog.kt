@@ -51,6 +51,10 @@ public class UploadProgress(
     private val lastProgressAt = AtomicLong(startedAt)
     private val written = AtomicLong(0)
     private val bodySentAt = AtomicLong(NOT_YET)
+    private val lastTickAt = AtomicLong(startedAt)
+
+    // Nanoseconds of pauses of the whole process since the last progress (or since the body was complete), see noteTick.
+    private val pausedCredit = AtomicLong(0)
 
     /** Body bytes the transport accepted so far. */
     public val bytesWritten: Long get() = written.get()
@@ -68,15 +72,18 @@ public class UploadProgress(
         bodySentAt.set(NOT_YET)
         lastProgressAt.set(now)
         bodyStartedAt.set(now)
+        pausedCredit.set(0)
     }
 
     internal fun wrote(bytes: Int) {
         written.addAndGet(bytes.toLong())
         lastProgressAt.set(nanoTime())
+        pausedCredit.set(0)
     }
 
     internal fun bodyComplete() {
         bodySentAt.set(nanoTime())
+        pausedCredit.set(0)
     }
 
     /**
@@ -96,6 +103,22 @@ public class UploadProgress(
         "${formatBytes(bytesWritten)} of ${formatBytes(totalBytes)} bytes sent in ${formatSeconds(elapsedMs())} " +
             "(average ${formatRate(averageBytesPerSecond())})"
 
+    /**
+     * The watchdog calls this on every tick, before [check]. The verdicts are wall-clock time, so a process that was not
+     * running (a stop-the-world GC, a starved CI runner, a suspended VM) used to look like an upload that stopped moving
+     * (#592). When this tick comes much later than the tick interval, the lateness is a pause of the whole process, not of
+     * the upload, and it is credited back: [check] does not count it as idle or as waiting for the server. Ordinary
+     * jitter (up to [PAUSE_TICKS] intervals between two ticks) is not credited, so a loaded machine can still lose an
+     * upload that really stopped.
+     */
+    internal fun noteTick(tickMs: Long) {
+        val now = nanoTime()
+        val gap = now - lastTickAt.getAndSet(now)
+        val tickNanos = tickMs * NANOS_PER_MS
+        if (gap <= tickNanos * PAUSE_TICKS) return
+        pausedCredit.addAndGet(gap - tickNanos)
+    }
+
     /** The verdict of the watchdog at this moment: null while the upload is fine. */
     internal fun check(
         idleWindowMs: Long,
@@ -104,8 +127,9 @@ public class UploadProgress(
     ): UploadWatchdogException? {
         val now = nanoTime()
         val sent = bodySentAt.get()
+        val paused = pausedCredit.get()
         if (sent != NOT_YET) {
-            val waitedMs = (now - sent) / NANOS_PER_MS
+            val waitedMs = (now - sent - paused).coerceAtLeast(0) / NANOS_PER_MS
             if (waitedMs < responseWaitMs) return null
             return UploadWatchdogException(
                 UploadWatchdogException.Reason.NO_RESPONSE,
@@ -113,7 +137,7 @@ public class UploadProgress(
                     describe(),
             )
         }
-        val idleMs = (now - lastProgressAt.get()) / NANOS_PER_MS
+        val idleMs = (now - lastProgressAt.get() - paused).coerceAtLeast(0) / NANOS_PER_MS
         if (idleMs < idleWindowMs) return null
         return UploadWatchdogException(
             UploadWatchdogException.Reason.STALLED,
@@ -124,6 +148,9 @@ public class UploadProgress(
     public companion object {
         private const val NOT_YET = Long.MIN_VALUE
         private const val NANOS_PER_MS = 1_000_000L
+
+        /** Ticks the watchdog may come late before the lateness counts as a pause of the process (see [noteTick]). */
+        private const val PAUSE_TICKS = 5
 
         /** "1,361,366,128" — grouped so a size reads at a glance. */
         public fun formatBytes(bytes: Long): String = String.format(Locale.ROOT, "%,d", bytes)
@@ -201,6 +228,7 @@ public suspend fun <T> withUploadWatchdog(
             launch(Dispatchers.Default) {
                 while (true) {
                     delay(tickMs)
+                    progress.noteTick(tickMs)
                     val cut = progress.check(idleWindowMs, responseWaitMs, what) ?: continue
                     verdict.set(cut)
                     work.cancel(CancellationException(cut.message, cut))
