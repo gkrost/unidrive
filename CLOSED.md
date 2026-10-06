@@ -124,3 +124,9 @@ Things that were done before this branch started. Append new entries when items 
 - Path normalization (NFC) across sync
 - Provider SPI hardening with two providers
 - `.lock.pid` rendered as `mode (no-mode)` for legacy pid-only sidecars — now named `legacy (pre-mode-mutex)` in the `daemon status`/`daemon stop` refusal
+- Pending-upload predicate (`remoteId == null && isHydrated == true`) was enforced informally across many call sites
+- `uploadFromCache` read the local watermark after the upload — redundant re-upload
+- Hydration-cache file was deleted inside the reap DB transaction — filesystem operation in a `db.batch{}`
+- Gradle daemon poison: `java.io.EOFException` from `SerializableTestResultStore` with 0-byte results
+- `unidrive refresh` against a profile with a pre-existing delta cursor returned only the incremental delta, not a full enumeration
+- Reach the 5+5+2 live-integration smoke target (OneDrive 9, Internxt 10, sync 2+ test methods, all behind `UNIDRIVE_INTEGRATION_TESTS`)

@@ -10,22 +10,24 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 │   ├── app/
 │   │   ├── cli/            # CLI entry point and subcommand mapping
 │   │   ├── cli-spi/        # CLI extension SPI (`org.krost.unidrive.cli.ext`)
-│   │   ├── core/           # Engine, crypto, model sets
+│   │   ├── core/           # Provider SPI (`CloudProvider`, `ProviderFactory`), auth and HTTP helpers
+│   │   ├── engine-core/    # Shared engine primitives: state.db, path and scope rules, remote gather
 │   │   ├── hydration/      # De/hydration pipeline
-│   │   ├── sync/           # Sync engine (ships the MVP), state.db, IPC server
+│   │   ├── sync/           # Sync engine (ships the MVP), IPC server
 │   │   └── sync-tracking/  # Frozen tracking-set engine (`unidrive ts`)
 │   └── providers/
 │       ├── internxt/       # Zero-knowledge encrypted client
+│       ├── localfs/        # No-auth local-directory provider for offline development and tests
 │       └── onedrive/       # Microsoft Graph API client
 └── dist/                   # User-space install scripts and systemd units
 ```
 
 ## Build
 
-JDK 21+, Linux with `systemd --user`.
+JDK 21+, Linux with `systemd --user`. The Gradle wrapper lives in `core/`.
 
 ```bash
-./gradlew :core:app:cli:assemble    # build fat JAR
+cd core && ./gradlew :app:cli:shadowJar    # build fat JAR → core/app/cli/build/libs/unidrive-*.jar
 ```
 
 ## Packaged distribution (no user-installed JDK)
@@ -37,9 +39,9 @@ runtime of its own version, so the image JVM deliberately leads the bytecode
 target):
 
 ```bash
-./gradlew :core:app:cli:shadowJar :core:app:cli:runtimeImage
+cd core && ./gradlew :app:cli:shadowJar :app:cli:runtimeImage
 # → core/app/cli/build/runtime-image/  (bin/java + legal/, ~50 MB)
-#   runtime-image/bin/java -jar core/app/cli/build/libs/unidrive-*.jar --version
+#   core/app/cli/build/runtime-image/bin/java -jar core/app/cli/build/libs/unidrive-*.jar --version
 ```
 
 The image's JDK module set is pinned — a new dependency that changes it fails
@@ -78,19 +80,40 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 
 ### Session & Identity
 - `auth` — OAuth/token provisioning
-- `profile` — multi-profile management
+- `profile` — multi-profile management (`add`, `list`, `remove`)
+- `backup` — backup profiles (`add`, `list`)
 - `logout` — destroy session, invalidate credentials
 
 ### Sync
 - `sync` — run the sync engine (`SyncEngine`, the engine the MVP ships); the frozen tracking-set engine is reachable only as `ts`
+- `refresh` — update `state.db` with remote changes through the running daemon (`--reset` re-enumerates the whole cloud tree)
+- `apply` — drain pending transfers left by a `refresh`, without fetching remote changes again
 - `status` — show alignment, transfers, exceptions
-- `conflicts` — convergence paths for conflicting hashes
+- `conflicts` — show recent conflicts; restore or clear conflict backups (`list`, `restore`, `clear`)
+- `verify` — report-only audit of the sync root, `state.db` and a live remote listing (exit 0 converged, 1 divergence, 2 could not audit)
+- `doctor` — read-only diagnostics: drift, staleness, destructive activity, scope, hydration
+- `log` — show recent sync activity
+
+### Daemon & Mount
+- `daemon` — per-profile daemon: `run` (foreground until SIGTERM), `status`, `stop`
+- `mount` — start the Linux FUSE co-daemon for a profile ([`unidrive-mount-linux`](https://github.com/gkrost/unidrive-mount-linux)); needs a running `daemon run`
+- `migrate` — one-time conversion of a legacy profile to a fixed mirror or mount mode ([independent-profiles](docs/adr/independent-profiles.md)); only the read-only `inventory` step exists so far
 
 ### Storage
-- `pin / get` — hydrate specific folders
+- `ls` — list a remote folder (no recursion; `--live` forces a provider query)
+- `get` — download file content (hydrate)
+- `pin / unpin` — add or remove an eager-download rule (glob pattern)
 - `free` — dehydrate to sparse markers
-- `vault` — vault operations
-- `sweep` — garbage-collect detached index fragments
+- `quota` — show storage quota
+- `share` — generate a shareable link for a file or folder
+- `trash` — trash emulation (`list`, `restore`, `purge`)
+- `versions` — versioned files (`list`, `restore`, `purge`)
+- `relocate` — migrate data between cloud providers
+- `vault` — credential vault (`init`, `encrypt`, `decrypt`, `change-passphrase`)
+- `sweep` — detect and rehydrate zero-byte stub files (`--null-bytes` scan; `--dry-run` and `--rehydrate` modify it)
+
+### Tracking-set engine (experimental, frozen)
+- `ts` — `sync`, `claim`, `unclaim`, `status` (see `core/app/sync-tracking/README.md`)
 
 ## Key source files
 
