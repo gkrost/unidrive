@@ -1475,6 +1475,53 @@ class HydrationImplTest {
         assertEquals(0L, e.size, "a negative remote size must clamp to 0, never reach the wire")
     }
 
+    // #524: a row whose upload is still pending records 0 for both remote and local
+    // size (the row is written when the copy begins and nothing writes the size back
+    // until the upload lands). The cache file is the only copy and the upload will
+    // send ITS size — list() must report that number, not a misleading 0 (a 0-byte
+    // file reads as data loss and invites a delete; that delete is not propagated,
+    // so the replay resurrects the file afterwards).
+    @Test
+    fun `list reports the cache size for a pending upload whose row sizes are zero`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertCreatedRow("/_INBOX/big.zip")
+        env.syncEngine.seedCacheContent("/_INBOX/big.zip", "x".repeat(137))
+
+        val r = env.hydration.list("/_INBOX")
+
+        assertTrue(r is ListResult.Ok)
+        val e = r.entries.single { it.path == "/_INBOX/big.zip" }
+        assertEquals(137L, e.size, "the cache file's size is what the upload will send")
+        assertEquals(true, e.pendingUpload)
+    }
+
+    @Test
+    fun `list falls back to the recorded size when a pending row has no cache file`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertCreatedRow("/ghost.bin")
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = r.entries.single { it.path == "/ghost.bin" }
+        assertEquals(0L, e.size, "no cache file — the recorded sizes stand")
+        assertEquals(true, e.pendingUpload)
+    }
+
+    @Test
+    fun `list keeps the recorded size for rows whose upload is not pending`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/cloud-only.txt", remoteSize = 9)
+        env.syncEngine.seedCacheContent("/cloud-only.txt", "not the reported number")
+
+        val r = env.hydration.list("")
+
+        assertTrue(r is ListResult.Ok)
+        val e = r.entries.single { it.path == "/cloud-only.txt" }
+        assertEquals(9L, e.size, "a remote-backed row without a pending upload keeps its recorded size")
+        assertEquals(false, e.pendingUpload)
+    }
+
     // The remote fields a mirroring client needs: the provider's modified time
     // (mtime_ms alone is the LOCAL watermark — enumeration time for cloud-only
     // rows), the remote id for rename recognition, the change-detection token,
