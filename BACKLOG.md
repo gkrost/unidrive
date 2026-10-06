@@ -21,7 +21,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 
 - [#99] Tracking-set sync engine (post-MVP epic; the engine is frozen, data-safety fixes only)
 - [#107] Cut first unidrive-mount-linux release tarball + wire dist/install.sh to download + SHA256-verify it
-- [#109] Reach the 5+5+2 smoke target
 - [#111] OneDrive webhook lifecycle events + validation endpoint
 
 ## Medium — efficiency
