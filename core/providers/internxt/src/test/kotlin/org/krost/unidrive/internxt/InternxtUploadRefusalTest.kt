@@ -31,7 +31,21 @@ class InternxtUploadRefusalTest {
         tmp.toFile().deleteRecursively()
     }
 
-    private fun newProvider(createStatus: HttpStatusCode): InternxtProvider {
+    private fun newProvider(createStatus: HttpStatusCode): InternxtProvider =
+        newProviderWith(createStatus)
+
+    /**
+     * The folder-listing route answers with an EMPTY children list: the walk
+     * succeeds and proves the target segment absent — positive proof (a trashed
+     * parent, #580), not a degraded gateway (that fails the listing itself).
+     */
+    private fun newProviderParentGone(): InternxtProvider =
+        newProviderWith(HttpStatusCode.OK, emptyListing = true)
+
+    private fun newProviderWith(
+        createStatus: HttpStatusCode,
+        emptyListing: Boolean = false,
+    ): InternxtProvider {
         val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
@@ -64,6 +78,8 @@ class InternxtUploadRefusalTest {
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
+                        emptyListing && url.contains("/folders/content/") ->
+                            respond("""{"children":[],"files":[]}""", HttpStatusCode.OK, json)
                         url.contains("/v2/buckets/") && url.contains("/files/start") ->
                             respond("""{"uploads":[{"index":0,"uuid":"shard-1","url":"$shardUrl"}]}""", HttpStatusCode.OK, json)
                         url == shardUrl -> respond("", HttpStatusCode.OK)
@@ -104,6 +120,44 @@ class InternxtUploadRefusalTest {
                     provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
                 }
                 assertEquals(500, e.statusCode, "a server error is not turned into a permanent failure")
+            } finally {
+                provider.close()
+            }
+        }
+
+    // #580: the parent folder was trashed in the cloud; the walk's listing succeeds and
+    // the target segment is not in it. That is permanent for the current state — the same
+    // call with the same bytes fails again forever — so it is a PermanentUploadFailureException
+    // (no retry ladder, replay and same-bytes resubmission skip it, the cache bytes stay),
+    // NOT the plain retryable ProviderException the walk used to raise.
+    @Test
+    fun `an upload whose parent the walk proves gone is a permanent refusal`() =
+        runTest {
+            val provider = newProviderParentGone()
+            try {
+                val e =
+                    assertFailsWith<PermanentUploadFailureException> {
+                        provider.upload(local(), "/_ud-test-0510/new.bin", existingRemoteId = null, onProgress = null)
+                    }
+                assertTrue(
+                    "Folder not found" in (e.message ?: ""),
+                    "the walk's proof of absence is carried in the message: ${e.message}",
+                )
+            } finally {
+                provider.close()
+            }
+        }
+
+    @Test
+    fun `an empty-file upload into a parent the walk proves gone is also a permanent refusal`() =
+        runTest {
+            val provider = newProviderParentGone()
+            try {
+                val e =
+                    assertFailsWith<PermanentUploadFailureException> {
+                        provider.upload(local().let { Files.write(it, ByteArray(0)); it }, "/_ud-test-0510/zero.bin", existingRemoteId = null, onProgress = null)
+                    }
+                assertTrue("Folder not found" in (e.message ?: ""), e.message)
             } finally {
                 provider.close()
             }

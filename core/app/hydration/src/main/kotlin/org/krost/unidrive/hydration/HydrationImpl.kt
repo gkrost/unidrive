@@ -843,7 +843,14 @@ class HydrationImpl(
                     // folder size wrapped past Int.MAX to a negative) must never reach the
                     // wire — a negative size breaks strict u64 list parsers and EIO'd the
                     // FUSE co-daemon's whole directory listing.
-                    val size = (if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize).coerceAtLeast(0L)
+                    // #524: while the upload is pending the cache file is the only copy
+                    // and the upload sends ITS size — the row (written when the copy
+                    // began) often still records 0 for both remote and local size, and a
+                    // 0-byte file on the wire reads as data loss and invites a delete.
+                    // One stat per pending row; a resolve/stat failure (unreadable name,
+                    // no cache file) falls back to the recorded sizes.
+                    val pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path)
+                    val size = reportedSize(e, pendingUpload)
                     ListResult.Entry(
                         path = e.path,
                         size = size,
@@ -863,7 +870,7 @@ class HydrationImpl(
                         // UD-901 predicate) — this wire flag must also cover a remote-backed
                         // file whose cached edit is still queued in an upload slot, which
                         // the predicate (remoteId == null) cannot see.
-                        pendingUpload = e.remoteId == null || uploadSlots.containsKey(e.path),
+                        pendingUpload = pendingUpload,
                         hasError = e.lastErrorAt != null,
                         excluded = syncEngine.isExcludedPath(e.path),
                     )
@@ -872,6 +879,23 @@ class HydrationImpl(
         } catch (e: Exception) {
             ListResult.Failed(HydrationError.Generic(e.message ?: "list failed"))
         }
+    }
+
+    /**
+     * The wire size of a listed row: the recorded sizes, except for a pending
+     * upload whose cache file holds the bytes (a folder never has a cache file).
+     * The recorded size is the fallback for every stat failure — [list] must not
+     * fail a whole directory because one row's name will not resolve (#526 class).
+     */
+    private fun reportedSize(
+        e: org.krost.unidrive.sync.model.SyncEntry,
+        pendingUpload: Boolean,
+    ): Long {
+        val recorded = (if (e.isHydrated) (e.localSize ?: e.remoteSize) else e.remoteSize).coerceAtLeast(0L)
+        if (!pendingUpload || e.isFolder) return recorded
+        return runCatching {
+            Files.size(syncEngine.resolveCachePath(e.path)).coerceAtLeast(0L)
+        }.getOrDefault(recorded)
     }
 
     override suspend fun mkdir(path: String): MkdirResult {
