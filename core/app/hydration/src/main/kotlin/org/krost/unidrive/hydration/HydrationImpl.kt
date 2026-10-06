@@ -65,6 +65,9 @@ class HydrationImpl(
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) : Hydration {
 
+    // #560 U3: the mount operations, over the shared core of [syncEngine] (one front-end per engine).
+    private val mount: MountEngine = MountEngine.over(syncEngine)
+
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
 
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
@@ -179,7 +182,7 @@ class HydrationImpl(
             // regardless of cache state; the cache layer is an implementation detail of
             // SyncEngine, not part of the Hydration SPI contract.
             _events.emit(HydrationEvent.Hydrating(path))
-            val p = syncEngine.ensureHydrated(path)
+            val p = mount.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
             // Re-read the row after hydration: ensureHydrated persists the freshly
             // downloaded size as remoteSize (and a concurrent enumeration may also have
@@ -684,7 +687,7 @@ class HydrationImpl(
      * cache copies of synced files that were read through the mount in earlier runs.
      */
     suspend fun sweepCache(): CacheEvictionReport {
-        val dir = syncEngine.hydrationCacheDir()
+        val dir = mount.hydrationCacheDir()
         if (Files.isDirectory(dir)) {
             val cutoff = System.currentTimeMillis() - STALE_TEMP_AGE_MS
             runCatching {
@@ -706,7 +709,7 @@ class HydrationImpl(
     private class CacheFile(val path: String, val file: Path, val size: Long, val lastUsed: Long)
 
     private fun listCacheFiles(): List<CacheFile> {
-        val dir = syncEngine.hydrationCacheDir()
+        val dir = mount.hydrationCacheDir()
         if (!Files.isDirectory(dir)) return emptyList()
         val result = mutableListOf<CacheFile>()
         runCatching {
@@ -734,7 +737,7 @@ class HydrationImpl(
     /**
      * #450: bring the cache directory under [cacheMaxBytes], least recently used first, copies that are
      * byte-identical to the file in the sync root before the rest. A file is evicted only if the engine
-     * vouches for it ([org.krost.unidrive.sync.SyncEngine.cacheDisposition]: it holds nothing the cloud
+     * vouches for it ([MountEngine.cacheDisposition]: it holds nothing the cloud
      * or the sync root does not) and nothing here uses it: no open handle, no queued or in-flight upload
      * (also re-checked by the engine's own lock at deletion), not accessed within the grace window.
      * Files without a row (an upload target that was renamed away, #319), unfinished creates, failed
@@ -751,7 +754,7 @@ class HydrationImpl(
 
             suspend fun evict(f: CacheFile) {
                 if (inUse(f.path)) return
-                val freed = syncEngine.evictCacheCopy(f.path) { _events.tryEmit(HydrationEvent.Dehydrated(it)) }
+                val freed = mount.evictCacheCopy(f.path) { _events.tryEmit(HydrationEvent.Dehydrated(it)) }
                 if (freed != null) {
                     total -= freed
                     evicted++
@@ -761,10 +764,10 @@ class HydrationImpl(
             for (f in files.sortedBy { it.lastUsed }) {
                 if (total <= cacheMaxBytes) break
                 if (inUse(f.path)) continue
-                when (syncEngine.cacheDisposition(f.path)) {
-                    org.krost.unidrive.sync.CacheDisposition.REDUNDANT -> evict(f)
-                    org.krost.unidrive.sync.CacheDisposition.DISPOSABLE -> disposable += f
-                    org.krost.unidrive.sync.CacheDisposition.PROTECTED -> {}
+                when (mount.cacheDisposition(f.path)) {
+                    CacheDisposition.REDUNDANT -> evict(f)
+                    CacheDisposition.DISPOSABLE -> disposable += f
+                    CacheDisposition.PROTECTED -> {}
                 }
             }
             for (f in disposable) {
@@ -784,7 +787,7 @@ class HydrationImpl(
         touch(path)
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
-            val cachePath = syncEngine.ensureHydrated(path)
+            val cachePath = mount.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(cachePath)
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             HydrateResult.Ok

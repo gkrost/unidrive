@@ -81,7 +81,7 @@ object HashVerifier {
      * Compute the content hash for [path] using [algorithm].
      * Returns null when [algorithm] is null (provider has no verifiable hash).
      */
-    internal fun computeHash(
+    fun computeHash(
         path: Path,
         algorithm: org.krost.unidrive.HashAlgorithm?,
     ): String? =
@@ -104,7 +104,7 @@ object HashVerifier {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    internal fun computeMd5Hex(path: Path): String {
+    fun computeMd5Hex(path: Path): String {
         val md = MessageDigest.getInstance("MD5")
         Files.newInputStream(path).use { input ->
             val buffer = ByteArray(8192)
@@ -116,7 +116,7 @@ object HashVerifier {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    internal fun computeQuickXorHash(path: Path): String {
+    fun computeQuickXorHash(path: Path): String {
         val qxh = QuickXorHash()
         Files.newInputStream(path).use { input ->
             val buffer = ByteArray(8192)
