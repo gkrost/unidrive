@@ -34,6 +34,7 @@ class RemoteEnumerationTest {
     private val provider = ListingProvider()
     private val inFlight = mutableSetOf<String>()
     private val invalidations = mutableListOf<Pair<Set<String>, Boolean>>()
+    private val invalidationMoves = mutableListOf<List<RemoteGather.RemoteMerge.Move>>()
 
     @BeforeTest
     fun setUp() {
@@ -68,8 +69,10 @@ class RemoteEnumerationTest {
                     override fun onViewInvalidated(
                         changedPaths: Set<String>,
                         full: Boolean,
+                        moved: List<RemoteGather.RemoteMerge.Move>,
                     ) {
                         invalidations += changedPaths to full
+                        invalidationMoves += moved
                     }
                 },
             log = LoggerFactory.getLogger(RemoteEnumerationTest::class.java),
@@ -178,6 +181,75 @@ class RemoteEnumerationTest {
             assertTrue(gather.isCollided("/same.txt"))
             assertEquals("4", db.getEntry("/same.txt")?.remoteId, "the smaller id wins when neither is tracked")
             assertEquals("1", db.getSyncState(RemoteGather.REMOTE_COLLISIONS_KEY))
+        }
+
+    // ---- #595: what the view.invalidated push names --------------------------------------------------------------------------------
+
+    @Test
+    fun `a remote rename reports the old path beside the new one and carries the move hint`() =
+        runTest {
+            provider.items = listOf(file("1", "/before.txt"))
+            enumeration().enumerate(reset = false)
+
+            provider.items = listOf(file("1", "/after.txt"))
+            val result = enumeration().enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertEquals(2, result.upserted, "both ends of the move changed in the view")
+            assertEquals("1", db.getEntry("/after.txt")?.remoteId)
+            assertNull(db.getEntry("/before.txt"), "the row moved to the new path")
+            val (paths, _) = invalidations.last()
+            assertEquals(setOf("/before.txt", "/after.txt"), paths, "the old path must be named beside the new one")
+            assertEquals(listOf(RemoteGather.RemoteMerge.Move("/before.txt", "/after.txt")), invalidationMoves.last())
+        }
+
+    @Test
+    fun `a re-delivered unchanged delta invalidates nothing`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"), file("2", "/b.txt"))
+            enumeration().enumerate(reset = false)
+            invalidations.clear()
+
+            // The Internxt delta rewinds its cursor on purpose: the same items come back.
+            provider.items = listOf(file("1", "/a.txt"), file("2", "/b.txt"))
+            val result = enumeration().enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertEquals(0, result.upserted, "an unchanged re-delivery upserts nothing the view can see")
+            assertEquals(emptyList<Pair<Set<String>, Boolean>>(), invalidations, "no view.invalidated for unchanged paths")
+            assertEquals("c2", db.getSyncState("delta_cursor"), "the cursor still advances")
+        }
+
+    @Test
+    fun `a delta that clears download quarantine invalidates the error shown in the view`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"))
+            enumeration().enumerate(reset = false)
+            assertTrue(db.setDownloadQuarantine("1", java.time.Instant.now()))
+            assertNotNull(db.getEntry("/a.txt")?.lastErrorAt)
+            invalidations.clear()
+
+            val result = enumeration().enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertNull(db.getEntry("/a.txt")?.lastErrorAt)
+            assertEquals(setOf("/a.txt"), invalidations.single().first)
+        }
+
+    @Test
+    fun `a genuinely changed item still invalidates its path`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"))
+            enumeration().enumerate(reset = false)
+            invalidations.clear()
+
+            provider.items = listOf(CloudItem(id = "1", name = "a.txt", path = "/a.txt", size = 42, isFolder = false, modified = null, created = null, hash = "deadbeef", mimeType = null))
+            val result = enumeration().enumerate(reset = false)
+
+            assertEquals(1, result.upserted)
+            assertEquals(1, invalidations.size)
+            assertEquals(setOf("/a.txt"), invalidations.single().first)
+            assertEquals(42, db.getEntry("/a.txt")?.remoteSize)
         }
 
     // One page per listing; every cursor names the listing that produced it.

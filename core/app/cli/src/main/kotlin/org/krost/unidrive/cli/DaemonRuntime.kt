@@ -150,12 +150,17 @@ class DaemonRuntime(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
                     standingScope = syncPaths, excludePatterns = excludePatterns,
                     uploadInFlight = { path -> hydrationRef?.hasUploadSlot(path) ?: false },
-                    viewInvalidationSink = { changedPaths, full ->
+                    viewInvalidationSink = { changedPaths, full, moved ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
                         val event = if (full || changedPaths.size > cap) {
                             HydrationEvent.ViewInvalidated(paths = emptyList(), full = true)
                         } else {
-                            HydrationEvent.ViewInvalidated(paths = changedPaths.toList())
+                            // #595: the renames ride along as an additive hint; a consumer
+                            // that ignores them still sees both ends in `paths`.
+                            HydrationEvent.ViewInvalidated(
+                                paths = changedPaths.toList(),
+                                moved = moved.map { HydrationEvent.ViewInvalidated.Moved(it.from, it.to) },
+                            )
                         }
                         hydrationIpcRef?.dispatchEvent(event)
                     },

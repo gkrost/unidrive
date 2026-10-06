@@ -106,6 +106,26 @@ class HydrationEventTest {
     }
 
     @Test
+    fun `view_invalidated omits moved when there are no renames`() {
+        // #595: the hint is additive — consumers written before it must parse the line.
+        val e = HydrationEvent.ViewInvalidated(paths = listOf("/a"))
+        assertEquals("""{"event":"view.invalidated","paths":["/a"]}""", serialiseHydrationEvent(e))
+    }
+
+    @Test
+    fun `view_invalidated carries the rename hint as from-to pairs`() {
+        val e =
+            HydrationEvent.ViewInvalidated(
+                paths = listOf("/before.txt", "/after.txt"),
+                moved = listOf(HydrationEvent.ViewInvalidated.Moved("/before.txt", "/after.txt")),
+            )
+        assertEquals(
+            """{"event":"view.invalidated","paths":["/before.txt","/after.txt"],"moved":[{"from":"/before.txt","to":"/after.txt"}]}""",
+            serialiseHydrationEvent(e),
+        )
+    }
+
+    @Test
     fun `view_invalidated with exactly 256 paths stays under cap and emits paths array`() {
         val paths = (1..HydrationEvent.VIEW_INVALIDATED_PATH_CAP).map { "/p$it" }
         val e = HydrationEvent.ViewInvalidated(paths = paths)

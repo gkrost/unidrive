@@ -72,7 +72,7 @@ class MountOperationsParityTest {
         syncPaths = scope,
         standingScope = scope,
         auditLog = auditLog,
-        viewInvalidationSink = { paths, full -> invalidations += paths to full },
+        viewInvalidationSink = { paths, full, _moved -> invalidations += paths to full },
     )
 
     private fun remoteItem(
