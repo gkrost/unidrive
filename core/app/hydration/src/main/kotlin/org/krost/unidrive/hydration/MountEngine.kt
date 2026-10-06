@@ -55,11 +55,15 @@ import java.time.Instant
  *  - **Cancellation.** The caller's coroutine is the unit: every operation is a suspend function that
  *    rethrows [kotlinx.coroutines.CancellationException]; a cancelled hydration deletes its staging
  *    file, a cancelled upload is audited as failed and leaves the row pending, a cancelled rescan
- *    releases its single-flight guard. Background work (the upload queue) runs in [HydrationImpl]'s
- *    scope, the rescan timer in the daemon's serve scope.
+ *    releases its single-flight guard. Background work runs elsewhere: the upload queue in
+ *    [HydrationImpl]'s `recoveryUploadScope`, the rescan timer and the poller in the daemon's serve
+ *    scope.
  *  - **Shutdown order.** This class holds no thread, file or connection to close. The daemon cancels
- *    its serve scope (the rescan timer, the poller, the IPC handlers), then closes the IPC server, the
- *    state database and the process lock, in that order (`DaemonRuntime.cleanup`).
+ *    its serve scope (the rescan timer, the poller, the IPC handlers, the hydration event fan-out), then
+ *    closes the IPC server, the state database and the process lock, in that order
+ *    (`DaemonRuntime.cleanup`). The upload queue's scope is not part of that: the daemon builds
+ *    [HydrationImpl] with its default scope, so an upload still running then is not cancelled first;
+ *    a row it could not settle stays pending for the replay at the next start (unchanged by #560 U3).
  */
 class MountEngine private constructor(
     private val wiring: MountWiring,
