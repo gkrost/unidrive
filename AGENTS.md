@@ -21,8 +21,8 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 - Red flags → re-verify whole artifact, not just called-out line.
 
 ## What lives where
-- `core/providers/{internxt,onedrive}/` — cloud clients
-- `core/app/{core,sync,sync-tracking,hydration,cli,cli-spi}/` — engine modules
+- `core/providers/{internxt,onedrive}/` — cloud clients; `core/providers/localfs/` — no-auth local-directory provider for offline development and tests
+- `core/app/{core,engine-core,sync,sync-tracking,hydration,cli,cli-spi}/` — engine modules
 - `docs/audits/` — Internxt notes
 - `docs/adr/` — architectural decisions
 
