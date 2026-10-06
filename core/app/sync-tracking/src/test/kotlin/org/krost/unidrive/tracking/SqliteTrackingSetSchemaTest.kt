@@ -72,6 +72,28 @@ class SqliteTrackingSetSchemaTest {
     }
 
     @Test
+    fun `opening a tracking_db with an invalid schema stamp is refused without replacing it`() {
+        val dbPath = Files.createTempDirectory("tracking-invalid-schema").resolve("tracking.db")
+        SqliteTrackingSet(dbPath).let { it.initialize(); it.close() }
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { c ->
+            c.createStatement().use { stmt ->
+                stmt.executeUpdate("UPDATE tracking_meta SET value='future' WHERE key='schema_version'")
+            }
+        }
+
+        val ex = assertFailsWith<IllegalStateException> { SqliteTrackingSet(dbPath).initialize() }
+        assertTrue(ex.message!!.contains("invalid schema version"))
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { c ->
+            c.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT value FROM tracking_meta WHERE key='schema_version'").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals("future", rs.getString(1), "a refused open must not replace an unknown stamp")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `a tracking_db without a stamp adopts the current schema and keeps its rows`() {
         // Pre-version database: tracking_meta exists (it always has) but carries no
         // schema_version row. There is no migration to perform — the first versioned

@@ -155,7 +155,10 @@ class SqliteTrackingSet(
         c.prepareStatement("SELECT value FROM tracking_meta WHERE key = ?").use { ps ->
             ps.setString(1, SCHEMA_VERSION_KEY)
             ps.executeQuery().use { rs ->
-                return if (rs.next()) rs.getString(1)?.toIntOrNull() else null
+                if (!rs.next()) return null
+                val value = rs.getString(1)
+                return value?.toIntOrNull()
+                    ?: error("tracking.db has an invalid schema version '$value'; upgrade unidrive or use a different tracking db.")
             }
         }
     }
