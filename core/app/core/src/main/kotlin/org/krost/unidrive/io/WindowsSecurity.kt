@@ -9,6 +9,7 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout
 import java.lang.invoke.MethodHandle
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 
 /**
@@ -24,6 +25,8 @@ import java.nio.file.Path
 internal object WindowsSecurity {
     const val ADMINISTRATORS_SID = "S-1-5-32-544"
 
+    private const val ERROR_FILE_NOT_FOUND = 2
+    private const val ERROR_PATH_NOT_FOUND = 3
     private const val FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     private const val IO_REPARSE_TAG_AF_UNIX = 0x80000023.toInt()
     private const val WIN32_FIND_DATA_SIZE = 592L
@@ -114,7 +117,7 @@ internal object WindowsSecurity {
             // WIN32_FIND_DATAW: DWORD attributes, three FILETIMEs, size fields, then dwReserved0.
             val data = arena.allocate(WIN32_FIND_DATA_SIZE, 4)
             val handle = findFirstFile.invoke(state, arena.wide(path.toAbsolutePath().toString()), data) as MemorySegment
-            if (handle.address() == -1L) throw IOException("FindFirstFileW($path) failed with error ${lastError(state)}")
+            if (handle.address() == -1L) throw failure("FindFirstFileW", path, lastError(state))
             try {
                 data.get(INT, 0) and FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
                     data.get(INT, REPARSE_TAG_OFFSET) == IO_REPARSE_TAG_AF_UNIX
@@ -139,7 +142,7 @@ internal object WindowsSecurity {
                     MemorySegment.NULL,
                     sdOut,
                 ) as Int
-            if (rc != 0) throw IOException("GetNamedSecurityInfoW($path) failed with error $rc")
+            if (rc != 0) throw failure("GetNamedSecurityInfoW", path, rc)
             val sd = sdOut.get(PTR, 0)
             try {
                 val owner = sidToString(arena, state, ownerOut.get(PTR, 0))
@@ -189,7 +192,7 @@ internal object WindowsSecurity {
                         daclOut.get(PTR, 0),
                         MemorySegment.NULL,
                     ) as Int
-                if (rc != 0) throw IOException("SetNamedSecurityInfoW($path) failed with error $rc")
+                if (rc != 0) throw failure("SetNamedSecurityInfoW", path, rc)
             } finally {
                 localFree.invoke(sd)
             }
@@ -284,6 +287,21 @@ internal object WindowsSecurity {
     }
 
     private fun lastError(state: MemorySegment): Int = state.get(INT, lastErrorOffset)
+
+    /**
+     * The exception for [call] on [path] failing with Windows error [code]: [NoSuchFileException] when
+     * the path or a folder on it does not exist (any more), so callers can tell that case apart.
+     */
+    private fun failure(
+        call: String,
+        path: Path,
+        code: Int,
+    ): IOException =
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+            NoSuchFileException(path.toString(), null, "$call failed with error $code")
+        } else {
+            IOException("$call($path) failed with error $code")
+        }
 
     /** A NUL-terminated UTF-16 copy of [s]. */
     private fun Arena.wide(s: String): MemorySegment {
