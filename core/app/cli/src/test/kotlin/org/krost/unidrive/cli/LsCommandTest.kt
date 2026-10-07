@@ -8,6 +8,9 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.localfs.LocalFsProvider
+import org.krost.unidrive.cli.LsCommand.Companion.DaemonLsView
+import org.krost.unidrive.cli.LsCommand.Companion.ViewEntryParsed
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -19,6 +22,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -48,6 +52,83 @@ class LsCommandTest {
         runCatching { Files.deleteIfExists(lockFile) }
         runCatching { Files.deleteIfExists(lockFile.resolveSibling(".lock.pid")) }
         runCatching { tempDir.toFile().deleteRecursively() }
+    }
+
+    // localfs answered listChildren of a missing path with an empty list, so
+    // `ls /typo` printed nothing and exited 0 — indistinguishable from an empty folder.
+    @Test
+    fun `live listing of a missing path is null not empty`() =
+        runBlocking {
+            val provider = LocalFsProvider(tempDir)
+            assertNull(LsCommand.listLive(provider, "/does/not/exist"))
+        }
+
+    @Test
+    fun `live listing of an existing empty folder is empty not null`() =
+        runBlocking {
+            Files.createDirectories(tempDir.resolve("empty"))
+            val provider = LocalFsProvider(tempDir)
+            assertEquals(emptyList(), LsCommand.listLive(provider, "/empty"))
+            assertEquals(emptyList(), LsCommand.listLive(LocalFsProvider(tempDir.resolve("empty")), "/"))
+        }
+
+    @Test
+    fun `live listing of a file path lists that file`() =
+        runBlocking {
+            Files.writeString(tempDir.resolve("a.txt"), "hi")
+            val provider = LocalFsProvider(tempDir)
+            assertEquals(listOf("a.txt"), LsCommand.listLive(provider, "/a.txt")?.map { it.name })
+        }
+
+    // state.db paths carry no trailing slash — `ls foo/` must resolve against /foo,
+    // or an existing (empty) folder reports as missing.
+    @Test
+    fun `ls path normalization strips trailing slashes`() {
+        assertEquals("/", LsCommand.normalizeLsPath("/"))
+        assertEquals("/", LsCommand.normalizeLsPath("///"))
+        assertEquals("/foo", LsCommand.normalizeLsPath("foo"))
+        assertEquals("/foo", LsCommand.normalizeLsPath("/foo/"))
+        assertEquals("/foo", LsCommand.normalizeLsPath("foo//"))
+        assertEquals("/foo/bar", LsCommand.normalizeLsPath("/foo/bar"))
+    }
+
+    @Test
+    fun `daemon view resolves an empty non-root listing against the parent`() {
+        val parent = listOf(ViewEntryParsed("/empty", 0, 1000, true))
+        val view =
+            LsCommand.resolveDaemonView("/empty", emptyList()) { queried ->
+                assertEquals("/", queried, "the lookup must ask for the parent path")
+                parent
+            }
+        assertTrue(view is DaemonLsView.Listing, "an existing empty folder lists (prints nothing, exit 0)")
+    }
+
+    @Test
+    fun `daemon view decides presence only from an enumerated parent`() {
+        val file = ViewEntryParsed("/a.txt", 42, 1000, false)
+        val self = LsCommand.resolveDaemonView("/a.txt", emptyList()) { listOf(file) }
+        assertEquals(DaemonLsView.SelfFile(file), self, "a file path lists as that file")
+
+        val missing = LsCommand.resolveDaemonView("/typo", emptyList()) { emptyList() }
+        assertEquals(DaemonLsView.NoSuchPath, missing, "absent in the parent view -> no such path")
+
+        val undecidable = LsCommand.resolveDaemonView("/a.txt", emptyList()) { null }
+        assertEquals(DaemonLsView.Undecidable, undecidable, "failed parent query must NOT claim the path is missing")
+    }
+
+    @Test
+    fun `daemon view skips the parent lookup for populated listings and root`() {
+        val children = listOf(ViewEntryParsed("/docs/x", 1, 1000, false))
+        val populated =
+            LsCommand.resolveDaemonView("/docs", children) {
+                throw AssertionError("a populated listing must not query the parent")
+            }
+        assertTrue(populated is DaemonLsView.Listing)
+
+        val root = LsCommand.resolveDaemonView("/", emptyList()) {
+            throw AssertionError("root must not query a parent")
+        }
+        assertTrue(root is DaemonLsView.Listing)
     }
 
     // #145 P2: `ls` mirrors the daemon view only when a DAEMON holds the lock. A plain
