@@ -110,8 +110,8 @@ sealed interface HydrationError {
     /**
      * A client-supplied path the engine does not accept: a logical path with a `.` or `..` segment, a control
      * character or a segment longer than any file system allows; a name the host's file system cannot hold
-     * (create, mkdir, rename); or a logical path whose cache file would not lie inside the profile's hydration
-     * cache folder. Refused before anything is changed.
+     * (create, mkdir, rename); a logical path whose cache file would not lie inside the profile's hydration
+     * cache folder; or an `open_write` cache path outside that folder. Refused before anything is changed.
      * Its [message] is the STABLE wire token `invalid_path`. Changing this string breaks that cross-repo
      * contract.
      */

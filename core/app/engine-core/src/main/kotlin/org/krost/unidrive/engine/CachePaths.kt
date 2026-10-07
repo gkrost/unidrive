@@ -1,14 +1,18 @@
 package org.krost.unidrive.engine
 
 import org.slf4j.Logger
+import java.io.IOException
+import java.nio.file.Files
 import java.nio.file.InvalidPathException
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The containment rules of a profile's hydration cache folder (`<cacheRoot>/unidrive/hydration/<cacheKey>`): every
- * cache file the engine resolves for a logical path lies inside it. One place for the host that lays the cache out
- * (`SyncEngine.resolveCachePath`) and the passes over rows (the enumeration's reap, the cache budget).
+ * cache file the engine resolves for a logical path, and every cache file a client hands back, lies inside it. One
+ * place for the host that lays the cache out (`SyncEngine.resolveCachePath`), the mount front-end that takes a
+ * client's cache path (`hydration.open_write`) and the passes over rows (the enumeration's reap, the cache budget).
  */
 object CachePaths {
     // Paths already warned about by [forRow]: a pass that runs every poll interval logs each one once.
@@ -37,6 +41,49 @@ object CachePaths {
             }
         if (!inside) throw SecurityException("path does not resolve inside the hydration cache: '${forLog(logicalPath)}'")
         return resolved
+    }
+
+    /**
+     * Whether [candidate] (a cache path a client hands back) names a file strictly inside [cacheDir]. Compared on
+     * normalised absolute paths and, as far as the path exists, on real paths: a link inside the folder that leads
+     * out of it does not count, another spelling of a file inside does (letter case on Windows, a short name, a
+     * redundant `.`). When [cacheDir] does not exist yet, nothing below it can either, and the spelling decides.
+     */
+    fun isInside(
+        cacheDir: Path,
+        candidate: Path,
+    ): Boolean {
+        val root = cacheDir.toAbsolutePath().normalize()
+        val path =
+            try {
+                candidate.toAbsolutePath().normalize()
+            } catch (_: java.io.IOError) {
+                return false
+            }
+        val realRoot =
+            try {
+                root.toRealPath()
+            } catch (_: IOException) {
+                return path != root && path.startsWith(root)
+            }
+        // The deepest part of [path] that exists (the file itself when it does), through its real path, and the
+        // names below it as given.
+        var existing: Path = path
+        val rest = ArrayList<Path>()
+        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            val name = existing.fileName ?: return false
+            if (name.toString() == "..") return false
+            rest.add(name)
+            existing = existing.parent ?: return false
+        }
+        var real =
+            try {
+                existing.toRealPath()
+            } catch (_: IOException) {
+                return false
+            }
+        for (name in rest.asReversed()) real = real.resolve(name)
+        return real != realRoot && real.startsWith(realRoot)
     }
 
     /**

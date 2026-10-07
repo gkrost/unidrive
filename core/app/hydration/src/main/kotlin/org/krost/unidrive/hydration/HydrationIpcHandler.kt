@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import org.krost.unidrive.sync.PathNormalizer
+import java.nio.file.InvalidPathException
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -21,7 +22,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *               segment longer than 255 UTF-16 units answers {"ok":false,"error":"invalid_path"}.
  *               mkdir, create and rename also answer invalid_path for a new name the host's file
  *               system cannot hold, and every verb for a path whose cache file would not lie inside
- *               the profile's hydration cache folder.
+ *               the profile's hydration cache folder. open_write's cache_path must lie inside that
+ *               folder (the path create / open_write_begin / open_read hand out, in any spelling);
+ *               otherwise invalid_path, before anything is changed or queued.
  *   open_read   request:  {"verb":"hydration.open_read","handle_id":"...","path":"/foo"}
  *   open_read   reply ok: {"ok":true,"cache_path":"/home/.../foo.txt"}
  *   open_read   reply err:{"ok":false,"error":"<message>"}
@@ -290,10 +293,17 @@ class HydrationIpcHandler(
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
+                // A local path; Hydration accepts it only inside the profile's hydration cache folder.
+                val cachePath =
+                    try {
+                        Paths.get(cache)
+                    } catch (_: InvalidPathException) {
+                        return reply(ok = false, error = HydrationError.INVALID_PATH_TOKEN)
+                    }
                 // base_etag is OPTIONAL: absent (or a row with no recorded token) →
                 // unconditional upload, byte-identical to the pre-guard contract.
                 val baseEtag = pluck(jsonRequest, "base_etag")
-                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
+                when (val r = hydration.openForWrite(connectionId, handleId, path, cachePath, baseEtag)) {
                     is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
@@ -437,10 +447,10 @@ class HydrationIpcHandler(
     // object and an NFD cache lookup misses the NFC-named file. Mirrors the existing
     // ingestion-chokepoint approach. Runs on the JSON-DECODED value, so an escaped
     // decomposed form (o + escaped combining diaeresis) is normalized too. NOT applied to
-    // `cache_path` (a literal local filesystem path the co-daemon already created, used
-    // verbatim) or `prefix` (StateDatabase.listDirectChildren already normalizes it).
-    // Every value is then validated (requireLogicalPath): this is the one place every
-    // verb's logical path passes through.
+    // `cache_path` (a local filesystem path; Hydration accepts it only inside the
+    // profile's hydration cache folder) or `prefix` (StateDatabase.listDirectChildren
+    // already normalizes it). Every value is then validated (requireLogicalPath): this
+    // is the one place every verb's logical path passes through.
     private fun pluckPath(line: String, key: String): String? =
         pluck(line, key)?.let { requireLogicalPath(PathNormalizer.nfc(it)) }
 

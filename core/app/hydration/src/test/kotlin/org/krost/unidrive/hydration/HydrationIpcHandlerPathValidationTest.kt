@@ -212,6 +212,21 @@ class HydrationIpcHandlerPathValidationTest {
         }
 
     @Test
+    fun `an open_write cache path that is not a valid local path is refused`() =
+        runTest {
+            val fake = RecordingHydration()
+
+            val reply =
+                HydrationIpcHandler(fake).handle(
+                    "c1",
+                    """{"verb":"hydration.open_write","handle_id":"h1","path":"/docs/a.txt","cache_path":"cache/a${escaped(0)}b"}""",
+                )
+
+            assertEquals(INVALID, reply.trim())
+            assertEquals(emptyList(), fake.calls)
+        }
+
+    @Test
     fun `verbs without a path field are not affected`() =
         runTest {
             val fake = RecordingHydration()

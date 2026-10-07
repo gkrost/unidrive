@@ -77,8 +77,10 @@ the scope are refused (§7).
 ### 3.2 Overwrite (save of an existing file)
 
 Same sequence as 3.1 minus `create`: the client writes the full new content
-to a cache path (its own or the one from `open_write_begin`) and issues
-`open_write`.
+to a cache path inside the profile's hydration cache folder (the one
+`open_write_begin`, `open_read` or `create` handed out) and issues
+`open_write`. A cache path outside that folder is refused with `invalid_path`
+before anything is queued (§7).
 
 - Base-etag guard: if the client observed an `etag` for the file (via
   `hydration.list`) it SHOULD send it as `base_etag`. The guard runs twice:
@@ -241,7 +243,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
 | `cancelled` | completed event | upload aborted by hydration.cancel |
-| `invalid_path` | every verb with a path | a `.` or `..` segment, a control character or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
+| `invalid_path` | every verb with a path; open_write's cache_path | a `.` or `..` segment, a control character or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder; an open_write cache path outside that folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
 
 ## 8. Who may write the mounted folder
@@ -271,4 +273,4 @@ folder from its own authority — it would desync from the rows.
 - Startup liveness: `DaemonRuntimeTest.verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply`.
 - Path validation (`invalid_path`): the boundary checks in `HydrationIpcHandlerPathValidationTest`; the
   cache-folder containment of the verbs in `HydrationPathContainmentTest`, `ResolveCachePathContainmentTest`
-  and `CachePathsTest`.
+  and `CachePathsTest`; `open_write`'s cache path in `HydrationOpenWriteCachePathTest`.

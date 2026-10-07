@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.StateDatabase
 import org.slf4j.LoggerFactory
@@ -293,7 +294,18 @@ class HydrationImpl(
         cachePath: Path,
         baseEtag: String?,
     ): OpenResult {
+        // The client hands the cache path back. Only a file inside the profile's cache folder is uploaded: the path
+        // create / open_write_begin / open_read handed out, or another spelling of a file there (compared on real
+        // paths, so a link cannot lead out). Anything else is refused before any state is touched or upload queued.
         if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
+        if (!CachePaths.isInside(mount.hydrationCacheDir(), cachePath)) {
+            log.warn(
+                "open_write of '{}' refused: its cache path '{}' is not inside the profile's hydration cache",
+                CachePaths.forLog(path),
+                CachePaths.forLog(cachePath.toString()),
+            )
+            return OpenResult.Failed(HydrationError.InvalidPath)
+        }
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         touch(path)
