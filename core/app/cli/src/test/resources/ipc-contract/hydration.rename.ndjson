@@ -14,3 +14,7 @@
 {"ok":false,"error":"outside_scope"}
 {"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/excluded/scratch.tmp"}
 {"ok":false,"error":"excluded"}
+{"verb":"hydration.rename","old_path":"/docs/../report.txt","new_path":"/docs/renamed.txt"}
+{"ok":false,"error":"invalid_path"}
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/docs/../renamed.txt"}
+{"ok":false,"error":"invalid_path"}

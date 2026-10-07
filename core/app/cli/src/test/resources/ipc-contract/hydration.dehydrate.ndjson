@@ -4,3 +4,5 @@
 {"ok":false,"error":"busy"}
 {"verb":"hydration.dehydrate","path":"/missing.txt"}
 {"ok":false,"error":"unknown_path"}
+{"verb":"hydration.dehydrate","path":"/.."}
+{"ok":false,"error":"invalid_path"}
