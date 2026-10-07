@@ -286,6 +286,14 @@ class OwnerOnlyTest {
         OwnerOnly.requireDirectory(dir)
         val locked = Files.writeString(dir.resolve("locked.meta"), "p")
         WindowsAclProbe.denyOwnerReadControl(locked)
+        // Only meaningful where the deny really stops the DACL read: the owner's implicit READ_CONTROL is
+        // taken away only by an OWNER RIGHTS deny, and even that does not bind every token (elevated
+        // Administrators configurations still read the DACL — as on the CI runners, where this failed as
+        // "got Changed"). Where the deny has no effect the error cannot be synthesized: skip, don't lie.
+        assumeTrue(
+            "the deny does not stop the DACL read under this token",
+            OwnerOnly.restrictFile(locked) is OwnerOnly.Outcome.Failed,
+        )
 
         val outcome = OwnerOnly.restrictDirectory(dir)
 
