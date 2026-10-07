@@ -155,8 +155,12 @@ class ProfileAddCommand : Runnable {
             }
         }
 
+        // Step 4b: Mode (#603) — chosen at creation, fixed afterwards. There is no default: nothing
+        // may assume a legacy profile, and a profile without a mode is refused by every command.
+        val mode = promptProfileMode(console)
+
         // Step 5: Generate and append TOML
-        val toml = generateProfileToml(type, name, syncRoot, creds)
+        val toml = generateProfileToml(type, name, syncRoot, creds, mode)
 
         if (!Files.exists(configPath)) {
             Files.createDirectories(configPath.parent)
@@ -183,6 +187,25 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
         return value!!
+    }
+
+    /**
+     * The mode prompt of profile creation (#603): a required choice between the two modes, with what
+     * each means. A blank answer is refused — there is no default to assume.
+     */
+    private fun promptProfileMode(console: java.io.Console): org.krost.unidrive.sync.ProfileMode {
+        println("Mode (fixed after creation, #603):")
+        println("  1) mount  — the drive as a filesystem (Explorer/FUSE; uploads from the engine's cache)")
+        println("  2) mirror — bidirectional folder sync over a sync_root")
+        while (true) {
+            print("Choice [1-2]: ")
+            when (console.readLine()?.trim()) {
+                "1" -> return org.krost.unidrive.sync.ProfileMode.MOUNT
+                "2" -> return org.krost.unidrive.sync.ProfileMode.MIRROR
+                null, "" -> System.err.println("Error: the mode is required; pick 1 (mount) or 2 (mirror).")
+                else -> System.err.println("Invalid choice — enter 1 (mount) or 2 (mirror).")
+            }
+        }
     }
 
     private fun promptOptional(
