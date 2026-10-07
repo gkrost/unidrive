@@ -125,7 +125,7 @@ class IpcSocketDirTest {
         val dacl = WindowsAclProbe.dacl(dir)
         assertTrue(dacl.startsWith("D:P"), "protected: $dacl")
         assertEquals(
-            setOf("A;OICI;FA;;;${WindowsAclProbe.userSid}", "A;OICI;FA;;;SY", "A;OICI;FA;;;BA"),
+            setOf("A;OICI;FA;;;${WindowsAclProbe.userSddlSid}", "A;OICI;FA;;;SY", "A;OICI;FA;;;BA"),
             WindowsAclProbe.aces(dacl).toSet(),
             dacl,
         )
@@ -154,7 +154,7 @@ class IpcSocketDirTest {
 
         assertOwnerOnly(existing)
         val metaSids = WindowsAclProbe.aces(WindowsAclProbe.dacl(meta)).map { it.substringAfterLast(';') }.toSet()
-        assertEquals(setOf(WindowsAclProbe.userSid, "SY", "BA"), metaSids)
+        assertEquals(setOf(WindowsAclProbe.userSddlSid, "SY", "BA"), metaSids)
     }
 
     @Test

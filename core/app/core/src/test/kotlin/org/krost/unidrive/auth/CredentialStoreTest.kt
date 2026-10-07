@@ -154,7 +154,7 @@ class CredentialStoreTest {
             val dacl = WindowsAclProbe.dacl(path)
             assertTrue(dacl.startsWith("D:P"), "$path: protected, no inherited entries: $dacl")
             assertEquals(
-                setOf(WindowsAclProbe.userSid, "SY", "BA"),
+                setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
                 WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet(),
                 "$path: $dacl",
             )

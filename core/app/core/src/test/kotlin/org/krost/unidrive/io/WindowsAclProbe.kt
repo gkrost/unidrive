@@ -46,6 +46,16 @@ internal object WindowsAclProbe {
             ?: error("whoami printed no SID")
     }
 
+    // Windows can encode a current-user SID as an alias, such as LA for the local Administrator.
+    // Convert independently of OwnerOnly so expectations compare the same SDDL representation.
+    val userSddlSid: String by lazy {
+        val powershell = Path.of(System.getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        val script = "\$sd = [Security.AccessControl.RawSecurityDescriptor]::new('D:(A;;FA;;;$userSid)'); " +
+            "\$sd.GetSddlForm([Security.AccessControl.AccessControlSections]::Access)"
+        val sddl = run(powershell.toString(), "-NoProfile", "-NonInteractive", "-Command", script)
+        aces(sddl).single().substringAfterLast(';')
+    }
+
     /** The SDDL access entries of [dacl], without the parentheses. */
     fun aces(dacl: String): List<String> = Regex("""\(([^()]*)\)""").findAll(dacl).map { it.groupValues[1] }.toList()
 

@@ -97,7 +97,7 @@ class OwnerOnlyTest {
         val dacl = WindowsAclProbe.dacl(dir)
         assertTrue(dacl.startsWith("D:P"), "protected (no inheritance from the parent): $dacl")
         assertEquals(
-            setOf("A;OICI;FA;;;${WindowsAclProbe.userSid}", "A;OICI;FA;;;SY", "A;OICI;FA;;;BA"),
+            setOf("A;OICI;FA;;;${WindowsAclProbe.userSddlSid}", "A;OICI;FA;;;SY", "A;OICI;FA;;;BA"),
             WindowsAclProbe.aces(dacl).toSet(),
             dacl,
         )
@@ -106,7 +106,7 @@ class OwnerOnlyTest {
     private fun assertInheritsOwnerOnly(path: Path) {
         val dacl = WindowsAclProbe.dacl(path)
         val sids = WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet()
-        assertEquals(setOf(WindowsAclProbe.userSid, "SY", "BA"), sids, dacl)
+        assertEquals(setOf(WindowsAclProbe.userSddlSid, "SY", "BA"), sids, dacl)
     }
 
     @Test
@@ -215,7 +215,7 @@ class OwnerOnlyTest {
         val dacl = WindowsAclProbe.dacl(file)
         assertTrue(dacl.startsWith("D:P"), dacl)
         assertEquals(
-            setOf("A;;FA;;;${WindowsAclProbe.userSid}", "A;;FA;;;SY", "A;;FA;;;BA"),
+            setOf("A;;FA;;;${WindowsAclProbe.userSddlSid}", "A;;FA;;;SY", "A;;FA;;;BA"),
             WindowsAclProbe.aces(dacl).toSet(),
             dacl,
         )

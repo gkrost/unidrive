@@ -77,7 +77,7 @@ class IpcServerPermissionsTest {
                 val dacl = WindowsAclProbe.dacl(socketPath)
                 assertTrue(dacl.startsWith("D:P"), "protected: $dacl")
                 assertEquals(
-                    setOf(WindowsAclProbe.userSid, "SY", "BA"),
+                    setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
                     WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet(),
                     dacl,
                 )

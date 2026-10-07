@@ -31,7 +31,7 @@ class StoragePermissionsTest {
 
     private fun sids(path: Path): Set<String> = WindowsAclProbe.aces(WindowsAclProbe.dacl(path)).map { it.substringAfterLast(';') }.toSet()
 
-    private val ownerOnlySids get() = setOf(WindowsAclProbe.userSid, "SY", "BA")
+    private val ownerOnlySids get() = setOf(WindowsAclProbe.userSddlSid, "SY", "BA")
 
     @Test
     fun `a pre-existing profile folder, its credential files and its state are tightened on Windows`() {
