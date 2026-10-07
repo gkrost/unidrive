@@ -361,6 +361,14 @@ tasks.register("checkModuleEdges") {
                     violations += "$from -> $it (the shared engine core may depend only on :app:core; :app:sync and :app:hydration depend on it)"
                 }
             }
+            // #560 U3: the mirror front-end (SyncEngine, :app:sync) and the mount front-end
+            // (MountEngine, :app:hydration) meet only in :app:engine-core and in the CLI that wires them.
+            if (from == ":app:hydration" && ":app:sync" in to) {
+                violations += "$from -> :app:sync (the mount front-end builds on :app:engine-core, not on the mirror engine)"
+            }
+            if (from == ":app:sync" && ":app:hydration" in to) {
+                violations += "$from -> :app:hydration (the mirror engine does not depend on the mount front-end)"
+            }
         }
         // Cycle check (depth-first, three colours).
         val state = mutableMapOf<String, Int>()

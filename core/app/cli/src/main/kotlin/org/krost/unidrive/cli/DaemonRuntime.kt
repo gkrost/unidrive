@@ -8,6 +8,7 @@ import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.HydrationIpcHandler
+import org.krost.unidrive.hydration.MountEngine
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProcessLock
 import org.krost.unidrive.sync.StateDatabase
@@ -165,7 +166,12 @@ class DaemonRuntime(
                         hydrationIpcRef?.dispatchEvent(event)
                     },
                 )
-                val hydration = HydrationImpl(engine, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
+                // #560 U3: the mount operations (hydration, uploads, remote folder/delete/rename, the
+                // enumeration and the sync-root rescan) run on MountEngine, over this engine's shared core
+                // (guard, gather, enumeration: one of each per daemon). The engine itself stays for the
+                // refresh.run fallback (RefreshRpcHandler, U4). See MountEngine for who owns what.
+                val mount = MountEngine.over(engine)
+                val hydration = HydrationImpl(mount, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
                 hydrationRef = hydration
                 // #450: what a stopped daemon left in the hydration cache (staging temp files, the
                 // copies of synced files read through the mount) is trimmed to the budget at start.
@@ -180,7 +186,7 @@ class DaemonRuntime(
                 // remote→state.db refresh for mount view consumers. Constructed before the
                 // hydration verbs so the subscribe-triggered enumerate (below) can reuse its
                 // shared in-flight guard.
-                val enumerateHandler = EnumerateRpcHandler(engine, serveScope, server::emit)
+                val enumerateHandler = EnumerateRpcHandler(mount, serveScope, server::emit)
 
                 // Reactive remote-change detection: when the FUSE co-daemon issues
                 // hydration.subscribe on mount, run ONE guarded enumerate after the reply.
@@ -236,9 +242,9 @@ class DaemonRuntime(
                     // other than through the mount (copied in, dropped while the daemon was down,
                     // restored from a backup) are uploaded by an upload-only rescan, once now (after
                     // the replay above, so a mount write's own queued upload goes first) and then on
-                    // a timer. Never downloads or deletes; see SyncEngine.rescanSyncRootForUpload.
+                    // a timer. Never downloads or deletes; see MountEngine.rescanSyncRootForUpload.
                     SyncRootRescanner(syncRootRescanIntervalMs) {
-                        val r = engine.rescanSyncRootForUpload()
+                        val r = mount.rescanSyncRootForUpload()
                         if (r.uploaded > 0 || r.foldersCreated > 0) {
                             log.info("sync root rescan: {} file(s) uploaded, {} folder(s) created", r.uploaded, r.foldersCreated)
                         }
@@ -301,7 +307,7 @@ class DaemonRuntime(
                         enumerateHandler,
                         pollIntervalMs,
                         serveScope,
-                        onNextAttempt = engine.enumerationTracker::nextAttemptAt,
+                        onNextAttempt = mount.enumerationTracker::nextAttemptAt,
                         consecutiveFailuresAtStart =
                             db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
                         isBusy = { refreshHandler.isInFlight() },
@@ -329,7 +335,7 @@ class DaemonRuntime(
                     ).toString()
                     val providerJson = kotlinx.serialization.json.JsonPrimitive(provider.id).toString()
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
-                    val enumerationJson = engine.enumerationStatus().toJson().toString()
+                    val enumerationJson = mount.enumerationStatus().toJson().toString()
                     val engineVersionJson = kotlinx.serialization.json.JsonPrimitive(BuildInfo.versionString()).toString()
                     // poll_interval_ms (#463): the effective interval of the remote poll (0 = off). The
                     // next attempt after a failure is enumeration.next_attempt_at_ms (additive, read-only).
