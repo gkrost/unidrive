@@ -110,13 +110,17 @@ class HydrationOpenWriteCachePathTest {
             }
             env.provider.uploadGate = CompletableDeferred()
 
-            for ((what, cachePath) in listOf(
+            val outsidePaths = mutableListOf(
                 "a file link" to fileLink,
                 "a file below a folder link" to dirLink.resolve("doc.txt"),
                 "a new file below a folder link" to dirLink.resolve("new.txt"),
-                "dot-dot after a folder link" to dirLink.resolve("..").resolve("elsewhere.txt"),
-                "a new file after dot-dot outside" to dirLink.resolve("..").resolve("new.txt"),
-            )) {
+            )
+            // Windows normalizes dot-dot before following a link; Unix follows the link first.
+            if (java.io.File.separatorChar != '\\') {
+                outsidePaths += "dot-dot after a folder link" to dirLink.resolve("..").resolve("elsewhere.txt")
+                outsidePaths += "a new file after dot-dot outside" to dirLink.resolve("..").resolve("new.txt")
+            }
+            for ((what, cachePath) in outsidePaths) {
                 val r = env.hydration.openForWrite("c1", "h1", "/doc.txt", cachePath)
 
                 assertEquals(HydrationError.INVALID_PATH_TOKEN, tokenOf(r), "$what: $r")
