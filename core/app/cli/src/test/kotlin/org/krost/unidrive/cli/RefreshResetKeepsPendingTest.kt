@@ -144,6 +144,17 @@ class RefreshResetKeepsPendingTest {
     }
 
     @Test
+    fun `a never hydrated row with an unsubmitted cache edit survives a reset`() {
+        db.upsertEntry(row("/unsubmitted.txt", remoteId = "id-unsubmitted", hydrated = false))
+        cacheCopy("/unsubmitted.txt", watermark.plusSeconds(60))
+
+        refresh("""{"verb":"refresh.run","reset":true}""")
+
+        assertNotNull(db.getEntry("/unsubmitted.txt"), "the row tracks the only copy of the unsynced edit")
+        assertNull(db.getEntry("/synced.txt"))
+    }
+
+    @Test
     fun `a row with a failed attempt and a newer cache copy is kept even without local bytes`() {
         db.upsertEntry(row("/failed.txt", remoteId = "id-failed", hydrated = false))
         db.markUploadFailed("/failed.txt", Instant.parse("2026-03-02T00:00:00Z"))

@@ -112,13 +112,11 @@ class RefreshRpcHandler(
                         } else {
                             if (reset) {
                                 // Rows that still await upload, and rows whose local copy holds an edit the cloud has
-                                // not seen, are not part of what a reset rebuilds from the cloud: keep them. Only a row
-                                // with local bytes, a failed attempt or an upload under way can hold such an edit;
-                                // looking at the cache for every cloud-only row of a large drive would take minutes.
+                                // not seen, are not part of what a reset rebuilds from the cloud: keep them. A write
+                                // can precede open_write and its upload/error bookkeeping, even on a never-read row.
                                 val kept =
                                     db.resetKeepingPending { row ->
-                                        (row.isHydrated || row.lastErrorAt != null || uploadInFlight(row.path)) &&
-                                            keepGuards.holdsUnsyncedEdit(row.path, row)
+                                        keepGuards.holdsUnsyncedEdit(row.path, row)
                                     }
                                 log.info(
                                     "refresh.run reset=true: cleared state.db (kept {} row(s) holding unsynced content) " +
