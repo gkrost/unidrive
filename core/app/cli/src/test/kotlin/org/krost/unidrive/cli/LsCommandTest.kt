@@ -11,7 +11,9 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.localfs.LocalFsProvider
 import org.krost.unidrive.cli.LsCommand.Companion.DaemonLsView
 import org.krost.unidrive.cli.LsCommand.Companion.ViewEntryParsed
-import java.net.UnixDomainSocketAddress
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcEndpoint
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
@@ -53,6 +55,9 @@ class LsCommandTest {
         runCatching { Files.deleteIfExists(lockFile.resolveSibling(".lock.pid")) }
         runCatching { tempDir.toFile().deleteRecursively() }
     }
+
+    // The daemon writes its IPC tokens next to the lock; ls connects with the read scope.
+    private fun endpoint() = IpcEndpoint(socketPath, tempDir, "test_profile")
 
     // localfs answered listChildren of a missing path with an empty list, so
     // `ls /typo` printed nothing and exited 0 — indistinguishable from an empty folder.
@@ -213,7 +218,7 @@ class LsCommandTest {
         try {
             // Trigger the reactive enumerate so state.db is populated, then wait for
             // view.invalidated to confirm the enumerate completed.
-            SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).use { sub ->
+            IpcAuthClient.connect(endpoint(), IpcAuth.Scope.READ).use { sub ->
                 sub.configureBlocking(false)
                 sub.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
                 val collected = readUntil(sub, "view.invalidated", timeoutMs = 10_000)
@@ -225,7 +230,7 @@ class LsCommandTest {
 
             // The mount-side view: query hydration.list directly.
             val mountReply =
-                SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).use { ch ->
+                IpcAuthClient.connect(endpoint(), IpcAuth.Scope.READ).use { ch ->
                     ch.write(ByteBuffer.wrap(("""{"verb":"hydration.list","prefix":""}""" + "\n").toByteArray()))
                     readOneLine(ch)
                 }
@@ -233,7 +238,7 @@ class LsCommandTest {
             assertTrue(mountView.isNotEmpty(), "mount view must be non-empty after enumerate; got: $mountReply")
 
             // The ls-side view: the exact code path `unidrive ls` takes when a daemon runs.
-            val lsView = LsCommand().queryDaemonView(socketPath, "/")
+            val lsView = LsCommand().queryDaemonView(endpoint(), "/")
             assertTrue(lsView != null, "ls must reach the daemon view")
 
             // Single source of truth: the two surfaces list identical paths.

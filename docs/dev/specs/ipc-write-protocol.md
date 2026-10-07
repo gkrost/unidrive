@@ -28,6 +28,8 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   does not know is answered with `{"ok":false,"error":"unknown_verb"}`; a
   request without a `verb` field gets `{"ok":false,"error":"missing_verb"}` —
   never silence. A client should still bound its wait for a reply line.
+- Every connection authenticates first (`hello`, `hello.proof`) and is limited
+  to the verbs of its scope: see [ipc-authentication.md](ipc-authentication.md).
 - Replies are `{"ok":true,...}` or `{"ok":false,"error":"<token>"}`. Error
   tokens are the stable cross-repo contract listed in §7.
 - Events flow only on connections that have issued `hydration.subscribe`.
@@ -246,6 +248,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `cancelled` | completed event | upload aborted by hydration.cancel |
 | `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
+| `auth_required` / `auth_failed` / `forbidden` | any | not authenticated yet, a refused handshake step, a verb outside the connection's scope ([ipc-authentication.md](ipc-authentication.md)) |
 
 ## 8. Who may write the mounted folder
 

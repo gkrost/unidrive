@@ -1,0 +1,12 @@
+{"verb":"hello.proof","proof":"2TL-rOrEbuDB9pZ34fpxlSRakSFB9X49f3Kn7_plriA"}
+{"ok":false,"error":"auth_failed"}
+{"verb":"hello","protocol":2,"scope":"full","client":"contract-test","nonce":"AAECAwQFBgcICQoLDA0ODw"}
+{"ok":true,"step":1,"snonce":"EBESExQVFhcYGRobHB0eHw"}
+{"verb":"hello.proof","proof":"GtoBU2BmkePKA90_tQJ5YMN4BNI6dGrDqeOSG04Mz7U"}
+{"ok":false,"error":"auth_failed"}
+{"verb":"daemon.status"}
+{"ok":true,"protocol_version":2,"engine_version":"build-dependent","auth_required":true}
+{"verb":"hello","protocol":2,"scope":"full","client":"contract-test","nonce":"AAECAwQFBgcICQoLDA0ODw"}
+{"ok":true,"step":1,"snonce":"EBESExQVFhcYGRobHB0eHw"}
+{"verb":"hello.proof","proof":"AAAA"}
+{"ok":false,"error":"auth_failed"}

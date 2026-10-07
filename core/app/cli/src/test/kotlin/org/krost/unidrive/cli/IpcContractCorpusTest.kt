@@ -30,6 +30,10 @@ import org.krost.unidrive.hydration.OpenResult
 import org.krost.unidrive.hydration.RenameResult
 import org.krost.unidrive.hydration.RmdirResult
 import org.krost.unidrive.hydration.UnlinkResult
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcEndpoint
+import org.krost.unidrive.sync.IpcServer
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -50,6 +54,10 @@ import kotlin.test.assertTrue
  * request/response pairs as alternating NDJSON lines (odd line = request,
  * even line = response). Co-client repos vendor these files and replay them
  * against their own encoder/decoder.
+ *
+ * The daemon authenticates every connection first (docs/dev/specs/ipc-authentication.md); the
+ * handshake itself and its refusal shapes are pinned by the session transcripts under
+ * `ipc-contract/auth/` (one connection per file, request/reply pairs in order).
  *
  * Comparison is parse-and-compare (key-order-insensitive), never strcmp.
  * A small set of VOLATILE_FIELDS carry machine- or run-dependent values
@@ -75,6 +83,15 @@ class IpcContractCorpusTest {
         }
         val expected = (HydrationIpcHandler.VERBS + daemonVerbs).map { "$it.ndjson" }.toSet()
         assertEquals(expected, files.toSet(), "one corpus fixture per registered IPC verb, no extras")
+
+        // IPC authentication: every corpus verb has a verb class (the default deny cannot silently
+        // swallow a real verb), and the class table names no verb outside the corpus, i.e. none the
+        // daemon does not register.
+        assertEquals(
+            files.map { it.removeSuffix(".ndjson") }.toSet(),
+            IpcAuth.VERB_CLASSES.keys,
+            "verb classes (IpcAuth.VERB_CLASSES) must cover exactly the corpus verbs",
+        )
 
         // Corpus self-consistency: every request line in <verb>.ndjson must
         // actually carry that verb.
@@ -130,8 +147,9 @@ class IpcContractCorpusTest {
                     // Fresh connection per exchange: subscribe-style verbs turn
                     // the connection into an event stream after the reply, so a
                     // shared connection would leak pushed events into the next
-                    // verb's reply read.
-                    val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+                    // verb's reply read. Each one authenticates first (the daemon
+                    // writes its tokens next to the lock).
+                    val channel = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "contract_profile"), IpcAuth.Scope.FULL)
                     try {
                         channel.configureBlocking(false)
                         channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
@@ -150,6 +168,52 @@ class IpcContractCorpusTest {
             runtime.close()
             daemonJob.join()
             runCatching { tempDir.toFile().deleteRecursively() }
+        }
+    }
+
+    /**
+     * `auth/<name>.ndjson`: one session each, replayed in order on ONE connection against a server
+     * holding the fixed test vectors (profile `p1`, token bytes 00..1f for both scopes, server nonce
+     * 10..1f). They pin the handshake replies and the auth_required / auth_failed / forbidden shapes.
+     */
+    @Test
+    fun auth_transcripts_replay_against_the_handshake() = runBlocking {
+        val dirUrl = checkNotNull(javaClass.getResource("/ipc-contract/auth")) { "ipc-contract/auth missing" }
+        val transcripts = Files.list(Paths.get(dirUrl.toURI())).use { s -> s.filter { it.toString().endsWith(".ndjson") }.toList() }
+        assertTrue(transcripts.size >= 4, "auth transcripts: $transcripts")
+        val token = ByteArray(32) { it.toByte() }
+        for (file in transcripts) {
+            val pairs = Files.readAllLines(file).filter { it.isNotBlank() }.chunked(2).map { it[0] to it[1] }
+            for ((request, _) in pairs) {
+                val verb = (Json.parseToJsonElement(request) as JsonObject)["verb"]!!.let { (it as JsonPrimitive).content }
+                assertTrue(
+                    verb == IpcAuth.HELLO || verb == IpcAuth.HELLO_PROOF || verb in IpcAuth.VERB_CLASSES,
+                    "${file.fileName}: '$verb' is neither a handshake verb nor a classified verb",
+                )
+            }
+            val dir = Files.createTempDirectory("ipc-contract-auth")
+            val socketPath = dir.resolve("a.sock")
+            val auth = IpcAuth("p1", token, token, "contract", serverNonces = { ByteArray(16) { (0x10 + it).toByte() } })
+            val server = IpcServer(socketPath, auth = auth)
+            val serveJob = kotlinx.coroutines.SupervisorJob()
+            server.start(kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + serveJob))
+            try {
+                SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).use { channel ->
+                    channel.configureBlocking(false)
+                    for ((request, expectedReply) in pairs) {
+                        channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
+                        assertJsonMatches(
+                            expected = Json.parseToJsonElement(expectedReply),
+                            actual = Json.parseToJsonElement(readFirstLine(channel, timeoutMs = 5_000)),
+                            at = "${file.fileName}: reply to $request",
+                        )
+                    }
+                }
+            } finally {
+                server.close()
+                serveJob.cancel()
+                runCatching { dir.toFile().deleteRecursively() }
+            }
         }
     }
 

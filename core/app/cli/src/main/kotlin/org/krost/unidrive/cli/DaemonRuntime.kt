@@ -9,6 +9,7 @@ import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.HydrationIpcHandler
 import org.krost.unidrive.hydration.MountEngine
+import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProcessLock
 import org.krost.unidrive.sync.StateDatabase
@@ -61,6 +62,11 @@ class DaemonRuntime(
     // #504: > 0 = rescan the sync root for files that arrived out of band (a pass at start, then every
     // this many ms), uploading them; 0 = off. Profile key sync_root_rescan_minutes (default 10 min).
     private val syncRootRescanIntervalMs: Long = 0,
+    // The profile's config folder (it holds credentials.json and the lock): the IPC token files are
+    // written here at every start, before the socket listens (docs/dev/specs/ipc-authentication.md).
+    private val ipcTokenDir: Path = lockFile.parent,
+    // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit).
+    private val exitProcess: (Int) -> Unit = { code -> System.exit(code) },
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -116,8 +122,13 @@ class DaemonRuntime(
                 throw e
             }
 
+            // New IPC tokens for this start, written before the socket exists (only the lock holder
+            // gets here, so a refused second start never rotates a running daemon's tokens). A refusal
+            // has printed its one line; start() rethrows it and `daemon run` exits 78.
+            val ipcAuth = IpcAuth.issueOrReport(ipcTokenDir, profileName, BuildInfo.versionString())
+
             Files.createDirectories(socketPath.parent)
-            val server = IpcServer(socketPath)
+            val server = IpcServer(socketPath, auth = ipcAuth)
             ipcServer = server
 
             // Use supervisorScope-with-explicit-cancel so the SERVE block returns
@@ -323,7 +334,9 @@ class DaemonRuntime(
                 // identity, so the provider type + name is what we can report
                 // truthfully, and `authenticated` only says that credentials are
                 // loaded (not that they are valid). enumeration is the progress of
-                // the remote enumeration (additive, object always present).
+                // the remote enumeration (additive, object always present). Before a
+                // connection authenticates, IpcAuth answers daemon.status itself with
+                // the minimal reply; this handler serves authenticated connections.
                 server.registerHandler("daemon.status") { _, _ ->
                     val uptimeMs = System.currentTimeMillis() - startedAtMs
                     val clientCount = server.clientCount
@@ -383,7 +396,8 @@ class DaemonRuntime(
                 serveJob.cancel()
             }
         } catch (e: Exception) {
-            log.error("daemon: lifecycle error", e)
+            // An IPC startup refusal is already reported as its one line.
+            if (e !is IpcAuth.StartupRefused) log.error("daemon: lifecycle error", e)
             throw e
         } finally {
             cleanup()
@@ -429,7 +443,7 @@ class DaemonRuntime(
         }
         val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
         System.err.println("$holderDesc$pidPart.")
-        System.exit(1)
+        exitProcess(1)
     }
 
     private fun cleanup() {
@@ -450,7 +464,8 @@ class DaemonRuntime(
         // instead of failing on a missing field mid-operation. Bump ONLY on
         // a breaking wire change; additive fields do not bump it. The golden
         // corpus under src/test/resources/ipc-contract/ pins the current
-        // shape (IpcContractCorpusTest).
-        const val IPC_PROTOCOL_VERSION: Int = 1
+        // shape (IpcContractCorpusTest). Version 2 authenticates every
+        // connection (IpcAuth, docs/dev/specs/ipc-authentication.md).
+        const val IPC_PROTOCOL_VERSION: Int = IpcAuth.PROTOCOL_VERSION
     }
 }

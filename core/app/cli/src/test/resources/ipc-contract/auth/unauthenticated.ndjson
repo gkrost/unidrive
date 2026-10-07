@@ -1,0 +1,8 @@
+{"verb":"daemon.status"}
+{"ok":true,"protocol_version":2,"engine_version":"build-dependent","auth_required":true}
+{"verb":"hydration.list","prefix":"/docs"}
+{"ok":false,"error":"auth_required"}
+{"verb":"sync.subscribe"}
+{"ok":false,"error":"auth_required"}
+{"verb":"daemon.shutdown"}
+{"ok":false,"error":"auth_required"}

@@ -11,6 +11,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.onedrive.OneDriveProvider
 import org.krost.unidrive.sync.ConflictLog
+import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcProgressReporter
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.LocalWatcher
@@ -352,7 +353,17 @@ open class SyncCommand : Runnable {
             SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name),
             StoragePermissions.defaultLogDir(),
         )
-        val ipcServer = IpcServer(socketPath)
+        // New IPC tokens for this run, before the socket listens (docs/dev/specs/ipc-authentication.md):
+        // the sync serves the same verbs as the daemon, so it authenticates its clients the same way and
+        // never runs without its IPC (the refusal is already reported as one line).
+        val ipcAuth =
+            try {
+                IpcAuth.issueOrReport(parent.providerConfigDir(), profile.name, BuildInfo.versionString())
+            } catch (_: IpcAuth.StartupRefused) {
+                runCatching { db.close() }
+                kotlin.system.exitProcess(IpcAuth.STARTUP_REFUSED_EXIT_CODE)
+            }
+        val ipcServer = IpcServer(socketPath, auth = ipcAuth)
         val ipcReporter = IpcProgressReporter(ipcServer, profile.name)
         val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)
         if (notifyReporter != null) delegates.add(notifyReporter)

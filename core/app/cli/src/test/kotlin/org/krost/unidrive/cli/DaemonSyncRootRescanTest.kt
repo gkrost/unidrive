@@ -8,7 +8,9 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
-import java.net.UnixDomainSocketAddress
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcEndpoint
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
@@ -77,7 +79,7 @@ class DaemonSyncRootRescanTest {
     }
 
     private fun send(request: String): String {
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "rescan_test_profile"), IpcAuth.Scope.READ)
         try {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
