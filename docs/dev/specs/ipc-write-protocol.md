@@ -77,8 +77,10 @@ the scope are refused (§7).
 ### 3.2 Overwrite (save of an existing file)
 
 Same sequence as 3.1 minus `create`: the client writes the full new content
-to a cache path (its own or the one from `open_write_begin`) and issues
-`open_write`.
+to the cache path the engine returned (from `open_write_begin`, `create`, or
+`open_read` for 3.4) and issues `open_write` with that path. Clients must send
+the path the engine returned; a cache path outside the profile's hydration
+cache folder is refused with `invalid_path` before anything is queued (§7).
 
 - Base-etag guard: if the client observed an `etag` for the file (via
   `hydration.list`) it SHOULD send it as `base_etag`. The guard runs twice:
@@ -237,6 +239,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `path_is_folder` / `path_is_file` | unlink/rmdir/open_write_begin | wrong kind |
 | `not_empty` | rmdir | folder still has children |
 | `conflict` | open_write | base_etag no longer matches the row |
+| `invalid_path` | open_write (`cache_path`) | the cache path lies outside the profile's hydration cache folder, or is not a valid local path; refused before anything is queued |
 | `outside_scope` | create, mkdir, rename (both ends), open_write_begin | path outside the profile's sync_path set |
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
