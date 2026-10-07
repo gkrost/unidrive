@@ -55,22 +55,19 @@ class RemoteEnumeration(
          * - the row never reached the cloud (`SyncEntry.isPendingUpload`);
          * - the hydration cache holds a copy newer than the row's last-synced watermark (an edit whose upload
          *   crashed or failed; the co-daemon's recovery scanner replays exactly this watermark).
-         * A cache path that cannot be resolved or read counts as no copy. The enumeration resolves it
-         * under the cache root before passing it here. The enumeration's reap and
+         * A cache path that cannot be resolved or read counts as no copy. The enumeration's reap and
          * `refresh.run`'s reset ask the same question here.
          */
         fun holdsUnsyncedEdit(
             path: String,
             row: SyncEntry?,
-            cachePath: Path?,
         ): Boolean {
             if (uploadInFlight(path)) return true
             if (row == null) return false
             if (row.isPendingUpload) return true
             return runCatching {
-                cachePath != null &&
-                    Files.exists(cachePath) &&
-                    Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
+                val cachePath = cachePathOf(path)
+                Files.exists(cachePath) && Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
             }.getOrDefault(false)
         }
     }
@@ -263,7 +260,7 @@ class RemoteEnumeration(
                     // A row whose path does not resolve inside the cache has no cache copy to
                     // protect or evict: its cache side is skipped (logged once), the row is reaped.
                     val cachePath = CachePaths.forRow(path, log, reapGuards.cachePathOf)
-                    if (reapGuards.holdsUnsyncedEdit(path, row, cachePath)) {
+                    if (reapGuards.holdsUnsyncedEdit(path, row)) {
                         // The daemon enumerates every poll interval: warn once per path, not once per poll.
                         val msg = "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit"
                         if (deferredReapWarned.add(path)) log.warn(msg, path) else log.debug(msg, path)

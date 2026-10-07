@@ -1,6 +1,7 @@
 package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.runBlocking
+import org.junit.Assume
 import org.krost.unidrive.hydration.ContainmentEnv.Companion.tokenOf
 import org.krost.unidrive.hydration.ContainmentEnv.Companion.windows
 import java.nio.file.Files
@@ -28,6 +29,25 @@ class HydrationPathContainmentTest {
     fun tearDown() {
         envs.forEach { it.close() }
     }
+
+    @Test
+    fun `open_write_begin refuses a logical cache path linked to an outside file without truncating it`() =
+        runBlocking<Unit> {
+            val env = env()
+            env.db.upsertEntry(env.fileRow("/doc.txt"))
+            val target = env.write(env.base.resolve("outside.txt"), "keep these bytes")
+            Files.createDirectories(env.cacheDir)
+            try {
+                Files.createSymbolicLink(env.cacheDir.resolve("doc.txt"), target)
+            } catch (e: Exception) {
+                Assume.assumeTrue("symbolic links are not available here: ${e.message}", false)
+            }
+
+            val result = env.hydration.openWriteBegin("c1", "/doc.txt", "h1")
+
+            assertEquals("keep these bytes", Files.readString(target))
+            assertEquals(HydrationError.INVALID_PATH_TOKEN, tokenOf(result))
+        }
 
     // ---- logical paths whose cache file would lie outside the folder -------------------------------------------
 
