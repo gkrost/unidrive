@@ -62,8 +62,8 @@ class SweepCommand : Runnable {
             }
 
             val profile = parent.resolveCurrentProfile()
-            // #603 (U4): the sweep walks placeholders, which only a mount profile has.
-            parent.requireProfileMode(profile, ProfileMode.MOUNT, "sweep")
+            // Sweep repairs sync_root copies for the mirror reconciler's next download pass.
+            parent.requireProfileMode(profile, ProfileMode.MIRROR, "sweep")
             val configDir = parent.configBaseDir().resolve(profile.name)
             val dbPath = configDir.resolve("state.db")
             if (!Files.exists(dbPath)) {
