@@ -45,6 +45,9 @@ class InternxtUploadRefusalTest {
     private fun newProviderWith(
         createStatus: HttpStatusCode,
         emptyListing: Boolean = false,
+        missingUploads: Boolean = false,
+        onFinish: () -> Unit = {},
+        reconcileListing: String = """{"children":[],"files":[]}""",
     ): InternxtProvider {
         val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
@@ -78,13 +81,19 @@ class InternxtUploadRefusalTest {
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
-                        emptyListing && url.contains("/folders/content/") ->
-                            respond("""{"children":[],"files":[]}""", HttpStatusCode.OK, json)
+                        (emptyListing || missingUploads) && url.contains("/folders/content/") ->
+                            respond(reconcileListing, HttpStatusCode.OK, json)
                         url.contains("/v2/buckets/") && url.contains("/files/start") ->
                             respond("""{"uploads":[{"index":0,"uuid":"shard-1","url":"$shardUrl"}]}""", HttpStatusCode.OK, json)
                         url == shardUrl -> respond("", HttpStatusCode.OK)
-                        url.contains("/v2/buckets/") && url.contains("/files/finish") ->
-                            respond("""{"id":"bucket-entry-1","index":"${"aa".repeat(32)}","bucket":"$bucket","name":"enc"}""", HttpStatusCode.OK, json)
+                        url.contains("/v2/buckets/") && url.contains("/files/finish") -> {
+                            onFinish()
+                            if (missingUploads) {
+                                respond("""{"message":"MissingUploadsError: Missing uploads to complete the upload"}""", HttpStatusCode.Conflict, json)
+                            } else {
+                                respond("""{"id":"bucket-entry-1","index":"${"aa".repeat(32)}","bucket":"$bucket","name":"enc"}""", HttpStatusCode.OK, json)
+                            }
+                        }
                         request.url.encodedPath == "/drive/files" && request.method == HttpMethod.Post ->
                             respond("""{"statusCode":${createStatus.value},"message":["refused"],"error":"x"}""", createStatus, json)
                         else -> respond("""{"error":"unexpected ${request.method.value} $url"}""", HttpStatusCode.NotFound, json)
@@ -96,6 +105,42 @@ class InternxtUploadRefusalTest {
     }
 
     private fun local(): Path = tmp.resolve("f.txt").also { Files.write(it, ByteArray(10) { 0x41 }) }
+
+    @Test
+    fun `a regular upload with missing shards and no reconciled entry is refused after one finish`() =
+        runTest {
+            var finishCalls = 0
+            val provider = newProviderWith(HttpStatusCode.OK, missingUploads = true, onFinish = { finishCalls++ })
+            try {
+                val e = assertFailsWith<PermanentUploadFailureException> {
+                    provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
+                }
+                assertTrue("MissingUploadsError" in (e.message ?: ""))
+                assertEquals(1, finishCalls, "neither the helper nor the shard pipeline repeats an exhausted session")
+            } finally {
+                provider.close()
+            }
+        }
+
+    @Test
+    fun `a stale same-name entry still refuses missing shards after the bounded relist`() =
+        runTest {
+            var finishCalls = 0
+            val provider = newProviderWith(
+                HttpStatusCode.OK,
+                missingUploads = true,
+                onFinish = { finishCalls++ },
+                reconcileListing = """{"children":[],"files":[{"uuid":"old","fileId":"old-entry","plainName":"f","type":"txt","size":"10","status":"EXISTS","creationTime":"2000-01-01T00:00:00Z"}]}""",
+            )
+            try {
+                assertFailsWith<PermanentUploadFailureException> {
+                    provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
+                }
+                assertEquals(1, finishCalls, "a stale same-name entry does not justify another finish")
+            } finally {
+                provider.close()
+            }
+        }
 
     @Test
     fun `a 400 from the drive is a permanent upload failure`() =

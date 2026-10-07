@@ -580,7 +580,8 @@ class InternxtProvider(
 
     // #493: a request the server refuses as such (400 Bad Request, 413, 415, 422) is refused again with the same bytes; it
     // becomes a PermanentUploadFailureException, so the hydration queue does not run its retry ladder on it. Everything else
-    // (5xx, 408, 409, 429, auth, network) keeps its type and stays retryable.
+    // (5xx, 408, unrelated 409, 429, auth, network) keeps its type and stays retryable.
+    // MissingUploadsError with no landed entry after a successful reconcile is refused at commit time below.
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
@@ -3039,9 +3040,9 @@ class InternxtProvider(
 //
 // Window is 5 minutes from [startedAt] (the upload's stage-1 timestamp), wide
 // enough to absorb retry ladders without colliding with stale same-name entries.
-// Case-a (no name match) re-attempts finishUpload once (in case the prior
-// commit truly didn't land — the bridge may be eventually consistent with the
-// PUT). A second 409 throws with the original 409 as cause.
+// If no entry matches after the bounded reconcile, the session has no shards
+// left to finish. Refuse the upload so hydration releases its slot and persists
+// the current content's refusal stamp instead of replaying that session.
 //
 // Provider call site is responsible for fresh-indexBytes pipeline retry on hard
 // failure (the IV-pinning constraint forbids holding stale indexBytes across a
@@ -3254,22 +3255,16 @@ internal suspend fun commitWithRetry(
                 -> {
                     finishUploadLog.warn(
                         "could not reconcile after finishUpload-409 for {} under {}; " +
-                            "re-attempting finishUpload (orphan shard may result on second failure){}",
+                            "refusing exhausted upload session without another finish{}",
                         plainName,
                         folderUuid,
                         e.requestId?.let { " requestId=$it" } ?: "",
                     )
-                    // case (a) re-attempt: try finishUpload once more, then surface.
-                    try {
-                        return api.finishUpload(bucket, indexHex, hashHex, shardUuid)
-                    } catch (e2: InternxtApiException) {
-                        throw InternxtApiException(
-                            "finishUpload 409 MissingUploadsError persists after reconcile NotFound: ${e2.message}",
-                            statusCode = e2.statusCode,
-                            requestId = e2.requestId ?: e.requestId,
-                            cause = e,
-                        )
-                    }
+                    throw org.krost.unidrive.PermanentUploadFailureException(
+                        "finishUpload 409 MissingUploadsError after reconcile NotFound: ${e.message}",
+                        cause = e,
+                        requestId = e.requestId,
+                    )
                 }
             }
         }

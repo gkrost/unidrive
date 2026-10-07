@@ -733,7 +733,7 @@ class InternxtApiServiceTest {
         }
 
     @Test
-    fun `commitWithRetry on 409 with no matching name re-attempts finishUpload once then throws`() =
+    fun `commitWithRetry on MissingUploads with no matching name refuses without finishing again`() =
         kotlinx.coroutines.test.runTest {
             val finishCalls = AtomicInteger(0)
             val listingCalls = AtomicInteger(0)
@@ -764,7 +764,7 @@ class InternxtApiServiceTest {
             val service = newServiceWithMock(engine)
             try {
                 val ex =
-                    kotlin.test.assertFailsWith<InternxtApiException> {
+                    kotlin.test.assertFailsWith<org.krost.unidrive.PermanentUploadFailureException> {
                         commitWithRetry(
                             api = service,
                             bucket = "test-bucket",
@@ -780,7 +780,6 @@ class InternxtApiServiceTest {
                             clock = { startedAt.plusMillis(500) },
                         )
                     }
-                assertEquals(409, ex.statusCode)
                 kotlin.test.assertTrue(
                     ex.message?.contains("MissingUploadsError") == true,
                     "thrown message must reference the marker substring, got: ${ex.message}",
@@ -790,8 +789,8 @@ class InternxtApiServiceTest {
                     (ex.cause as? InternxtApiException)?.statusCode == 409,
                     "cause must carry the original 409 statusCode",
                 )
-                assertEquals(2, finishCalls.get(), "case (a): one initial 409 + one re-attempt that also 409s")
-                assertEquals(1, listingCalls.get(), "one reconcile listing before the re-attempt")
+                assertEquals(1, finishCalls.get(), "a missing upload session cannot be finished again")
+                assertEquals(1, listingCalls.get(), "reconcile before refusing the upload")
             } finally {
                 service.close()
             }
