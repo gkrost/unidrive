@@ -51,7 +51,7 @@ class LsCommand : Callable<Int> {
     var live: Boolean = false
 
     override fun call(): Int {
-        val normalized = if (path.startsWith("/")) path else "/$path"
+        val normalized = normalizeLsPath(path)
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
@@ -64,19 +64,22 @@ class LsCommand : Callable<Int> {
         if (!live && daemonHoldsLock(parent.providerConfigDir()) && Files.exists(socketPath)) {
             val entries = queryDaemonView(socketPath, normalized)
             if (entries != null) {
-                // hydration.list answers a missing path with an empty list, same as an
-                // empty folder — look the path up in its parent's view to tell them apart.
-                if (entries.isEmpty() && normalized != "/") {
-                    val parentPath = normalized.substringBeforeLast('/').ifEmpty { "/" }
-                    val self = queryDaemonView(socketPath, parentPath)?.find { it.path == normalized }
-                    if (self == null) return noSuchPath(normalized)
-                    if (!self.isFolder) {
-                        printDaemonEntries(listOf(self))
+                when (val view = resolveDaemonView(normalized, entries) { queryDaemonView(socketPath, it) }) {
+                    is DaemonLsView.Listing -> {
+                        printDaemonEntries(view.entries)
                         return 0
                     }
+                    is DaemonLsView.SelfFile -> {
+                        printDaemonEntries(listOf(view.entry))
+                        return 0
+                    }
+                    DaemonLsView.NoSuchPath -> return noSuchPath(normalized)
+                    DaemonLsView.Undecidable -> {
+                        // Parent lookup failed mid-way (daemon shut down between
+                        // the two IPC round-trips) — presence is undecidable from
+                        // the view; the live query below answers authoritatively.
+                    }
                 }
-                printDaemonEntries(entries)
-                return 0
             }
             // Daemon socket exists but the query failed (mid-shutdown / stale
             // socket). Fall through to the live query rather than failing.
@@ -182,6 +185,64 @@ class LsCommand : Callable<Int> {
     private fun jsonStr(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     companion object {
+        /**
+         * Root-absolute, trailing-slash-free form of the user-supplied [path].
+         * `hydration.list` and state.db paths carry no trailing slash — without
+         * trimming, `ls foo/` would compare `/foo/` against the stored `/foo`
+         * and report an existing (empty) folder as missing.
+         */
+        internal fun normalizeLsPath(path: String): String =
+            (if (path.startsWith("/")) path else "/$path").trimEnd('/').ifEmpty { "/" }
+
+        /** What `ls` should print when the daemon's state.db view is reachable. */
+        internal sealed interface DaemonLsView {
+            /** Direct children of the queried path (possibly empty — an existing folder). */
+            data class Listing(val entries: List<ViewEntryParsed>) : DaemonLsView
+
+            /** The queried path is a file: list that single entry, like `ls <file>`. */
+            data class SelfFile(val entry: ViewEntryParsed) : DaemonLsView
+
+            /** The parent view is enumerated and does not contain the path. */
+            data object NoSuchPath : DaemonLsView
+
+            /**
+             * The parent query failed (daemon shut down between the two IPC
+             * round-trips) — presence cannot be decided from the view; the
+             * caller falls through to the live provider query.
+             */
+            data object Undecidable : DaemonLsView
+        }
+
+        /**
+         * Resolve what `ls` should print for [normalized] given its [children]
+         * from the daemon view. `hydration.list` answers a missing path with an
+         * empty list, same as an empty folder — an empty non-root listing is
+         * therefore resolved against the parent's view: absent there means the
+         * path does not exist (ls stays consistent with the mount view), a file
+         * there lists as that single entry. One caveat accepted for that
+         * consistency: during a first enumeration the view can be incomplete,
+         * so a not-yet-enumerated existing path reports as missing — `--live`
+         * is the escape hatch.
+         */
+        internal fun resolveDaemonView(
+            normalized: String,
+            children: List<ViewEntryParsed>,
+            parentQuery: (String) -> List<ViewEntryParsed>?,
+        ): DaemonLsView =
+            when {
+                children.isNotEmpty() || normalized == "/" -> DaemonLsView.Listing(children)
+                else -> {
+                    val parent = parentQuery(normalized.substringBeforeLast('/').ifEmpty { "/" })
+                    val self = parent?.find { it.path == normalized }
+                    when {
+                        parent == null -> DaemonLsView.Undecidable
+                        self == null -> DaemonLsView.NoSuchPath
+                        self.isFolder -> DaemonLsView.Listing(children)
+                        else -> DaemonLsView.SelfFile(self)
+                    }
+                }
+            }
+
         /**
          * Live listing of [normalized], or null when the path does not exist. Some
          * providers (localfs) return an empty list for a missing path instead of
