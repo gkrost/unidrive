@@ -11,8 +11,8 @@ import java.nio.file.attribute.PosixFilePermission
  *
  * Apply owner-only permissions to [path] when the underlying filesystem
  * supports the POSIX file attribute view (Linux, macOS). On Windows /
- * FAT / NTFS this is a no-op; token security is provided by the
- * directory ACL there instead.
+ * FAT / NTFS this is a no-op; [OwnerOnly] sets an owner-only ACL there
+ * instead.
  *
  * - `ownerRwx = true`  → `rwx------`  (used for the token directory)
  * - `ownerRwx = false` → `rw-------`  (used for the token file)

@@ -2,7 +2,7 @@ package org.krost.unidrive.auth
 
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
-import org.krost.unidrive.io.setPosixPermissionsIfSupported
+import org.krost.unidrive.io.OwnerOnly
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -80,13 +80,14 @@ public class CredentialStore<T>(
      * (some Windows network shares); the race window shrinks but doesn't
      * fully close — that's a documented limitation.
      *
-     * Side-effects: chmod the directory `rwx------` and the file
-     * `rw-------` on POSIX filesystems via
-     * [setPosixPermissionsIfSupported]; no-op on Windows / FAT.
+     * Side-effects: the directory and the file are made reachable by the
+     * current user only ([OwnerOnly]: `rwx------` / `rw-------` on POSIX,
+     * an owner-only ACL on Windows). Throws [java.io.IOException] when
+     * that fails; the directory is checked before the file is written.
      */
     public fun save(value: T) {
         Files.createDirectories(dir)
-        setPosixPermissionsIfSupported(dir, ownerRwx = true)
+        OwnerOnly.requireDirectory(dir)
         Files.writeString(tmpFile, json.encodeToString(serializer, value))
         try {
             Files.move(
@@ -99,7 +100,7 @@ public class CredentialStore<T>(
             log.warn("Filesystem rejected ATOMIC_MOVE at {} — falling back to non-atomic replace", file)
             Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING)
         }
-        setPosixPermissionsIfSupported(file, ownerRwx = false)
+        OwnerOnly.requireFile(file)
     }
 
     /** Delete the credential file if it exists. No-op otherwise. */

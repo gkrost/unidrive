@@ -2,8 +2,12 @@ package org.krost.unidrive.auth
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.serializer
+import org.junit.Assume.assumeTrue
+import org.krost.unidrive.io.WindowsAclProbe
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -117,5 +121,44 @@ class CredentialStoreTest {
     @Test
     fun `delete is a no-op when the file does not exist`() {
         store().delete() // no exception
+    }
+
+    @Test
+    fun `save restricts the folder to 0700 and the file to 0600 on POSIX`() {
+        assumeTrue(
+            "POSIX file attributes only",
+            FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+        )
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxr-xr-x"))
+
+        store().save(Sample(accessToken = "x".repeat(64), expiresAt = 0L))
+
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)))
+        assertEquals(
+            "rw-------",
+            PosixFilePermissions.toString(Files.getPosixFilePermissions(dir.resolve("creds.json"))),
+        )
+    }
+
+    @Test
+    fun `save gives the folder and the file an owner-only ACL on Windows`() {
+        assumeTrue("Windows ACLs only", WindowsAclProbe.isWindows)
+        // The profile folder sits in a parent that grants an extra principal inheritable read access.
+        WindowsAclProbe.grantInheritableRead(dir, WindowsAclProbe.USERS_SID)
+        val profileDir = dir.resolve("profile")
+        val s = CredentialStore(profileDir, "creds.json", serializer<Sample>())
+
+        s.save(Sample(accessToken = "x".repeat(64), expiresAt = 0L))
+
+        for (path in listOf(profileDir, profileDir.resolve("creds.json"))) {
+            val dacl = WindowsAclProbe.dacl(path)
+            assertTrue(dacl.startsWith("D:P"), "$path: protected, no inherited entries: $dacl")
+            assertEquals(
+                setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
+                WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet(),
+                "$path: $dacl",
+            )
+        }
+        assertEquals("x".repeat(64), s.load()?.accessToken)
     }
 }
