@@ -78,6 +78,8 @@ class CacheFolderTest {
         assertFalse(isInsideCacheFolder(dir, fileLink), "a file link")
         assertFalse(isInsideCacheFolder(dir, dirLink.resolve("b.txt")), "a file below a folder link")
         assertFalse(isInsideCacheFolder(dir, dirLink.resolve("new.txt")), "a new file below a folder link")
+        assertFalse(isInsideCacheFolder(dir, dirLink.resolve("..").resolve("elsewhere.txt")), "dot-dot after a link resolves outside")
+        assertFalse(isInsideCacheFolder(dir, dirLink.resolve("..").resolve("missing.txt")), "a new file after dot-dot outside")
     }
 
     @Test

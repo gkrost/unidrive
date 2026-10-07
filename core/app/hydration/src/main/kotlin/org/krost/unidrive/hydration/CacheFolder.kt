@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 
 /**
@@ -19,15 +20,18 @@ internal fun isInsideCacheFolder(
     val root = cacheDir.toAbsolutePath().normalize()
     val path =
         try {
-            candidate.toAbsolutePath().normalize()
+            candidate.toAbsolutePath()
         } catch (_: java.io.IOError) {
             return false
         }
     val realRoot =
         try {
             root.toRealPath()
+        } catch (_: NoSuchFileException) {
+            val normalised = path.normalize()
+            return normalised != root && normalised.startsWith(root)
         } catch (_: IOException) {
-            return path != root && path.startsWith(root)
+            return false
         }
     // The deepest part of [path] that exists (the file itself when it does), through its real path, and the names
     // below it as given.
@@ -35,7 +39,6 @@ internal fun isInsideCacheFolder(
     val rest = ArrayList<Path>()
     while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
         val name = existing.fileName ?: return false
-        if (name.toString() == "..") return false
         rest.add(name)
         existing = existing.parent ?: return false
     }
@@ -46,6 +49,7 @@ internal fun isInsideCacheFolder(
             return false
         }
     for (name in rest.asReversed()) real = real.resolve(name)
+    real = real.normalize()
     return real != realRoot && real.startsWith(realRoot)
 }
 

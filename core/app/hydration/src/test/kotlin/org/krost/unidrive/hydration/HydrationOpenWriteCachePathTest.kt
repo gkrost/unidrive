@@ -114,6 +114,8 @@ class HydrationOpenWriteCachePathTest {
                 "a file link" to fileLink,
                 "a file below a folder link" to dirLink.resolve("doc.txt"),
                 "a new file below a folder link" to dirLink.resolve("new.txt"),
+                "dot-dot after a folder link" to dirLink.resolve("..").resolve("elsewhere.txt"),
+                "a new file after dot-dot outside" to dirLink.resolve("..").resolve("new.txt"),
             )) {
                 val r = env.hydration.openForWrite("c1", "h1", "/doc.txt", cachePath)
 
