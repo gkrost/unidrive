@@ -17,8 +17,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Wire format (all JSON):
  *   Paths:      every logical path field (path, old_path, new_path, prefix) is validated before
- *               the verb runs: a `.` or `..` segment, a control character (NUL included) or a
- *               segment longer than 255 UTF-16 units answers {"ok":false,"error":"invalid_path"}.
+ *               the verb runs: a `.` or `..` segment, a control character (NUL included), an
+ *               empty segment other than that of a leading or trailing slash, or a segment
+ *               longer than 255 UTF-16 units answers {"ok":false,"error":"invalid_path"}.
  *               mkdir, create and rename also answer invalid_path for a new name the host's file
  *               system cannot hold, and every verb for a path whose cache file would not lie inside
  *               the profile's hydration cache folder.
@@ -446,14 +447,18 @@ class HydrationIpcHandler(
 
     // The validation of a LOGICAL path at the IPC boundary, for every verb that takes one.
     // A path is a list of names separated by '/'; a `.` or `..` segment, a control
-    // character (NUL included) or a segment longer than 255 UTF-16 units (no supported file
+    // character (NUL included), an empty segment other than that of a leading or trailing
+    // slash ("/a//b", "//a") or a segment longer than 255 UTF-16 units (no supported file
     // system holds a longer name) throws [InvalidLogicalPath], which [handle] answers with
-    // invalid_path before the verb runs. The empty segments of a leading or trailing slash
-    // ("/", "/a/") stay accepted. A name the host's file system cannot hold is the verb's
-    // own check (mkdir, create and rename refuse it in HydrationImpl).
+    // invalid_path before the verb runs. "", "/" and "/a/" stay accepted. DEL is a legal
+    // name character on NTFS and POSIX file systems and stays accepted. A name the host's
+    // file system cannot hold is the verb's own check (mkdir, create and rename refuse it in
+    // HydrationImpl).
     private fun requireLogicalPath(path: String): String {
-        for (segment in path.split('/')) {
-            if (segment == "." || segment == ".." || segment.length > MAX_SEGMENT_UTF16_UNITS || segment.any { it < ' ' }) {
+        val segments = path.split('/')
+        for ((i, segment) in segments.withIndex()) {
+            val emptyInside = segment.isEmpty() && i != 0 && i != segments.lastIndex
+            if (emptyInside || segment == "." || segment == ".." || segment.length > MAX_SEGMENT_UTF16_UNITS || segment.any { it < ' ' }) {
                 throw InvalidLogicalPath()
             }
         }

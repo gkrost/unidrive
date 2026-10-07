@@ -11,9 +11,9 @@ import kotlin.test.assertNotEquals
 
 /**
  * Every logical path a hydration verb takes is validated once, at the IPC boundary, before the verb runs: a `.` or
- * `..` segment, a NUL or another control character, or a segment longer than 255 UTF-16 units is refused with
- * `invalid_path` and the verb is never called. The empty segments of a leading or trailing slash stay accepted, and
- * so do names that merely contain dots.
+ * `..` segment, a NUL or another control character, an empty segment other than that of a leading or trailing slash,
+ * or a segment longer than 255 UTF-16 units is refused with `invalid_path` and the verb is never called. The root,
+ * a trailing slash and names that merely contain dots stay accepted.
  */
 class HydrationIpcHandlerPathValidationTest {
     private companion object {
@@ -39,12 +39,18 @@ class HydrationIpcHandlerPathValidationTest {
                 "a line feed" to "/docs/a${BS}nb.txt",
                 "a tab" to "/docs/a${BS}tb.txt",
                 "a segment of 256 units" to "/docs/" + "n".repeat(256),
+                "an empty segment in the middle" to "/docs//x.txt",
+                "a doubled leading slash" to "//x.txt",
+                "a doubled trailing slash" to "/docs//",
             )
 
         val accepted: List<Pair<String, String>> =
             listOf(
                 "the root" to "/",
+                "the empty root form" to "",
                 "a trailing slash" to "/docs/",
+                // DEL is a legal file-name character on NTFS and POSIX file systems.
+                "a DEL character" to "/docs/a${escaped(0x7f)}b.txt",
                 "a segment of 255 units" to "/docs/" + "n".repeat(255),
                 "a name of three dots" to "/docs/...",
                 "a hidden name" to "/docs/.hidden",

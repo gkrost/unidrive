@@ -6,3 +6,5 @@
 {"ok":false,"error":"busy"}
 {"verb":"hydration.unlink","path":"/docs/./report.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.unlink","path":"/docs//report.txt"}
+{"ok":false,"error":"invalid_path"}
