@@ -233,9 +233,11 @@ class RemoteEnumeration(
                     // Defer the whole reap: the row stays alive and the next complete
                     // enumeration re-evaluates once the upload has landed (or failed).
                     val row = db.getEntry(path)
-                    val cachePath = reapGuards.cachePathOf(path)
+                    // A row whose path does not resolve inside the cache has no cache copy to
+                    // protect or evict: its cache side is skipped (logged once), the row is reaped.
+                    val cachePath = CachePaths.forRow(path, log, reapGuards.cachePathOf)
                     val cacheDirty =
-                        if (row == null) {
+                        if (row == null || cachePath == null) {
                             false
                         } else {
                             runCatching {
@@ -251,9 +253,11 @@ class RemoteEnumeration(
                     }
                     deferredReapWarned.remove(path)
                     db.markDeleted(path)
-                    cacheEvictions.add(
-                        Triple(path, cachePath, runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull()),
-                    )
+                    if (cachePath != null) {
+                        cacheEvictions.add(
+                            Triple(path, cachePath, runCatching { Files.getLastModifiedTime(cachePath).toMillis() }.getOrNull()),
+                        )
+                    }
                     reapedViewPaths.add(applyReverseTop(path, canonicalToLocalTop))
                     reaped++
                 }

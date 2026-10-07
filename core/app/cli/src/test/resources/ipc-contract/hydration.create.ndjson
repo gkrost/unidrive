@@ -8,3 +8,5 @@
 {"ok":true,"cache_path":"/cache/unidrive/hydration/excluded/scratch.tmp","handle_id":"h-2","excluded":true}
 {"verb":"hydration.create","handle_id":"h-2","path":"/outside/new.txt"}
 {"ok":false,"error":"outside_scope"}
+{"verb":"hydration.create","handle_id":"h-2","path":"/docs/../new.txt"}
+{"ok":false,"error":"invalid_path"}

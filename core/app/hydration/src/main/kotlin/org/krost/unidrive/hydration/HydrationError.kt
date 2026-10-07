@@ -107,6 +107,18 @@ sealed interface HydrationError {
         override val message: String = "$REMOTE_INCOMPLETE_TOKEN: got $storedBytes of $declaredBytes bytes"
     }
 
+    /**
+     * A client-supplied path the engine does not accept: a logical path with a `.` or `..` segment, a control
+     * character or a segment longer than any file system allows; a name the host's file system cannot hold
+     * (create, mkdir, rename); or a logical path whose cache file would not lie inside the profile's hydration
+     * cache folder. Refused before anything is changed.
+     * Its [message] is the STABLE wire token `invalid_path`. Changing this string breaks that cross-repo
+     * contract.
+     */
+    data object InvalidPath : HydrationError {
+        override val message: String = INVALID_PATH_TOKEN
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
@@ -128,5 +140,8 @@ sealed interface HydrationError {
 
         /** Wire token for [Cancelled]; shared verbatim with the mount crate. */
         const val CANCELLED_TOKEN = "cancelled"
+
+        /** Wire token for [InvalidPath]. */
+        const val INVALID_PATH_TOKEN = "invalid_path"
     }
 }
