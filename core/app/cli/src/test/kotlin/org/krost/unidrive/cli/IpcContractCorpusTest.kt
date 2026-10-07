@@ -218,6 +218,9 @@ class IpcContractCorpusTest {
                 serveJob.cancel()
                 runCatching { dir.toFile().deleteRecursively() }
             }
+        }
+    }
+
     @Test
     fun connection_refusal_matches_corpus_over_live_socket() = runBlocking {
         val expected = loadConnectionLine("too_many_clients")

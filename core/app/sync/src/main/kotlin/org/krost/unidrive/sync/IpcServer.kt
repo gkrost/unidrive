@@ -296,7 +296,7 @@ class IpcServer(
                         }
                         sc.configureBlocking(false)
                         val connId = java.util.UUID.randomUUID().toString()
-                        val entry = ClientEntry(sc, connId)
+                        val entry = ClientEntry(sc, connId).also { it.lastRequestAtMs = clock() }
                         auth?.let { authSessions[connId] = it.newSession() }
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
@@ -550,7 +550,8 @@ class IpcServer(
         // handshake itself and refuses what the connection may not call (yet); null = go on as before.
         val gate = auth?.gate(authSessions[connId], verb, line)
         val handler = verb?.let { handlers[it] }
-        if (handler != null && verb in idleExemptVerbs) clients.firstOrNull { it.channel === client }?.idleExempt = true
+        // Only a request that reaches its handler (the gate let it through) makes the connection idle-exempt.
+        if (gate == null && handler != null && verb in idleExemptVerbs) clients.firstOrNull { it.channel === client }?.idleExempt = true
         var handlerThrew = false
         val reply = when {
             gate != null -> gate.json

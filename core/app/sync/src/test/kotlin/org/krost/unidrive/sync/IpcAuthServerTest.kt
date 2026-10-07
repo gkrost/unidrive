@@ -255,6 +255,50 @@ class IpcAuthServerTest {
     }
 
     @Test
+    fun `a request the gate answers never makes a connection idle-exempt`() {
+        // Idle time on a manual clock; the handshake timeout far away, so only the idle rule closes.
+        val now = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        IpcAuth.issue(profileDir, "p1", "test-engine")
+        val auth =
+            IpcAuth(
+                "p1",
+                IpcAuth.readToken(IpcAuth.tokenFile(profileDir, IpcAuth.Scope.FULL)),
+                IpcAuth.readToken(IpcAuth.tokenFile(profileDir, IpcAuth.Scope.READ)),
+                "test-engine",
+                unauthenticatedTimeoutMs = 3_600_000,
+            )
+        val server = IpcServer(socketPath, auth = auth, idleTimeoutMs = 60_000, clock = { now.get() })
+        server.registerHandler("hydration.list") { _, _ -> """{"ok":true,"entries":[]}""" }
+        server.registerHandler("hydration.unlink") { _, _ -> """{"ok":true}""" }
+        server.registerIdleExemptVerbs(listOf("hydration.list", "hydration.unlink"))
+        server.start(scope)
+        servers.add(server)
+
+        // Answered auth_required (not authenticated) and forbidden (read scope): neither reached a handler.
+        val unauthenticated = raw().also { assertEquals("""{"ok":false,"error":"auth_required"}""", it.ask("""{"verb":"hydration.list","prefix":"/"}""")) }
+        val reader =
+            IpcAuthClient.connect(endpoint, IpcAuth.Scope.READ).also {
+                it.configureBlocking(false)
+                assertEquals("""{"ok":false,"error":"forbidden","scope":"read"}""", it.ask("""{"verb":"hydration.unlink","path":"/a"}"""))
+            }
+        // Control: a full connection whose exempt request reached its handler stays.
+        val writer =
+            IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL).also {
+                it.configureBlocking(false)
+                assertEquals("""{"ok":true}""", it.ask("""{"verb":"hydration.unlink","path":"/a"}"""))
+            }
+        try {
+            now.addAndGet(120_000)
+            assertEquals(null, unauthenticated.line(), "closed for being idle")
+            assertEquals(null, reader.line(), "closed for being idle")
+            Thread.sleep(300)
+            assertEquals("""{"ok":true,"entries":[]}""", writer.ask("""{"verb":"hydration.list","prefix":"/"}"""), "the exempt connection stays")
+        } finally {
+            listOf(unauthenticated, reader, writer).forEach { runCatching { it.close() } }
+        }
+    }
+
+    @Test
     fun `every IpcServer the engine builds outside tests authenticates its connections`() {
         // auth = null exists for the unit tests of the bare server only; `daemon run` and `sync` must
         // never serve without the handshake. The tests run in this module's folder: ../ is core/app.
