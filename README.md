@@ -1,6 +1,6 @@
 # `unidrive`
 
-Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Internxt Drive (zero-knowledge E2EE) and Microsoft OneDrive (Graph API). Runs as a user-space Linux daemon via systemd; platform tiers consume the engine over IPC — [`unidrive-mount-linux`](https://github.com/gkrost/unidrive-mount-linux) (FUSE) and [`unidrive-windows`](https://github.com/gkrost/unidrive-windows) (CfAPI; new and changed files upload from the mount since unidrive-windows#86, rename and delete in progress in unidrive-windows#87).
+Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Internxt Drive (zero-knowledge E2EE) and Microsoft OneDrive (Graph API). Runs as a user-space Linux daemon via systemd; platform tiers consume the engine over IPC — [`unidrive-mount-linux`](https://github.com/gkrost/unidrive-mount-linux) (FUSE) and [`unidrive-windows`](https://github.com/gkrost/unidrive-windows) (CfAPI; new, changed, renamed and deleted files sync from the mount — unidrive-windows#86, then unidrive-windows#87).
 
 ## Technical Layout
 
@@ -121,3 +121,4 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 - `SyncEngine.kt` — the sync engine behind `sync` and the daemon
 - `TrackingEngine.kt` — the frozen tracking-set engine, reachable only as `unidrive ts ...`
 - `HydrationImpl.kt` — physical payload de/reconstruction lifecycle
+- `MountEngine.kt` — mount operations (cache, hydration verbs, mirror hand-off) since the engine split
