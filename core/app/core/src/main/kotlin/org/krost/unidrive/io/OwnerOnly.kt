@@ -5,9 +5,12 @@ import java.lang.foreign.FunctionDescriptor
 import java.lang.foreign.Linker
 import java.lang.foreign.ValueLayout
 import java.nio.file.FileSystems
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
 
@@ -19,7 +22,8 @@ import java.nio.file.attribute.PosixFilePermission
  * - Windows: a protected DACL (nothing inherited from the parent) granting full control to the
  *   current user, SYSTEM and Administrators only. On a folder the entries are object- and
  *   container-inheritable, so what is created in it later gets exactly that set, and Windows
- *   re-derives the inherited entries of what is already in it.
+ *   re-derives inherited entries. Existing descendants are also restricted explicitly, since a
+ *   parent's DACL does not remove an explicit grant or a protected DACL on a child.
  *
  * Both are idempotent: a path that already has these permissions is left as it is
  * ([Outcome.Unchanged]), so callers can apply them at every start to folders an earlier version
@@ -174,6 +178,34 @@ public object OwnerOnly {
     }
 
     private fun restrictWindows(
+        path: Path,
+        directory: Boolean,
+    ): Outcome {
+        var changed = false
+        fun restrictEntry(entry: Path, attrs: BasicFileAttributes) {
+            if (attrs.isSymbolicLink || attrs.isOther) throw IOException("Refusing to restrict a link or junction: $entry")
+            val outcome = restrictWindowsPath(entry, attrs.isDirectory)
+            requireRestricted(entry, outcome)
+            if (outcome == Outcome.Changed) changed = true
+        }
+        restrictEntry(path, Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS))
+        if (directory) {
+            Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (dir != path) restrictEntry(dir, attrs)
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    restrictEntry(file, attrs)
+                    return FileVisitResult.CONTINUE
+                }
+            })
+        }
+        return if (changed) Outcome.Changed else Outcome.Unchanged
+    }
+
+    private fun restrictWindowsPath(
         path: Path,
         directory: Boolean,
     ): Outcome {

@@ -34,6 +34,12 @@ internal object WindowsAclProbe {
         sid: String,
     ) = run("icacls", dir.toString(), "/grant", "*$sid:(OI)(CI)RX")
 
+    fun grantRead(file: Path, sid: String) = run("icacls", file.toString(), "/grant", "*$sid:R")
+
+    fun protectInheritance(path: Path) = run("icacls", path.toString(), "/inheritance:d")
+
+    fun junction(link: Path, target: Path) = run("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
+
     /** The SID of the user running the tests, as `whoami` reports it. */
     val userSid: String by lazy {
         Regex("S-1-[0-9-]+").find(run("whoami", "/user", "/fo", "csv", "/nh"))?.value

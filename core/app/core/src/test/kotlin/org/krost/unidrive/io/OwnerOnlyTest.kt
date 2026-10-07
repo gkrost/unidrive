@@ -140,6 +140,46 @@ class OwnerOnlyTest {
     }
 
     @Test
+    fun `a directory already owner-only still tightens explicit and protected child grants`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("explicit-children"))
+        OwnerOnly.requireDirectory(dir)
+        val file = Files.writeString(dir.resolve("state.db"), "x")
+        WindowsAclProbe.grantRead(file, WindowsAclProbe.USERS_SID)
+        val sub = Files.createDirectory(dir.resolve("protected"))
+        WindowsAclProbe.protectInheritance(sub)
+        WindowsAclProbe.grantInheritableRead(sub, WindowsAclProbe.USERS_SID)
+        val nested = Files.writeString(sub.resolve("cache.txt"), "y")
+        assertTrue(";BU)" in WindowsAclProbe.dacl(file), "precondition: explicit read grant")
+        assertTrue(";BU)" in WindowsAclProbe.dacl(nested), "precondition: protected parent retains extra grant")
+
+        assertEquals(OwnerOnly.Outcome.Changed, OwnerOnly.restrictDirectory(dir))
+
+        assertOwnerOnlyDirectory(dir)
+        assertOwnerOnlyDirectory(sub)
+        assertInheritsOwnerOnly(file)
+        assertInheritsOwnerOnly(nested)
+        assertEquals(OwnerOnly.Outcome.Unchanged, OwnerOnly.restrictDirectory(dir))
+    }
+
+    @Test
+    fun `restricting a directory never changes the ACL of a junction target`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("with-junction"))
+        val outside = Files.createDirectory(parent.resolve("outside"))
+        WindowsAclProbe.grantInheritableRead(outside, WindowsAclProbe.USERS_SID)
+        val before = WindowsAclProbe.dacl(outside)
+        val link = dir.resolve("linked")
+        WindowsAclProbe.junction(link, outside)
+        try {
+            assertTrue(OwnerOnly.restrictDirectory(dir) is OwnerOnly.Outcome.Failed)
+            assertEquals(before, WindowsAclProbe.dacl(outside), "the target lies outside the restricted tree")
+        } finally {
+            Files.delete(link)
+        }
+    }
+
+    @Test
     fun `what is created later in a restricted folder gets the owner-only entries only`() {
         assumeWindows()
         val dir = childWithInheritedExtraGrant("later")
