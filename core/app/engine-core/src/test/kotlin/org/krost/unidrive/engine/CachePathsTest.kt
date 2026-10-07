@@ -102,8 +102,11 @@ class CachePathsTest {
         assertFalse(CachePaths.isInside(dir, fileLink), "a file link")
         assertFalse(CachePaths.isInside(dir, dirLink.resolve("b.txt")), "a file below a folder link")
         assertFalse(CachePaths.isInside(dir, dirLink.resolve("new.txt")), "a new file below a folder link")
-        assertFalse(CachePaths.isInside(dir, dirLink.resolve("..").resolve("elsewhere.txt")), "dot-dot after a link resolves outside")
-        assertFalse(CachePaths.isInside(dir, dirLink.resolve("..").resolve("missing.txt")), "a new file after dot-dot outside")
+        // Windows normalizes dot-dot before following a link; Unix follows the link first.
+        if (java.io.File.separatorChar != '\\') {
+            assertFalse(CachePaths.isInside(dir, dirLink.resolve("..").resolve("elsewhere.txt")), "dot-dot after a link resolves outside")
+            assertFalse(CachePaths.isInside(dir, dirLink.resolve("..").resolve("missing.txt")), "a new file after dot-dot outside")
+        }
         for (logical in listOf("/link.txt", "/linked/b.txt", "/linked/new.txt")) {
             assertFailsWith<SecurityException>(logical) { CachePaths.resolveInside(dir, logical) }
         }
