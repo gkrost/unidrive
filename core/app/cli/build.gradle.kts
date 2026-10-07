@@ -136,9 +136,9 @@ val generateBuildInfo =
                 .map { it.trim().isNotEmpty() }
         // Per docs/dev/specs/unidrive-distribution-design.md §3.5,
         // tagged-release builds print the bare semver (e.g. "0.0.1")
-        // with no commit suffix. Non-tag (dev) builds keep the existing
-        // "(commit)" / "(commit-dirty)" enrichment for bug-report
-        // tractability.
+        // with no commit suffix. Non-tag (dev) builds carry the commit id
+        // as semver build metadata (`+<commit>[.dirty]`, #574) for
+        // bug-report tractability.
         val gitTagAtHead =
             providers
                 .exec {
@@ -169,11 +169,17 @@ val generateBuildInfo =
                 } catch (_: Exception) {
                     false
                 }
+            // #574 (owner decision): Kubernetes style — the release version plus the git commit id as
+            // semver build metadata: `<major>.<minor>.<patch>+<commit>`. Clients order on the release
+            // part (the project version, bumped per release) and use the commit id only to identify the
+            // build. A dirty build says so in the metadata (`+<commit>.dirty`); a tagged release keeps
+            // the bare semver of distribution-design §3.5 (no metadata, nothing to identify — the tag
+            // names the build).
             val versionString =
                 when {
                     taggedRelease -> version
-                    dirty -> "$version ($commit-dirty)"
-                    else -> "$version ($commit)"
+                    dirty -> "$version+$commit.dirty"
+                    else -> "$version+$commit"
                 }
             val dir = outputDir.get().asFile.resolve("org/krost/unidrive/cli")
             dir.mkdirs()
@@ -186,6 +192,8 @@ val generateBuildInfo =
             |    const val COMMIT = "$commit"
             |    const val DIRTY = $dirty
             |    const val BUILD_INSTANT = "$buildInstant"
+            |    /** #574: dev builds carry the commit id as semver build metadata (`VERSION+COMMIT[.dirty]`);
+            |      * clients order on the release part (VERSION) and use the commit id to identify the build. */
             |    fun versionString(): String = "$versionString"
             |}
                 """.trimMargin() + "\n",
