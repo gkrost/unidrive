@@ -106,8 +106,9 @@ class IpcDispatcherIsolationTest {
                 // Dispatchers.IO), while transport writes run on the dedicated 4-thread pool,
                 // so handler saturation cannot block transport writes. Without the fix, everything
                 // runs on Dispatchers.IO; whether the test fails depends on the IO pool size.
-                // N=8 chosen to stay under MAX_CLIENTS=10 (8 slow + 1 fast = 9 total), leaving
-                // room for the accept loop and other overhead.
+                // N=8 chosen to stay under the connection cap (8 slow + 1 fast = 9 total; the
+                // cap was 10 when this was written, 32 by default now), leaving room for the
+                // accept loop and other overhead.
                 val slowClients = (1..8).map { connectClient() }
                 for (c in slowClients) sendVerb(c, "slow")
 

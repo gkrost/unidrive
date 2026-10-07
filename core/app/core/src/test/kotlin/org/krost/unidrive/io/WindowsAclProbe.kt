@@ -38,6 +38,12 @@ internal object WindowsAclProbe {
 
     fun protectInheritance(path: Path) = run("icacls", path.toString(), "/inheritance:d")
 
+    /** Denies the owner (OWNER RIGHTS, S-1-3-4) reading the permissions of [file]; deleting it through the folder still works.
+     *  Only an OWNER RIGHTS ACE can take the owner's implicit READ_CONTROL away — a deny to Everyone or another
+     *  group cannot — and even this one does not bind every token (an elevated Administrators token in some
+     *  configurations still reads the DACL). Callers probe the effect and skip where it does not hold. */
+    fun denyOwnerReadControl(file: Path) = run("icacls", file.toString(), "/deny", "*S-1-3-4:(RC)")
+
     fun junction(link: Path, target: Path) = run("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
 
     /** The SID of the user running the tests, as `whoami` reports it. */

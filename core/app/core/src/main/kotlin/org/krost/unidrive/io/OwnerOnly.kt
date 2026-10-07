@@ -8,6 +8,7 @@ import java.nio.file.FileSystems
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
@@ -23,7 +24,8 @@ import java.nio.file.attribute.PosixFilePermission
  *   current user, SYSTEM and Administrators only. On a folder the entries are object- and
  *   container-inheritable, so what is created in it later gets exactly that set, and Windows
  *   re-derives inherited entries. Existing descendants are also restricted explicitly, since a
- *   parent's DACL does not remove an explicit grant or a protected DACL on a child.
+ *   parent's DACL does not remove an explicit grant or a protected DACL on a child. A descendant
+ *   that is removed while the folder is walked is skipped; the folder itself must remain.
  *
  * Both are idempotent: a path that already has these permissions is left as it is
  * ([Outcome.Unchanged]), so callers can apply them at every start to folders an earlier version
@@ -56,6 +58,16 @@ public object OwnerOnly {
     private val ownerFile = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
 
     public fun restrictDirectory(dir: Path): Outcome = restrict(dir, directory = true)
+
+    /**
+     * [restrictDirectory] with a test seam: [beforeEntry] runs for each entry below [dir] after the
+     * walk has listed it and before its permissions are read or set (Windows only; the POSIX
+     * variant does not walk the folder).
+     */
+    internal fun restrictDirectory(
+        dir: Path,
+        beforeEntry: (Path) -> Unit,
+    ): Outcome = restrict(dir, directory = true, beforeEntry)
 
     public fun restrictFile(file: Path): Outcome = restrict(file, directory = false)
 
@@ -149,9 +161,10 @@ public object OwnerOnly {
     private fun restrict(
         path: Path,
         directory: Boolean,
+        beforeEntry: (Path) -> Unit = {},
     ): Outcome =
         try {
-            if (isWindows(path)) restrictWindows(path, directory) else restrictPosix(path, directory)
+            if (isWindows(path)) restrictWindows(path, directory, beforeEntry) else restrictPosix(path, directory)
         } catch (e: Exception) {
             Outcome.Failed(e.message ?: e.javaClass.name)
         } catch (e: LinkageError) {
@@ -180,6 +193,7 @@ public object OwnerOnly {
     private fun restrictWindows(
         path: Path,
         directory: Boolean,
+        beforeEntry: (Path) -> Unit,
     ): Outcome {
         var changed = false
         fun restrictEntry(entry: Path, attrs: BasicFileAttributes) {
@@ -190,18 +204,43 @@ public object OwnerOnly {
             requireRestricted(entry, outcome)
             if (outcome == Outcome.Changed) changed = true
         }
+        // Another process may remove an entry between the listing and the call on it (the IPC folder is
+        // shared by the daemons of all profiles, #630). Such an entry is done; any other error still fails,
+        // and so does a removal of the folder itself.
+        fun removedMeanwhile(entry: Path, e: IOException): Boolean =
+            e is NoSuchFileException && entry != path && Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+
         restrictEntry(path, Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS))
         if (directory) {
             Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (dir != path) restrictEntry(dir, attrs)
+                    if (dir == path) return FileVisitResult.CONTINUE
+                    try {
+                        beforeEntry(dir)
+                        restrictEntry(dir, attrs)
+                    } catch (e: NoSuchFileException) {
+                        if (removedMeanwhile(dir, e)) return FileVisitResult.SKIP_SUBTREE
+                        throw e
+                    }
                     return FileVisitResult.CONTINUE
                 }
 
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    restrictEntry(file, attrs)
+                    try {
+                        beforeEntry(file)
+                        restrictEntry(file, attrs)
+                    } catch (e: NoSuchFileException) {
+                        if (!removedMeanwhile(file, e)) throw e
+                    }
                     return FileVisitResult.CONTINUE
                 }
+
+                // A folder that is gone by the time the walk opens or reads it.
+                override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult =
+                    if (removedMeanwhile(file, exc)) FileVisitResult.CONTINUE else throw exc
+
+                override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult =
+                    if (exc == null || removedMeanwhile(dir, exc)) FileVisitResult.CONTINUE else throw exc
             })
         }
         return if (changed) Outcome.Changed else Outcome.Unchanged

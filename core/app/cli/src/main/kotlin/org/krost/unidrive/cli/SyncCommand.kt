@@ -562,6 +562,8 @@ open class SyncCommand : Runnable {
                 ipcServer.registerConnectionCloseListener { connId ->
                     hydration.onConnectionClosed(connId)
                 }
+                // As in DaemonRuntime: a mount client's connections are never closed for being idle.
+                ipcServer.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
                 // Fan hydration events out only to connections that ran hydration.subscribe,
                 // with a bounded queue + drop-oldest+sentinel backpressure per subscriber.
                 hydrationIpc.start(this, ipcServer::writeToConnection)

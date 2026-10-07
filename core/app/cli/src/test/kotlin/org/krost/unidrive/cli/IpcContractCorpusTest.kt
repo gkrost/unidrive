@@ -58,6 +58,10 @@ import kotlin.test.assertTrue
  * The daemon authenticates every connection first (docs/dev/specs/ipc-authentication.md); the
  * handshake itself and its refusal shapes are pinned by the session transcripts under
  * `ipc-contract/auth/` (one connection per file, request/reply pairs in order).
+ * Lines the daemon writes on a connection without a request (no verb) live
+ * in `ipc-contract/connection/<error token>.ndjson`, one line each: today
+ * only `too_many_clients`, the line a connection over the cap reads before
+ * the daemon closes it.
  *
  * Comparison is parse-and-compare (key-order-insensitive), never strcmp.
  * A small set of VOLATILE_FIELDS carry machine- or run-dependent values
@@ -214,10 +218,67 @@ class IpcContractCorpusTest {
                 serveJob.cancel()
                 runCatching { dir.toFile().deleteRecursively() }
             }
+    @Test
+    fun connection_refusal_matches_corpus_over_live_socket() = runBlocking {
+        val expected = loadConnectionLine("too_many_clients")
+        val tempDir = Files.createTempDirectory("ipc-contract-refusal-test")
+        val socketPath = tempDir.resolve("daemon.sock")
+        val runtime = DaemonRuntime(
+            profileName = "contract_profile",
+            lockFile = tempDir.resolve(".lock"),
+            dbPath = tempDir.resolve("state.db"),
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+        val daemonJob = launch { runtime.start() }
+        val held = mutableListOf<SocketChannel>()
+        try {
+            repeat(50) {
+                if (Files.exists(socketPath)) return@repeat
+                delay(50)
+            }
+            assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+
+            // Each connection is confirmed by a daemon.status reply before the next one opens,
+            // so the daemon has counted it; the first connection past the cap reads the refusal
+            // line instead of the reply.
+            var refusal: String? = null
+            for (attempt in 1..64) {
+                val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+                held += channel
+                channel.configureBlocking(false)
+                channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
+                val line = readFirstLine(channel, timeoutMs = 5_000)
+                val error = (Json.parseToJsonElement(line) as JsonObject)["error"]
+                if ((error as? JsonPrimitive)?.content == "too_many_clients") {
+                    refusal = line
+                    break
+                }
+            }
+            assertJsonMatches(
+                expected = Json.parseToJsonElement(expected),
+                actual = Json.parseToJsonElement(checkNotNull(refusal) { "no connection was refused" }),
+                at = "too_many_clients line",
+            )
+        } finally {
+            held.forEach { runCatching { it.close() } }
+            runtime.close()
+            daemonJob.join()
+            runCatching { tempDir.toFile().deleteRecursively() }
         }
     }
 
     // ── corpus loading ───────────────────────────────────────────────────────
+
+    private fun loadConnectionLine(token: String): String {
+        val stream = checkNotNull(javaClass.getResourceAsStream("/ipc-contract/connection/$token.ndjson")) {
+            "missing connection-level corpus fixture '$token'"
+        }
+        val lines = stream.bufferedReader().readLines().filter { it.isNotBlank() }
+        check(lines.size == 1) { "connection/$token.ndjson must hold exactly one line, got ${lines.size}" }
+        return lines.single()
+    }
 
     private fun loadPairs(verb: String): List<Pair<String, String>> {
         val stream = checkNotNull(javaClass.getResourceAsStream("/ipc-contract/$verb.ndjson")) {

@@ -222,6 +222,9 @@ class DaemonRuntime(
                 server.registerConnectionCloseListener { connId ->
                     hydration.onConnectionClosed(connId)
                 }
+                // A mount client's connections are never closed for being idle: its open handles and
+                // its event subscription live on them, and refresh.run routing counts them.
+                server.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
                 hydrationIpc.start(serveScope, server::writeToConnection)
                 server.registerConnectionCloseListener { connId ->
                     hydrationIpc.onSubscriberDisconnect(connId)
