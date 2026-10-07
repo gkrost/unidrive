@@ -19,7 +19,10 @@ interface Hydration {
 
     /**
      * Register a write handle for [path] and start a background upload of
-     * [cachePath] (see [HydrationImpl.openForWrite]). [baseEtag] is the
+     * [cachePath] (see [HydrationImpl.openForWrite]). [cachePath] must lie
+     * inside the profile's hydration cache folder (the path the open and
+     * create verbs hand out); anything else is refused with
+     * [HydrationError.InvalidPath] before any state changes. [baseEtag] is the
      * optimistic-concurrency token the client observed via `hydration.list`
      * (`etag` field) when it last read the file; when it no longer matches the
      * row's token the write is refused with [HydrationError.Conflict] BEFORE

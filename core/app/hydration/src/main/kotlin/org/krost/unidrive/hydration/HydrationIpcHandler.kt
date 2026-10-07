@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import org.krost.unidrive.sync.PathNormalizer
+import java.nio.file.InvalidPathException
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -26,6 +27,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         An excluded path (exclude_patterns match) answers
  *                         {"ok":true,"cache_path":"...","excluded":true} and emits a
  *                         `skipped` event instead of running an upload.
+ *                         cache_path must lie inside the profile's hydration cache
+ *                         folder (the path create / open_write_begin / open_read hand
+ *                         out, in any spelling); otherwise {"ok":false,"error":"invalid_path"},
+ *                         before anything is changed or queued.
  *   close_handle request: {"verb":"hydration.close_handle","handle_id":"..."}
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
@@ -269,10 +274,17 @@ class HydrationIpcHandler(
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
+                // A local path; Hydration accepts it only inside the profile's hydration cache folder.
+                val cachePath =
+                    try {
+                        Paths.get(cache)
+                    } catch (_: InvalidPathException) {
+                        return reply(ok = false, error = HydrationError.INVALID_PATH_TOKEN)
+                    }
                 // base_etag is OPTIONAL: absent (or a row with no recorded token) →
                 // unconditional upload, byte-identical to the pre-guard contract.
                 val baseEtag = pluck(jsonRequest, "base_etag")
-                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
+                when (val r = hydration.openForWrite(connectionId, handleId, path, cachePath, baseEtag)) {
                     is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }

@@ -229,7 +229,8 @@ class IpcContractCorpusTest {
      * the it's-a-folder family, `/docs/open.txt` → busy, `/docs/nonempty` →
      * not_empty, `/docs/report.txt` → an existing file, `/outside...` →
      * outside_scope (sync_path guard), `/excluded/...` → accepted with
-     * excluded:true (keep-local rule).
+     * excluded:true (keep-local rule), an open_write cache path outside
+     * `/cache/unidrive/hydration` → invalid_path.
      */
     private class ScriptedHydration : Hydration {
         override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult =
@@ -238,6 +239,8 @@ class IpcContractCorpusTest {
 
         override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path, baseEtag: String?): OpenResult =
             when {
+                // A cache path outside the profile's hydration cache folder is refused before anything else.
+                !cachePath.startsWith(cacheDir) -> OpenResult.Failed(HydrationError.InvalidPath)
                 path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
                 // A stale base_etag refuses the write before any upload runs.
                 path == "/docs/report.txt" && baseEtag == "stale-etag" -> OpenResult.Failed(HydrationError.Conflict)
@@ -352,6 +355,8 @@ class IpcContractCorpusTest {
         override fun onConnectionClosed(connectionId: String) {}
 
         private fun cachePathFor(path: String): Path = Paths.get("/cache/unidrive/hydration$path")
+
+        private val cacheDir: Path = Paths.get("/cache/unidrive/hydration")
     }
 
     /**

@@ -276,6 +276,17 @@ class HydrationImpl(
     ): OpenResult {
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+        // The client hands the cache path back. Only a file inside the profile's cache folder is uploaded: the path
+        // create / open_write_begin / open_read handed out, or another spelling of a file there (compared on real
+        // paths, so a link cannot lead out). Anything else is refused before any state is touched or upload queued.
+        if (!isInsideCacheFolder(mount.hydrationCacheDir(), cachePath)) {
+            log.warn(
+                "open_write of '{}' refused: its cache path '{}' is not inside the profile's hydration cache",
+                forLogLine(path),
+                forLogLine(cachePath.toString()),
+            )
+            return OpenResult.Failed(HydrationError.InvalidPath)
+        }
         touch(path)
 
         // Excluded paths (exclude_patterns) are keep-local: the write is

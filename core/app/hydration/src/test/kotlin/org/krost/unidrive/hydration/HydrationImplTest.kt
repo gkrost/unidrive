@@ -317,8 +317,11 @@ internal class HydrationTestEnv(
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
     private val fakeProvider = MinimalFakeProvider(id = providerId)
 
-    /** Staging area for cache files written by write-path tests. */
-    val tempDir: Path = Files.createTempDirectory("unidrive-hydration-tmp")
+    /**
+     * Staging area for cache files written by write-path tests: a folder inside the profile's
+     * hydration cache folder, the only place open_write accepts a client's cache path from.
+     */
+    val tempDir: Path
 
     val stateDb: StateDatabaseFacade
     val syncEngine: SyncEngineFacade
@@ -341,6 +344,7 @@ internal class HydrationTestEnv(
             excludePatterns = excludePatterns,
         )
 
+        tempDir = Files.createDirectories(engine.resolveCachePath("/.test-staging"))
         stateDb = StateDatabaseFacade(db)
         syncEngine = SyncEngineFacade(fakeProvider, engine)
         hydration = HydrationImpl(
