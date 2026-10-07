@@ -265,8 +265,8 @@ class DaemonRuntime(
 
                 // refresh.run verb (spec §4.2). Pass serveScope so refresh
                 // jobs are cancelled when the daemon shuts down. Pass db so
-                // the F9 `reset` parameter can call db.resetAll() before
-                // re-enumeration.
+                // the F9 `reset` parameter can clear it (keeping the rows that
+                // still await upload) before re-enumeration.
                 // Route refresh to the one-way enumerate path when a mount client (the FUSE
                 // co-daemon) is serving this profile's view — that profile's sync_root is
                 // empty/unset, so the legacy reconcile would (correctly) abort on the deletion
@@ -280,6 +280,8 @@ class DaemonRuntime(
                         db!!,
                         serveScope,
                         mountClientConnected = { hydrationIpc.hasActiveMountConnection() },
+                        // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
+                        uploadInFlight = { path -> hydration.hasUploadSlot(path) },
                     )
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)

@@ -155,6 +155,66 @@ class StateDatabase(
     }
 
     /**
+     * [resetAll] for a profile whose mount may hold writes that have not reached the cloud: the rows that
+     * still await upload stay, and everything else (the other rows, the tombstones, `sync_state`) is cleared
+     * exactly as [resetAll] clears it, in one transaction: a failure leaves rows and `sync_state` as they were.
+     *
+     * A row awaits upload when [pendingUploadPaths] names it. A file row is also kept when [alsoKeep] says so;
+     * it is asked about every other alive FILE row (never a folder, never a row that is kept already), so the
+     * caller can name the rows whose local copy holds an edit the cloud has not seen (an upload under way, a
+     * hydration-cache copy newer than the row's watermark: `RemoteEnumeration.ReapGuards.holdsUnsyncedEdit`).
+     * It runs inside the transaction with the database locked, once per such row (every file row of a large
+     * drive: hundreds of thousands), so it must be cheap for most rows; if it throws, nothing is cleared.
+     *
+     * Returns the number of rows kept.
+     */
+    @Synchronized
+    fun resetKeepingPending(alsoKeep: (SyncEntry) -> Boolean = { false }): Int =
+        batch {
+            val keep = LinkedHashSet<String>()
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT remote_id FROM sync_entries WHERE $PENDING_UPLOAD_ROWS").use { rs ->
+                    while (rs.next()) keep += rs.getString(1)
+                }
+                stmt.executeQuery("SELECT * FROM alive_entries WHERE is_folder=0").use { rs ->
+                    while (rs.next()) {
+                        if (rs.getString("remote_id") in keep) continue
+                        val candidate = rs.toSyncEntry()
+                        if (alsoKeep(candidate)) keep += rs.getString("remote_id")
+                    }
+                }
+            }
+            if (keep.isEmpty()) {
+                conn.createStatement().use { it.executeUpdate("DELETE FROM sync_entries") }
+            } else {
+                // A temporary table, not an IN list: the number of rows to keep is not bounded by the number of
+                // parameters one statement binds. It lives on this connection and in this transaction.
+                conn.createStatement().use { stmt ->
+                    stmt.executeUpdate("CREATE TEMP TABLE IF NOT EXISTS reset_keep (remote_id TEXT PRIMARY KEY)")
+                    stmt.executeUpdate("DELETE FROM reset_keep")
+                }
+                conn.prepareStatement("INSERT INTO reset_keep (remote_id) VALUES (?)").use { insert ->
+                    for (id in keep) {
+                        insert.setString(1, id)
+                        insert.addBatch()
+                    }
+                    insert.executeBatch()
+                }
+                conn.createStatement().use { stmt ->
+                    stmt.executeUpdate(
+                        "DELETE FROM sync_entries WHERE NOT EXISTS " +
+                            "(SELECT 1 FROM reset_keep k WHERE k.remote_id = sync_entries.remote_id)",
+                    )
+                    stmt.executeUpdate("DROP TABLE reset_keep")
+                }
+            }
+            // sync_state holds the schema stamp too: restamp in the same transaction (see resetAll, #411).
+            conn.createStatement().use { it.executeUpdate("DELETE FROM sync_state") }
+            stampSchemaVersion()
+            keep.size
+        }
+
+    /**
      * Three bootstrap cases (acceptance criterion: upgrade path):
      * 1. `sync_state` missing entirely → fresh install. Create everything
      *    from the new schema and stamp `schema_version`.
@@ -1103,13 +1163,7 @@ class StateDatabase(
     fun pendingUploadPaths(): List<String> {
         val out = mutableListOf<String>()
         conn.createStatement().use { stmt ->
-            val rs = stmt.executeQuery(
-                // GLOB, not LIKE (#552): it is case-sensitive like the `startsWith("local:")` the rest of the code
-                // uses for the synthetic, and it can walk the remote_id index from 'local:' on instead of every row.
-                "SELECT path FROM sync_entries WHERE status='EXISTS' " +
-                    "AND remote_id GLOB 'local:*' AND is_folder=0 AND is_hydrated<>0 " +
-                    "ORDER BY path",
-            )
+            val rs = stmt.executeQuery("SELECT path FROM sync_entries WHERE $PENDING_UPLOAD_ROWS ORDER BY path")
             while (rs.next()) out += rs.getString(1)
         }
         return out
@@ -1629,6 +1683,14 @@ class StateDatabase(
         private val log = LoggerFactory.getLogger(StateDatabase::class.java)
 
         private const val SNAPSHOT_DIR_PREFIX = "unidrive-dryrun-"
+
+        /**
+         * The WHERE clause that selects the alive file rows awaiting upload; [pendingUploadPaths] and
+         * [resetKeepingPending] share it. GLOB, not LIKE (#552): it is case-sensitive like the
+         * `startsWith("local:")` the rest of the code uses for the synthetic, and it can walk the remote_id index
+         * from 'local:' on instead of every row.
+         */
+        private const val PENDING_UPLOAD_ROWS = "status='EXISTS' AND remote_id GLOB 'local:*' AND is_folder=0 AND is_hydrated<>0"
 
         /** `path` starts with the bound prefix, exactly (see [bindPrefix]): two parameters, both the prefix. */
         private const val UNDER_PREFIX = "substr(path, 1, length(?)) = ?"

@@ -23,10 +23,14 @@ class RecordingEngine(
     @Volatile var enumerateResult: EnumerateResult = EnumerateResult(ok = true),
     private val gate: CompletableDeferred<Unit>? = null,
     private val enumerateFailure: Throwable? = null,
+    // The hydration cache stays inside the temp directory: resolveCachePath is public and the
+    // refresh reset asks it about every row it might keep.
+    cacheRoot: Path = Files.createTempDirectory("ud-recording-cache"),
 ) : SyncEngine(
         provider = NoopProvider,
         db = freshDb(),
         syncRoot = Files.createTempDirectory("ud-recording-root"),
+        cacheRoot = cacheRoot,
     ) {
     @Volatile var enumerateCalled = false
     @Volatile var syncOnceCalled = false
