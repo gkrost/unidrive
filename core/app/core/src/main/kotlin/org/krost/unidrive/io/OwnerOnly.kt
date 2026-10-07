@@ -183,7 +183,9 @@ public object OwnerOnly {
     ): Outcome {
         var changed = false
         fun restrictEntry(entry: Path, attrs: BasicFileAttributes) {
-            if (attrs.isSymbolicLink || attrs.isOther) throw IOException("Refusing to restrict a link or junction: $entry")
+            if (attrs.isSymbolicLink || (attrs.isOther && !WindowsSecurity.isUnixSocket(entry))) {
+                throw IOException("Refusing to restrict a link or junction: $entry")
+            }
             val outcome = restrictWindowsPath(entry, attrs.isDirectory)
             requireRestricted(entry, outcome)
             if (outcome == Outcome.Changed) changed = true

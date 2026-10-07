@@ -24,6 +24,10 @@ import java.nio.file.Path
 internal object WindowsSecurity {
     const val ADMINISTRATORS_SID = "S-1-5-32-544"
 
+    private const val FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    private const val IO_REPARSE_TAG_AF_UNIX = 0x80000023.toInt()
+    private const val WIN32_FIND_DATA_SIZE = 592L
+    private const val REPARSE_TAG_OFFSET = 36L
     private const val SE_FILE_OBJECT = 1
     private const val OWNER_SECURITY_INFORMATION = 0x1
     private const val DACL_SECURITY_INFORMATION = 0x4
@@ -60,6 +64,14 @@ internal object WindowsSecurity {
         descriptor: FunctionDescriptor,
     ): MethodHandle = linker.downcallHandle(lib.find(name).orElseThrow { IOException("$name not found") }, descriptor)
 
+    private val findFirstFile by lazy {
+        linker.downcallHandle(
+            kernel32.find("FindFirstFileW").orElseThrow { IOException("FindFirstFileW not found") },
+            FunctionDescriptor.of(PTR, PTR, PTR),
+            Linker.Option.captureCallState("GetLastError"),
+        )
+    }
+    private val findClose by lazy { plain(kernel32, "FindClose", FunctionDescriptor.of(INT, PTR)) }
     private val getCurrentProcess by lazy { plain(kernel32, "GetCurrentProcess", FunctionDescriptor.of(PTR)) }
     private val closeHandle by lazy { plain(kernel32, "CloseHandle", FunctionDescriptor.of(INT, PTR)) }
     private val localFree by lazy { plain(kernel32, "LocalFree", FunctionDescriptor.of(PTR, PTR)) }
@@ -95,6 +107,21 @@ internal object WindowsSecurity {
 
     /** True when this process's token is a member of Administrators (elevated; CheckTokenMembership semantics). */
     val processIsAdministrator: Boolean by lazy { isAdministratorsMember() }
+
+    fun isUnixSocket(path: Path): Boolean =
+        Arena.ofConfined().use { arena ->
+            val state = arena.allocate(callState)
+            // WIN32_FIND_DATAW: DWORD attributes, three FILETIMEs, size fields, then dwReserved0.
+            val data = arena.allocate(WIN32_FIND_DATA_SIZE, 4)
+            val handle = findFirstFile.invoke(state, arena.wide(path.toAbsolutePath().toString()), data) as MemorySegment
+            if (handle.address() == -1L) throw IOException("FindFirstFileW($path) failed with error ${lastError(state)}")
+            try {
+                data.get(INT, 0) and FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
+                    data.get(INT, REPARSE_TAG_OFFSET) == IO_REPARSE_TAG_AF_UNIX
+            } finally {
+                findClose.invoke(handle)
+            }
+        }
 
     fun read(path: Path): Security =
         Arena.ofConfined().use { arena ->

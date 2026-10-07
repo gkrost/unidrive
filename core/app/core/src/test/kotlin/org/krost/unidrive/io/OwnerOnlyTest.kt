@@ -2,6 +2,10 @@ package org.krost.unidrive.io
 
 import org.junit.Assume.assumeTrue
 import java.io.IOException
+import java.net.StandardProtocolFamily
+import java.net.UnixDomainSocketAddress
+import java.nio.channels.ServerSocketChannel
+import java.nio.channels.SocketChannel
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -26,6 +30,28 @@ class OwnerOnlyTest {
     @AfterTest
     fun tearDown() {
         parent.toFile().deleteRecursively()
+    }
+
+    @Test
+    fun `a Windows Unix socket is tightened without being mistaken for a junction`() {
+        assumeTrue("Windows ACLs only", WindowsAclProbe.isWindows)
+        val socket = parent.resolve("live.sock")
+        ServerSocketChannel.open(StandardProtocolFamily.UNIX).use { server ->
+            server.bind(UnixDomainSocketAddress.of(socket))
+            WindowsAclProbe.grantRead(socket, WindowsAclProbe.USERS_SID)
+            assertTrue(OwnerOnly.requireFile(socket).restricted)
+            assertEquals(
+                setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
+                WindowsAclProbe.aces(WindowsAclProbe.dacl(socket)).map { it.substringAfterLast(';') }.toSet(),
+            )
+            WindowsAclProbe.grantRead(socket, WindowsAclProbe.USERS_SID)
+            assertTrue(OwnerOnly.requireDirectory(parent).restricted)
+            assertEquals(
+                setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
+                WindowsAclProbe.aces(WindowsAclProbe.dacl(socket)).map { it.substringAfterLast(';') }.toSet(),
+            )
+            SocketChannel.open(UnixDomainSocketAddress.of(socket)).close()
+        }
     }
 
     // ── owner rule (pure) ───────────────────────────────────────────────────
