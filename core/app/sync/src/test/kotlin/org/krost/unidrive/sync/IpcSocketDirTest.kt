@@ -2,6 +2,10 @@ package org.krost.unidrive.sync
 
 import org.junit.Assume.assumeTrue
 import org.krost.unidrive.io.OwnerOnly
+import java.net.StandardProtocolFamily
+import java.net.UnixDomainSocketAddress
+import java.nio.channels.ServerSocketChannel
+import java.nio.channels.SocketChannel
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.FileSystems
 import java.nio.file.Files
@@ -21,9 +25,10 @@ class IpcSocketDirTest {
 
     @BeforeTest
     fun setUp() {
-        // Short prefix: the bound-socket test below nests one folder deeper, and an AF_UNIX path caps at
-        // about 107 characters — the previous prefix pushed that spelling over the limit.
-        tmp = Files.createTempDirectory("udipc-")
+        // Short prefix: the socket test below binds <temp>/uipcd-<up to 20 digits>/unidrive-ipc/s.sock, and the
+        // JDK binds an AF_UNIX path of at most 106 bytes on Windows, which leaves 59 bytes for the temp folder.
+        // ("udipc-" is taken: the Windows client's tests use and sweep %TEMP%/udipc-*.)
+        tmp = Files.createTempDirectory("uipcd-")
     }
 
     @AfterTest
@@ -178,15 +183,30 @@ class IpcSocketDirTest {
     // as an `isOther` entry; it names no other object and must be restricted (or left) in place, not
     // refused: a refusal here fails `defaultSocketPath` and with it the daemon start.
     @Test
-    fun `the Windows socket folder still opens with a bound socket inside it`() {
+    fun `the Windows socket folder still opens with a live or a stale socket inside it`() {
         assumeWindows()
         val dir = IpcSocketDir.ensureWindowsDir(tmp)
         val socketPath = dir.resolve("s.sock")
-        java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
-            server.bind(java.net.UnixDomainSocketAddress.of(socketPath))
-            assertTrue(Files.exists(socketPath), "precondition: socket file bound")
+        val pathBytes = socketPath.toString().toByteArray(Charsets.UTF_8).size
+        assertTrue(
+            pathBytes <= AF_UNIX_PATH_MAX_BYTES,
+            "the socket path is $pathBytes bytes, over the $AF_UNIX_PATH_MAX_BYTES the JDK binds on Windows; " +
+                "point TMP and TEMP at a shorter folder to run this test: $socketPath",
+        )
+        try {
+            ServerSocketChannel.open(StandardProtocolFamily.UNIX).use { server ->
+                server.bind(UnixDomainSocketAddress.of(socketPath))
+                assertTrue(Files.exists(socketPath), "precondition: socket file bound")
 
+                assertEquals(dir, IpcSocketDir.ensureWindowsDir(tmp))
+                // The socket is left usable: its owner can still connect.
+                SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).close()
+            }
+            // Closed without removing the file, as after a crash: the stale socket file stays behind.
+            assertTrue(Files.exists(socketPath), "precondition: stale socket file left")
             assertEquals(dir, IpcSocketDir.ensureWindowsDir(tmp))
+        } finally {
+            Files.deleteIfExists(socketPath)
         }
     }
 
@@ -200,5 +220,10 @@ class IpcSocketDirTest {
         // The name may be the hashed form: the temp path of a test is long.
         assertEquals(tmp.resolve("unidrive-ipc"), socket.parent)
         assertOwnerOnly(socket.parent)
+    }
+
+    private companion object {
+        // Longer paths fail to bind on Windows with "Unix domain path too long" (JDK 21 and 27).
+        const val AF_UNIX_PATH_MAX_BYTES = 106
     }
 }
