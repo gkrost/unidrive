@@ -1,0 +1,45 @@
+# Generated from dist/launcher/unidrive.ps1.tmpl by the Gradle deploy; edit the template, not this file.
+#
+# UD-270: PowerShell launcher, invoked by unidrive.cmd so CTRL-C from the user's shell exits cleanly
+# without cmd.exe's trailing "Terminate batch job?" prompt.
+#
+# Args go through a single-quoted array + splat so PowerShell 5.1's parser doesn't split tokens at `.`
+# (`-Dstdout.encoding=UTF-8` became `-Dstdout` + `.encoding=UTF-8` and Java crashed on the fragment).
+#
+# Force UTF-8 console output so Java's UTF-8 stdout renders correctly on a German Windows console
+# (CP850 would show box-drawing characters as mojibake).
+chcp 65001 > $null
+
+# Heap size: UNIDRIVE_XMX holds a bare size (e.g. 512m, 2g - no -Xmx prefix).
+$xmx = if ($env:UNIDRIVE_XMX) { '-Xmx' + $env:UNIDRIVE_XMX } else { '-Xmx2g' }
+
+# --locale=xx_YY (or UNIDRIVE_LOCALE) sets -Duser.language=xx -Duser.country=YY. The flag is consumed here and
+# never reaches the engine; the command line beats the environment.
+$locale = $env:UNIDRIVE_LOCALE
+$passArgs = @()
+foreach ($a in $args) {
+    if ($a -match '^--locale=(.*)$') { $locale = $Matches[1] } else { $passArgs += $a }
+}
+$localeArgs = @()
+if ($locale) {
+    if ($locale -match '^([A-Za-z]{2,3})(?:[_-]([A-Za-z]{2}))?$') {
+        $localeArgs += ('-Duser.language=' + $Matches[1].ToLowerInvariant())
+        if ($Matches[2]) { $localeArgs += ('-Duser.country=' + $Matches[2].ToUpperInvariant()) }
+    } else {
+        [Console]::Error.WriteLine("unidrive: --locale expects xx or xx_YY (for example de_LU), got '$locale'")
+        exit 2
+    }
+}
+
+# AF_UNIX socket temp dir: the JVM's default tracks java.io.tmpdir, which packaged Windows apps have seen
+# redirected or unwritable - pin it to the host's temp dir instead.
+$tmp = if ($env:TEMP) { $env:TEMP } elseif ($env:TMP) { $env:TMP } else { $null }
+
+$javaArgs = @($xmx)
+@STATIC_FLAGS_PS@
+$javaArgs += $localeArgs
+# Append, never concat with a possibly-null operand: it inserts an empty element when TEMP/TMP are unset.
+if ($tmp) { $javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + $tmp) }
+$javaArgs += @('-jar', '@JAR@')
+& java @javaArgs @passArgs
+exit $LASTEXITCODE
