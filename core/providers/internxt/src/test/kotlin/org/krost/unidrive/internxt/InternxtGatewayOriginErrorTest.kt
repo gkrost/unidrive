@@ -283,13 +283,15 @@ class InternxtGatewayOriginErrorTest {
             assertTrue(second.complete)
         }
 
-    // The walk: a folder whose content cannot be read because the gateway gave up on the origin is skipped like one that
-    // answered 503. The walk goes on, the folder's files are missing and the gather says it is incomplete.
+    // The walk: a folder whose combined content call the gateway or the origin cannot serve is re-listed
+    // through the paginated per-folder endpoints (#523). When those fail the same way, the folder is
+    // skipped like before: the walk goes on, the folder's files are missing, the gather is incomplete.
     @Test
-    fun `a 524 on one folder's content call is skipped like a 503 and the walk goes on`() =
+    fun `a 524 on one folder's content call falls back to the paged listing and is skipped when that fails too`() =
         runTest {
             for (status in listOf(503, 524)) {
                 val content = AtomicInteger(0)
+                val pagedFolders = AtomicInteger(0)
                 val (code, headers) = if (status == 524) answer(524, retryAfter = "120") else (HttpStatusCode.ServiceUnavailable to json)
                 val engine =
                     MockEngine { request ->
@@ -300,6 +302,11 @@ class InternxtGatewayOriginErrorTest {
                             isAccountWideListing(request.url.encodedPath) -> respond("{}", HttpStatusCode.ServiceUnavailable, json)
                             url.endsWith("/folders/content/other") -> {
                                 content.incrementAndGet()
+                                respond(errorBody(status), code, headers)
+                            }
+                            // the paged fallback fails the same way: the folders stream dies first, the files one never runs
+                            request.url.encodedPath.endsWith("/folders/content/other/folders") -> {
+                                pagedFolders.incrementAndGet()
                                 respond(errorBody(status), code, headers)
                             }
                             contentOf(url) != null -> respond(contentOf(url)!!, HttpStatusCode.OK, json)
@@ -315,7 +322,16 @@ class InternxtGatewayOriginErrorTest {
                     "status $status: everything but the folder that was skipped",
                 )
                 assertFalse(page.complete, "status $status: a skipped folder makes the gather incomplete")
-                assertEquals(if (status == 524) 1 else 3, content.get(), "status $status: attempts at the skipped folder")
+                assertEquals(
+                    if (status == 524) 1 else 3,
+                    content.get(),
+                    "status $status: attempts at the skipped folder's combined call",
+                )
+                assertEquals(
+                    if (status == 524) 1 else 3,
+                    pagedFolders.get(),
+                    "status $status: attempts at the paged fallback",
+                )
             }
         }
 
