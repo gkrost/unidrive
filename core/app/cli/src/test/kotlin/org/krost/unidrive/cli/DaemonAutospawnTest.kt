@@ -16,6 +16,29 @@ import kotlin.test.assertTrue
  */
 class DaemonAutospawnTest {
     @Test
+    fun `an authenticated daemon that never answers status is not ready`() =
+        kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val dir = Files.createTempDirectory("autospawn-silent")
+            val socket = dir.resolve("daemon.sock")
+            val auth = org.krost.unidrive.sync.IpcAuth.issue(dir, "p", "test")
+            val server = org.krost.unidrive.sync.IpcServer(socketPath = socket, auth = auth)
+            val serverJob = kotlinx.coroutines.Job()
+            val serverScope = kotlinx.coroutines.CoroutineScope(coroutineContext + serverJob)
+            server.registerHandler("daemon.status") { _, _ ->
+                kotlinx.coroutines.delay(60_000)
+                """{"ok":true}"""
+            }
+            try {
+                server.start(serverScope)
+                assertFalse(DaemonAutospawn.daemonAnswers("p", socket, dir, replyTimeoutMs = 100))
+            } finally {
+                server.close()
+                serverJob.cancel()
+                dir.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
     fun `a daemon that already answers is not spawned again`() {
         val spawnedCommands = mutableListOf<List<String>>()
         val ok =
@@ -55,7 +78,7 @@ class DaemonAutospawnTest {
         val command = seenCommand!!
         assertEquals("-jar", command[1])
         assertEquals(Path.of("/opt/unidrive/unidrive.jar").toString(), command[2])
-        assertEquals(listOf("daemon", "run", "work_mount"), command.drop(3), "the daemon is started as `daemon run <profile>`")
+        assertEquals(listOf("--config-dir", tempDir.toAbsolutePath().parent.toString(), "daemon", "run", "work_mount"), command.drop(3), "the daemon uses the client's configuration root")
         assertTrue(command[0].endsWith("java") || command[0].endsWith("java.exe"), "the child runs this JVM's java")
     }
 

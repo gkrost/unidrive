@@ -43,7 +43,7 @@ object DaemonAutospawn {
         configDir: Path,
         socketPath: Path = IpcServer.defaultSocketPath(profileName),
         waitTimeoutMs: Long = DEFAULT_WAIT_TIMEOUT_MS,
-        probe: (String, Path) -> Boolean = ::daemonAnswers,
+        probe: (String, Path) -> Boolean = { name, socket -> daemonAnswers(name, socket, configDir) },
         locateJar: () -> Path? = ::thisJar,
         spawn: (List<String>, Path) -> Unit = ::defaultSpawn,
     ): Boolean {
@@ -64,7 +64,14 @@ object DaemonAutospawn {
             "unidrive: the daemon for profile '$profileName' is not running; starting it (output: $logFile) and waiting for it ...",
         )
         try {
-            spawn(listOf(javaBin.toString(), "-jar", jar.toString(), "daemon", "run", profileName), logFile)
+            spawn(
+                listOf(
+                    javaBin.toString(), "-jar", jar.toString(),
+                    "--config-dir", configDir.toAbsolutePath().parent.toString(),
+                    "daemon", "run", profileName,
+                ),
+                logFile,
+            )
         } catch (e: Exception) {
             log.warn("auto-spawn of the daemon failed", e)
             System.err.println(
@@ -94,18 +101,31 @@ object DaemonAutospawn {
     fun daemonAnswers(
         profileName: String,
         socketPath: Path,
+        configDir: Path,
+        replyTimeoutMs: Long = IpcAuthClient.HANDSHAKE_TIMEOUT_MS,
     ): Boolean {
         if (!Files.exists(socketPath)) return false
         return try {
             val channel =
                 IpcAuthClient.connect(
-                    IpcEndpoint(socketPath, socketPath.parent, profileName),
+                    IpcEndpoint(socketPath, configDir, profileName),
                     IpcAuth.Scope.FULL,
                 )
             try {
-                channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
+                channel.configureBlocking(false)
+                val deadline = System.nanoTime() + replyTimeoutMs * 1_000_000
+                val request = ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray())
                 val buffer = ByteBuffer.allocate(64 * 1024)
-                channel.read(buffer) > 0
+                while (System.nanoTime() < deadline) {
+                    if (request.hasRemaining()) channel.write(request)
+                    if (!request.hasRemaining()) {
+                        val read = channel.read(buffer)
+                        if (read > 0) return true
+                        if (read < 0) return false
+                    }
+                    Thread.sleep(10)
+                }
+                false
             } finally {
                 channel.close()
             }
