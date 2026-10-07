@@ -1,6 +1,8 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -84,7 +86,7 @@ class DaemonRuntimeTest {
             val runtime = startDaemon(StubProvider())
             val daemonJob = launch { runtime.start() }
             try {
-                awaitSocket()
+                awaitSocket(daemonJob)
                 for (scope in IpcAuth.Scope.entries) {
                     val token = IpcAuth.tokenFile(tempDir, scope)
                     assertTrue(Files.exists(token), "token file $token must exist once the socket does")
@@ -123,7 +125,7 @@ class DaemonRuntimeTest {
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val first = startDaemon(StubProvider())
             val job1 = launch { first.start() }
-            awaitSocket()
+            awaitSocket(job1)
             val oldToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
             first.close()
             job1.join()
@@ -131,7 +133,7 @@ class DaemonRuntimeTest {
             val second = startDaemon(StubProvider())
             val job2 = launch { second.start() }
             try {
-                awaitSocket()
+                awaitSocket(job2)
                 val newToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
                 assertTrue(oldToken != newToken, "a new start writes new tokens")
                 // A client still holding the previous token is refused; one that re-reads the file is not.
@@ -153,7 +155,7 @@ class DaemonRuntimeTest {
             val first = startDaemon(StubProvider())
             val job = launch { first.start() }
             try {
-                awaitSocket()
+                awaitSocket(job)
                 val files = IpcAuth.Scope.entries.map { IpcAuth.tokenFile(tempDir, it) }
                 // Digests, so a failure message never shows a token.
                 fun state() =
@@ -476,7 +478,7 @@ class DaemonRuntimeTest {
         // Dispatchers.IO: shutdownAndWait blocks its caller, so start() must not share runBlocking's thread.
         val daemonJob = launch(kotlinx.coroutines.Dispatchers.IO) { runtime.start() }
         // Startup is fixture setup; the shutdown deadline below is the behavior under test.
-        kotlinx.coroutines.withTimeout(30_000) {
+        withTimeout(30_000) {
             while (!Files.exists(socketPath)) {
                 check(!daemonJob.isCompleted) { "daemon stopped before binding its socket" }
                 delay(50)
@@ -828,12 +830,18 @@ class DaemonRuntimeTest {
             providerFactory = { provider },
         )
 
-    private suspend fun awaitSocket() {
-        repeat(100) {
-            if (Files.exists(socketPath)) return
-            delay(50)
+    // Startup is fixture setup: a cold or busy runner gets 30 s, and a start that ENDED without binding
+    // fails at once instead of running out the clock (a real regression then names itself, the way the
+    // shutdown-cleanup test below checks its daemon the same way).
+    private suspend fun awaitSocket(daemonJob: Job? = null) {
+        withTimeout(30_000) {
+            while (!Files.exists(socketPath)) {
+                if (daemonJob?.isCompleted == true) {
+                    error("the daemon start finished without binding its socket")
+                }
+                delay(50)
+            }
         }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
     }
 
     // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
@@ -855,7 +863,7 @@ class DaemonRuntimeTest {
     fun `daemon_status carries an enumeration object that is idle before any enumeration and leaves the other fields alone`() = runBlocking {
         val runtime = startDaemon(StubProvider())
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
 
@@ -882,7 +890,7 @@ class DaemonRuntimeTest {
         val gate = CompletableDeferred<Unit>()
         val runtime = startDaemon(ScriptedDeltaProvider(gate = gate))
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             val started = sendOneRequest("""{"verb":"sync.enumerate"}""")
             assertTrue(started.contains("\"ok\":true"), started)
@@ -918,7 +926,7 @@ class DaemonRuntimeTest {
     fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking {
         val runtime = startDaemon(ScriptedDeltaProvider(failure = ProviderException("cannot list /Secret/Plans: boom")))
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             sendOneRequest("""{"verb":"sync.enumerate"}""")
             val failed = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "failed" }
