@@ -21,7 +21,9 @@ class IpcSocketDirTest {
 
     @BeforeTest
     fun setUp() {
-        tmp = Files.createTempDirectory("unidrive-ipc-dir-test-")
+        // Short prefix: the bound-socket test below nests one folder deeper, and an AF_UNIX path caps at
+        // about 107 characters — the previous prefix pushed that spelling over the limit.
+        tmp = Files.createTempDirectory("udipc-")
     }
 
     @AfterTest
@@ -169,6 +171,23 @@ class IpcSocketDirTest {
         val e = assertFailsWith<IllegalStateException> { IpcSocketDir.ensureWindowsDir(tmp) }
         assertTrue(e.message!!.contains("unidrive-ipc"), e.message)
         Files.delete(link)
+    }
+
+    // The IPC folder legitimately holds socket files — another profile's live daemon, or a stale one
+    // after a crash. A bound AF_UNIX socket is a reparse point on Windows, so the folder walk sees it
+    // as an `isOther` entry; it names no other object and must be restricted (or left) in place, not
+    // refused: a refusal here fails `defaultSocketPath` and with it the daemon start.
+    @Test
+    fun `the Windows socket folder still opens with a bound socket inside it`() {
+        assumeWindows()
+        val dir = IpcSocketDir.ensureWindowsDir(tmp)
+        val socketPath = dir.resolve("s.sock")
+        java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.UNIX).use { server ->
+            server.bind(java.net.UnixDomainSocketAddress.of(socketPath))
+            assertTrue(Files.exists(socketPath), "precondition: socket file bound")
+
+            assertEquals(dir, IpcSocketDir.ensureWindowsDir(tmp))
+        }
     }
 
     @Test
