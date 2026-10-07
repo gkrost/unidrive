@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.runBlocking
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.StateDatabase
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -61,6 +62,8 @@ class SweepCommand : Runnable {
             }
 
             val profile = parent.resolveCurrentProfile()
+            // Sweep repairs sync_root copies for the mirror reconciler's next download pass.
+            parent.requireProfileMode(profile, ProfileMode.MIRROR, "sweep")
             val configDir = parent.configBaseDir().resolve(profile.name)
             val dbPath = configDir.resolve("state.db")
             if (!Files.exists(dbPath)) {

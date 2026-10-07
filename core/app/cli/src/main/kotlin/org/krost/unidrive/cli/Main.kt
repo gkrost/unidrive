@@ -6,6 +6,7 @@ import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.sync.ProfileInfo
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.RawProvider
 import org.krost.unidrive.sync.RawSyncConfig
 import org.krost.unidrive.sync.SyncConfig
@@ -160,6 +161,57 @@ open class Main : Runnable {
         MDC.put("profile", _profile!!.name)
         return _profile!!
     }
+
+    /**
+     * #603 (U4, the hosting contract): the gate every mode-bound command runs right after
+     * [resolveCurrentProfile], before any provider write or mutable startup recovery. A profile without
+     * a `mode` is refused with one clear message (owner decision: no legacy support, nothing assumes a
+     * legacy profile); a profile of the wrong mode is refused with what to run instead. A profile's
+     * mode is fixed — the way to the other mode is a second profile (#564 defers a switch).
+     *
+     * Does not return on refusal — exits 78 ([MountCommand.EX_CONFIG], a config-shaped refusal).
+     */
+    fun requireProfileMode(
+        profile: ProfileInfo,
+        needed: ProfileMode,
+        command: String,
+    ): ProfileMode {
+        val mode =
+            profile.mode
+                ?: run {
+                    System.err.println("Error: ${ProfileMode.modelessMessage(profile.name, command)}")
+                    System.exit(MODE_REFUSAL_EXIT)
+                    @Suppress("UNREACHABLE_CODE") throw IllegalStateException("unreachable")
+                }
+        if (mode != needed) {
+            System.err.println(
+                "Error: profile '${profile.name}' is a ${mode.wireName} profile; '$command' needs a ${needed.wireName} profile. " +
+                    "Nothing was touched. For the other mode, create a second profile with " +
+                    "mode = \"${needed.wireName}\" — a profile's mode is fixed, there is no switch (#603).",
+            )
+            System.exit(MODE_REFUSAL_EXIT)
+        }
+        return mode
+    }
+
+    /**
+     * The [requireProfileMode] gate for a command that serves BOTH modes (`daemon run`): only the
+     * modeless case is refused, and the resolved mode comes back for the caller to pass on.
+     */
+    fun requireAnyProfileMode(
+        profile: ProfileInfo,
+        command: String,
+    ): ProfileMode =
+        profile.mode
+            ?: run {
+                System.err.println("Error: ${ProfileMode.modelessMessage(profile.name, command)}")
+                System.exit(MODE_REFUSAL_EXIT)
+                @Suppress("UNREACHABLE_CODE") throw IllegalStateException("unreachable")
+            }
+
+    /** Exit code of a hosting-contract refusal (#603): config-shaped, like [MountCommand.EX_CONFIG]. */
+    val MODE_REFUSAL_EXIT: Int = 78
+
 
     /**
      * UD-242: unified "no unidrive config" error surface used by every subcommand that

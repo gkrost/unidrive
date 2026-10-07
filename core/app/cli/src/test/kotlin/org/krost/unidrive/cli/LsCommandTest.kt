@@ -11,6 +11,7 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.localfs.LocalFsProvider
 import org.krost.unidrive.cli.LsCommand.Companion.DaemonLsView
 import org.krost.unidrive.cli.LsCommand.Companion.ViewEntryParsed
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcEndpoint
@@ -200,6 +201,7 @@ class LsCommandTest {
         val provider: CloudProvider = TwoRemoteFilesStubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,

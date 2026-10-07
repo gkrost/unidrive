@@ -62,6 +62,9 @@ class DaemonRunCommand : Runnable {
         val parent = daemonCmd.parent
         applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
+        // #603 (U4): the hosting contract. The daemon serves both modes, but a profile without a mode is
+        // refused before any provider write, token rotation or mutable startup recovery.
+        val mode = parent.requireAnyProfileMode(profile, "daemon run")
         val config = parent.loadSyncConfig()
         // Owner-only permissions, also for what an earlier version created: the credentials and the
         // profile folder, the IPC folder (defaultSocketPath), then the hydration cache and the logs.
@@ -87,6 +90,13 @@ class DaemonRunCommand : Runnable {
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
             syncRootRescanIntervalMs = config.syncRootRescanMinutes(profile.name) * 60_000L,
+            profileMode = mode,
+        )
+        // The startup banner reports the mode and the capabilities (#603 U4), so an operator — and a
+        // client reading the log — can see what this daemon serves without asking it over IPC.
+        println(
+            "unidrive daemon ${BuildInfo.versionString()} — profile '${profile.name}' " +
+                "(${mode.wireName}) — capabilities: ${mode.capabilities.joinToString(" ")}",
         )
 
         // Install SIGTERM handler that signals graceful shutdown. It must wait for the main

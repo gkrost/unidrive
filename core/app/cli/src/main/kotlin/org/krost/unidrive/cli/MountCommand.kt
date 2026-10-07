@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -38,6 +39,8 @@ class MountCommand : Runnable {
             parent.invalidateProfileCaches()
         }
         val profile = parent.resolveCurrentProfile()
+        // #603 (U4): the hosting contract, before anything mutates — `mount` is the mount-mode command.
+        parent.requireProfileMode(profile, ProfileMode.MOUNT, "mount")
 
         // Per spec unidrive-daemon-design.md §3.3: mount no longer acquires
         // the profile lock. The daemon (which holds Mode.DAEMON) is the

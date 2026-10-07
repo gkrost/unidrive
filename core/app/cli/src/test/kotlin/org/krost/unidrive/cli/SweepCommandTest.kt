@@ -18,6 +18,50 @@ import kotlin.test.*
  * because keeping them package-private lets callers stay simple.
  */
 class SweepCommandTest {
+    @Test
+    fun `mirror sweep can mark a stub for the next sync`() {
+        val config = Files.createTempDirectory("sweep-mirror")
+        try {
+            val root = Files.createDirectories(config.resolve("root"))
+            Files.write(root.resolve("stub.bin"), ByteArray(1000))
+            Files.writeString(config.resolve("config.toml"), """
+                [providers.repair]
+                type = "localfs"
+                mode = "mirror"
+                sync_root = '${root.toString().replace('\\', '/')}'
+            """.trimIndent())
+            val dbPath = Files.createDirectories(config.resolve("repair")).resolve("state.db")
+            val initial = StateDatabase(dbPath)
+            try {
+                val state = initial
+                state.initialize()
+                state.upsertEntry(entry("/stub.bin", 1000))
+            } finally {
+                initial.close()
+            }
+            val process = ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-jar", System.getProperty("unidrive.runtime.test.jar"),
+                "-c", config.toString(), "-p", "repair", "sweep", "--null-bytes", "--rehydrate",
+            ).redirectErrorStream(true).start()
+            assertTrue(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS), "sweep must terminate")
+            val output = process.inputStream.bufferedReader().readText()
+            assertEquals(0, process.exitValue(), output)
+            val repaired = StateDatabase(dbPath)
+            try {
+                val state = repaired
+                state.initialize()
+                assertFalse(state.getEntry("/stub.bin")!!.isHydrated, output)
+            } finally {
+                repaired.close()
+            }
+            assertTrue("sweep" in org.krost.unidrive.sync.ProfileMode.MIRROR.capabilities)
+            assertFalse("sweep" in org.krost.unidrive.sync.ProfileMode.MOUNT.capabilities)
+        } finally {
+            config.toFile().deleteRecursively()
+        }
+    }
+
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
 

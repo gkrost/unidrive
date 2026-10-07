@@ -39,6 +39,7 @@
         "type": "object",
         "properties": {
           "type": { "type": "string" },
+          "mode": { "type": "string", "enum": ["mirror", "mount"], "description": "#603 (U4): the profile's hosting mode, chosen at creation and fixed. A profile without one is refused." },
           "sync_root": { "type": "string" },
           "root_path": { "type": "string" },
           "pin_patterns": {

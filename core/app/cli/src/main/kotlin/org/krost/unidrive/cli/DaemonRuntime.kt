@@ -12,6 +12,7 @@ import org.krost.unidrive.hydration.MountEngine
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProcessLock
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.slf4j.LoggerFactory
@@ -62,6 +63,11 @@ class DaemonRuntime(
     // #504: > 0 = rescan the sync root for files that arrived out of band (a pass at start, then every
     // this many ms), uploading them; 0 = off. Profile key sync_root_rescan_minutes (default 10 min).
     private val syncRootRescanIntervalMs: Long = 0,
+    // #603 (U4): the profile's hosting mode, resolved and gated by `daemon run` before this runtime is
+    // constructed. A mount daemon serves the hydration verbs, sync.enumerate and the poller, and routes
+    // refresh.run to the always-enumerate path; a mirror daemon refuses the mount verbs (wrong_mode) and
+    // keeps refresh.run's legacy reconcile. Reported in daemon.status (mode, capabilities) and the banner.
+    private val profileMode: ProfileMode,
     // The profile's config folder (it holds credentials.json and the lock): the IPC token files are
     // written here at every start, before the socket listens (docs/dev/specs/ipc-authentication.md).
     private val ipcTokenDir: Path = lockFile.parent,
@@ -207,7 +213,19 @@ class DaemonRuntime(
                 // without a manual `refresh`, without waiting for the next poll (#463). Serialised through
                 // the same in-flight guard as sync.enumerate/the poller, so a concurrent
                 // enumeration is skipped rather than overlapped.
+                // #603 (U4): the mount verbs exist only on a mount profile. A mirror daemon answers every
+                // hydration verb and sync.enumerate with wrong_mode — the client's command gate refuses
+                // before this, but nothing here may serve mount semantics on a mirror profile either.
+                // The mount wiring below (handlers, subscribe-hook, upload replay, root rescan, poller)
+                // is mount-only; a mirror daemon keeps sync.subscribe, refresh.run (legacy reconcile)
+                // and daemon.status.
+                val wrongModeReply = """{"ok":false,"error":"wrong_mode"}"""
+                val mountMode = profileMode == ProfileMode.MOUNT
                 for (verb in HydrationIpcHandler.VERBS) {
+                    if (!mountMode) {
+                        server.registerHandler(verb) { _, _ -> wrongModeReply }
+                        continue
+                    }
                     server.registerHandler(verb) { connId, json ->
                         val reply = hydrationIpc.handle(connectionId = connId, jsonRequest = json)
                         if (verb == "hydration.subscribe" && reply.contains("\"ok\":true")) {
@@ -218,6 +236,9 @@ class DaemonRuntime(
                         }
                         reply
                     }
+                }
+                if (!mountMode) {
+                    server.registerHandler("sync.enumerate") { _, _ -> wrongModeReply }
                 }
                 server.registerConnectionCloseListener { connId ->
                     hydration.onConnectionClosed(connId)
@@ -248,21 +269,26 @@ class DaemonRuntime(
                 // client-submitted ones. The co-daemon's recovery-<n> scanner
                 // stays as the client-side complement for cache files the row
                 // scan cannot see.
-                serveScope.launch {
-                    runCatching { hydration.replayPendingUploads() }
-                        .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
-                        .onFailure { log.warn("pending-upload replay failed", it) }
-                    // #504: the sync root is nobody's inbox but the engine's: files that reach it
-                    // other than through the mount (copied in, dropped while the daemon was down,
-                    // restored from a backup) are uploaded by an upload-only rescan, once now (after
-                    // the replay above, so a mount write's own queued upload goes first) and then on
-                    // a timer. Never downloads or deletes; see MountEngine.rescanSyncRootForUpload.
-                    SyncRootRescanner(syncRootRescanIntervalMs) {
-                        val r = mount.rescanSyncRootForUpload()
-                        if (r.uploaded > 0 || r.foldersCreated > 0) {
-                            log.info("sync root rescan: {} file(s) uploaded, {} folder(s) created", r.uploaded, r.foldersCreated)
-                        }
-                    }.run()
+                //
+                // #603 (U4): mount-only. A mirror profile's sync_root belongs to its reconcile, not to
+                // an upload rescan, and a mirror daemon serves no hydration uploads to replay.
+                if (mountMode) {
+                    serveScope.launch {
+                        runCatching { hydration.replayPendingUploads() }
+                            .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
+                            .onFailure { log.warn("pending-upload replay failed", it) }
+                        // #504: the sync root is nobody's inbox but the engine's: files that reach it
+                        // other than through the mount (copied in, dropped while the daemon was down,
+                        // restored from a backup) are uploaded by an upload-only rescan, once now (after
+                        // the replay above, so a mount write's own queued upload goes first) and then on
+                        // a timer. Never downloads or deletes; see MountEngine.rescanSyncRootForUpload.
+                        SyncRootRescanner(syncRootRescanIntervalMs) {
+                            val r = mount.rescanSyncRootForUpload()
+                            if (r.uploaded > 0 || r.foldersCreated > 0) {
+                                log.info("sync root rescan: {} file(s) uploaded, {} folder(s) created", r.uploaded, r.foldersCreated)
+                            }
+                        }.run()
+                    }
                 }
 
                 // sync.subscribe — symmetric to SyncCommand's wiring.
@@ -281,19 +307,19 @@ class DaemonRuntime(
                 // jobs are cancelled when the daemon shuts down. Pass db so
                 // the F9 `reset` parameter can clear it (keeping the rows that
                 // still await upload) before re-enumeration.
-                // Route refresh to the one-way enumerate path when a mount client (the FUSE
-                // co-daemon) is serving this profile's view — that profile's sync_root is
-                // empty/unset, so the legacy reconcile would (correctly) abort on the deletion
-                // guards. Detect the mount via a live connection that has issued a hydration verb;
-                // hasSubscribers() is always false today because the co-daemon doesn't yet
-                // subscribe on mount (that's the Phase-3 follow-up — design §4/§6).
+                // #603 (U4): a mount profile's refresh.run ALWAYS takes the one-way enumerate path —
+                // with or without a connected client. The enumerate is remote→state.db only: a reset
+                // clears the delta cursor (the enumeration state), pending local intent stays, the last
+                // good rows survive a failed or incomplete gather, and nothing is published as a
+                // deletion before an authoritative completion. A mirror profile keeps the legacy
+                // reconcile (its mounted flag stays false; no hydration subscriber exists there).
                 val refreshHandler =
                     RefreshRpcHandler(
                         server,
                         engine,
                         db!!,
                         serveScope,
-                        mountClientConnected = { hydrationIpc.hasActiveMountConnection() },
+                        mountClientConnected = { profileMode == ProfileMode.MOUNT },
                         // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
                         uploadInFlight = { path -> hydration.hasUploadSlot(path) },
                     )
@@ -301,12 +327,14 @@ class DaemonRuntime(
                     refreshHandler.handle(connId, json)
                 }
 
-                // sync.enumerate verb (mount-view-refresh-design.md §4.1). The handler is
-                // constructed above (shared with the subscribe-triggered enumerate); here we
-                // expose it as an explicit verb whose terminal events fan out to sync.subscribe
-                // listeners via server.emit.
-                server.registerHandler("sync.enumerate") { connId, json ->
-                    enumerateHandler.handle(connId, json)
+                // sync.enumerate verb (mount-view-refresh-design.md §4.1), mount-only (#603: a mirror
+                // daemon registered its wrong_mode refusal above). The handler is constructed above
+                // (shared with the subscribe-triggered enumerate); here we expose it as an explicit verb
+                // whose terminal events fan out to sync.subscribe listeners via server.emit.
+                if (mountMode) {
+                    server.registerHandler("sync.enumerate") { connId, json ->
+                        enumerateHandler.handle(connId, json)
+                    }
                 }
 
                 // Remote-change discovery (mount-view-refresh-design.md §5, #463), on by default in
@@ -317,17 +345,20 @@ class DaemonRuntime(
                 // so it never overlaps either. Launched on serveScope so it cancels with the daemon at
                 // shutdown. The backoff starts escalated when the previous run ended in enumerate
                 // failures (#517 R3): a restart into a known-bad remote doesn't re-run the doomed
-                // cycle at full cadence.
-                pollerRef =
-                    EnumeratePoller(
-                        enumerateHandler,
-                        pollIntervalMs,
-                        serveScope,
-                        onNextAttempt = mount.enumerationTracker::nextAttemptAt,
-                        consecutiveFailuresAtStart =
-                            db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
-                        isBusy = { refreshHandler.isInFlight() },
-                    ).also { it.start() }
+                // cycle at full cadence. Mount-only (#603): a mirror profile's discovery is `sync`'s
+                // reconcile, not the mount-view poll.
+                if (mountMode) {
+                    pollerRef =
+                        EnumeratePoller(
+                            enumerateHandler,
+                            pollIntervalMs,
+                            serveScope,
+                            onNextAttempt = mount.enumerationTracker::nextAttemptAt,
+                            consecutiveFailuresAtStart =
+                                db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
+                            isBusy = { refreshHandler.isInFlight() },
+                        ).also { it.start() }
+                }
 
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
@@ -355,12 +386,19 @@ class DaemonRuntime(
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
                     val enumerationJson = mount.enumerationStatus().toJson().toString()
                     val engineVersionJson = kotlinx.serialization.json.JsonPrimitive(BuildInfo.versionString()).toString()
+                    // mode + capabilities (#603 U4): what this daemon serves, so a client can check the
+                    // hosting contract before it sends a verb the profile refuses (additive, read-only).
+                    val modeJson = kotlinx.serialization.json.JsonPrimitive(profileMode.wireName).toString()
+                    val capabilitiesJson = kotlinx.serialization.json.JsonArray(
+                        profileMode.capabilities.map { kotlinx.serialization.json.JsonPrimitive(it) },
+                    ).toString()
                     // poll_interval_ms (#463): the effective interval of the remote poll (0 = off). The
                     // next attempt after a failure is enumeration.next_attempt_at_ms (additive, read-only).
                     // engine_version (#554): the build a co-client is talking to — behaviour fixes do
                     // not move IPC_PROTOCOL_VERSION, so this is the age signal a client gates its
-                    // engine minimum on (additive, read-only).
-                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson,"poll_interval_ms":$pollIntervalMs}"""
+                    // engine minimum on (additive, read-only). #574: a dev build carries the commit id
+                    // as semver build metadata (VERSION+COMMIT[.dirty]), so the release part orders.
+                    """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"mode":$modeJson,"capabilities":$capabilitiesJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson,"poll_interval_ms":$pollIntervalMs}"""
                 }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every

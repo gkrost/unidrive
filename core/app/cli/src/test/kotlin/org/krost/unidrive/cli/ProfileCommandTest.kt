@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isValidProfileName
 import org.krost.unidrive.sync.removeProfileSection
@@ -30,6 +31,7 @@ class ProfileCommandTest {
                     "access_key_id" to "AKIA123",
                     "secret_access_key" to "secret",
                 ),
+            mode = ProfileMode.MOUNT,
             )
         assertContains(toml, "[providers.hetzner-s3]")
         assertContains(toml, "type = \"s3\"")
@@ -41,12 +43,13 @@ class ProfileCommandTest {
 
     @Test
     fun `generateProfileToml produces minimal OneDrive section`() {
-        val toml = generateProfileToml("onedrive", "work", "~/OneDrive-Work", emptyMap())
+        val toml = (generateProfileToml("onedrive", "work", "~/OneDrive-Work", emptyMap(), mode = ProfileMode.MOUNT))
         assertContains(toml, "[providers.work]")
         assertContains(toml, "type = \"onedrive\"")
         assertContains(toml, "sync_root = \"~/OneDrive-Work\"")
-        // No credential fields
-        assertTrue(toml.lines().count { it.contains("=") } == 2) // type + sync_root only
+        // mode, type + sync_root; no credential fields (#603)
+        assertTrue(toml.lines().count { it.contains("=") } == 3) // mode + type + sync_root
+        assertContains(toml, "mode = \"mount\"")
     }
 
     @Test
@@ -61,6 +64,7 @@ class ProfileCommandTest {
                     "remote_path" to "",
                     "user" to "admin",
                 ),
+            mode = ProfileMode.MOUNT,
             )
         assertContains(toml, "host = \"192.168.1.100\"")
         assertContains(toml, "user = \"admin\"")
@@ -80,6 +84,7 @@ class ProfileCommandTest {
                     "user" to "alice",
                     "password" to "s3cret",
                 ),
+            mode = ProfileMode.MOUNT,
             )
         assertContains(toml, "type = \"webdav\"")
         assertContains(toml, "url = \"https://cloud.example.com/dav\"")
@@ -98,6 +103,7 @@ class ProfileCommandTest {
                     "rclone_remote" to "gdrive",
                     "rclone_path" to "/backup",
                 ),
+            mode = ProfileMode.MOUNT,
             )
         assertContains(toml, "type = \"rclone\"")
         assertContains(toml, "rclone_remote = \"gdrive\"")
@@ -114,6 +120,7 @@ class ProfileCommandTest {
                 mapOf(
                     "password" to """p@ss"word\with\slashes""",
                 ),
+            mode = ProfileMode.MOUNT,
             )
         assertContains(toml, """password = "p@ss\"word\\with\\slashes"""")
     }

@@ -30,6 +30,7 @@ import org.krost.unidrive.hydration.OpenResult
 import org.krost.unidrive.hydration.RenameResult
 import org.krost.unidrive.hydration.RmdirResult
 import org.krost.unidrive.hydration.UnlinkResult
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcEndpoint
@@ -131,6 +132,7 @@ class IpcContractCorpusTest {
         val tempDir = Files.createTempDirectory("ipc-contract-test")
         val socketPath = tempDir.resolve("daemon.sock")
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "contract_profile",
             lockFile = tempDir.resolve(".lock"),
             dbPath = tempDir.resolve("state.db"),
@@ -227,6 +229,7 @@ class IpcContractCorpusTest {
         val tempDir = Files.createTempDirectory("ipc-contract-refusal-test")
         val socketPath = tempDir.resolve("daemon.sock")
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "contract_profile",
             lockFile = tempDir.resolve(".lock"),
             dbPath = tempDir.resolve("state.db"),

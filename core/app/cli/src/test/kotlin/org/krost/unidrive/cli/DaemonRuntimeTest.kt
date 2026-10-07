@@ -1,6 +1,8 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -20,6 +22,7 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanProgress
 import org.krost.unidrive.io.OwnerOnly
 import org.krost.unidrive.io.grantProblem
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
@@ -103,7 +106,7 @@ class DaemonRuntimeTest {
             val runtime = startDaemon(StubProvider())
             val daemonJob = launch { runtime.start() }
             try {
-                awaitSocket()
+                awaitSocket(daemonJob)
                 for (scope in IpcAuth.Scope.entries) {
                     val token = IpcAuth.tokenFile(tempDir, scope)
                     assertTrue(Files.exists(token), "token file $token must exist once the socket does")
@@ -142,7 +145,7 @@ class DaemonRuntimeTest {
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val first = startDaemon(StubProvider())
             val job1 = launch { first.start() }
-            awaitSocket()
+            awaitSocket(job1)
             val oldToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
             first.close()
             job1.join()
@@ -150,7 +153,7 @@ class DaemonRuntimeTest {
             val second = startDaemon(StubProvider())
             val job2 = launch { second.start() }
             try {
-                awaitSocket()
+                awaitSocket(job2)
                 val newToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
                 assertTrue(oldToken != newToken, "a new start writes new tokens")
                 // A client still holding the previous token is refused; one that re-reads the file is not.
@@ -172,7 +175,7 @@ class DaemonRuntimeTest {
             val first = startDaemon(StubProvider())
             val job = launch { first.start() }
             try {
-                awaitSocket()
+                awaitSocket(job)
                 val files = IpcAuth.Scope.entries.map { IpcAuth.tokenFile(tempDir, it) }
                 // Digests, so a failure message never shows a token.
                 fun state() =
@@ -187,6 +190,7 @@ class DaemonRuntimeTest {
                 val secondSocket = tempDir.resolve("second.sock")
                 val second =
                     DaemonRuntime(
+                        profileMode = ProfileMode.MOUNT,
                         profileName = "test_profile",
                         lockFile = lockFile,
                         dbPath = dbPath,
@@ -214,6 +218,7 @@ class DaemonRuntimeTest {
             val notAFolder = Files.writeString(tempDir.resolve("not-a-folder"), "x")
             val runtime =
                 DaemonRuntime(
+                    profileMode = ProfileMode.MOUNT,
                     profileName = "test_profile",
                     lockFile = lockFile,
                     dbPath = dbPath,
@@ -249,6 +254,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = AuthFailingStubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -290,6 +296,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -337,6 +344,7 @@ class DaemonRuntimeTest {
     fun verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply() =
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val runtime = DaemonRuntime(
+                profileMode = ProfileMode.MOUNT,
                 profileName = "test_profile",
                 lockFile = lockFile,
                 dbPath = dbPath,
@@ -453,6 +461,7 @@ class DaemonRuntimeTest {
         Files.writeString(metaPath, "test_profile\n")
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -478,6 +487,7 @@ class DaemonRuntimeTest {
     @Test
     fun `shutdownAndWait returns only after cleanup has released the socket and the lock`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -488,7 +498,7 @@ class DaemonRuntimeTest {
         // Dispatchers.IO: shutdownAndWait blocks its caller, so start() must not share runBlocking's thread.
         val daemonJob = launch(kotlinx.coroutines.Dispatchers.IO) { runtime.start() }
         // Startup is fixture setup; the shutdown deadline below is the behavior under test.
-        kotlinx.coroutines.withTimeout(30_000) {
+        withTimeout(30_000) {
             while (!Files.exists(socketPath)) {
                 check(!daemonJob.isCompleted) { "daemon stopped before binding its socket" }
                 delay(50)
@@ -512,6 +522,7 @@ class DaemonRuntimeTest {
     @Test
     fun `shutdownAndWait on a runtime that never started does not block`() {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -527,6 +538,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_shutdown verb acks then runs the clean shutdown path`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -555,6 +567,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_status reports the effective scope`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -586,6 +599,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_status reports the effective poll interval`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -643,6 +657,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -708,6 +723,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = OneRemoteFileStubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -752,6 +768,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -824,6 +841,7 @@ class DaemonRuntimeTest {
 
     private fun startDaemon(provider: CloudProvider) =
         DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -832,12 +850,18 @@ class DaemonRuntimeTest {
             providerFactory = { provider },
         )
 
-    private suspend fun awaitSocket() {
-        repeat(100) {
-            if (Files.exists(socketPath)) return
-            delay(50)
+    // Startup is fixture setup: a cold or busy runner gets 30 s, and a start that ENDED without binding
+    // fails at once instead of running out the clock (a real regression then names itself, the way the
+    // shutdown-cleanup test below checks its daemon the same way).
+    private suspend fun awaitSocket(daemonJob: Job? = null) {
+        withTimeout(30_000) {
+            while (!Files.exists(socketPath)) {
+                if (daemonJob?.isCompleted == true) {
+                    error("the daemon start finished without binding its socket")
+                }
+                delay(50)
+            }
         }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
     }
 
     // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
@@ -859,7 +883,7 @@ class DaemonRuntimeTest {
     fun `daemon_status carries an enumeration object that is idle before any enumeration and leaves the other fields alone`() = runBlocking {
         val runtime = startDaemon(StubProvider())
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
 
@@ -886,7 +910,7 @@ class DaemonRuntimeTest {
         val gate = CompletableDeferred<Unit>()
         val runtime = startDaemon(ScriptedDeltaProvider(gate = gate))
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             val started = sendOneRequest("""{"verb":"sync.enumerate"}""")
             assertTrue(started.contains("\"ok\":true"), started)
@@ -922,7 +946,7 @@ class DaemonRuntimeTest {
     fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking {
         val runtime = startDaemon(ScriptedDeltaProvider(failure = ProviderException("cannot list /Secret/Plans: boom")))
         val daemonJob = launch { runtime.start() }
-        awaitSocket()
+        awaitSocket(daemonJob)
         try {
             sendOneRequest("""{"verb":"sync.enumerate"}""")
             val failed = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "failed" }

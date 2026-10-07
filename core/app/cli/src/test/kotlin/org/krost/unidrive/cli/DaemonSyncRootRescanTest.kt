@@ -8,6 +8,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcEndpoint
@@ -53,6 +54,7 @@ class DaemonSyncRootRescanTest {
 
     private fun runtime(rescanIntervalMs: Long) =
         DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "rescan_test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
