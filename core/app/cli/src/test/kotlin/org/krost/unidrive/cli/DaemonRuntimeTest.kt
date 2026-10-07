@@ -302,11 +302,13 @@ class DaemonRuntimeTest {
         )
         // Dispatchers.IO: shutdownAndWait blocks its caller, so start() must not share runBlocking's thread.
         val daemonJob = launch(kotlinx.coroutines.Dispatchers.IO) { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
+        // Startup is fixture setup; the shutdown deadline below is the behavior under test.
+        kotlinx.coroutines.withTimeout(30_000) {
+            while (!Files.exists(socketPath)) {
+                check(!daemonJob.isCompleted) { "daemon stopped before binding its socket" }
+                delay(50)
+            }
         }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
         assertTrue(Files.exists(pidFile), "daemon must hold the lock before shutdown")
 

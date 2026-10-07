@@ -46,7 +46,14 @@ class HydrationErrorTest {
             HydrationError.Excluded -> "excluded"
             HydrationError.Cancelled -> "cancelled"
             is HydrationError.RemoteIncomplete -> "remote_incomplete"
+            HydrationError.InvalidPath -> "invalid_path"
         }
         assertTrue(rendered.startsWith("generic:"))
+    }
+
+    @Test
+    fun `invalid path carries the stable invalid_path wire token`() {
+        assertEquals("invalid_path", HydrationError.InvalidPath.message)
+        assertEquals("invalid_path", HydrationError.INVALID_PATH_TOKEN)
     }
 }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import org.krost.unidrive.sync.PathNormalizer
+import java.nio.file.InvalidPathException
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -16,6 +17,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * connection identifier (passed by the caller of handle()).
  *
  * Wire format (all JSON):
+ *   Paths:      every logical path field (path, old_path, new_path, prefix) is validated before
+ *               the verb runs: a `.` or `..` segment, a control character (NUL included), an
+ *               empty segment other than that of a leading or trailing slash, or a segment
+ *               longer than 255 UTF-16 units answers {"ok":false,"error":"invalid_path"}.
+ *               mkdir, create and rename also answer invalid_path for a new name the host's file
+ *               system cannot hold, and every verb for a path whose cache file would not lie inside
+ *               the profile's hydration cache folder.
  *   open_read   request:  {"verb":"hydration.open_read","handle_id":"...","path":"/foo"}
  *   open_read   reply ok: {"ok":true,"cache_path":"/home/.../foo.txt"}
  *   open_read   reply err:{"ok":false,"error":"<message>"}
@@ -26,6 +34,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *                         An excluded path (exclude_patterns match) answers
  *                         {"ok":true,"cache_path":"...","excluded":true} and emits a
  *                         `skipped` event instead of running an upload.
+ *                         cache_path must lie inside the profile's hydration cache
+ *                         folder (the path create / open_write_begin / open_read hand
+ *                         out, in any spelling); otherwise {"ok":false,"error":"invalid_path"},
+ *                         before anything is changed or queued.
  *   close_handle request: {"verb":"hydration.close_handle","handle_id":"..."}
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
@@ -229,6 +241,9 @@ class HydrationIpcHandler(
         // source and the queue is the per-subscriber smoothing layer.
         const val SUBSCRIBER_QUEUE_CAPACITY = 64
 
+        // The longest name NTFS and the common Linux file systems hold, in UTF-16 units.
+        private const val MAX_SEGMENT_UTF16_UNITS = 255
+
         // Single source of truth for the verbs this handler answers. The daemon
         // (SyncCommand) iterates this list to wire each verb on IpcServer via
         // registerHandler. The dispatch table in `handle()` below must stay in
@@ -255,6 +270,18 @@ class HydrationIpcHandler(
         val verb = pluck(jsonRequest, "verb") ?: return reply(ok = false, error = "missing_verb")
         // Any hydration verb on a connection marks it a live mount client (see mountConnections).
         mountConnections.add(connectionId)
+        return try {
+            dispatch(connectionId, verb, jsonRequest)
+        } catch (_: InvalidLogicalPath) {
+            reply(ok = false, error = HydrationError.INVALID_PATH_TOKEN)
+        }
+    }
+
+    private suspend fun dispatch(
+        connectionId: String,
+        verb: String,
+        jsonRequest: String,
+    ): String {
         return when (verb) {
             "hydration.open_read" -> {
                 val handleId = pluck(jsonRequest, "handle_id") ?: return reply(ok = false, error = "missing_handle_id")
@@ -269,10 +296,17 @@ class HydrationIpcHandler(
                 val path = pluckPath(jsonRequest, "path") ?: return reply(ok = false, error = "missing_path")
                 val cache = pluck(jsonRequest, "cache_path") ?: return reply(ok = false, error = "missing_cache_path")
                 if (cache.isEmpty()) return reply(ok = false, error = "missing_cache_path")
+                // A local path; Hydration accepts it only inside the profile's hydration cache folder.
+                val cachePath =
+                    try {
+                        Paths.get(cache)
+                    } catch (_: InvalidPathException) {
+                        return reply(ok = false, error = HydrationError.INVALID_PATH_TOKEN)
+                    }
                 // base_etag is OPTIONAL: absent (or a row with no recorded token) →
                 // unconditional upload, byte-identical to the pre-guard contract.
                 val baseEtag = pluck(jsonRequest, "base_etag")
-                when (val r = hydration.openForWrite(connectionId, handleId, path, Paths.get(cache), baseEtag)) {
+                when (val r = hydration.openForWrite(connectionId, handleId, path, cachePath, baseEtag)) {
                     is OpenResult.Ok -> openOkReply(r)
                     is OpenResult.Failed -> reply(ok = false, error = r.error.message)
                 }
@@ -315,7 +349,9 @@ class HydrationIpcHandler(
                 }
             }
             "hydration.list" -> {
-                val prefix = pluck(jsonRequest, "prefix") ?: return reply(ok = false, error = "missing_prefix")
+                // Not NFC-normalised here (StateDatabase.listDirectChildren does that), but validated like every path.
+                val prefix = pluck(jsonRequest, "prefix")?.let { requireLogicalPath(it) }
+                    ?: return reply(ok = false, error = "missing_prefix")
                 when (val r = hydration.list(prefix)) {
                     is ListResult.Ok -> serialiseListEntries(r.entries)
                     is ListResult.Failed -> reply(ok = false, error = r.error.message)
@@ -414,10 +450,35 @@ class HydrationIpcHandler(
     // object and an NFD cache lookup misses the NFC-named file. Mirrors the existing
     // ingestion-chokepoint approach. Runs on the JSON-DECODED value, so an escaped
     // decomposed form (o + escaped combining diaeresis) is normalized too. NOT applied to
-    // `cache_path` (a literal local filesystem path the co-daemon already created, used
-    // verbatim) or `prefix` (StateDatabase.listDirectChildren already normalizes it).
+    // `cache_path` (a local filesystem path, not a logical one) or `prefix`
+    // (StateDatabase.listDirectChildren already normalizes it). Every value is then
+    // validated (requireLogicalPath): this is the one place every verb's logical path
+    // passes through.
     private fun pluckPath(line: String, key: String): String? =
-        pluck(line, key)?.let { PathNormalizer.nfc(it) }
+        pluck(line, key)?.let { requireLogicalPath(PathNormalizer.nfc(it)) }
+
+    // The validation of a LOGICAL path at the IPC boundary, for every verb that takes one.
+    // A path is a list of names separated by '/'; a `.` or `..` segment, a control
+    // character (NUL included), an empty segment other than that of a leading or trailing
+    // slash ("/a//b", "//a") or a segment longer than 255 UTF-16 units (no supported file
+    // system holds a longer name) throws [InvalidLogicalPath], which [handle] answers with
+    // invalid_path before the verb runs. "", "/" and "/a/" stay accepted. DEL is a legal
+    // name character on NTFS and POSIX file systems and stays accepted. A name the host's
+    // file system cannot hold is the verb's own check (mkdir, create and rename refuse it in
+    // HydrationImpl).
+    private fun requireLogicalPath(path: String): String {
+        val segments = path.split('/')
+        for ((i, segment) in segments.withIndex()) {
+            val emptyInside = segment.isEmpty() && i != 0 && i != segments.lastIndex
+            if (emptyInside || segment == "." || segment == ".." || segment.length > MAX_SEGMENT_UTF16_UNITS || segment.any { it < ' ' }) {
+                throw InvalidLogicalPath()
+            }
+        }
+        return path
+    }
+
+    // No stack trace: it is a refusal, answered on the wire.
+    private class InvalidLogicalPath : RuntimeException(null, null, false, false)
 
     // Minimal JSON pluck — returns the decoded value of a TOP-LEVEL string member of the
     // request object. Sufficient for our verb messages; we don't accept arbitrary client

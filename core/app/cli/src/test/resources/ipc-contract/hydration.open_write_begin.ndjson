@@ -10,3 +10,5 @@
 {"ok":true,"cache_path":"/cache/unidrive/hydration/excluded/scratch.tmp","excluded":true}
 {"verb":"hydration.open_write_begin","path":"/outside/x.txt"}
 {"ok":false,"error":"outside_scope"}
+{"verb":"hydration.open_write_begin","path":"/docs/./report.txt"}
+{"ok":false,"error":"invalid_path"}

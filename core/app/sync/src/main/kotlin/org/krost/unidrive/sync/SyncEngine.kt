@@ -213,7 +213,12 @@ open class SyncEngine(
         // #115: wire real user-dirs.dirs content so the reconciler can map locale-
         // aliased local folder names to their cloud-canonical equivalents.
         xdgUserDirsOverrides = xdgUserDirsOverrides,
-        isHydrationCachePresent = { path -> Files.isRegularFile(resolveCachePath(path)) },
+        // A row whose path does not resolve inside the cache answers true: it is kept out of the
+        // delete plan rather than read as a local delete.
+        isHydrationCachePresent = { path ->
+            org.krost.unidrive.engine.CachePaths.forRow(path, log) { resolveCachePath(it) }
+                ?.let { Files.isRegularFile(it) } ?: true
+        },
         // #532: identical edits on both sides are convergence, not a conflict — compare the
         // local file against the remote item with the provider's own content hash. Strict
         // (matches, not verify): a provider without a hash keeps the conflict.
@@ -477,16 +482,18 @@ open class SyncEngine(
      * Resolves the cache file path for a given path within the hydration cache.
      * The mount front-end resolves through it ([MountWiring.cachePathOf], #560 U3), as do the
      * Reconciler's #459 guard, the enumeration's reap and test fixtures.
+     *
+     * The result is normalised and always lies inside the profile's cache folder
+     * (`<cacheRoot>/unidrive/hydration/<cacheKey>`), the way [safeResolveLocal] keeps local files
+     * inside the sync root: a path that would resolve outside it throws [SecurityException]
+     * ([org.krost.unidrive.engine.CachePaths.resolveInside]). The verbs answer it with
+     * `invalid_path`; the passes over rows skip the row's cache side.
      */
-    fun resolveCachePath(path: String): Path {
-        val effectiveRoot = cacheRoot
-            ?: (System.getenv("XDG_CACHE_HOME")?.let { Paths.get(it) }
-                ?: Paths.get(System.getProperty("user.home"), ".cache"))
-        return effectiveRoot
-            .resolve("unidrive/hydration")
-            .resolve(cacheKey.ifBlank { "default" })
-            .resolve(path.trimStart('/'))
-    }
+    fun resolveCachePath(path: String): Path =
+        org.krost.unidrive.engine.CachePaths.resolveInside(
+            hydrationCacheRoot(cacheRoot ?: defaultHydrationCacheRoot(), cacheKey),
+            path,
+        )
 
     // #560 U2: the classification lives in :app:engine-core (RemoteErrors), shared with the mount.
     // See [org.krost.unidrive.engine.RemoteErrors.isAlreadyGone] for the two shapes it accepts.

@@ -279,9 +279,18 @@ class HydrationIpcHandlerJsonEscapeTest {
         for ((json, decoded) in table) {
             val fake = RecordingHydration()
 
+            // handle_id carries any text; a path field refuses control characters (invalid_path).
+            HydrationIpcHandler(fake).handle("c1", """{"verb":"hydration.close_handle","handle_id":"x${json}y"}""")
+
+            assertEquals(listOf(Call("close_handle", listOf("x${decoded}y"))), fake.calls, "escape ${json.last()}")
+        }
+        // The printable ones decode the same way in a path field.
+        for ((json, decoded) in table.take(3)) {
+            val fake = RecordingHydration()
+
             HydrationIpcHandler(fake).handle("c1", """{"verb":"hydration.mkdir","path":"/x${json}y"}""")
 
-            assertEquals(listOf(Call("mkdir", listOf("/x${decoded}y"))), fake.calls, "escape ${json.last()}")
+            assertEquals(listOf(Call("mkdir", listOf("/x${decoded}y"))), fake.calls, "escape ${json.last()} in a path")
         }
     }
 
@@ -295,10 +304,11 @@ class HydrationIpcHandlerJsonEscapeTest {
     }
 
     @Test
-    fun escaped_quote_backslash_and_newline_inside_one_name_survive_create_and_rename() = runTest {
-        // Logical name:  a"b\c<LF>d  (quote, backslash, newline in a single segment).
-        val json = "a${BS}\"b${BS}${BS}c${BS}nd"
-        val logical = "a\"b\\c\nd"
+    fun escaped_quote_and_backslash_inside_one_name_survive_create_and_rename() = runTest {
+        // Logical name:  a"b\cd  (quote and backslash in a single segment). A newline in a path is
+        // refused at the boundary (HydrationIpcHandlerPathValidationTest).
+        val json = "a${BS}\"b${BS}${BS}cd"
+        val logical = "a\"b\\cd"
 
         val created = RecordingHydration()
         HydrationIpcHandler(created).handle("c1", """{"verb":"hydration.create","handle_id":"h1","path":"/dir/$json"}""")

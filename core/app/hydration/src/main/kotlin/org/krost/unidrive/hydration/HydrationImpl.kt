@@ -202,7 +202,26 @@ class HydrationImpl(
         lastAccess[path] = System.currentTimeMillis()
     }
 
+    // Whether the cache file of [path] lies inside the profile's cache folder: the engine's resolution refuses one
+    // that would not (SecurityException). A verb that would read, write or delete that file answers invalid_path
+    // instead, before anything is touched. A name the platform cannot hold at all (InvalidPathException) is left to
+    // the verb, which reports it as before.
+    private fun resolvesInsideCache(path: String): Boolean =
+        try {
+            mount.resolveCachePath(path)
+            true
+        } catch (_: SecurityException) {
+            false
+        } catch (_: java.nio.file.InvalidPathException) {
+            true
+        }
+
+    // A name this engine will not create: one the host's file system cannot hold (the cache keeps a file or folder of
+    // that name; on Windows the Win32 rules), or one whose cache file would lie outside the cache folder.
+    private fun refusedNewName(path: String): Boolean = mount.localNameIssue(path) != null || !resolvesInsideCache(path)
+
     override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult {
+        if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         touch(path)
@@ -274,8 +293,20 @@ class HydrationImpl(
         cachePath: Path,
         baseEtag: String?,
     ): OpenResult {
+        if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+        // The client hands the cache path back. Only a file inside the profile's cache folder is uploaded: the path
+        // create / open_write_begin / open_read handed out, or another spelling of a file there (compared on real
+        // paths, so a link cannot lead out). Anything else is refused before any state is touched or upload queued.
+        if (!isInsideCacheFolder(mount.hydrationCacheDir(), cachePath)) {
+            log.warn(
+                "open_write of '{}' refused: its cache path '{}' is not inside the profile's hydration cache",
+                forLogLine(path),
+                forLogLine(cachePath.toString()),
+            )
+            return OpenResult.Failed(HydrationError.InvalidPath)
+        }
         touch(path)
 
         // Excluded paths (exclude_patterns) are keep-local: the write is
@@ -815,6 +846,7 @@ class HydrationImpl(
     fun hasUploadSlot(path: String): Boolean = uploadSlots.containsKey(path)
 
     override suspend fun hydrate(path: String): HydrateResult {
+        if (!resolvesInsideCache(path)) return HydrateResult.Failed(HydrationError.InvalidPath)
         touch(path)
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
@@ -829,6 +861,7 @@ class HydrationImpl(
         }
     }
     override suspend fun dehydrate(path: String): DehydrateResult {
+        if (!resolvesInsideCache(path)) return DehydrateResult.Failed(HydrationError.InvalidPath)
         val entry = stateDb.getEntry(path)
             ?: return DehydrateResult.Failed(HydrationError.UnknownPath)
 
@@ -934,6 +967,7 @@ class HydrationImpl(
 
     override suspend fun mkdir(path: String): MkdirResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (refusedNewName(normalised)) return MkdirResult.Failed(HydrationError.InvalidPath)
         // Scope guard: a folder created outside the profile's sync_path set
         // would land in the cloud but never show in the mounted view (the view
         // only lists the scope). Refuse before touching the provider.
@@ -1115,8 +1149,8 @@ class HydrationImpl(
     // already succeeded). Deletes children before parents so the directory
     // empties before it is removed.
     private fun evictCacheTree(path: String) {
-        val root = mount.resolveCachePath(path)
         runCatching {
+            val root = mount.resolveCachePath(path)
             if (!Files.exists(root)) return
             Files.walk(root).use { stream ->
                 stream.sorted(Comparator.reverseOrder()).forEach { p ->
@@ -1142,6 +1176,7 @@ class HydrationImpl(
 
     override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (!resolvesInsideCache(normalised)) return OpenResult.Failed(HydrationError.InvalidPath)
         // Scope guard: same rationale as mkdir — a truncate outside the
         // profile's sync_path set would touch cloud data the view never shows.
         if (mount.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
@@ -1169,6 +1204,7 @@ class HydrationImpl(
 
     override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (refusedNewName(normalised)) return CreateResult.Failed(HydrationError.InvalidPath)
         val mutex = createMutexes.computeIfAbsent(normalised) { Mutex() }
         return mutex.withLock {
             // Scope guard: a file created outside the profile's sync_path set
@@ -1227,6 +1263,12 @@ class HydrationImpl(
     ): RenameResult {
         val oldNorm = oldPath.trimEnd('/').let { if (it == "") "/" else it }
         val newNorm = newPath.trimEnd('/').let { if (it == "") "/" else it }
+
+        // Both cache files must lie inside the cache folder, and the destination is a name this engine creates.
+        // Decided before anything is moved, in the cloud or locally.
+        if (!resolvesInsideCache(oldNorm) || refusedNewName(newNorm)) {
+            return RenameResult.Failed(HydrationError.InvalidPath)
+        }
 
         // POSIX rename(2) onto itself is a no-op success. Decided BEFORE the
         // destination-deletion step below: with replace=true the source would

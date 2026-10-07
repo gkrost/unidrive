@@ -2,3 +2,5 @@
 {"ok":true}
 {"verb":"hydration.hydrate","path":"/missing.txt"}
 {"ok":false,"error":"unknown_path"}
+{"verb":"hydration.hydrate","path":"/docs/../report.txt"}
+{"ok":false,"error":"invalid_path"}

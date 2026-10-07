@@ -77,8 +77,10 @@ the scope are refused (§7).
 ### 3.2 Overwrite (save of an existing file)
 
 Same sequence as 3.1 minus `create`: the client writes the full new content
-to a cache path (its own or the one from `open_write_begin`) and issues
-`open_write`.
+to the cache path the engine returned (from `open_write_begin`, `create`, or
+`open_read` for 3.4) and issues `open_write` with that path. Clients must send
+the path the engine returned; a cache path outside the profile's hydration
+cache folder is refused with `invalid_path` before anything is queued (§7).
 
 - Base-etag guard: if the client observed an `etag` for the file (via
   `hydration.list`) it SHOULD send it as `base_etag`. The guard runs twice:
@@ -237,10 +239,12 @@ still leave a remote item; the caller follows with the row-level verb
 | `path_is_folder` / `path_is_file` | unlink/rmdir/open_write_begin | wrong kind |
 | `not_empty` | rmdir | folder still has children |
 | `conflict` | open_write | base_etag no longer matches the row |
+| `invalid_path` | open_write (`cache_path`) | the cache path lies outside the profile's hydration cache folder, or is not a valid local path; refused before anything is queued |
 | `outside_scope` | create, mkdir, rename (both ends), open_write_begin | path outside the profile's sync_path set |
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
 | `cancelled` | completed event | upload aborted by hydration.cancel |
+| `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
 
 ## 8. Who may write the mounted folder
@@ -268,3 +272,6 @@ folder from its own authority — it would desync from the rows.
   and `HydrationUploadQueueTest`; the recovery-<n> handle contract in
   `HydrationImplTest`.
 - Startup liveness: `DaemonRuntimeTest.verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply`.
+- Path validation (`invalid_path`): the boundary checks in `HydrationIpcHandlerPathValidationTest`; the
+  cache-folder containment of the verbs in `HydrationPathContainmentTest`, `ResolveCachePathContainmentTest`
+  and `CachePathsTest`.

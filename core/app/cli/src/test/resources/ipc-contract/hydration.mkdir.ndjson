@@ -4,3 +4,5 @@
 {"ok":false,"error":"parent_not_found"}
 {"verb":"hydration.mkdir","path":"/outside"}
 {"ok":false,"error":"outside_scope"}
+{"verb":"hydration.mkdir","path":"/docs/../newdir"}
+{"ok":false,"error":"invalid_path"}

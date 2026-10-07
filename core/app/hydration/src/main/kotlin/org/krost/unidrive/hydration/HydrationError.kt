@@ -107,6 +107,15 @@ sealed interface HydrationError {
         override val message: String = "$REMOTE_INCOMPLETE_TOKEN: got $storedBytes of $declaredBytes bytes"
     }
 
+    /**
+     * A client-supplied path the engine does not accept, refused before anything is changed. Which paths: the
+     * wire-format notes of [HydrationIpcHandler] and §7 of docs/dev/specs/ipc-write-protocol.md. Its [message] is
+     * the STABLE wire token `invalid_path`. Changing this string breaks that cross-repo contract.
+     */
+    data object InvalidPath : HydrationError {
+        override val message: String = INVALID_PATH_TOKEN
+    }
+
     companion object {
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
@@ -128,5 +137,8 @@ sealed interface HydrationError {
 
         /** Wire token for [Cancelled]; shared verbatim with the mount crate. */
         const val CANCELLED_TOKEN = "cancelled"
+
+        /** Wire token for [InvalidPath]. */
+        const val INVALID_PATH_TOKEN = "invalid_path"
     }
 }
