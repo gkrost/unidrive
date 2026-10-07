@@ -169,6 +169,10 @@ class InternxtCursorListingTest {
         // no entry serves an empty listing. [pagedStatus] fails the paged listing instead.
         val pagedContent: Map<String, Pair<List<String>, List<String>>> = emptyMap(),
         val pagedStatus: Int? = null,
+        // A gateway that caps `limit` below what is asked serves at most [pagedMaxPage] items per page;
+        // one that ignores `offset` on the files stream serves its first page again and again ([pagedIgnoresOffset]).
+        val pagedMaxPage: Int? = null,
+        val pagedIgnoresOffset: Boolean = false,
     ) {
         val seen = CopyOnWriteArrayList<Seen>()
         val other = CopyOnWriteArrayList<String>()
@@ -216,8 +220,8 @@ class InternxtCursorListingTest {
                             val uuid = path.substringAfter("/folders/content/").substringBefore('/')
                             val (folders, files) = pagedContent[uuid] ?: Pair(emptyList(), emptyList())
                             val items = if (path.endsWith("/files")) files else folders
-                            val offset = params["offset"]?.toInt() ?: 0
-                            val limit = params["limit"]?.toInt() ?: error("the paged per-folder listing must name a limit: ${request.url}")
+                            val offset = if (pagedIgnoresOffset && path.endsWith("/files")) 0 else params["offset"]?.toInt() ?: 0
+                            val limit = minOf(params["limit"]?.toInt() ?: error("the paged per-folder listing must name a limit: ${request.url}"), pagedMaxPage ?: Int.MAX_VALUE)
                             respond(
                                 """{"${if (path.endsWith("/files")) "files" else "folders"}":[${items.drop(offset).take(limit).joinToString(",")}]}""",
                                 HttpStatusCode.OK,
@@ -680,12 +684,69 @@ class InternxtCursorListingTest {
 
             val fileRequests = drive.other.filter { it.contains("/folders/content/big/files") }
             val offsets = fileRequests.map { Regex("offset=(\\d+)").find(it)!!.groupValues[1].toInt() }
-            assertEquals(listOf(0, 999), offsets, "paged to the short page: $fileRequests")
+            assertEquals(listOf(0, 999, 1200), offsets, "paged to the empty page: $fileRequests")
             assertTrue(
                 drive.other.filter { it.contains("/folders/content/") && Regex("offset=").containsMatchIn(it) }
                     .all { it.contains("sort=uuid") && it.contains("order=ASC") },
                 "offset-stable ordering on every paged request: ${drive.other}",
             )
+        }
+
+    @Test
+    fun `a gateway that caps the page size below the limit asked still lists every file of the folder`() =
+        runTest {
+            // The server may serve fewer items per page than `limit` asks for. A short page is then no
+            // sign of the last page: the listing ends only on an empty page and advances by what came back.
+            val bigFiles =
+                (0 until 1200).map {
+                    """{"uuid":"bf-$it","plainName":"big$it","type":"txt","size":"7","status":"EXISTS","folderUuid":"big"}"""
+                }
+            val drive =
+                DriveMock(
+                    contentStatus = 503,
+                    failure = { _, _ -> Failure.Status(503) },
+                    pagedMaxPage = 100,
+                    pagedContent =
+                        mapOf(
+                            "root" to Pair(listOf("""{"uuid":"big","plainName":"big","status":"EXISTS","parentUuid":"root"}"""), emptyList()),
+                            "big" to Pair(emptyList(), bigFiles),
+                        ),
+                )
+            val page = provider(drive.engine).delta(null, null, quiet())
+
+            assertTrue(page.complete, "no folder is skipped when the paged listing answers")
+            val paths = page.items.map { it.path }.toSet()
+            assertEquals(1201, paths.size, "the folder itself plus all 1200 files, though no page held more than 100: $paths")
+            val offsets =
+                drive.other.filter { it.contains("/folders/content/big/files") }
+                    .map { Regex("offset=([0-9]+)").find(it)!!.groupValues[1].toInt() }
+            assertEquals((0..1200 step 100).toList(), offsets, "advanced by the size of each page, ended on the empty one")
+        }
+
+    @Test
+    fun `a gateway that ignores the offset fails the paged listing instead of looping, and the gather stays incomplete`() =
+        runTest {
+            val bigFiles =
+                (0 until 1200).map {
+                    """{"uuid":"bf-$it","plainName":"big$it","type":"txt","size":"7","status":"EXISTS","folderUuid":"big"}"""
+                }
+            val drive =
+                DriveMock(
+                    contentStatus = 503,
+                    failure = { _, _ -> Failure.Status(503) },
+                    pagedIgnoresOffset = true,
+                    pagedContent =
+                        mapOf(
+                            "root" to Pair(listOf("""{"uuid":"big","plainName":"big","status":"EXISTS","parentUuid":"root"}"""), emptyList()),
+                            "big" to Pair(emptyList(), bigFiles),
+                        ),
+                )
+            val page = provider(drive.engine).delta(null, null, quiet())
+
+            assertFalse(page.complete, "a listing that repeats its first page is no complete listing")
+            assertTrue(page.items.none { it.path.startsWith("/big/") }, "no partial listing of the folder is kept: ${page.items.map { it.path }}")
+            val fileRequests = drive.other.count { it.contains("/folders/content/big/files") }
+            assertTrue(fileRequests in 2..6, "stopped at the first repeated page, not after many: $fileRequests")
         }
 
     @Test

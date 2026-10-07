@@ -64,6 +64,9 @@ class InternxtApiService(
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
+        /** Safety bound of one paged per-folder stream (10,000 pages are ~10M items at the default page size). */
+        internal const val MAX_LISTING_PAGES: Int = 10_000
+
         private fun defaultHttpClient(): HttpClient =
             HttpClient {
                 install(HttpTimeout) {
@@ -184,51 +187,73 @@ class InternxtApiService(
      * gateway (a 29k-file folder needs ~105 s in one 30 MB body; the gateway cuts at ~125 s,
      * so folders beyond ~35k files never fit). Both sub-endpoints verified live: the item
      * shapes match the combined call's, including the status/removed/deleted fields the walk
-     * filters on. Pages until a page comes back short; each page rides the same ladder and
+     * filters on. Pages until an empty page (the server may cap `limit`); each page rides the same ladder and
      * listing watchdog as the offset listings.
      */
     suspend fun getFolderContentsPaged(folderUuid: String): FolderContentResponse =
         folderContentsPagedDedup.load(folderUuid, currentPriority()) {
-            val folders = ArrayList<InternxtFolder>()
-            var offset = 0
-            while (true) {
-                val body =
-                    authenticatedGet(
-                        "$baseUrl/folders/content/$folderUuid/folders",
-                        linkedMapOf(
-                            "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
-                            "offset" to offset.toString(),
-                            "sort" to "uuid",
-                            "order" to "ASC",
-                        ),
-                        socketTimeoutMs = listingSocketTimeoutMs,
-                    )
-                val page = json.decodeFromString<PagedFolderFoldersResponse>(body).folders
-                folders.addAll(page)
-                if (page.size < InternxtConfig.LISTING_PAGE_SIZE) break
-                offset += page.size
-            }
-            val files = ArrayList<InternxtFile>()
-            offset = 0
-            while (true) {
-                val body =
-                    authenticatedGet(
-                        "$baseUrl/folders/content/$folderUuid/files",
-                        linkedMapOf(
-                            "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
-                            "offset" to offset.toString(),
-                            "sort" to "uuid",
-                            "order" to "ASC",
-                        ),
-                        socketTimeoutMs = listingSocketTimeoutMs,
-                    )
-                val page = json.decodeFromString<PagedFolderFilesResponse>(body).files
-                files.addAll(page)
-                if (page.size < InternxtConfig.LISTING_PAGE_SIZE) break
-                offset += page.size
-            }
+            val folders =
+                pagedFolderStream<InternxtFolder>(folderUuid, "folders", { it.uuid }) {
+                    json.decodeFromString<PagedFolderFoldersResponse>(it).folders
+                }
+            val files =
+                pagedFolderStream<InternxtFile>(folderUuid, "files", { it.uuid }) {
+                    json.decodeFromString<PagedFolderFilesResponse>(it).files
+                }
             FolderContentResponse(children = folders, files = files)
         }
+
+    /**
+     * One stream of the paged per-folder listing. The server may serve fewer items than `limit`
+     * asks for, so a short page is no sign of the last one: the stream ends only on an EMPTY page,
+     * and the offset advances by the number of items a page actually returned. A server that
+     * ignores `offset` would serve the same page for ever; that is no listing, so the stream
+     * fails (a 503, which the walk counts as a skipped folder and reports as incomplete) when a
+     * page starts with the item the page before it started with, or after [MAX_LISTING_PAGES].
+     */
+    private suspend fun <T> pagedFolderStream(
+        folderUuid: String,
+        stream: String,
+        uuidOf: (T) -> String,
+        parse: (String) -> List<T>,
+    ): List<T> {
+        val items = ArrayList<T>()
+        var offset = 0
+        var previousFirst: String? = null
+        var pages = 0
+        while (true) {
+            val body =
+                authenticatedGet(
+                    "$baseUrl/folders/content/$folderUuid/$stream",
+                    linkedMapOf(
+                        "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
+                        "offset" to offset.toString(),
+                        "sort" to "uuid",
+                        "order" to "ASC",
+                    ),
+                    socketTimeoutMs = listingSocketTimeoutMs,
+                )
+            val page = parse(body)
+            if (page.isEmpty()) return items
+            val first = uuidOf(page.first())
+            if (first == previousFirst) {
+                throw InternxtApiException(
+                    "The paged $stream listing of folder $folderUuid returned the same page twice (offset $offset): " +
+                        "the server does not honour the offset, so the listing cannot be completed",
+                    statusCode = 503,
+                )
+            }
+            if (++pages > MAX_LISTING_PAGES) {
+                throw InternxtApiException(
+                    "The paged $stream listing of folder $folderUuid exceeded $MAX_LISTING_PAGES pages without ending",
+                    statusCode = 503,
+                )
+            }
+            previousFirst = first
+            items.addAll(page)
+            offset += page.size
+        }
+    }
 
     suspend fun listFiles(
         updatedAt: String? = null,
