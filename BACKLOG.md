@@ -42,7 +42,6 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - [#147] `StateDatabase.batch{}` holds the `@Synchronized` lock across a full enumeration → mount `ls` stalls during `enumerateRemoteIntoState(reset)`
 - [#150] Local-dev redeploy + co-daemon observability gaps (`scripts/dev/redeploy-local.sh`)
 - [#151] `rm` on the mount records `status=DELETED` but the provider trashes (recoverable) — label vs disposition mismatch
-- [#152] `unidrive-ui` needs to call `sync.subscribe` after connecting
 - [#153] OneDrive `malware` facet skip on download
 - [#154] OneDrive `fileSize` precheck → early 507
 - [#155] Internxt keep-overwritten prune

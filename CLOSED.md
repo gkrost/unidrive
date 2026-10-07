@@ -130,3 +130,4 @@ Things that were done before this branch started. Append new entries when items 
 - Gradle daemon poison: `java.io.EOFException` from `SerializableTestResultStore` with 0-byte results
 - `unidrive refresh` against a profile with a pre-existing delta cursor returned only the incremental delta, not a full enumeration
 - Reach the 5+5+2 live-integration smoke target (OneDrive 9, Internxt 10, sync 2+ test methods, all behind `UNIDRIVE_INTEGRATION_TESTS`)
+- `unidrive-ui` calls `sync.subscribe` after connecting (was: the event stream needed an explicit client-side subscribe; drained from BACKLOG: Low)
