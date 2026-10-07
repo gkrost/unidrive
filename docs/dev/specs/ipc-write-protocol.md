@@ -30,6 +30,9 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   never silence. A client should still bound its wait for a reply line.
 - Every connection authenticates first (`hello`, `hello.proof`) and is limited
   to the verbs of its scope: see [ipc-authentication.md](ipc-authentication.md).
+- The verb is the top-level string member `verb` of the request object. A line
+  that is not one JSON object, a `verb` that is not a string or appears twice,
+  and nesting deeper than 64 levels are all answered with `missing_verb`.
 - Replies are `{"ok":true,...}` or `{"ok":false,"error":"<token>"}`. Error
   tokens are the stable cross-repo contract listed in §7.
 - Events flow only on connections that have issued `hydration.subscribe`.
