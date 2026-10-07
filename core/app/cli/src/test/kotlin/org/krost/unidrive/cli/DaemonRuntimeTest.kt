@@ -182,7 +182,8 @@ class DaemonRuntimeTest {
                 val requests = listOf(
                     """{"verb":"daemon.status"}""",
                     """{"verb":"hydration.open_read","handle_id":"h1","path":"/startup/read.txt"}""",
-                    """{"verb":"hydration.open_write","handle_id":"h2","path":"/startup/write.txt","cache_path":"${tempDir.resolve("write-cache.bin")}"}""",
+                    // The cache path is a JSON string: a Windows path's backslashes must be escaped.
+                    """{"verb":"hydration.open_write","handle_id":"h2","path":"/startup/write.txt","cache_path":${kotlinx.serialization.json.JsonPrimitive(tempDir.resolve("write-cache.bin").toString())}}""",
                     """{"verb":"hydration.open_write_begin","path":"/startup/truncate.txt"}""",
                     """{"verb":"hydration.close_handle","handle_id":"h3"}""",
                     """{"verb":"hydration.hydrate","path":"/startup/hydrate.txt"}""",
