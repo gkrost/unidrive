@@ -5,11 +5,13 @@
 .DESCRIPTION
     Lists the golden folder recursively through the daemon and checks every manifest entry: present, uploaded (remote_id set),
     no pending upload, no error, same size. This is the cloud-side view of the tree; verify.ps1 is the local-side view.
-    Read-only: it only sends hydration.list. Needs PowerShell 7.
+    Read-only: it only sends hydration.list, over a connection authenticated with the profile's read token (ipc-auth.ps1).
+    Needs PowerShell 7.
 
 .PARAMETER Profile   engine profile whose daemon to ask
 .PARAMETER Prefix    where the golden folder lives in the cloud view, default /_INBOX/golden-unicode-v1
 .PARAMETER Watch     repeat every 10 s until nothing is pending (or -TimeoutSec runs out)
+.PARAMETER ConfigDir the engine's config folder (default: resolved like the engine does)
 #>
 [CmdletBinding()]
 param(
@@ -18,11 +20,12 @@ param(
     [string]$Manifest = (Join-Path $PSScriptRoot 'manifest.tsv'),
     [switch]$Watch,
     [int]$TimeoutSec = 600,
-    [int]$MaxLines = 60
+    [int]$MaxLines = 60,
+    [string]$ConfigDir
 )
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required (pwsh).' }
-$sock = Join-Path $env:TEMP "unidrive-ipc\unidrive-$Profile.sock"
+. (Join-Path $PSScriptRoot 'ipc-auth.ps1')
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 
 function Expand-Tokens([string]$s) { [regex]::Replace($s, '\{U\+([0-9A-Fa-f]{4,6})\}', { param($m) [char]::ConvertFromUtf32([Convert]::ToInt32($m.Groups[1].Value, 16)) }) }
@@ -37,10 +40,8 @@ function To-Ascii([string]$s) {
 $script:conn = $null
 function Connect-Ipc {
     if ($script:conn) { $script:conn.Socket.Dispose(); $script:conn = $null }
-    $s = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::Unix, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Unspecified)
-    $s.Connect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($sock))
-    $stream = [System.Net.Sockets.NetworkStream]::new($s)
-    $script:conn = [pscustomobject]@{ Socket = $s; Stream = $stream; Reader = [IO.StreamReader]::new($stream, $utf8) }
+    # Reads the token afresh at every (re)connect: a restarted daemon has new tokens.
+    $script:conn = Connect-UnidriveIpc -Profile $Profile -Scope read -ConfigDir $ConfigDir
 }
 function Invoke-Ipc([hashtable]$request) {
     $bytes = $utf8.GetBytes(($request | ConvertTo-Json -Compress -Depth 5) + "`n")

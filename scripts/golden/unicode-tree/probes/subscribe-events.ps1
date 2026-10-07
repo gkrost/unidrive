@@ -5,20 +5,20 @@
 .DESCRIPTION
     Ad-hoc probe, read-only: connects to the daemon's IPC socket, sends hydration.subscribe and prints what arrives for -Seconds.
     It is how the malformed `uploading` event (gkrost/unidrive#484) was found: the Windows client resets its stream on such a
-    line, so a probe that parses the same lines shows what the client sees. Needs PowerShell 7.
+    line, so a probe that parses the same lines shows what the client sees. Authenticates with the profile's read token
+    (ipc-auth.ps1; -ConfigDir overrides where the profile's config folder is). Needs PowerShell 7.
 #>
 param(
     [Parameter(Mandatory)][string]$Profile,
-    [int]$Seconds = 60
+    [int]$Seconds = 60,
+    [string]$ConfigDir
 )
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required (pwsh).' }
-$sock = Join-Path $env:TEMP "unidrive-ipc\unidrive-$Profile.sock"
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'ipc-auth.ps1')
 $utf8 = [System.Text.UTF8Encoding]::new($false)
-$s = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::Unix, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Unspecified)
-$s.Connect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($sock))
-$stream = [System.Net.Sockets.NetworkStream]::new($s)
+$conn = Connect-UnidriveIpc -Profile $Profile -Scope read -ConfigDir $ConfigDir
+$s = $conn.Socket; $stream = $conn.Stream; $reader = $conn.Reader
 $b = $utf8.GetBytes('{"verb":"hydration.subscribe"}' + "`n"); $stream.Write($b, 0, $b.Length); $stream.Flush()
-$reader = [IO.StreamReader]::new($stream, $utf8)
 $end = (Get-Date).AddSeconds($Seconds)
 $n = 0; $bad = 0; $kinds = @{}; $task = $null
 while ((Get-Date) -lt $end) {

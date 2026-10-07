@@ -1,0 +1,4 @@
+{"verb":"hello","protocol":2,"scope":"full","client":"contract-test","nonce":"AAECAwQFBgcICQoLDA0ODw"}
+{"ok":true,"step":1,"snonce":"EBESExQVFhcYGRobHB0eHw"}
+{"verb":"hello.proof","proof":"2TL-rOrEbuDB9pZ34fpxlSRakSFB9X49f3Kn7_plriA"}
+{"ok":true,"scope":"full","protocol_version":2,"proof":"qwZ4elXK7shenllL3frkDuObSaAhaSuBDra9Q94EuNo"}

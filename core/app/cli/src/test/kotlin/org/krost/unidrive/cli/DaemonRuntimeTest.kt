@@ -18,6 +18,12 @@ import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanProgress
+import org.krost.unidrive.io.OwnerOnly
+import org.krost.unidrive.io.grantProblem
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcAuthException
+import org.krost.unidrive.sync.IpcEndpoint
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -64,6 +70,157 @@ class DaemonRuntimeTest {
         runCatching { Files.deleteIfExists(lockFile.resolveSibling(".lock.pid")) }
         runCatching { tempDir.toFile().deleteRecursively() }
     }
+
+    // The daemon writes its IPC tokens next to the lock (the profile folder); every client authenticates.
+    private fun connect(scope: IpcAuth.Scope = IpcAuth.Scope.FULL): SocketChannel =
+        IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "test_profile"), scope)
+
+    private fun rawConnect(): SocketChannel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+
+    @Test
+    fun `the daemon writes owner-only tokens before it listens and serves only authenticated connections`() =
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val runtime = startDaemon(StubProvider())
+            val daemonJob = launch { runtime.start() }
+            try {
+                awaitSocket()
+                for (scope in IpcAuth.Scope.entries) {
+                    val token = IpcAuth.tokenFile(tempDir, scope)
+                    assertTrue(Files.exists(token), "token file $token must exist once the socket does")
+                    assertEquals(null, OwnerOnly.grantProblem(token), "token file must be owner-only")
+                }
+
+                rawConnect().use { ch ->
+                    ch.configureBlocking(false)
+                    ch.write(ByteBuffer.wrap("{\"verb\":\"hydration.list\",\"prefix\":\"/\"}\n".toByteArray()))
+                    assertEquals("""{"ok":false,"error":"auth_required"}""", readFirstReplyLine(ch, 5_000))
+                    ch.write(ByteBuffer.wrap("{\"verb\":\"daemon.status\"}\n".toByteArray()))
+                    val status = Json.parseToJsonElement(readFirstReplyLine(ch, 5_000)).jsonObject
+                    // A client without a token file decides on exactly these two: version 2 = cannot
+                    // authenticate, version 1 = a daemon without the handshake. Numbers and booleans, not strings.
+                    assertEquals(setOf("ok", "protocol_version", "engine_version", "auth_required"), status.keys, "minimal before authentication")
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(2), status.getValue("protocol_version"))
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(true), status.getValue("auth_required"))
+                    assertEquals(kotlinx.serialization.json.JsonPrimitive(true), status.getValue("ok"))
+                }
+
+                connect(IpcAuth.Scope.READ).use { ch ->
+                    ch.configureBlocking(false)
+                    ch.write(ByteBuffer.wrap("{\"verb\":\"daemon.shutdown\"}\n".toByteArray()))
+                    assertEquals("""{"ok":false,"error":"forbidden","scope":"read"}""", readFirstReplyLine(ch, 5_000))
+                    ch.write(ByteBuffer.wrap("{\"verb\":\"daemon.status\"}\n".toByteArray()))
+                    assertTrue("\"uptime_ms\"" in readFirstReplyLine(ch, 5_000), "a read client gets the full status")
+                }
+            } finally {
+                runtime.close()
+                daemonJob.join()
+            }
+        }
+
+    @Test
+    fun `the daemon rotates its tokens at every start`() =
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val first = startDaemon(StubProvider())
+            val job1 = launch { first.start() }
+            awaitSocket()
+            val oldToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
+            first.close()
+            job1.join()
+
+            val second = startDaemon(StubProvider())
+            val job2 = launch { second.start() }
+            try {
+                awaitSocket()
+                val newToken = Files.readString(IpcAuth.tokenFile(tempDir, IpcAuth.Scope.FULL))
+                assertTrue(oldToken != newToken, "a new start writes new tokens")
+                // A client still holding the previous token is refused; one that re-reads the file is not.
+                val stale = Files.createDirectories(tempDir.resolve("stale"))
+                Files.writeString(IpcAuth.tokenFile(stale, IpcAuth.Scope.FULL), oldToken)
+                kotlin.test.assertFailsWith<IpcAuthException> {
+                    IpcAuthClient.connect(IpcEndpoint(socketPath, stale, "test_profile"), IpcAuth.Scope.FULL)
+                }
+                connect().close()
+            } finally {
+                second.close()
+                job2.join()
+            }
+        }
+
+    @Test
+    fun `a second start that loses the profile lock leaves the running daemon's tokens untouched`() =
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            val first = startDaemon(StubProvider())
+            val job = launch { first.start() }
+            try {
+                awaitSocket()
+                val files = IpcAuth.Scope.entries.map { IpcAuth.tokenFile(tempDir, it) }
+                // Digests, so a failure message never shows a token.
+                fun state() =
+                    files.map {
+                        java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(it)).joinToString("") { b -> "%02x".format(b) } to
+                            Files.getLastModifiedTime(it)
+                    }
+                val before = state()
+
+                // Same profile (lock), its own socket path: only the lock can stop it.
+                var exitCode: Int? = null
+                val secondSocket = tempDir.resolve("second.sock")
+                val second =
+                    DaemonRuntime(
+                        profileName = "test_profile",
+                        lockFile = lockFile,
+                        dbPath = dbPath,
+                        syncRoot = tempDir,
+                        socketPath = secondSocket,
+                        providerFactory = { error("a start that lost the lock must not get this far") },
+                        exitProcess = { exitCode = it },
+                    )
+                second.start()
+
+                assertEquals(1, exitCode, "the second start is refused by the lock")
+                assertEquals(before, state(), "token files untouched (content digest and mtime)")
+                assertFalse(Files.exists(secondSocket))
+                connect().close() // the running daemon's clients still authenticate
+            } finally {
+                first.close()
+                job.join()
+            }
+        }
+
+    @Test
+    fun `a daemon that cannot write its token files refuses to start and never binds the socket`() =
+        runBlocking {
+            // A regular file where the profile folder should be: the token files cannot be created.
+            val notAFolder = Files.writeString(tempDir.resolve("not-a-folder"), "x")
+            val runtime =
+                DaemonRuntime(
+                    profileName = "test_profile",
+                    lockFile = lockFile,
+                    dbPath = dbPath,
+                    syncRoot = tempDir,
+                    socketPath = socketPath,
+                    providerFactory = { StubProvider() },
+                    ipcTokenDir = notAFolder,
+                )
+            val stderr = java.io.ByteArrayOutputStream()
+            val originalErr = System.err
+            System.setErr(java.io.PrintStream(stderr, true, Charsets.UTF_8))
+            val ex =
+                try {
+                    runCatching { runtime.start() }.exceptionOrNull()
+                } finally {
+                    System.setErr(originalErr)
+                }
+
+            assertTrue(ex is IpcAuth.StartupRefused, "got $ex")
+            assertTrue(ex.message!!.startsWith("IPC startup refused: "), ex.message)
+            assertTrue(notAFolder.toString() in ex.message!!, "the line names the path: ${ex.message}")
+            val lines = stderr.toString(Charsets.UTF_8).lines().filter { it.startsWith("IPC startup refused:") }
+            assertEquals(listOf(ex.message), lines, "exactly one refusal line on stderr")
+            assertFalse(Files.exists(socketPath), "the socket is never bound without its tokens")
+            assertFalse(Files.exists(lockFile.resolveSibling("${lockFile.fileName}.pid")), "the lock is released")
+            assertEquals(78, IpcAuth.STARTUP_REFUSED_EXIT_CODE)
+        }
 
     @Test
     fun daemon_fail_fast_on_auth_failure_does_not_bind_socket() = runBlocking {
@@ -129,7 +286,7 @@ class DaemonRuntimeTest {
         }
         assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
 
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = connect()
         try {
             // hydration.list takes "prefix", not "path" (cf. HydrationIpcHandler.handle()).
             // On a brand-new empty StateDatabase, list("/") returns Ok(emptyList()) → ok:true.
@@ -204,8 +361,15 @@ class DaemonRuntimeTest {
                     """{"verb":"daemon.statusx"}""",
                     """{"verb":"daemon.shutdown"}""",
                 )
+                // The IPC verb classes (IpcAuth) name exactly these verbs: each reaches a handler below,
+                // so the class table holds no verb the daemon does not register, and none is missing.
+                // (A pattern, not a JSON parse: the open_write line carries a raw Windows path there.)
+                assertEquals(
+                    IpcAuth.VERB_CLASSES.keys,
+                    requests.map { Regex(""""verb":"([^"]+)"""").find(it)!!.groupValues[1] }.toSet() - "daemon.statusx",
+                )
                 for (request in requests) {
-                    val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+                    val channel = connect()
                     try {
                         channel.configureBlocking(false)
                         val req = request + "\n"
@@ -429,7 +593,7 @@ class DaemonRuntimeTest {
     }
 
     private fun sendOneRequest(request: String): String {
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = connect()
         try {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
@@ -475,7 +639,7 @@ class DaemonRuntimeTest {
         }
         assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
 
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = connect()
         try {
             // Non-blocking reads so the deadline loop below actually polls the
             // deadline. With blocking reads, a read with nothing buffered hangs
@@ -539,7 +703,7 @@ class DaemonRuntimeTest {
         }
         assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
 
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = connect()
         try {
             channel.configureBlocking(false)
             // Subscribe via hydration.subscribe (the verb the co-daemon issues on mount).
@@ -583,7 +747,7 @@ class DaemonRuntimeTest {
         }
         assertTrue(Files.exists(socketPath), "socket must be bound")
 
-        val channel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
+        val channel = connect()
         channel.configureBlocking(false)
         try {
             channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))

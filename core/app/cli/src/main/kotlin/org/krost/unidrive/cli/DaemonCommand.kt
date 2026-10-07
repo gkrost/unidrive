@@ -1,5 +1,9 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcAuthException
+import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
@@ -91,7 +95,13 @@ class DaemonRunCommand : Runnable {
             runtime.shutdownAndWait()
         })
 
-        runBlocking { runtime.start() }
+        try {
+            runBlocking { runtime.start() }
+        } catch (_: IpcAuth.StartupRefused) {
+            // The IPC token files could not be written or verified: the daemon never runs without its
+            // IPC. The reason is already on stderr and in the log, as one line.
+            kotlin.system.exitProcess(IpcAuth.STARTUP_REFUSED_EXIT_CODE)
+        }
     }
 }
 
@@ -157,9 +167,9 @@ class DaemonStatusCommand : Runnable {
             return
         }
         try {
-            java.nio.channels.SocketChannel.open(
-                java.net.UnixDomainSocketAddress.of(socketPath),
-            ).use { channel ->
+            // daemon.status is a read verb: a read-scope connection (docs/dev/specs/ipc-authentication.md).
+            val endpoint = IpcEndpoint(socketPath, parent.providerConfigDir(), profile.name)
+            IpcAuthClient.connect(endpoint, IpcAuth.Scope.READ).use { channel ->
                 channel.write(
                     java.nio.ByteBuffer.wrap(
                         ("""{"verb":"daemon.status"}""" + "\n").toByteArray(),
@@ -176,6 +186,8 @@ class DaemonStatusCommand : Runnable {
                 val reply = String(buf.array(), 0, buf.limit()).substringBefore('\n')
                 println(reply)
             }
+        } catch (e: IpcAuthException) {
+            System.err.println("daemon IPC authentication failed: ${e.message}")
         } catch (e: java.io.IOException) {
             System.err.println("daemon socket unreachable: ${e.message}")
         }
@@ -283,8 +295,9 @@ class DaemonStopCommand : Runnable {
         // OS); Process.destroy() is only the fallback. On Windows destroy() is TerminateProcess,
         // which skips the shutdown hooks and leaves a stale socket and lock.
         val socketPath = IpcServer.defaultSocketPath(profile.name)
+        val endpoint = IpcEndpoint(socketPath, parent.providerConfigDir(), profile.name)
         val outcome = stopDaemonProcess(
-            requestShutdown = { requestDaemonShutdown(socketPath) },
+            requestShutdown = { requestDaemonShutdown(endpoint) },
             awaitExit = { timeoutMs -> awaitProcessExit(handle, timeoutMs) },
             destroy = { handle.destroy() },
             gracefulDeadlineMs = STOP_DEADLINE_MS,
@@ -352,18 +365,19 @@ private fun awaitProcessExit(handle: ProcessHandle, timeoutMs: Long): Boolean {
 }
 
 /**
- * Send `daemon.shutdown` to the daemon listening on [socketPath] and wait for its ack. Returns true
+ * Send `daemon.shutdown` to the daemon listening on [endpoint] and wait for its ack. Returns true
  * when the daemon has accepted the request: it replied ok, or it dropped the connection after the
  * request was written (a daemon already closing its sockets can reset the connection before the
  * ack is read, notably on Windows; the caller still verifies the process exits and falls back to
- * destroy()). Returns false when the socket is absent or unreachable, the request could not be
- * written, or the reply is negative or missing. Never throws.
+ * destroy()). Returns false when the socket is absent or unreachable, the IPC handshake fails (an
+ * admin verb needs a full-scope connection), the request could not be written, or the reply is
+ * negative or missing. Never throws.
  */
-internal fun requestDaemonShutdown(socketPath: java.nio.file.Path, timeoutMs: Long = 3_000): Boolean {
-    if (!Files.exists(socketPath)) return false
+internal fun requestDaemonShutdown(endpoint: IpcEndpoint, timeoutMs: Long = 3_000): Boolean {
+    if (!Files.exists(endpoint.socketPath)) return false
     var written = false
     return try {
-        java.nio.channels.SocketChannel.open(java.net.UnixDomainSocketAddress.of(socketPath)).use { channel ->
+        IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL).use { channel ->
             channel.configureBlocking(false)
             val request = """{"verb":"daemon.shutdown"}""" + "\n"
             val out = java.nio.ByteBuffer.wrap(request.toByteArray())
