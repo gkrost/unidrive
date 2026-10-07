@@ -205,6 +205,96 @@ class OwnerOnlyTest {
         }
     }
 
+    // ── Windows: entries that change while the folder is walked ────────────
+    // The walk lists a folder before it reads and sets the permissions of each entry; another process
+    // (a second daemon sharing the IPC folder) may remove an entry in between. The seam of
+    // restrictDirectory removes it at exactly that point.
+
+    @Test
+    fun `a file removed after the walk listed it is skipped and the walk completes`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("walk"))
+        val gone = Files.writeString(dir.resolve("a-gone.meta"), "p")
+        val kept = Files.writeString(dir.resolve("b-kept.meta"), "p")
+        WindowsAclProbe.grantRead(kept, WindowsAclProbe.USERS_SID)
+
+        val outcome = OwnerOnly.restrictDirectory(dir) { if (it == gone) Files.delete(it) }
+
+        assertFalse(Files.exists(gone), "precondition: removed during the walk")
+        assertEquals(OwnerOnly.Outcome.Changed, outcome)
+        assertOwnerOnlyDirectory(dir)
+        assertInheritsOwnerOnly(kept)
+    }
+
+    @Test
+    fun `a folder removed after the listing, before the walk opened it, is skipped`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("walk"))
+        val first = Files.writeString(dir.resolve("a.meta"), "p")
+        val sub = Files.createDirectory(dir.resolve("b-sub"))
+        Files.writeString(sub.resolve("x.meta"), "p")
+        val kept = Files.writeString(dir.resolve("c-kept.meta"), "p")
+        WindowsAclProbe.grantRead(kept, WindowsAclProbe.USERS_SID)
+        val seen = mutableListOf<Path>()
+
+        val outcome =
+            OwnerOnly.restrictDirectory(dir) {
+                seen.add(it)
+                if (it == first) assertTrue(sub.toFile().deleteRecursively(), "precondition: folder removed")
+            }
+
+        // The listing of a small folder is read at once, so the walk still reaches b-sub and fails to open it.
+        assertTrue(seen.none { it.startsWith(sub) }, "precondition: b-sub was gone before the walk reached it: $seen")
+        assertEquals(OwnerOnly.Outcome.Changed, outcome)
+        assertEquals(listOf(first, kept), seen, "the walk went on after b-sub")
+        assertInheritsOwnerOnly(kept)
+    }
+
+    @Test
+    fun `a folder removed at its own step is skipped with everything in it`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("walk"))
+        val sub = Files.createDirectory(dir.resolve("a-sub"))
+        Files.writeString(sub.resolve("x.meta"), "p")
+        val kept = Files.writeString(dir.resolve("b-kept.meta"), "p")
+        WindowsAclProbe.grantRead(kept, WindowsAclProbe.USERS_SID)
+
+        val outcome = OwnerOnly.restrictDirectory(dir) { if (it == sub) sub.toFile().deleteRecursively() }
+
+        assertFalse(Files.exists(sub), "precondition: removed during the walk")
+        assertEquals(OwnerOnly.Outcome.Changed, outcome)
+        assertInheritsOwnerOnly(kept)
+    }
+
+    @Test
+    fun `the folder itself removed during the walk is still a failure`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("walk"))
+        val first = Files.writeString(dir.resolve("a.meta"), "p")
+        Files.writeString(dir.resolve("b.meta"), "p")
+
+        val outcome = OwnerOnly.restrictDirectory(dir) { if (it == first) dir.toFile().deleteRecursively() }
+
+        assertFalse(Files.exists(dir), "precondition: removed during the walk")
+        assertTrue(outcome is OwnerOnly.Outcome.Failed, "got $outcome")
+    }
+
+    @Test
+    fun `any other error on an entry still fails the walk and names the entry`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("walk"))
+        OwnerOnly.requireDirectory(dir)
+        val locked = Files.writeString(dir.resolve("locked.meta"), "p")
+        WindowsAclProbe.denyOwnerReadControl(locked)
+
+        val outcome = OwnerOnly.restrictDirectory(dir)
+
+        assertTrue(outcome is OwnerOnly.Outcome.Failed && locked.toString() in outcome.reason, "got $outcome")
+        val e = assertFailsWith<IOException> { OwnerOnly.requireDirectory(dir) }
+        assertTrue(locked.toString() in e.message!!, e.message)
+        Files.delete(locked)
+    }
+
     @Test
     fun `what is created later in a restricted folder gets the owner-only entries only`() {
         assumeWindows()

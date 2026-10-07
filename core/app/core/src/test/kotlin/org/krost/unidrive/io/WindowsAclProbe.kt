@@ -38,6 +38,9 @@ internal object WindowsAclProbe {
 
     fun protectInheritance(path: Path) = run("icacls", path.toString(), "/inheritance:d")
 
+    /** Denies the owner (OWNER RIGHTS, S-1-3-4) reading the permissions of [file]; deleting it through the folder still works. */
+    fun denyOwnerReadControl(file: Path) = run("icacls", file.toString(), "/deny", "*S-1-3-4:(RC)")
+
     fun junction(link: Path, target: Path) = run("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
 
     /** The SID of the user running the tests, as `whoami` reports it. */

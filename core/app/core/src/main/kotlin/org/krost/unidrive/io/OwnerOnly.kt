@@ -57,6 +57,16 @@ public object OwnerOnly {
 
     public fun restrictDirectory(dir: Path): Outcome = restrict(dir, directory = true)
 
+    /**
+     * [restrictDirectory] with a test seam: [beforeEntry] runs for each entry below [dir] after the
+     * walk has listed it and before its permissions are read or set (Windows only; the POSIX
+     * variant does not walk the folder).
+     */
+    internal fun restrictDirectory(
+        dir: Path,
+        beforeEntry: (Path) -> Unit,
+    ): Outcome = restrict(dir, directory = true, beforeEntry)
+
     public fun restrictFile(file: Path): Outcome = restrict(file, directory = false)
 
     /** [restrictDirectory], throwing [IOException] unless the folder ends up owner-only. */
@@ -149,9 +159,10 @@ public object OwnerOnly {
     private fun restrict(
         path: Path,
         directory: Boolean,
+        beforeEntry: (Path) -> Unit = {},
     ): Outcome =
         try {
-            if (isWindows(path)) restrictWindows(path, directory) else restrictPosix(path, directory)
+            if (isWindows(path)) restrictWindows(path, directory, beforeEntry) else restrictPosix(path, directory)
         } catch (e: Exception) {
             Outcome.Failed(e.message ?: e.javaClass.name)
         } catch (e: LinkageError) {
@@ -180,6 +191,7 @@ public object OwnerOnly {
     private fun restrictWindows(
         path: Path,
         directory: Boolean,
+        beforeEntry: (Path) -> Unit,
     ): Outcome {
         var changed = false
         fun restrictEntry(entry: Path, attrs: BasicFileAttributes) {
@@ -194,11 +206,15 @@ public object OwnerOnly {
         if (directory) {
             Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (dir != path) restrictEntry(dir, attrs)
+                    if (dir != path) {
+                        beforeEntry(dir)
+                        restrictEntry(dir, attrs)
+                    }
                     return FileVisitResult.CONTINUE
                 }
 
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    beforeEntry(file)
                     restrictEntry(file, attrs)
                     return FileVisitResult.CONTINUE
                 }
