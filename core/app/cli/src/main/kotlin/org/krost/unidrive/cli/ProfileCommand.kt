@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.ProviderMetadata
+import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isProfileAuthenticated
@@ -11,6 +12,7 @@ import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 
 @Command(
@@ -225,7 +227,19 @@ class ProfileListCommand : Runnable {
             val type = rp.type ?: name
             val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
             val authed = isProfileAuthenticated(type, name, rp, baseDir)
-            val authLabel = if (authed) AnsiHelper.green(GlyphRenderer.tick()) else AnsiHelper.dim(dash)
+            // Credentials on disk aren't proof they still work: an expired
+            // Internxt JWT is still a credentials.json.
+            val usable =
+                authed &&
+                    !credentialNeedsReauth(
+                        main.checkCredentialHealth(ProfileInfo(name, type, Path.of(syncRoot), rp), baseDir.resolve(name)),
+                    )
+            val authLabel =
+                when {
+                    usable -> AnsiHelper.green(GlyphRenderer.tick())
+                    authed -> AnsiHelper.yellow("${GlyphRenderer.warn()} expired")
+                    else -> AnsiHelper.dim(dash)
+                }
             println("%-20s %-10s %-30s %s".format(name, type, syncRoot, authLabel))
         }
     }

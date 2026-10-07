@@ -61,7 +61,7 @@ class InternxtProviderFactory : ProviderFactory {
     ): CredentialHealth {
         val credFile = profileDir.resolve("credentials.json")
         if (!Files.exists(credFile)) {
-            return CredentialHealth.Missing("No credentials file — run 'unidrive auth'")
+            return CredentialHealth.Missing("No credentials file")
         }
 
         return try {
@@ -70,7 +70,7 @@ class InternxtProviderFactory : ProviderFactory {
             // UD-308 padding fix is preserved in the shared impl.
             val exp = JwtExtractor.extractExp(creds.jwt)
             if (exp != null && System.currentTimeMillis() / 1000 > exp) {
-                return CredentialHealth.ExpiresIn(0, "JWT expired — run 'unidrive auth'")
+                return CredentialHealth.ExpiresIn(0, "JWT expired")
             }
             CredentialHealth.Ok
         } catch (e: Exception) {
