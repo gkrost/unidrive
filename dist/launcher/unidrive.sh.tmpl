@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Generated from dist/launcher/unidrive.sh.tmpl; edit the template, not this file.
+# Heap size via UNIDRIVE_XMX (a bare size, e.g. 512m, 2g - no -Xmx prefix).
+# --locale=xx_YY (or UNIDRIVE_LOCALE) sets -Duser.language=xx -Duser.country=YY; the flag is consumed here and the
+# command line beats the environment.
+locale="${UNIDRIVE_LOCALE:-}"
+pass=()
+for a in "$@"; do
+    case "$a" in
+        --locale=*) locale="${a#--locale=}" ;;
+        *) pass+=("$a") ;;
+    esac
+done
+locale_args=()
+if [[ -n "$locale" ]]; then
+    if [[ "$locale" =~ ^([A-Za-z]{2,3})([_-]([A-Za-z]{2}))?$ ]]; then
+        locale_args+=("-Duser.language=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')")
+        if [[ -n "${BASH_REMATCH[3]}" ]]; then
+            locale_args+=("-Duser.country=$(printf '%s' "${BASH_REMATCH[3]}" | tr '[:lower:]' '[:upper:]')")
+        fi
+    else
+        echo "unidrive: --locale expects xx or xx_YY (for example de_LU), got '$locale'" >&2
+        exit 2
+    fi
+fi
+exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" -jar "@JAR@" "${pass[@]}"

@@ -302,6 +302,31 @@ fun run(
     return output.trim()
 }
 
+// The launchers are rendered from dist/launcher/*.tmpl; the flags every launcher passes live in
+// dist/launcher/jvm-flags.txt (also read by dist/install.sh, unidrive-jfr.sh and the golden-run launcher).
+val launcherDir: File = rootProject.projectDir.resolve("../dist/launcher")
+
+fun staticJvmFlags(): List<String> =
+    launcherDir
+        .resolve("jvm-flags.txt")
+        .readLines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+
+fun renderLauncher(
+    template: String,
+    jarPath: String,
+): String {
+    val flags = staticJvmFlags()
+    return launcherDir
+        .resolve(template)
+        .readText()
+        .replace("\r\n", "\n")
+        .replace("@STATIC_FLAGS_PS@", "\$javaArgs += @(" + flags.joinToString(", ") { "'$it'" } + ")")
+        .replace("@STATIC_FLAGS_SH@", flags.joinToString(" ") { "\"$it\"" })
+        .replace("@JAR@", jarPath)
+}
+
 tasks.register("deploy") {
     dependsOn(tasks.shadowJar)
     group = "distribution"
@@ -413,54 +438,7 @@ fun deployWindows(
     // still running. PowerShell exits cleanly back to the parent shell on
     // CTRL-C with no prompt.
     val ps1Launcher = file("$libDir\\unidrive.ps1")
-    ps1Launcher.writeText(
-        """
-        |# UD-270: PowerShell launcher. Invoked by ${'$'}binDir\unidrive.cmd
-        |# so CTRL-C from the user's shell exits cleanly without cmd.exe's
-        |# trailing "Terminate batch job?" prompt.
-        |#
-        |# Args go through a single-quoted array + splat so PowerShell 5.1's
-        |# parser doesn't split tokens at `.`. Pre-fix the inline form
-        |# `& java -Dstdout.encoding=UTF-8 ...` became `-Dstdout` +
-        |# `.encoding=UTF-8` after PowerShell tokenisation; Java treated the
-        |# trailing fragment as a class name and crashed with
-        |# "Hauptklasse .encoding=UTF-8 konnte nicht gefunden oder geladen
-        |# werden". Single-quoted arrays bypass PowerShell's parser entirely.
-        |#
-        |# Force UTF-8 console output so Java's UTF-8 stdout (set via
-        |# -Dstdout.encoding=UTF-8) renders correctly. Without this on a
-        |# German Windows console (default CP850 / CP437), box-drawing
-        |# characters render as mojibake — `─` (E2 94 80) is read as CP850
-        |# → "ÔöÇ". chcp 65001 tells conhost to interpret the stdout byte
-        |# stream as UTF-8.
-        |chcp 65001 > ${'$'}null
-        |
-        |# Heap size: UNIDRIVE_XMX holds a bare size (e.g. 512m, 2g — no -Xmx
-        |# prefix). The old fixed -Xmx6g assumed a workstation; the packaged
-        |# image runs on ordinary desktops too.
-        |${'$'}xmx = if (${'$'}env:UNIDRIVE_XMX) { '-Xmx' + ${'$'}env:UNIDRIVE_XMX } else { '-Xmx2g' }
-        |# AF_UNIX socket temp dir: the JVM's default tracks java.io.tmpdir,
-        |# which packaged Windows apps have seen redirected or unwritable —
-        |# pin it to the host's temp dir instead.
-        |${'$'}tmp = if (${'$'}env:TEMP) { ${'$'}env:TEMP } elseif (${'$'}env:TMP) { ${'$'}env:TMP } else { ${'$'}null }
-        |${'$'}javaArgs = @(
-        |    ${'$'}xmx
-        |    '-Dstdout.encoding=UTF-8'
-        |    '-Dstderr.encoding=UTF-8'
-        |    '--enable-native-access=ALL-UNNAMED'
-        |)
-        |# Append, never concat with a possibly-null operand: ${'$'}javaArgs + ${'$'}tmpDirArg
-        |# inserts an empty element when TEMP/TMP are unset (java then reads an empty
-        |# first argument as the main class name under PowerShell 7).
-        |if (${'$'}tmp) { ${'$'}javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + ${'$'}tmp) }
-        |${'$'}javaArgs += @(
-        |    '-jar'
-        |    '$targetJar'
-        |)
-        |& java @javaArgs @args
-        |exit ${'$'}LASTEXITCODE
-        """.trimMargin() + "\r\n",
-    )
+    ps1Launcher.writeText(renderLauncher("unidrive.ps1.tmpl", targetJar.absolutePath).replace("\n", "\r\n"))
 
     launcher.writeText(
         """
@@ -473,18 +451,13 @@ fun deployWindows(
         """.trimMargin() + "\r\n",
     )
 
-    // Batch wrapper — restart loop with sentinel-based stop
+    // Batch wrapper — restart loop with sentinel-based stop. It calls the generated PowerShell launcher, so the
+    // watch loop runs on exactly the flags of every other entry point.
     val batchWrapper = file("$libDir\\unidrive-watch.cmd")
-    val jarPath = targetJar.absolutePath.replace("\\", "\\\\")
-    val sentinelPath = "$localAppData\\\\unidrive\\\\stop"
     batchWrapper.writeText(
         "@echo off\r\n" +
-            "set \"XMX=-Xmx2g\"\r\n" +
-            "if defined UNIDRIVE_XMX set \"XMX=-Xmx%UNIDRIVE_XMX%\"\r\n" +
             ":loop\r\n" +
-            "java %XMX% -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED " +
-            "-Djdk.net.unixdomain.tmpdir=\"%TEMP%\" -jar " +
-            "\"${targetJar.absolutePath}\" sync --watch\r\n" +
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"${ps1Launcher.absolutePath}\" sync --watch\r\n" +
             "if exist \"${localAppData}\\unidrive\\stop\" (\r\n" +
             "    del \"${localAppData}\\unidrive\\stop\"\r\n" +
             "    exit /b 0\r\n" +
@@ -540,14 +513,7 @@ fun deployLinux(
 
     jarFile.copyTo(targetJar, overwrite = true)
 
-    launcher.writeText(
-        """
-        |#!/usr/bin/env bash
-        |# Heap size via UNIDRIVE_XMX (a bare size, e.g. 512m, 2g — no -Xmx prefix).
-        |XMX="-Xmx${'$'}{UNIDRIVE_XMX:-2g}"
-        |exec java "${'$'}XMX" -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 --enable-native-access=ALL-UNNAMED "-Djdk.net.unixdomain.tmpdir=${'$'}{TMPDIR:-/tmp}" -jar "$targetJar" "${'$'}@"
-        """.trimMargin() + "\n",
-    )
+    launcher.writeText(renderLauncher("unidrive.sh.tmpl", targetJar.absolutePath))
     launcher.setExecutable(true)
 
     serviceFile.writeText(

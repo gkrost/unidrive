@@ -73,14 +73,15 @@ find "${INSTALL_LIB}" -maxdepth 1 -type f -name 'unidrive*.jar' \
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 
-# CLI wrapper
+# CLI wrapper, rendered from the same template and flag list as the Gradle deploy launcher.
 mkdir -p "${INSTALL_BIN}"
-cat > "${INSTALL_BIN}/unidrive" <<WRAPPER
-#!/usr/bin/env bash
-# Heap size via UNIDRIVE_XMX (a bare size, e.g. 512m, 2g — no -Xmx prefix).
-XMX="-Xmx\${UNIDRIVE_XMX:-2g}"
-exec java "\$XMX" --enable-native-access=ALL-UNNAMED "-Djdk.net.unixdomain.tmpdir=\${TMPDIR:-/tmp}" -jar "${INSTALL_LIB}/${CLI_BASENAME}" "\$@"
-WRAPPER
+STATIC_FLAGS=""
+while IFS= read -r flag; do
+    flag="${flag%%#*}"; flag="${flag//[[:space:]]/}"
+    [[ -n "${flag}" ]] && STATIC_FLAGS+="\"${flag}\" "
+done < "${SCRIPT_DIR}/launcher/jvm-flags.txt"
+sed -e "s|@STATIC_FLAGS_SH@|${STATIC_FLAGS% }|" -e "s|@JAR@|${INSTALL_LIB}/${CLI_BASENAME}|" \
+    "${SCRIPT_DIR}/launcher/unidrive.sh.tmpl" > "${INSTALL_BIN}/unidrive"
 chmod +x "${INSTALL_BIN}/unidrive"
 echo "  ${INSTALL_BIN}/unidrive"
 
