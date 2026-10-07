@@ -29,17 +29,20 @@ fun escapeTomlValue(value: String): String =
 
 /**
  * Generate a TOML section string for a new profile.
- * Returns the full `[providers.<name>]` block ready to append.
+ * Returns the full `[providers.<name>]` block ready to append. The mode is mandatory (#603): a
+ * profile without one is refused by every command, so creation always writes it.
  */
 fun generateProfileToml(
     type: String,
     name: String,
     syncRoot: String,
     credentials: Map<String, String>,
+    mode: ProfileMode,
 ): String =
     buildString {
         append("\n[providers.$name]\n")
         append("type = \"${escapeTomlValue(type)}\"\n")
+        append("mode = \"${mode.wireName}\"\n")
         append("sync_root = \"${escapeTomlValue(syncRoot)}\"\n")
         for ((key, value) in credentials) {
             if (value.isNotBlank()) {

@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.runBlocking
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.StateDatabase
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -61,6 +62,8 @@ class SweepCommand : Runnable {
             }
 
             val profile = parent.resolveCurrentProfile()
+            // #603 (U4): the sweep walks placeholders, which only a mount profile has.
+            parent.requireProfileMode(profile, ProfileMode.MOUNT, "sweep")
             val configDir = parent.configBaseDir().resolve(profile.name)
             val dbPath = configDir.resolve("state.db")
             if (!Files.exists(dbPath)) {

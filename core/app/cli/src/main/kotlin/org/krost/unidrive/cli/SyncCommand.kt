@@ -16,6 +16,7 @@ import org.krost.unidrive.sync.IpcProgressReporter
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.LocalWatcher
 import org.krost.unidrive.sync.NotifyProgressReporter
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.ProgressReporter
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SubscriptionRenewalScheduler
@@ -238,6 +239,9 @@ open class SyncCommand : Runnable {
         // Mirrors UD-299's sync_root normalisation philosophy: do-what-I-mean
         // for paths instead of failing loud.
         syncPaths = SyncScope.normalize(syncPaths).toMutableList()
+        // #603 (U4): the hosting contract, before the lock or anything else mutates - `sync` is the
+        // mirror-mode command; a modeless or mount profile is refused before anything is touched.
+        parent.requireProfileMode(parent.resolveCurrentProfile(), ProfileMode.MIRROR, "sync")
         val lock = parent.acquireProfileLock()
         Runtime.getRuntime().addShutdownHook(Thread { lock.unlock() })
 

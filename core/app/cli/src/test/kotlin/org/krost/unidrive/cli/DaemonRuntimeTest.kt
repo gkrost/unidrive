@@ -20,6 +20,7 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanProgress
 import org.krost.unidrive.io.OwnerOnly
 import org.krost.unidrive.io.grantProblem
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
@@ -167,6 +168,7 @@ class DaemonRuntimeTest {
                 val secondSocket = tempDir.resolve("second.sock")
                 val second =
                     DaemonRuntime(
+                        profileMode = ProfileMode.MOUNT,
                         profileName = "test_profile",
                         lockFile = lockFile,
                         dbPath = dbPath,
@@ -194,6 +196,7 @@ class DaemonRuntimeTest {
             val notAFolder = Files.writeString(tempDir.resolve("not-a-folder"), "x")
             val runtime =
                 DaemonRuntime(
+                    profileMode = ProfileMode.MOUNT,
                     profileName = "test_profile",
                     lockFile = lockFile,
                     dbPath = dbPath,
@@ -229,6 +232,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = AuthFailingStubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -270,6 +274,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -317,6 +322,7 @@ class DaemonRuntimeTest {
     fun verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply() =
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val runtime = DaemonRuntime(
+                profileMode = ProfileMode.MOUNT,
                 profileName = "test_profile",
                 lockFile = lockFile,
                 dbPath = dbPath,
@@ -433,6 +439,7 @@ class DaemonRuntimeTest {
         Files.writeString(metaPath, "test_profile\n")
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -458,6 +465,7 @@ class DaemonRuntimeTest {
     @Test
     fun `shutdownAndWait returns only after cleanup has released the socket and the lock`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -492,6 +500,7 @@ class DaemonRuntimeTest {
     @Test
     fun `shutdownAndWait on a runtime that never started does not block`() {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -507,6 +516,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_shutdown verb acks then runs the clean shutdown path`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -535,6 +545,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_status reports the effective scope`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -566,6 +577,7 @@ class DaemonRuntimeTest {
     @Test
     fun `daemon_status reports the effective poll interval`() = runBlocking {
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -623,6 +635,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -688,6 +701,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = OneRemoteFileStubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -732,6 +746,7 @@ class DaemonRuntimeTest {
         val provider: CloudProvider = StubProvider()
 
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,
@@ -804,6 +819,7 @@ class DaemonRuntimeTest {
 
     private fun startDaemon(provider: CloudProvider) =
         DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "test_profile",
             lockFile = lockFile,
             dbPath = dbPath,

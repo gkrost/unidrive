@@ -309,6 +309,9 @@ internal object StringOrListSerializer : KSerializer<List<String>> {
 data class RawProvider(
     // Profile metadata
     val type: String? = null,
+    // #603 (U4): the profile's hosting mode, "mirror" | "mount" — chosen at creation, fixed afterwards.
+    // Absent = a modeless profile, which every command refuses (no legacy support; see ProfileMode).
+    val mode: String? = null,
     val sync_root: String? = null,
     val root_path: String? = null, // localfs alternative
     // Sync settings
@@ -390,6 +393,12 @@ data class ProfileInfo(
     val type: String,
     val syncRoot: Path,
     val rawProvider: RawProvider?,
+    /**
+     * #603 (U4): the profile's hosting mode, from `[providers.<name>] mode`. Null when the key is
+     * absent: a modeless profile, which every command refuses before anything is touched — it is never
+     * defaulted (owner decision: no legacy support, nothing assumes a legacy profile).
+     */
+    val mode: ProfileMode? = null,
     /**
      * True when this profile was discovered from a directory on disk that has
      * no matching `[providers.<name>]` section in config.toml. An orphan profile
@@ -648,12 +657,18 @@ data class SyncConfig(
                     section.sync_root?.let { Paths.get(expandTilde(it)) }
                         ?: raw.general.sync_root?.let { Paths.get(expandTilde(it)) }
                         ?: defaultSyncRoot(type)
-                return ProfileInfo(name = name, type = type, syncRoot = syncRoot, rawProvider = section)
+                return ProfileInfo(
+                    name = name,
+                    type = type,
+                    syncRoot = syncRoot,
+                    rawProvider = section,
+                    mode = ProfileMode.fromConfig(section.mode), // null = modeless: the caller refuses (#603)
+                )
             } else if (name in KNOWN_TYPES) {
                 val syncRoot =
                     raw.general.sync_root?.let { Paths.get(expandTilde(it)) }
                         ?: defaultSyncRoot(name)
-                return ProfileInfo(name = name, type = name, syncRoot = syncRoot, rawProvider = null)
+                return ProfileInfo(name = name, type = name, syncRoot = syncRoot, rawProvider = null, mode = null)
             } else {
                 val configured = raw.providers.keys
                 throw IllegalArgumentException(

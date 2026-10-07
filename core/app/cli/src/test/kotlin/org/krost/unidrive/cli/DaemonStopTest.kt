@@ -11,6 +11,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcEndpoint
 import java.nio.file.Files
@@ -95,6 +96,7 @@ class DaemonStopTest {
         val socketPath: Path = dir.resolve("daemon.sock")
         val lockFile = dir.resolve(".lock")
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "stop_profile",
             lockFile = lockFile,
             dbPath = dir.resolve("state.db"),
@@ -131,6 +133,7 @@ class DaemonStopTest {
         val dir = Files.createTempDirectory("daemon-stop-test")
         val socketPath: Path = dir.resolve("daemon.sock")
         val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
             profileName = "stop_profile",
             lockFile = dir.resolve(".lock"),
             dbPath = dir.resolve("state.db"),

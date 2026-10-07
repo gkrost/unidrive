@@ -52,6 +52,7 @@ class SyncFullTreeRefusalSmokeTest {
 
                 [providers.onedrive_test]
                 type = "onedrive"
+                mode = "mirror"
                 sync_root = "$syncRoot"
                 client_id = "smoke-client"
                 sync_path = ["/scoped"]

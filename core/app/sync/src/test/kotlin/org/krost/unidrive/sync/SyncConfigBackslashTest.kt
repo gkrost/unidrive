@@ -81,7 +81,7 @@ class SyncConfigBackslashTest {
     fun `profile setup writes a Windows sync_root that reads back unchanged`() {
         // The writer funnels through escapeTomlValue, so profile creation cannot emit a config
         // that this reader rejects (the round-trip question raised in the issue).
-        val section = generateProfileToml("localfs", "my_inxt", windowsPath, emptyMap())
+        val section = generateProfileToml("localfs", "my_inxt", windowsPath, emptyMap(), ProfileMode.MIRROR)
         val raw = SyncConfig.parseRaw(section)
         assertEquals(windowsPath, raw.providers["my_inxt"]?.sync_root)
     }
