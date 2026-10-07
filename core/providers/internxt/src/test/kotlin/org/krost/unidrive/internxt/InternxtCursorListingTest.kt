@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -163,6 +164,11 @@ class InternxtCursorListingTest {
         val contentStatus: Int? = null,
         val failure: (stream: String, page: Int) -> Failure? = { _, _ -> null },
         val body: (stream: String, cursor: String?) -> String? = { _, _ -> null },
+        // #523: raw item bodies for the paginated per-folder listing (GET /folders/content/{uuid}/folders
+        // and /files), keyed by folder uuid and served honouring the request's limit/offset; a uuid with
+        // no entry serves an empty listing. [pagedStatus] fails the paged listing instead.
+        val pagedContent: Map<String, Pair<List<String>, List<String>>> = emptyMap(),
+        val pagedStatus: Int? = null,
     ) {
         val seen = CopyOnWriteArrayList<Seen>()
         val other = CopyOnWriteArrayList<String>()
@@ -203,6 +209,21 @@ class InternxtCursorListingTest {
                 if (stream == null) {
                     other += request.url.toString()
                     when {
+                        path.contains("/folders/content/") &&
+                            (path.endsWith("/files") || path.endsWith("/folders")) &&
+                            (pagedContent.isNotEmpty() || pagedStatus != null) -> {
+                            if (pagedStatus != null) return@MockEngine respond("{}", HttpStatusCode.fromValue(pagedStatus), jsonHeaders)
+                            val uuid = path.substringAfter("/folders/content/").substringBefore('/')
+                            val (folders, files) = pagedContent[uuid] ?: Pair(emptyList(), emptyList())
+                            val items = if (path.endsWith("/files")) files else folders
+                            val offset = params["offset"]?.toInt() ?: 0
+                            val limit = params["limit"]?.toInt() ?: error("the paged per-folder listing must name a limit: ${request.url}")
+                            respond(
+                                """{"${if (path.endsWith("/files")) "files" else "folders"}":[${items.drop(offset).take(limit).joinToString(",")}]}""",
+                                HttpStatusCode.OK,
+                                jsonHeaders,
+                            )
+                        }
                         contentStatus != null && path.contains("/folders/content/") ->
                             respond("{}", HttpStatusCode.fromValue(contentStatus), jsonHeaders)
                         tree != null && path.contains("/folders/content/") -> {
@@ -625,6 +646,67 @@ class InternxtCursorListingTest {
             assertEquals(walkPaths, second.items.map { it.path }.toSet())
             assertEquals(syncRequests, drive.seen.size, "the second gather never touched the cursor listing")
             assertTrue(drive.other.count { it.contains("/folders/content/") } >= 4, "both gathers walked the tree: ${drive.other}")
+        }
+
+    @Test
+    fun `a big folder the combined call cannot serve is listed through the paginated per-folder endpoints`() =
+        runTest {
+            // The #523 wall: a 29k-file folder's combined content call is one 30 MB body the gateway
+            // cuts at its ~125 s origin cap, and the walk used to skip it — complete=false, the files
+            // gone for good, an incremental poll cannot pick them up (their updatedAt is old). The
+            // fallback pages /folders/content/{uuid}/folders and /files by offset with sort=uuid.
+            val bigFiles =
+                (0 until 1200).map {
+                    """{"uuid":"bf-$it","plainName":"big$it","type":"txt","size":"7","status":"EXISTS","folderUuid":"big"}"""
+                }
+            val drive =
+                DriveMock(
+                    contentStatus = 503,
+                    // The cursor listing fails server-side too, so the gather hands over to the walk
+                    // (the #533 fallback); it is the walk whose per-folder call this test is about.
+                    failure = { _, _ -> Failure.Status(503) },
+                    pagedContent =
+                        mapOf(
+                            "root" to Pair(listOf("""{"uuid":"big","plainName":"big","status":"EXISTS","parentUuid":"root"}"""), emptyList()),
+                            "big" to Pair(emptyList(), bigFiles),
+                        ),
+                )
+            val page = provider(drive.engine).delta(null, null, quiet())
+
+            assertTrue(page.complete, "no folder is skipped when the paged listing answers")
+            val paths = page.items.map { it.path }.toSet()
+            assertEquals(1201, paths.size, "the folder itself plus all 1200 paged files: $paths")
+            assertTrue("/big" in paths && "/big/big1199.txt" in paths, "the paged subtree is complete: $paths")
+
+            val fileRequests = drive.other.filter { it.contains("/folders/content/big/files") }
+            val offsets = fileRequests.map { Regex("offset=(\\d+)").find(it)!!.groupValues[1].toInt() }
+            assertEquals(listOf(0, 999), offsets, "paged to the short page: $fileRequests")
+            assertTrue(
+                drive.other.filter { it.contains("/folders/content/") && Regex("offset=").containsMatchIn(it) }
+                    .all { it.contains("sort=uuid") && it.contains("order=ASC") },
+                "offset-stable ordering on every paged request: ${drive.other}",
+            )
+        }
+
+    @Test
+    fun `a folder the paged fallback cannot list either is still skipped and the gather stays incomplete`() =
+        runTest {
+            // The honest-completion invariant is unchanged: when both the combined call and the paged
+            // per-folder listing fail server-side, the folder is skipped and complete=false stands.
+            // The cursor streams fail as well, so the gather hands over to the walk.
+            val drive =
+                DriveMock(
+                    tree = walkTree,
+                    contentStatus = 503,
+                    failure = { _, _ -> Failure.Status(503) },
+                    pagedStatus = 503,
+                )
+            val page = provider(drive.engine).delta(null, null, quiet())
+
+            assertFalse(page.complete, "a folder nobody could list keeps the gather incomplete")
+            assertTrue(page.items.isEmpty(), "the root folder could not be listed, so nothing was gathered")
+            val contentCalls = drive.other.count { it.contains("/folders/content/") }
+            assertTrue(contentCalls >= 4, "the combined call and the paged listing were both attempted: ${drive.other}")
         }
 
     @Test

@@ -41,3 +41,20 @@ data class FolderContentResponse(
     val children: List<InternxtFolder> = emptyList(),
     val files: List<InternxtFile> = emptyList(),
 )
+
+/**
+ * `GET /folders/content/{uuid}/folders` (limit/offset/sort/order) — the paginated per-folder
+ * listing of #523, the fallback for a folder whose combined content call does not fit the
+ * gateway. Same item shape as the combined call's `children` (verified live, incl. the
+ * status/removed/deleted fields the walk filters on).
+ */
+@Serializable
+data class PagedFolderFoldersResponse(
+    val folders: List<InternxtFolder> = emptyList(),
+)
+
+/** `GET /folders/content/{uuid}/files` — the files half of the paginated per-folder listing. */
+@Serializable
+data class PagedFolderFilesResponse(
+    val files: List<InternxtFile> = emptyList(),
+)

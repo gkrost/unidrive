@@ -2095,6 +2095,28 @@ class InternxtProvider(
     //
     // [onProgress] is not seeded: it names the listing it reports on, and the items it
     // reports are the walk's own, the ones the gather keeps.
+    // #523: the combined folder-content call dies server-side for a folder whose single body
+    // the gateway cannot deliver (a 29k-file folder needs ~105 s in one 30 MB body; the gateway
+    // cuts its origin at ~125 s, so beyond ~35k files the call never returns). On a server-side
+    // failure (any 5xx; a gateway 524 arrives here as a synthetic 503) the folder is re-listed
+    // through the paginated per-folder endpoints instead of being skipped: every file the paged
+    // listing returns is one the walk would otherwise have dropped, and an incremental poll
+    // cannot pick them up later because their updatedAt is old. A fallback page that itself
+    // fails propagates, so the callers' existing skip-on-500/503 still counts the folder and
+    // keeps the gather incomplete — the honest signal is unchanged.
+    private suspend fun folderContentsWithPerPageFallback(folderUuid: String): FolderContentResponse =
+        try {
+            api.getFolderContents(folderUuid)
+        } catch (e: InternxtApiException) {
+            if (e.statusCode < 500 && e.statusCode != 0) throw e
+            log.warn(
+                "Folder {} content call failed ({}); listing it through the paginated per-folder endpoints",
+                folderUuid,
+                e.statusCode,
+            )
+            api.getFolderContentsPaged(folderUuid)
+        }
+
     private suspend fun scopedFullDelta(
         scopeRoots: List<String>,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
@@ -2106,7 +2128,7 @@ class InternxtProvider(
         val rootUuid = authService.getValidCredentials().rootFolderId
         val inventory =
             collectScopedInventoryImpl(
-                getContents = api::getFolderContents,
+                getContents = ::folderContentsWithPerPageFallback,
                 driveRootUuid = rootUuid,
                 scopeRoots = scopeRoots,
                 scanned = foldersScanned,

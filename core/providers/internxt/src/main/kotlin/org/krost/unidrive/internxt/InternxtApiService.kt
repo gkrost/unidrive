@@ -175,6 +175,61 @@ class InternxtApiService(
             json.decodeFromString<FolderContentResponse>(body)
         }
 
+    internal val folderContentsPagedDedup = InFlightDedup<String, FolderContentResponse>()
+
+    /**
+     * #523: the paginated per-folder listing — `GET /folders/content/{uuid}/folders` and
+     * `/files` with `limit`/`offset`, `sort=uuid` for offset stability, `order=ASC`. The
+     * fallback for a folder whose combined content call fails server-side or cannot fit the
+     * gateway (a 29k-file folder needs ~105 s in one 30 MB body; the gateway cuts at ~125 s,
+     * so folders beyond ~35k files never fit). Both sub-endpoints verified live: the item
+     * shapes match the combined call's, including the status/removed/deleted fields the walk
+     * filters on. Pages until a page comes back short; each page rides the same ladder and
+     * listing watchdog as the offset listings.
+     */
+    suspend fun getFolderContentsPaged(folderUuid: String): FolderContentResponse =
+        folderContentsPagedDedup.load(folderUuid, currentPriority()) {
+            val folders = ArrayList<InternxtFolder>()
+            var offset = 0
+            while (true) {
+                val body =
+                    authenticatedGet(
+                        "$baseUrl/folders/content/$folderUuid/folders",
+                        linkedMapOf(
+                            "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
+                            "offset" to offset.toString(),
+                            "sort" to "uuid",
+                            "order" to "ASC",
+                        ),
+                        socketTimeoutMs = listingSocketTimeoutMs,
+                    )
+                val page = json.decodeFromString<PagedFolderFoldersResponse>(body).folders
+                folders.addAll(page)
+                if (page.size < InternxtConfig.LISTING_PAGE_SIZE) break
+                offset += page.size
+            }
+            val files = ArrayList<InternxtFile>()
+            offset = 0
+            while (true) {
+                val body =
+                    authenticatedGet(
+                        "$baseUrl/folders/content/$folderUuid/files",
+                        linkedMapOf(
+                            "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
+                            "offset" to offset.toString(),
+                            "sort" to "uuid",
+                            "order" to "ASC",
+                        ),
+                        socketTimeoutMs = listingSocketTimeoutMs,
+                    )
+                val page = json.decodeFromString<PagedFolderFilesResponse>(body).files
+                files.addAll(page)
+                if (page.size < InternxtConfig.LISTING_PAGE_SIZE) break
+                offset += page.size
+            }
+            FolderContentResponse(children = folders, files = files)
+        }
+
     suspend fun listFiles(
         updatedAt: String? = null,
         limit: Int = InternxtConfig.LISTING_PAGE_SIZE,
