@@ -5,12 +5,15 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcAuthException
+import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
-import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
@@ -62,9 +65,10 @@ class LsCommand : Callable<Int> {
         // lock-pid modeToken (the same signal `daemon status` uses) and otherwise
         // fall through to the documented live provider query.
         if (!live && daemonHoldsLock(parent.providerConfigDir()) && Files.exists(socketPath)) {
-            val entries = queryDaemonView(socketPath, normalized)
+            val endpoint = IpcEndpoint(socketPath, parent.providerConfigDir(), profile.name)
+            val entries = queryDaemonView(endpoint, normalized)
             if (entries != null) {
-                when (val view = resolveDaemonView(normalized, entries) { queryDaemonView(socketPath, it) }) {
+                when (val view = resolveDaemonView(normalized, entries) { queryDaemonView(endpoint, it) }) {
                     is DaemonLsView.Listing -> {
                         printDaemonEntries(view.entries)
                         return 0
@@ -115,17 +119,22 @@ class LsCommand : Callable<Int> {
      * `internal` so the ls-agrees-with-mount-view test can assert it returns the
      * same view `hydration.list` serves.
      */
-    internal fun queryDaemonView(socketPath: java.nio.file.Path, normalized: String): List<ViewEntryParsed>? {
+    internal fun queryDaemonView(endpoint: IpcEndpoint, normalized: String): List<ViewEntryParsed>? {
         // hydration.list uses "prefix"; "/" and "" both mean root.
         val prefix = if (normalized == "/") "" else normalized
         return try {
-            SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).use { channel ->
+            // A read-scope connection: ls only lists (docs/dev/specs/ipc-authentication.md).
+            IpcAuthClient.connect(endpoint, IpcAuth.Scope.READ).use { channel ->
                 val req = """{"verb":"hydration.list","prefix":${jsonStr(prefix)}}""" + "\n"
                 channel.write(ByteBuffer.wrap(req.toByteArray()))
                 val reply = readOneJsonReply(channel)
                 if (!reply.contains("\"ok\":true")) return null
                 parseListEntries(reply)
             }
+        } catch (e: IpcAuthException) {
+            // Not answered without authentication; the live query below still answers.
+            System.err.println("ls: ${e.message}; listing live instead")
+            null
         } catch (e: java.io.IOException) {
             null
         }

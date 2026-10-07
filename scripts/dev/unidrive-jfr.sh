@@ -146,11 +146,15 @@ fi
 # Match the production launcher's args (UD-258 UTF-8 + Ktor FFI access)
 # plus JFR-specific options. stackdepth=256 captures deep stacks so async
 # coroutine stitching survives in the dump.
+STATIC_FLAGS=()
+while IFS= read -r flag; do
+  flag="${flag%%#*}"; flag="${flag//[[:space:]]/}"
+  [[ -n "$flag" ]] && STATIC_FLAGS+=("$flag")
+done < "$(dirname "${BASH_SOURCE[0]}")/../../dist/launcher/jvm-flags.txt"
+
 JVM_ARGS=(
   -Xmx6g
-  -Dstdout.encoding=UTF-8
-  -Dstderr.encoding=UTF-8
-  --enable-native-access=ALL-UNNAMED
+  "${STATIC_FLAGS[@]}"
   -XX:FlightRecorderOptions=stackdepth=256,memorysize=64m
   "-XX:StartFlightRecording=$JFR_PARAMS"
   -XX:+HeapDumpOnOutOfMemoryError

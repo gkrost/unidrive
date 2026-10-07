@@ -96,16 +96,11 @@ if ($EngineJar) {
     $EngineJar = [IO.Path]::GetFullPath($EngineJar)
     if (-not (Test-Path -LiteralPath $EngineJar)) { throw "engine jar not found: $EngineJar" }
     $launcher = Join-Path $Work 'engine-launcher.ps1'
-    $jarArg = $EngineJar.Replace("'", "''")
-    $launcherText = @"
-chcp 65001 > `$null
-`$tmp = if (`$env:TEMP) { `$env:TEMP } else { `$env:TMP }
-`$javaArgs = @('-Xmx2g', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8', '--enable-native-access=ALL-UNNAMED')
-if (`$tmp) { `$javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + `$tmp) }
-`$javaArgs += @('-jar', '$jarArg')
-& java @javaArgs @args
-exit `$LASTEXITCODE
-"@
+    # the same template and flag list as the Gradle deploy launcher (dist/launcher/)
+    $launcherDir = Join-Path $PSScriptRoot '..\..\..\dist\launcher'
+    $flags = @(Get-Content -LiteralPath (Join-Path $launcherDir 'jvm-flags.txt') | ForEach-Object { ($_ -replace '#.*$', '').Trim() } | Where-Object { $_ })
+    $flagLine = '$javaArgs += @(' + (($flags | ForEach-Object { "'$_'" }) -join ', ') + ')'
+    $launcherText = (Get-Content -LiteralPath (Join-Path $launcherDir 'unidrive.ps1.tmpl') -Raw).Replace('@STATIC_FLAGS_PS@', $flagLine).Replace('@JAR@', $EngineJar.Replace("'", "''"))
     [IO.File]::WriteAllText($launcher, $launcherText, $utf8)
 } else {
     if (-not (Test-Path -LiteralPath $installedLauncher)) { throw "no installed engine launcher at $installedLauncher (use -EngineJar)" }

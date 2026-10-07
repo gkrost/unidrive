@@ -1,0 +1,12 @@
+{"verb":"hello","protocol":2,"scope":"read","client":"contract-test","nonce":"AAECAwQFBgcICQoLDA0ODw"}
+{"ok":true,"step":1,"snonce":"EBESExQVFhcYGRobHB0eHw"}
+{"verb":"hello.proof","proof":"GtoBU2BmkePKA90_tQJ5YMN4BNI6dGrDqeOSG04Mz7U"}
+{"ok":true,"scope":"read","protocol_version":2,"proof":"OZm49FG0lEPBerNevnY86dcxbxuAS4jC3rwgK4Gtc8o"}
+{"verb":"daemon.shutdown"}
+{"ok":false,"error":"forbidden","scope":"read"}
+{"verb":"refresh.run","reset":true}
+{"ok":false,"error":"forbidden","scope":"read"}
+{"verb":"hydration.unlink","path":"/docs/report.txt"}
+{"ok":false,"error":"forbidden","scope":"read"}
+{"verb":"sync.enumerate"}
+{"ok":false,"error":"forbidden","scope":"read"}

@@ -1,0 +1,13 @@
+# The JVM flags every unidrive launcher passes, one per line ('#' starts a comment).
+# Single source: the Gradle deploy launchers, dist/install.sh, scripts/dev/unidrive-jfr.sh and
+# scripts/golden/unicode-tree/run-localfs.ps1 read this file; unidrive-windows mirrors it in
+# EngineHost.JvmFlags (a different repository: change both together).
+#
+# Not listed here because they depend on the machine or the caller: -Xmx (UNIDRIVE_XMX, default 2g),
+# -Djdk.net.unixdomain.tmpdir (the host's temp dir) and -Duser.language/-Duser.country (--locale).
+-Dstdout.encoding=UTF-8
+-Dstderr.encoding=UTF-8
+--enable-native-access=ALL-UNNAMED
+# A daemon that survives an OutOfMemoryError runs on with dead worker threads; exit so the supervisor restarts it.
+# The JVM exits with code 3 then, distinct from the CLI's own 0 (ok), 1 (aborted) and 2 (per-action failures).
+-XX:+ExitOnOutOfMemoryError

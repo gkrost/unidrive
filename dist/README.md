@@ -55,3 +55,14 @@ publishes via the channels at https://unidrive.krost.org/install/.
 For the local-development install path used today (build + drop under
 `~/.local/`), see `install.sh` and `core/app/cli/build.gradle.kts`'s
 `deploy` task.
+
+## Launcher flags and `--locale`
+
+Every launcher (the Gradle `deploy` task's `unidrive.ps1` / `unidrive`, `install.sh`, the golden-run launcher,
+`scripts/dev/unidrive-jfr.sh`) is rendered from `dist/launcher/*.tmpl` and reads its fixed JVM flags from
+`dist/launcher/jvm-flags.txt`. Add or remove a flag there, nowhere else (unidrive-windows mirrors the list in
+`EngineHost.JvmFlags`; change both together).
+
+`unidrive --locale=xx_YY ...` (or `UNIDRIVE_LOCALE=xx_YY`) passes `-Duser.language=xx -Duser.country=YY` to the JVM and is
+consumed by the launcher; `--locale=xx` sets only the language. The command line beats the environment; a malformed value
+exits with 2.

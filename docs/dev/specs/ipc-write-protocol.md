@@ -28,6 +28,8 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   does not know is answered with `{"ok":false,"error":"unknown_verb"}`; a
   request without a `verb` field gets `{"ok":false,"error":"missing_verb"}` —
   never silence. A client should still bound its wait for a reply line.
+- Every connection authenticates first (`hello`, `hello.proof`) and is limited
+  to the verbs of its scope: see [ipc-authentication.md](ipc-authentication.md).
 - The verb is the top-level string member `verb` of the request object. A line
   that is not one JSON object, a `verb` that is not a string or appears twice,
   and nesting deeper than 64 levels are all answered with `missing_verb`.
@@ -262,6 +264,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `cancelled` | completed event | upload aborted by hydration.cancel |
 | `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
+| `auth_required` / `auth_failed` / `forbidden` | any | not authenticated yet, a refused handshake step, a verb outside the connection's scope ([ipc-authentication.md](ipc-authentication.md)) |
 | `too_many_clients` | connection (no request) | the daemon's connection cap is reached; the line is written once and the connection closed (§1) |
 
 ## 8. Who may write the mounted folder

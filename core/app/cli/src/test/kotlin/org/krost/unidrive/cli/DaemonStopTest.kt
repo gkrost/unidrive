@@ -11,6 +11,8 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcEndpoint
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -81,7 +83,7 @@ class DaemonStopTest {
     fun `requestDaemonShutdown returns false when nothing listens on the socket`() {
         val dir = Files.createTempDirectory("daemon-stop-test")
         try {
-            assertFalse(requestDaemonShutdown(dir.resolve("absent.sock")))
+            assertFalse(requestDaemonShutdown(IpcEndpoint(dir.resolve("absent.sock"), dir, "stop_profile")))
         } finally {
             dir.toFile().deleteRecursively()
         }
@@ -111,7 +113,7 @@ class DaemonStopTest {
             assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
 
             assertTrue(
-                withContext(Dispatchers.IO) { requestDaemonShutdown(socketPath) },
+                withContext(Dispatchers.IO) { requestDaemonShutdown(IpcEndpoint(socketPath, dir, "stop_profile")) },
                 "a live daemon must ack daemon.shutdown",
             )
 
@@ -120,6 +122,47 @@ class DaemonStopTest {
             assertFalse(Files.exists(lockFile.resolveSibling(".lock.pid")), "and releases the lock")
         } finally {
             runtime.close()
+            runCatching { dir.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test
+    fun `requestDaemonShutdown without the daemon's token does not stop it`() = runBlocking {
+        val dir = Files.createTempDirectory("daemon-stop-test")
+        val socketPath: Path = dir.resolve("daemon.sock")
+        val runtime = DaemonRuntime(
+            profileName = "stop_profile",
+            lockFile = dir.resolve(".lock"),
+            dbPath = dir.resolve("state.db"),
+            syncRoot = dir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+        )
+        val daemonJob = launch { runtime.start() }
+        try {
+            repeat(50) {
+                if (Files.exists(socketPath)) return@repeat
+                delay(50)
+            }
+            assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+            // Only the read token: daemon.shutdown is an admin verb and needs the full one.
+            val readOnly = Files.createDirectories(dir.resolve("read-only"))
+            Files.copy(IpcAuth.tokenFile(dir, IpcAuth.Scope.READ), IpcAuth.tokenFile(readOnly, IpcAuth.Scope.FULL))
+            val stale = Files.createDirectories(dir.resolve("stale"))
+            Files.writeString(IpcAuth.tokenFile(stale, IpcAuth.Scope.FULL), "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
+
+            for (tokenDir in listOf(readOnly, stale)) {
+                assertFalse(
+                    withContext(Dispatchers.IO) { requestDaemonShutdown(IpcEndpoint(socketPath, tokenDir, "stop_profile")) },
+                    "no shutdown without the full token ($tokenDir)",
+                )
+            }
+            delay(300)
+            assertTrue(daemonJob.isActive, "the daemon still runs")
+            assertTrue(Files.exists(socketPath))
+        } finally {
+            runtime.close()
+            daemonJob.join()
             runCatching { dir.toFile().deleteRecursively() }
         }
     }

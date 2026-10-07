@@ -6,20 +6,21 @@
     Ad-hoc probe, read-only. Joins hydration.list (remote_modified_ms, remote_id, pending_upload) with the file system of the mount and
     prints one line per uploaded file, ordered by the cloud time: ORIGINAL when the local file still has the fixed golden time,
     changed otherwise, plus the attributes (ReparsePoint = a placeholder). It showed that the mount's placeholders lose the time
-    unevenly (gkrost/unidrive#486). Needs PowerShell 7.
+    unevenly (gkrost/unidrive#486). Authenticates with the profile's read token (ipc-auth.ps1; -ConfigDir overrides where the
+    profile's config folder is). Needs PowerShell 7.
 #>
 param(
     [Parameter(Mandatory)][string]$Profile,
     [Parameter(Mandatory)][string]$MountRoot,
     [string]$Prefix = '/_INBOX/golden-unicode-v1',
-    [string]$GoldenMtime = '2026-01-01T12:00:00Z'
+    [string]$GoldenMtime = '2026-01-01T12:00:00Z',
+    [string]$ConfigDir
 )
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required (pwsh).' }
-$sock = Join-Path $env:TEMP "unidrive-ipc\unidrive-$Profile.sock"
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'ipc-auth.ps1')
 $utf8 = [System.Text.UTF8Encoding]::new($false)
-$s = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::Unix, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Unspecified)
-$s.Connect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($sock))
-$st = [System.Net.Sockets.NetworkStream]::new($s); $rd = [IO.StreamReader]::new($st, $utf8)
+$conn = Connect-UnidriveIpc -Profile $Profile -Scope read -ConfigDir $ConfigDir
+$s = $conn.Socket; $st = $conn.Stream; $rd = $conn.Reader
 function Ask($o) { $b = $utf8.GetBytes(($o | ConvertTo-Json -Compress) + "`n"); $st.Write($b, 0, $b.Length); $st.Flush(); $rd.ReadLine() | ConvertFrom-Json }
 $parse = { param($t) [DateTime]::Parse($t, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) }
 $orig = & $parse $GoldenMtime

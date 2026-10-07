@@ -1,11 +1,14 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcAuthClient
+import org.krost.unidrive.sync.IpcAuthException
+import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
-import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
@@ -70,7 +73,9 @@ class RefreshCommand : Runnable {
         }
 
         try {
-            SocketChannel.open(UnixDomainSocketAddress.of(socketPath)).use { channel ->
+            // refresh.run is an admin verb: a full-scope connection (docs/dev/specs/ipc-authentication.md).
+            val endpoint = IpcEndpoint(socketPath, parent.providerConfigDir(), profile.name)
+            IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL).use { channel ->
                 // Subscribe to progress events
                 channel.write(ByteBuffer.wrap(("""{"verb":"sync.subscribe"}""" + "\n").toByteArray()))
                 readOneJsonReply(channel)  // discard sync.subscribe reply
@@ -112,6 +117,9 @@ class RefreshCommand : Runnable {
                     System.exit(1)
                 }
             }
+        } catch (e: IpcAuthException) {
+            System.err.println("unidrive refresh: ${e.message}")
+            System.exit(1)
         } catch (e: java.io.IOException) {
             System.err.println("unidrive refresh: failed to communicate with daemon: ${e.message}")
             System.err.println("Daemon may have crashed. Restart with: `unidrive -p ${profile.name} daemon run`.")

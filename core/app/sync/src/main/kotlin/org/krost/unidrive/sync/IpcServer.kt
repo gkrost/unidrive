@@ -27,6 +27,9 @@ class IpcServer(
     private val transportDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
     private val handlerDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
     writeTimeoutMs: Long = readWriteTimeoutFromEnv(),
+    // IPC authentication (docs/dev/specs/ipc-authentication.md). `daemon run` and `sync` always pass one;
+    // null (no handshake) is for the unit tests of the bare server only.
+    private val auth: IpcAuth? = null,
     // How many connections are served at once; one more is refused with too_many_clients.
     private val maxClients: Int = readMaxClientsFromEnv(),
     // A connection that sent no request for this long is closed (0 = never); see idleExpired.
@@ -113,6 +116,9 @@ class IpcServer(
     // per connection (the per-client reader processes lines sequentially),
     // so a per-connId slot is sufficient — no queue.
     private val pendingPostReply = java.util.concurrent.ConcurrentHashMap<String, suspend () -> Unit>()
+
+    // IPC authentication: one handshake state per connection (connId), only when [auth] is set.
+    private val authSessions = java.util.concurrent.ConcurrentHashMap<String, IpcAuth.Session>()
 
     /**
      * Register an inbound-verb handler. The handler receives the connection ID
@@ -291,6 +297,7 @@ class IpcServer(
                         sc.configureBlocking(false)
                         val connId = java.util.UUID.randomUUID().toString()
                         val entry = ClientEntry(sc, connId).also { it.lastRequestAtMs = clock() }
+                        auth?.let { authSessions[connId] = it.newSession() }
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
                         scope.launch(transport) {
@@ -298,6 +305,11 @@ class IpcServer(
                             val pending = StringBuilder()
                             try {
                                 while (isActive) {
+                                    // IPC authentication: a connection still unauthenticated after the timeout is closed.
+                                    if (authSessions[connId]?.timedOut() == true) {
+                                        log.debug("IPC: closing unauthenticated client id={} after the handshake timeout", connId)
+                                        break
+                                    }
                                     buf.clear()
                                     val n = sc.read(buf)
                                     if (n < 0) break  // client closed
@@ -323,6 +335,7 @@ class IpcServer(
                                         val line = pending.substring(0, idx)
                                         pending.delete(0, idx + 1)
                                         dispatchRequest(sc, connId, line)
+                                        if (!sc.isOpen) break // closed by the request (failed handshakes)
                                         entry.lastRequestAtMs = clock()
                                         idx = pending.indexOf('\n')
                                     }
@@ -331,6 +344,7 @@ class IpcServer(
                                 log.debug("IPC: client reader closed: {}", e.message)
                             } finally {
                                 clients.remove(entry)
+                                authSessions.remove(connId)
                                 runCatching { sc.close() }
                                 log.debug("IPC: reader exited, client removed id={} (total={})", connId, clients.size)
                                 closeListeners.forEach { it(connId) }
@@ -381,6 +395,7 @@ class IpcServer(
         clients.clear()
         syncSubscribers.clear()
         pendingPostReply.clear()
+        authSessions.clear()
         // #419: only remove the files of a socket THIS server bound. A start() that was refused
         // ("Another daemon is already listening") or failed to bind still gets close()d by its
         // caller's cleanup, and must not unlink the live daemon's socket. Cleared afterwards so a
@@ -531,10 +546,15 @@ class IpcServer(
         // no version of this daemon knows, which the client can surface instead
         // of hanging on.
         val verb = parseVerb(line)
+        // IPC authentication (IpcAuth): before the handler lookup, the connection's session answers the
+        // handshake itself and refuses what the connection may not call (yet); null = go on as before.
+        val gate = auth?.gate(authSessions[connId], verb, line)
         val handler = verb?.let { handlers[it] }
-        if (handler != null && verb in idleExemptVerbs) clients.firstOrNull { it.channel === client }?.idleExempt = true
+        // Only a request that reaches its handler (the gate let it through) makes the connection idle-exempt.
+        if (gate == null && handler != null && verb in idleExemptVerbs) clients.firstOrNull { it.channel === client }?.idleExempt = true
         var handlerThrew = false
         val reply = when {
+            gate != null -> gate.json
             verb == null -> {
                 log.warn("IPC: request without a usable 'verb' (missing, not a string, repeated, or not one JSON object): {}", line.take(80))
                 """{"ok":false,"error":"missing_verb"}"""
@@ -557,6 +577,8 @@ class IpcServer(
                 writeNonBlocking(entry.channel, ByteBuffer.wrap((reply + "\n").toByteArray(Charsets.UTF_8)))
             }
         }
+        // The third failed handshake closes the connection (its reader then cleans up).
+        if (gate?.close == true) runCatching { client.close() }
         // R7: post-reply hook fires ONLY on the successful-reply path.
         // If the handler threw, the scheduled action (if any) is discarded.
         val pending = pendingPostReply.remove(connId)
