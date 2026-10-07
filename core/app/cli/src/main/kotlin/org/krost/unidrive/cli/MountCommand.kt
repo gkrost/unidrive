@@ -68,6 +68,14 @@ class MountCommand : Runnable {
             return
         }
 
+        // #142: the first client connection starts the profile's daemon — a fresh machine's
+        // `unidrive mount /path` works without the operator having seen the word "daemon". When the
+        // spawn is not possible the co-daemon's own error below still speaks, unchanged.
+        DaemonAutospawn.ensureDaemonRunning(
+            profileName = profile.name,
+            configDir = parent.providerConfigDir(),
+        )
+
         Files.createDirectories(cacheRoot)
         val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
         val exit = superviseProcess(argv)

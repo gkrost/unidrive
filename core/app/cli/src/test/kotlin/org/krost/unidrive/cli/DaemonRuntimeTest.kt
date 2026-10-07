@@ -78,6 +78,26 @@ class DaemonRuntimeTest {
     private fun rawConnect(): SocketChannel = SocketChannel.open(UnixDomainSocketAddress.of(socketPath))
 
     @Test
+    fun `autospawn recognizes a daemon whose tokens are separate from its socket`() =
+        runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            socketPath = Files.createDirectory(tempDir.resolve("ipc")).resolve("daemon.sock")
+            val runtime = startDaemon(StubProvider())
+            val daemonJob = launch { runtime.start() }
+            try {
+                awaitSocket()
+                assertTrue(DaemonAutospawn.ensureDaemonRunning(
+                    profileName = "test_profile",
+                    configDir = tempDir,
+                    socketPath = socketPath,
+                    locateJar = { error("a running authenticated daemon must not be spawned") },
+                ))
+            } finally {
+                runtime.close()
+                daemonJob.join()
+            }
+        }
+
+    @Test
     fun `the daemon writes owner-only tokens before it listens and serves only authenticated connections`() =
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val runtime = startDaemon(StubProvider())

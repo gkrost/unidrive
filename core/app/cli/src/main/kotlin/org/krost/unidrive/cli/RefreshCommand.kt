@@ -61,6 +61,13 @@ class RefreshCommand : Runnable {
         val profile = parent.resolveCurrentProfile()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
+        // #142: the first client connection starts the profile's daemon — `unidrive refresh` works on a
+        // fresh machine without the operator starting a daemon by hand. A stale socket file (a killed
+        // daemon left it behind) also lands here: the probe connects before it believes.
+        DaemonAutospawn.ensureDaemonRunning(
+            profileName = profile.name,
+            configDir = parent.providerConfigDir(),
+        )
         if (!Files.exists(socketPath)) {
             System.err.println(
                 "unidrive refresh: daemon for profile '${profile.name}' is not running.",
