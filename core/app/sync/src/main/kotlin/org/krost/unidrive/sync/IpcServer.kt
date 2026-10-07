@@ -23,6 +23,10 @@ class IpcServer(
     private val transportDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
     private val handlerDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
     writeTimeoutMs: Long = readWriteTimeoutFromEnv(),
+    // A connection that sent no request for this long is closed (0 = never); see idleExpired.
+    private val idleTimeoutMs: Long = readIdleTimeoutFromEnv(),
+    // Monotonic milliseconds for the idle timeout; injectable so tests move time instead of waiting.
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     // Captured at construction so a later companion-object change can't accidentally
     // re-read the env var mid-flight. Multiply once into nanos so writeNonBlocking
@@ -69,7 +73,15 @@ class IpcServer(
         val channel: SocketChannel,
         val id: String,
         val writeMutex: Mutex = Mutex(),
-    )
+    ) {
+        // When the last request line was handled (clock()); the accept time until the first one.
+        @Volatile
+        var lastRequestAtMs: Long = 0L
+
+        // Set once the connection used one of the idle-exempt verbs (registerIdleExemptVerbs).
+        @Volatile
+        var idleExempt: Boolean = false
+    }
     private val clients = CopyOnWriteArrayList<ClientEntry>()
     private val channel = Channel<String>(capacity = 256)
     private val handlers = java.util.concurrent.ConcurrentHashMap<String, suspend (String, String) -> String>()
@@ -116,6 +128,18 @@ class IpcServer(
      */
     fun registerConnectionCloseListener(listener: (connectionId: String) -> Unit) {
         closeListeners.add(listener)
+    }
+
+    private val idleExemptVerbs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * A connection that has sent a request for one of [verbs] (and a handler took it) is never
+     * closed for being idle. The daemon passes the hydration verbs: a mount client's open handles
+     * and its event subscription live on its connections, and its live connections are what the
+     * daemon recognises a mount by. Sync subscribers are exempt without this.
+     */
+    fun registerIdleExemptVerbs(verbs: Collection<String>) {
+        idleExemptVerbs.addAll(verbs)
     }
 
     fun updateState(state: SyncState) {
@@ -241,9 +265,10 @@ class IpcServer(
             es.asCoroutineDispatcher()
         }
         log.info(
-            "IPC: transport pool size={} write_timeout_ms={}",
+            "IPC: transport pool size={} write_timeout_ms={} idle_timeout_ms={}",
             TRANSPORT_POOL_SIZE,
             writeTimeoutNs / 1_000_000L,
+            idleTimeoutMs,
         )
 
         acceptJob =
@@ -252,13 +277,13 @@ class IpcServer(
                     try {
                         val sc = server.accept()
                         if (clients.size >= MAX_CLIENTS) {
-                            log.warn("IPC: max clients ({}) reached, rejecting connection", MAX_CLIENTS)
-                            runCatching { sc.close() }
+                            log.warn("IPC: max clients ({}) reached, refusing connection", MAX_CLIENTS)
+                            refuse(sc)
                             continue
                         }
                         sc.configureBlocking(false)
                         val connId = java.util.UUID.randomUUID().toString()
-                        val entry = ClientEntry(sc, connId)
+                        val entry = ClientEntry(sc, connId).also { it.lastRequestAtMs = clock() }
                         clients.add(entry)
                         log.debug("IPC: client connected id={} (total={})", connId, clients.size)
                         scope.launch(transport) {
@@ -269,7 +294,14 @@ class IpcServer(
                                     buf.clear()
                                     val n = sc.read(buf)
                                     if (n < 0) break  // client closed
-                                    if (n == 0) { delay(20); continue }
+                                    if (n == 0) {
+                                        if (idleExpired(entry)) {
+                                            log.info("IPC: closing idle connection id={} (no request for {} ms)", connId, idleTimeoutMs)
+                                            break
+                                        }
+                                        delay(20)
+                                        continue
+                                    }
                                     buf.flip()
                                     val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
                                     if (pending.length + bytes.size > MAX_REQUEST_BYTES) {
@@ -284,6 +316,7 @@ class IpcServer(
                                         val line = pending.substring(0, idx)
                                         pending.delete(0, idx + 1)
                                         dispatchRequest(sc, connId, line)
+                                        entry.lastRequestAtMs = clock()
                                         idx = pending.indexOf('\n')
                                     }
                                 }
@@ -492,6 +525,7 @@ class IpcServer(
         // of hanging on.
         val verb = parseVerb(line)
         val handler = verb?.let { handlers[it] }
+        if (handler != null && verb in idleExemptVerbs) clients.firstOrNull { it.channel === client }?.idleExempt = true
         var handlerThrew = false
         val reply = when {
             verb == null -> {
@@ -550,6 +584,40 @@ class IpcServer(
 
     private fun escapeJson(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+    // Closed for being idle: no request line for idleTimeoutMs (0 = never), and neither a sync
+    // subscriber nor a connection that used an idle-exempt verb. Time spent waiting for a reply does
+    // not count: the reader only checks between requests.
+    private fun idleExpired(entry: ClientEntry): Boolean =
+        idleTimeoutMs > 0 &&
+            clock() - entry.lastRequestAtMs >= idleTimeoutMs &&
+            !entry.idleExempt &&
+            entry.id !in syncSubscribers
+
+    // A connection over MAX_CLIENTS: best effort, one line that says why, then close. A fresh
+    // connection's send buffer is empty, so the line goes out at once; the short deadline only
+    // bounds a peer that reads nothing. What the client already sent is read and dropped first:
+    // closing with unread input can reset the connection, and a reset can discard the line.
+    private fun refuse(sc: SocketChannel) {
+        runCatching {
+            sc.configureBlocking(false)
+            val line = ByteBuffer.wrap(TOO_MANY_CLIENTS_LINE.toByteArray(Charsets.UTF_8))
+            val deadline = System.nanoTime() + REFUSAL_WRITE_TIMEOUT_NS
+            while (line.hasRemaining() && System.nanoTime() < deadline) {
+                if (sc.write(line) == 0) Thread.sleep(5)
+            }
+            sc.shutdownOutput()
+            val sink = ByteBuffer.allocate(4096)
+            var drained = 0
+            while (drained < MAX_REQUEST_BYTES) {
+                sink.clear()
+                val n = sc.read(sink)
+                if (n <= 0) break
+                drained += n
+            }
+        }
+        runCatching { sc.close() }
+    }
+
     private fun writeNonBlocking(
         client: SocketChannel,
         buf: ByteBuffer,
@@ -567,7 +635,31 @@ class IpcServer(
     }
 
     companion object {
-        private const val MAX_CLIENTS = 10
+        internal const val MAX_CLIENTS = 10
+
+        // What a connection over MAX_CLIENTS reads before it is closed (contract corpus:
+        // ipc-contract/connection/too_many_clients.ndjson).
+        private const val TOO_MANY_CLIENTS_LINE = "{\"ok\":false,\"error\":\"too_many_clients\"}\n"
+        private const val REFUSAL_WRITE_TIMEOUT_NS = 200_000_000L
+
+        // Idle timeout (UNIDRIVE_IPC_IDLE_TIMEOUT_MS, docs/env-vars.md): 30 min by default, 0 = off,
+        // other values clamped to 1 min..24 h.
+        internal const val DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000L
+        private const val MIN_IDLE_TIMEOUT_MS = 60 * 1000L
+        private const val MAX_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000L
+
+        // Pure function for testing the parse + clamp without touching System.getenv.
+        internal fun parseIdleTimeoutMs(raw: String?): Long {
+            val ms = raw?.trim()?.toLongOrNull() ?: return DEFAULT_IDLE_TIMEOUT_MS
+            return when {
+                ms == 0L -> 0L
+                ms < 0L -> DEFAULT_IDLE_TIMEOUT_MS
+                else -> ms.coerceIn(MIN_IDLE_TIMEOUT_MS, MAX_IDLE_TIMEOUT_MS)
+            }
+        }
+
+        internal fun readIdleTimeoutFromEnv(): Long = parseIdleTimeoutMs(System.getenv("UNIDRIVE_IPC_IDLE_TIMEOUT_MS"))
+
         private const val MAX_SOCKET_PATH_LENGTH = 90
         private const val MAX_REQUEST_BYTES = 64 * 1024
         private const val TRANSPORT_POOL_SIZE = 4

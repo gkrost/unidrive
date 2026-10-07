@@ -27,6 +27,27 @@ filesystem on the receiving side). Do not raise it to mask
 problem. See `docs/dev/specs/ipc-transport-dispatcher-isolation-design.md`
 for the history.
 
+### `UNIDRIVE_IPC_IDLE_TIMEOUT_MS`
+
+How long an IPC connection may go without sending a request before
+`IpcServer` closes it (no line is written; the client reads end of stream).
+Never closed for being idle: a `sync.subscribe` subscriber, and a connection
+that has used any `hydration.*` verb (a mount client: its open handles and
+its event subscription live on its connections). Time spent waiting for a
+reply does not count.
+
+- **Default:** `1800000` (30 minutes)
+- **`0`** switches the idle close off.
+- **Accepted range:** `60000..86400000` (1 min..24 h); a value outside it is
+  clamped to the nearer bound.
+- **Negative or unparseable values fall back to the default.**
+- **Code:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt`, `parseIdleTimeoutMs`, `idleExpired`.
+
+A client that pools connections should resend a request once on a new
+connection when a pooled connection reaches end of stream before any byte
+of the reply: the daemon closes an idle connection only between requests,
+so the request was not processed.
+
 ## OneDrive
 
 ### `UNIDRIVE_ONEDRIVE_OAUTH_PORT`

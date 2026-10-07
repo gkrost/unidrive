@@ -225,10 +225,13 @@ class IpcServerTest {
             val rejected = connectClient()
             delay(200)
 
-            // Attempt to read — rejected client should get nothing or be closed
+            // Attempt to read — the rejected client gets nothing but the refusal line before it is
+            // closed (the line itself: IpcServerConnectionLimitsTest)
             val buf = ByteBuffer.allocate(64)
             val n = rejected.read(buf)
-            assertTrue(n <= 0, "11th client should be rejected, got $n bytes")
+            val got = if (n > 0) String(buf.array(), 0, n, Charsets.UTF_8) else ""
+            val refusal = """{"ok":false,"error":"too_many_clients"}""" + "\n"
+            assertTrue(refusal.startsWith(got), "11th client should be rejected, got: $got")
 
             rejected.close()
             for (c in clients) c.close()
