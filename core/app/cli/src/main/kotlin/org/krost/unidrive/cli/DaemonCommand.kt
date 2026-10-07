@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
@@ -58,9 +59,16 @@ class DaemonRunCommand : Runnable {
         applyPositionalProfile(parent, profilePositional)
         val profile = parent.resolveCurrentProfile()
         val config = parent.loadSyncConfig()
+        // Owner-only permissions, also for what an earlier version created: the credentials and the
+        // profile folder, the IPC folder (defaultSocketPath), then the hydration cache and the logs.
+        StoragePermissions.restrictProfile(parent.providerConfigDir())
         val lockFile = parent.providerConfigDir().resolve(".lock")
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val socketPath = IpcServer.defaultSocketPath(profile.name)
+        StoragePermissions.restrictCacheAndLogs(
+            SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name),
+            StoragePermissions.defaultLogDir(),
+        )
         val pollIntervalMs = EnumeratePoller.effectiveIntervalMs(pollInterval, config.daemonPollSeconds(profile.name))
 
         val runtime = DaemonRuntime(

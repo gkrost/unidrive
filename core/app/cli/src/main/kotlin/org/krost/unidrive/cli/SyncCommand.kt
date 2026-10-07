@@ -255,6 +255,8 @@ open class SyncCommand : Runnable {
         }
 
         val profile = parent.resolveCurrentProfile()
+        // Owner-only credentials and profile folder before the provider reads them (StoragePermissions).
+        StoragePermissions.restrictProfile(parent.providerConfigDir())
         val rawProvider = parent.createProvider()
         val config = parent.loadSyncConfig()
         // A sync_path in config.toml is the profile's standing scope; --sync-path
@@ -346,6 +348,10 @@ open class SyncCommand : Runnable {
         // daemon." Profile lock (UD-272) ensures only one sync per profile
         // runs at a time, so socket creation can't collide.
         val socketPath = IpcServer.defaultSocketPath(profile.name)
+        StoragePermissions.restrictCacheAndLogs(
+            SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name),
+            StoragePermissions.defaultLogDir(),
+        )
         val ipcServer = IpcServer(socketPath)
         val ipcReporter = IpcProgressReporter(ipcServer, profile.name)
         val delegates = mutableListOf<ProgressReporter>(cliReporter, ipcReporter)

@@ -4,11 +4,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.krost.unidrive.io.OwnerOnly
 import org.slf4j.LoggerFactory
 import java.io.IOException
-import java.lang.foreign.FunctionDescriptor
-import java.lang.foreign.Linker
-import java.lang.foreign.ValueLayout
 import java.net.ConnectException
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
@@ -17,7 +15,6 @@ import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -228,13 +225,11 @@ class IpcServer(
         val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
         server.bind(UnixDomainSocketAddress.of(socketPath))
         ownsSocketFiles = true
-        // UD-100: defense-in-depth — set 0600 on socket file for parity with parent dir 0700 (tempSocketDir() at line 316).
-        runCatching {
-            Files.setPosixFilePermissions(
-                socketPath,
-                PosixFilePermissions.fromString("rw-------"),
-            )
-        }
+        // UD-100: defense-in-depth — the socket file is owner-only too (0600 on POSIX, an owner-only
+        // ACL on Windows), for parity with its owner-only folder (defaultSocketPath). The folder is
+        // what keeps others out, so a failure here is logged rather than fatal.
+        val restricted = OwnerOnly.restrictFile(socketPath)
+        if (!restricted.restricted) log.warn("IPC: could not restrict the permissions of {}: {}", socketPath, restricted)
         serverChannel = server
 
         val transport: kotlinx.coroutines.CoroutineDispatcher = transportDispatcher ?: run {
@@ -653,28 +648,29 @@ class IpcServer(
             }
         }
 
-        fun defaultSocketPath(profileName: String): Path {
-            val os = System.getProperty("os.name", "").lowercase()
-            if (os.contains("win")) {
+        fun defaultSocketPath(profileName: String): Path =
+            defaultSocketPath(
+                profileName,
+                Path.of(System.getProperty("java.io.tmpdir")),
+                System.getProperty("os.name", "").lowercase().contains("win"),
+            )
+
+        internal fun defaultSocketPath(
+            profileName: String,
+            tmpDir: Path,
+            windows: Boolean,
+        ): Path {
+            if (windows) {
                 // Windows AF_UNIX sockets don't work in %LOCALAPPDATA% directly
                 // but do work in %TEMP% (which is %LOCALAPPDATA%\Temp)
-                val tmpDir = System.getProperty("java.io.tmpdir")
-                val dir = Path.of(tmpDir, "unidrive-ipc")
-                Files.createDirectories(dir)
-                return resolveAndMeta(dir, profileName)
+                return resolveAndMeta(IpcSocketDir.ensureWindowsDir(tmpDir), profileName)
             }
-            // Linux / macOS: /run/user/$UID/
-            return try {
-                val uid = getUid()
-                val runDir = Path.of("/run/user/$uid")
-                if (Files.isDirectory(runDir)) {
-                    resolveAndMeta(runDir, profileName)
-                } else {
-                    resolveAndMeta(tempSocketDir(), profileName)
-                }
-            } catch (_: Exception) {
-                resolveAndMeta(tempSocketDir(), profileName)
-            }
+            // Linux / macOS: /run/user/$UID/, else the per-user folder in the temp dir
+            // (a fixed name, so clients find the socket there too).
+            val uid = OwnerOnly.posixUid()
+            val runDir = Path.of("/run/user/$uid")
+            val dir = if (Files.isDirectory(runDir)) runDir else IpcSocketDir.ensurePosixFallbackDir(tmpDir, uid)
+            return resolveAndMeta(dir, profileName)
         }
 
         private fun resolveAndMeta(
@@ -693,29 +689,6 @@ class IpcServer(
                 writeMetaFile(result, profileName)
             }
             return result
-        }
-
-        private fun getUid(): Int {
-            val linker = Linker.nativeLinker()
-            val getuid =
-                linker.downcallHandle(
-                    linker.defaultLookup().find("getuid").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT),
-                )
-            return getuid.invoke() as Int
-        }
-
-        private fun tempSocketDir(): Path {
-            val perms = PosixFilePermissions.fromString("rwx------")
-            return try {
-                Files.createTempDirectory(
-                    "unidrive-ipc-",
-                    PosixFilePermissions.asFileAttribute(perms),
-                )
-            } catch (_: UnsupportedOperationException) {
-                // Windows doesn't support POSIX permissions
-                Files.createTempDirectory("unidrive-ipc-")
-            }
         }
     }
 }
