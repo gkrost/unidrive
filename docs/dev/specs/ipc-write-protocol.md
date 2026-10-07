@@ -28,6 +28,9 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   does not know is answered with `{"ok":false,"error":"unknown_verb"}`; a
   request without a `verb` field gets `{"ok":false,"error":"missing_verb"}` —
   never silence. A client should still bound its wait for a reply line.
+- The verb is the top-level string member `verb` of the request object. A line
+  that is not one JSON object, a `verb` that is not a string or appears twice,
+  and nesting deeper than 64 levels are all answered with `missing_verb`.
 - Replies are `{"ok":true,...}` or `{"ok":false,"error":"<token>"}`. Error
   tokens are the stable cross-repo contract listed in §7.
 - Events flow only on connections that have issued `hydration.subscribe`.
@@ -35,6 +38,19 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   oldest event is dropped and one `{"event":"lost","since_last":N}` sentinel
   precedes the next deliverable event. A client must treat `lost` as
   "resync your per-file state from `hydration.list`".
+- The daemon serves at most 32 connections at a time by default
+  (`UNIDRIVE_IPC_MAX_CLIENTS`, `docs/env-vars.md`). A connection over that
+  cap reads one line, `{"ok":false,"error":"too_many_clients"}`, and then end
+  of stream; it is never served. The line is best effort (a reset can still
+  lose it), and a client that sent a request at once reads it in place of the
+  reply. Such a client should close that connection, not pool it, and back off
+  before it connects again.
+- A connection that sent no request for `UNIDRIVE_IPC_IDLE_TIMEOUT_MS` (30 min
+  by default, `docs/env-vars.md`) is closed between requests, without a line.
+  A `sync.subscribe` subscriber and a connection that has used any
+  `hydration.*` verb are never closed for being idle. A pooled request that
+  meets end of stream before any reply byte was not processed and can be sent
+  again on a new connection.
 
 ## 2. Handle model
 
@@ -246,6 +262,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `cancelled` | completed event | upload aborted by hydration.cancel |
 | `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
+| `too_many_clients` | connection (no request) | the daemon's connection cap is reached; the line is written once and the connection closed (§1) |
 
 ## 8. Who may write the mounted folder
 
@@ -263,7 +280,10 @@ folder from its own authority — it would desync from the rows.
 
 - Golden request/reply corpus: `core/app/cli/src/test/resources/ipc-contract/<verb>.ndjson`,
   replayed by `IpcContractCorpusTest` (one fixture per registered verb, both
-  sides key-order-insensitive).
+  sides key-order-insensitive). Lines written without a request live in
+  `ipc-contract/connection/<token>.ndjson` (one line each; today
+  `too_many_clients`), checked over a live socket by the same test.
+- Connection cap and idle timeout: `IpcServerConnectionLimitsTest`.
 - Sequences (this document §3), at the SPI level against a real
   `HydrationImpl` + engine: the full write sequence and the safe-save
   replace-rename sequence in `HydrationUploadQueueTest`; scope refusals and

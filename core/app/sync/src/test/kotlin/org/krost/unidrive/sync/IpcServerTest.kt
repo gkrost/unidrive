@@ -211,24 +211,28 @@ class IpcServerTest {
     @Test
     fun `max clients enforced`() =
         runTest {
-            server = IpcServer(socketPath)
+            // A small injected cap; the default (32) is pinned in IpcServerConnectionLimitsTest.
+            server = IpcServer(socketPath, maxClients = 3)
             server!!.start(backgroundScope)
             delay(100)
 
             val clients = mutableListOf<SocketChannel>()
-            for (i in 1..10) {
+            for (i in 1..3) {
                 clients.add(connectClient())
                 delay(50)
             }
 
-            // 11th client should be rejected
+            // 4th client should be rejected
             val rejected = connectClient()
             delay(200)
 
-            // Attempt to read — rejected client should get nothing or be closed
+            // Attempt to read — the rejected client gets nothing but the refusal line before it is
+            // closed (the line itself: IpcServerConnectionLimitsTest)
             val buf = ByteBuffer.allocate(64)
             val n = rejected.read(buf)
-            assertTrue(n <= 0, "11th client should be rejected, got $n bytes")
+            val got = if (n > 0) String(buf.array(), 0, n, Charsets.UTF_8) else ""
+            val refusal = """{"ok":false,"error":"too_many_clients"}""" + "\n"
+            assertTrue(refusal.startsWith(got), "4th client should be rejected, got: $got")
 
             rejected.close()
             for (c in clients) c.close()
@@ -730,7 +734,7 @@ class IpcServerTest {
         val deadline = System.currentTimeMillis() + 3000
         while (srv.clientCount < 1 && System.currentTimeMillis() < deadline) delay(20)
 
-        // Fire 50 broadcasts + 50 RPC round-trips (batched 8 at a time so MAX_CLIENTS=10
+        // Fire 50 broadcasts + 50 RPC round-trips (batched 8 at a time so the connection cap
         // is not exceeded: 1 persistent listener + up to 8 in-flight RPC clients = 9 max).
         // RPC calls are wrapped in runCatching because a concurrent broadcast may close a
         // client connection mid-write under load; the assertion below catches NDJSON interleaving
