@@ -20,8 +20,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * How the IPC server limits connections (private tracker, item F7; engine #494):
- * a connection over the cap is told why before it is closed, and a connection that sent no
+ * How the IPC server limits connections (private tracker, item F7; engine #494): the cap is 32
+ * by default and configurable, a connection over it is told why before it is closed, and a connection that sent no
  * request for the idle timeout is closed, unless it subscribed to sync progress or used one of
  * the verbs the daemon exempts (the hydration verbs). Time is a manual clock, so no test waits
  * for a timeout.
@@ -49,24 +49,39 @@ class IpcServerConnectionLimitsTest {
         Files.deleteIfExists(socketDir)
     }
 
-    private fun newServer(idleTimeoutMs: Long): IpcServer =
-        IpcServer(socketPath, idleTimeoutMs = idleTimeoutMs, clock = { now.get() }).also {
+    // A small cap keeps the tests that fill it fast; the default cap has a test of its own.
+    private fun newServer(idleTimeoutMs: Long, maxClients: Int = SMALL_CAP): IpcServer =
+        IpcServer(socketPath, maxClients = maxClients, idleTimeoutMs = idleTimeoutMs, clock = { now.get() }).also {
             server = it
             it.registerHandler("ping") { _, _ -> """{"ok":true}""" }
         }
 
-    // ── the refusal line ────────────────────────────────────────────────────
+    // ── the cap and the refusal line ────────────────────────────────────────
 
     @Test
-    fun `a connection over the limit reads too_many_clients and then end of stream`() =
+    fun `a server with a cap of 3 refuses the 4th connection with too_many_clients`() =
         runBlocking(Dispatchers.IO) {
-            val srv = newServer(idleTimeoutMs = 0)
+            val srv = newServer(idleTimeoutMs = 0, maxClients = 3)
             srv.start(serverScope)
-            fillToTheLimit(srv)
+            fillToTheLimit(srv, 3)
 
             val refused = connect()
             assertEquals(listOf(TOO_MANY_CLIENTS), readUntilEof(refused))
-            assertEquals(IpcServer.MAX_CLIENTS, srv.clientCount, "the refused connection never counts")
+            assertEquals(3, srv.clientCount, "the refused connection never counts")
+        }
+
+    @Test
+    fun `the default cap is 32`() =
+        runBlocking(Dispatchers.IO) {
+            assertEquals(32, IpcServer.DEFAULT_MAX_CLIENTS)
+            // Constructed without maxClients, as the daemon does (UNIDRIVE_IPC_MAX_CLIENTS unset in tests).
+            val srv = IpcServer(socketPath, idleTimeoutMs = 0).also { server = it }
+            srv.registerHandler("ping") { _, _ -> """{"ok":true}""" }
+            srv.start(serverScope)
+            fillToTheLimit(srv, 32)
+
+            assertEquals(listOf(TOO_MANY_CLIENTS), readUntilEof(connect()), "the 33rd connection is refused")
+            assertEquals(32, srv.clientCount)
         }
 
     @Test
@@ -74,7 +89,7 @@ class IpcServerConnectionLimitsTest {
         runBlocking(Dispatchers.IO) {
             val srv = newServer(idleTimeoutMs = 0)
             srv.start(serverScope)
-            fillToTheLimit(srv)
+            fillToTheLimit(srv, SMALL_CAP)
 
             val refused = connect()
             send(refused, """{"verb":"ping"}""")
@@ -86,13 +101,24 @@ class IpcServerConnectionLimitsTest {
         runBlocking(Dispatchers.IO) {
             val srv = newServer(idleTimeoutMs = 0)
             srv.start(serverScope)
-            fillToTheLimit(srv)
+            fillToTheLimit(srv, SMALL_CAP)
             clients.removeAt(0).close()
-            waitUntil("the closed client is removed") { srv.clientCount == IpcServer.MAX_CLIENTS - 1 }
+            waitUntil("the closed client is removed") { srv.clientCount == SMALL_CAP - 1 }
 
             val next = connect()
             assertEquals("""{"ok":true}""", roundTrip(next, """{"verb":"ping"}"""))
         }
+
+    @Test
+    fun `the cap from the environment is clamped`() {
+        assertEquals(32, IpcServer.parseMaxClients(null), "unset")
+        assertEquals(32, IpcServer.parseMaxClients("many"), "not a number")
+        assertEquals(32, IpcServer.parseMaxClients("0"), "zero")
+        assertEquals(32, IpcServer.parseMaxClients("-3"), "negative")
+        assertEquals(4, IpcServer.parseMaxClients("2"), "below the minimum: the minimum")
+        assertEquals(64, IpcServer.parseMaxClients(" 64 "), "in range: as given")
+        assertEquals(256, IpcServer.parseMaxClients("100000"), "above the maximum: the maximum")
+    }
 
     // ── the idle timeout ────────────────────────────────────────────────────
 
@@ -210,12 +236,12 @@ class IpcServerConnectionLimitsTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    // Opens MAX_CLIENTS connections, each confirmed by a reply, so the server has registered all.
-    private suspend fun fillToTheLimit(srv: IpcServer) {
-        repeat(IpcServer.MAX_CLIENTS) {
+    // Opens [cap] connections, each confirmed by a reply, so the server has registered all.
+    private suspend fun fillToTheLimit(srv: IpcServer, cap: Int) {
+        repeat(cap) {
             assertEquals("""{"ok":true}""", roundTrip(connect(), """{"verb":"ping"}"""))
         }
-        waitUntil("all slots taken") { srv.clientCount == IpcServer.MAX_CLIENTS }
+        waitUntil("all slots taken") { srv.clientCount == cap }
     }
 
     private suspend fun connect(): SocketChannel {
@@ -289,5 +315,6 @@ class IpcServerConnectionLimitsTest {
 
     private companion object {
         const val TOO_MANY_CLIENTS = """{"ok":false,"error":"too_many_clients"}"""
+        const val SMALL_CAP = 3
     }
 }

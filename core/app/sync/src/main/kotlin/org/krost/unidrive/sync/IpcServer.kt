@@ -23,6 +23,8 @@ class IpcServer(
     private val transportDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
     private val handlerDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
     writeTimeoutMs: Long = readWriteTimeoutFromEnv(),
+    // How many connections are served at once; one more is refused with too_many_clients.
+    private val maxClients: Int = readMaxClientsFromEnv(),
     // A connection that sent no request for this long is closed (0 = never); see idleExpired.
     private val idleTimeoutMs: Long = readIdleTimeoutFromEnv(),
     // Monotonic milliseconds for the idle timeout; injectable so tests move time instead of waiting.
@@ -265,10 +267,11 @@ class IpcServer(
             es.asCoroutineDispatcher()
         }
         log.info(
-            "IPC: transport pool size={} write_timeout_ms={} idle_timeout_ms={}",
+            "IPC: transport pool size={} write_timeout_ms={} idle_timeout_ms={} max_clients={}",
             TRANSPORT_POOL_SIZE,
             writeTimeoutNs / 1_000_000L,
             idleTimeoutMs,
+            maxClients,
         )
 
         acceptJob =
@@ -276,8 +279,8 @@ class IpcServer(
                 while (isActive) {
                     try {
                         val sc = server.accept()
-                        if (clients.size >= MAX_CLIENTS) {
-                            log.warn("IPC: max clients ({}) reached, refusing connection", MAX_CLIENTS)
+                        if (clients.size >= maxClients) {
+                            log.warn("IPC: max clients ({}) reached, refusing connection", maxClients)
                             refuse(sc)
                             continue
                         }
@@ -593,7 +596,7 @@ class IpcServer(
             !entry.idleExempt &&
             entry.id !in syncSubscribers
 
-    // A connection over MAX_CLIENTS: best effort, one line that says why, then close. A fresh
+    // A connection over maxClients: best effort, one line that says why, then close. A fresh
     // connection's send buffer is empty, so the line goes out at once; the short deadline only
     // bounds a peer that reads nothing. What the client already sent is read and dropped first:
     // closing with unread input can reset the connection, and a reset can discard the line.
@@ -635,9 +638,21 @@ class IpcServer(
     }
 
     companion object {
-        internal const val MAX_CLIENTS = 10
+        // Connection cap (UNIDRIVE_IPC_MAX_CLIENTS, docs/env-vars.md): 32 by default; unset,
+        // unparseable or <= 0 gives the default, other values are clamped to 4..256.
+        internal const val DEFAULT_MAX_CLIENTS = 32
+        private const val MIN_MAX_CLIENTS = 4
+        private const val MAX_MAX_CLIENTS = 256
 
-        // What a connection over MAX_CLIENTS reads before it is closed (contract corpus:
+        // Pure function for testing the parse + clamp without touching System.getenv.
+        internal fun parseMaxClients(raw: String?): Int {
+            val n = raw?.trim()?.toIntOrNull() ?: return DEFAULT_MAX_CLIENTS
+            return if (n <= 0) DEFAULT_MAX_CLIENTS else n.coerceIn(MIN_MAX_CLIENTS, MAX_MAX_CLIENTS)
+        }
+
+        internal fun readMaxClientsFromEnv(): Int = parseMaxClients(System.getenv("UNIDRIVE_IPC_MAX_CLIENTS"))
+
+        // What a connection over the cap reads before it is closed (contract corpus:
         // ipc-contract/connection/too_many_clients.ndjson).
         private const val TOO_MANY_CLIENTS_LINE = "{\"ok\":false,\"error\":\"too_many_clients\"}\n"
         private const val REFUSAL_WRITE_TIMEOUT_NS = 200_000_000L

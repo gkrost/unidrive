@@ -48,6 +48,23 @@ connection when a pooled connection reaches end of stream before any byte
 of the reply: the daemon closes an idle connection only between requests,
 so the request was not processed.
 
+### `UNIDRIVE_IPC_MAX_CLIENTS`
+
+How many IPC connections `IpcServer` serves at once. One more connection
+reads `{"ok":false,"error":"too_many_clients"}` and is closed; it is never
+served.
+
+- **Default:** `32`
+- **Accepted range:** `4..256`; a value outside it is clamped to the nearer
+  bound.
+- **Unset, unparseable, `0` or negative values fall back to the default.**
+- **Code:** `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/IpcServer.kt`, `parseMaxClients`.
+
+The Windows client alone may hold 8 connections (a pool of 6 plus 2
+subscriptions); the CLI, the tray, the status UI and scripts share the rest.
+The daemon logs `IPC: max clients (N) reached, refusing connection` when the
+cap is hit, and the start line names the value in use (`max_clients=`).
+
 ## OneDrive
 
 ### `UNIDRIVE_ONEDRIVE_OAUTH_PORT`

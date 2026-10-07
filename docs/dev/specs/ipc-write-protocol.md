@@ -35,7 +35,8 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   oldest event is dropped and one `{"event":"lost","since_last":N}` sentinel
   precedes the next deliverable event. A client must treat `lost` as
   "resync your per-file state from `hydration.list`".
-- The daemon serves at most 10 connections at a time. A connection over that
+- The daemon serves at most 32 connections at a time by default
+  (`UNIDRIVE_IPC_MAX_CLIENTS`, `docs/env-vars.md`). A connection over that
   cap reads one line, `{"ok":false,"error":"too_many_clients"}`, and then end
   of stream; it is never served. The line is best effort (a reset can still
   lose it), and a client that sent a request at once reads it in place of the
