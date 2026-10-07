@@ -205,9 +205,12 @@ fast in CI.
 
 ### §3.5 `--version` output
 
-Both `unidrive --version` and `unidrive-mount --version` print exactly the
-user-visible version (e.g. `0.0.1`). No commit SHA, no build date, no
-packaging revision. Build-info enrichment is a deferred BACKLOG item, not MVP.
+Both `unidrive --version` and `unidrive-mount --version` print `BuildInfo.versionString()`:
+the release version (e.g. `0.0.1`) for a tagged build; for a dev build the release version
+plus the git commit id as semver build metadata - `<major>.<minor>.<patch>+<commit>`
+(`+<commit>.dirty` when the tree was dirty), the Kubernetes-style orderable marker of #574.
+Clients order on the release part and use the commit id only to identify the build. No
+build date, no packaging revision.
 
 ### §3.6 Rollback story
 
