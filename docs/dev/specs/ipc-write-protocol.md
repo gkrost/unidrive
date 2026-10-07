@@ -28,6 +28,9 @@ code. Request/reply byte shapes are pinned by the golden corpus under
   does not know is answered with `{"ok":false,"error":"unknown_verb"}`; a
   request without a `verb` field gets `{"ok":false,"error":"missing_verb"}` —
   never silence. A client should still bound its wait for a reply line.
+- The verb is the top-level string member `verb` of the request object. A line
+  that is not one JSON object, a `verb` that is not a string or appears twice,
+  and nesting deeper than 64 levels are all answered with `missing_verb`.
 - Replies are `{"ok":true,...}` or `{"ok":false,"error":"<token>"}`. Error
   tokens are the stable cross-repo contract listed in §7.
 - Events flow only on connections that have issued `hydration.subscribe`.

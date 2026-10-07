@@ -4,6 +4,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import org.krost.unidrive.io.OwnerOnly
 import org.slf4j.LoggerFactory
 import java.io.IOException
@@ -453,7 +457,7 @@ class IpcServer(
                     "scan_progress",
                     state.profile,
                     ts,
-                    """"phase":${escapeJson(state.phase)},"count":${state.scanCount}""",
+                    """"phase":${jsonString(state.phase)},"count":${state.scanCount}""",
                 ),
             )
         }
@@ -473,7 +477,7 @@ class IpcServer(
                     "action_progress",
                     state.profile,
                     ts,
-                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":${escapeJson(state.lastAction)},"path":${escapeJson(state.lastPath ?: "")}""",
+                    """"index":${state.actionIndex},"total":${state.actionTotal},"action":${jsonString(state.lastAction)},"path":${jsonString(state.lastPath ?: "")}""",
                 ),
             )
         }
@@ -500,12 +504,12 @@ class IpcServer(
         extra: String? = null,
     ): String {
         val sb = StringBuilder()
-        sb.append("""{"event":${escapeJson(event)},"profile":${escapeJson(profile)}""")
+        sb.append("""{"event":${jsonString(event)},"profile":${jsonString(profile)}""")
         if (extra != null) {
             sb.append(",")
             sb.append(extra)
         }
-        sb.append(""","timestamp":${escapeJson(timestamp)}}""")
+        sb.append(""","timestamp":${jsonString(timestamp)}}""")
         return sb.toString()
     }
 
@@ -532,11 +536,11 @@ class IpcServer(
         var handlerThrew = false
         val reply = when {
             verb == null -> {
-                log.warn("IPC: request without 'verb' field: {}", line.take(80))
+                log.warn("IPC: request without a usable 'verb' (missing, not a string, repeated, or not one JSON object): {}", line.take(80))
                 """{"ok":false,"error":"missing_verb"}"""
             }
             handler == null -> {
-                log.warn("IPC: no handler for verb '{}'", verb)
+                log.warn("IPC: no handler for verb {}", jsonString(verb.take(80)))
                 """{"ok":false,"error":"unknown_verb"}"""
             }
             else -> try {
@@ -544,7 +548,7 @@ class IpcServer(
             } catch (e: Exception) {
                 handlerThrew = true
                 log.error("IPC: handler '$verb' threw", e)
-                """{"error":"handler_threw","verb":"$verb","message":${escapeJson(e.message ?: "")}}"""
+                """{"error":"handler_threw","verb":${jsonString(verb)},"message":${jsonString(e.message ?: "")}}"""
             }
         }
         val entry = clients.firstOrNull { it.channel === client } ?: return
@@ -564,28 +568,6 @@ class IpcServer(
             }
         }
     }
-
-    private fun parseVerb(line: String): String? {
-        // Minimal JSON probe — looks for "verb"\s*:\s*"..." at top level. Avoids
-        // pulling a full JSON parser into IpcServer for one field.
-        // Top-level anchoring: the char before "verb" (skipping whitespace) must be { or ,.
-        val key = "\"verb\""
-        val k = line.indexOf(key)
-        if (k < 0) return null
-        // Walk left skipping whitespace to find the previous non-whitespace character.
-        var prev = k - 1
-        while (prev >= 0 && line[prev].isWhitespace()) prev--
-        if (prev < 0 || (line[prev] != '{' && line[prev] != ',')) return null
-        val colon = line.indexOf(':', k + key.length)
-        if (colon < 0) return null
-        val q1 = line.indexOf('"', colon)
-        if (q1 < 0) return null
-        val q2 = line.indexOf('"', q1 + 1)
-        if (q2 < 0) return null
-        return line.substring(q1 + 1, q2)
-    }
-
-    private fun escapeJson(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     // Closed for being idle: no request line for idleTimeoutMs (0 = never), and neither a sync
     // subscriber nor a connection that used an idle-exempt verb. Time spent waiting for a reply does
@@ -678,6 +660,106 @@ class IpcServer(
         private const val MAX_SOCKET_PATH_LENGTH = 90
         private const val MAX_REQUEST_BYTES = 64 * 1024
         private const val TRANSPORT_POOL_SIZE = 4
+
+        /**
+         * [s] as one JSON string literal, quotes included: the one escaper for the lines this
+         * server builds by hand. kotlinx escapes what JSON requires (quote, backslash, every
+         * control character below U+0020); NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR are escaped
+         * as well, since some line readers end a line at them although JSON allows them raw. So a
+         * value (a file name, an exception message) can never split or end an NDJSON line.
+         */
+        fun jsonString(s: String): String {
+            val quoted = JsonPrimitive(s).toString()
+            if (quoted.none { it in EXTRA_LINE_BREAKS }) return quoted
+            val sb = StringBuilder(quoted.length + 10)
+            for (c in quoted) {
+                if (c in EXTRA_LINE_BREAKS) {
+                    sb.append('\\').append('u').append(Integer.toHexString(c.code).padStart(4, '0'))
+                } else {
+                    sb.append(c)
+                }
+            }
+            return sb.toString()
+        }
+
+        private val EXTRA_LINE_BREAKS = charArrayOf(Char(0x85), Char(0x2028), Char(0x2029))
+
+        // No request nests deeper than a few levels. The walk below refuses deeper lines before
+        // kotlinx sees them: its tree reader recurses once per array level.
+        private const val MAX_REQUEST_DEPTH = 64
+
+        /**
+         * The verb of a request line: the top-level string member `verb` of the request object.
+         * Anything else (not JSON, not an object, no `verb`, a `verb` that is not a string,
+         * `verb` named twice, nesting deeper than [MAX_REQUEST_DEPTH]) yields null, which the
+         * caller answers with `missing_verb`. A second `verb` is refused rather than resolved:
+         * kotlinx keeps the last one, the hydration handler's own parse the first, and both must
+         * see the same verb.
+         */
+        internal fun parseVerb(line: String): String? {
+            if (countTopLevelMembers(line, "verb") != 1) return null
+            val request =
+                try {
+                    Json.parseToJsonElement(line)
+                } catch (_: Exception) {
+                    return null
+                }
+            val verb = (request as? JsonObject)?.get("verb") as? JsonPrimitive ?: return null
+            return if (verb.isString) verb.content else null
+        }
+
+        // How many members of the top-level object are named [name], or -1 when the line nests
+        // deeper than MAX_REQUEST_DEPTH or a string does not end. Only a count of exactly 1 on a
+        // line kotlinx then parses as one object is used, so the walk can stay simple: depth
+        // outside strings, and a string at depth 1 right after `{` or `,` is a member name
+        // (decoded only when it carries an escape).
+        private fun countTopLevelMembers(line: String, name: String): Int {
+            var count = 0
+            var depth = 0
+            var atName = false
+            var i = 0
+            while (i < line.length) {
+                when (val c = line[i]) {
+                    '{', '[' -> {
+                        if (++depth > MAX_REQUEST_DEPTH) return -1
+                        atName = c == '{' && depth == 1
+                    }
+                    '}', ']' -> depth--
+                    ',' -> atName = depth == 1
+                    '"' -> {
+                        val end = closingQuote(line, i)
+                        if (end < 0) return -1
+                        if (atName && stringIs(line, i, end, name)) count++
+                        atName = false
+                        i = end
+                    }
+                }
+                i++
+            }
+            return count
+        }
+
+        // Index of the quote that closes the string opening at [open], or -1 when it does not close.
+        private fun closingQuote(line: String, open: Int): Int {
+            var i = open + 1
+            while (i < line.length) {
+                when (line[i]) {
+                    '\\' -> i += 2
+                    '"' -> return i
+                    else -> i++
+                }
+            }
+            return -1
+        }
+
+        // Whether the string literal between the quotes at [open] and [close] reads [text].
+        private fun stringIs(line: String, open: Int, close: Int, text: String): Boolean {
+            if ((open + 1 until close).none { line[it] == '\\' }) {
+                return close - open - 1 == text.length && line.regionMatches(open + 1, text, 0, text.length)
+            }
+            val decoded = runCatching { Json.parseToJsonElement(line.substring(open, close + 1)).jsonPrimitive.content }
+            return decoded.getOrNull() == text
+        }
 
         // Pure-function overload for testing the parse + clamp logic without
         // touching System.getenv. Production path delegates here.
