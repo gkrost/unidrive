@@ -2,3 +2,5 @@
 {"ok":true,"entries":[{"path":"/docs/report.txt","size":42,"mtime_ms":1234567890123,"hydrated":true,"folder":false,"remote_modified_ms":1234567890000,"remote_id":"rid-report","etag":"etag-report","pending_upload":false,"error":false},{"path":"/docs/sub","size":0,"mtime_ms":1234567890123,"hydrated":false,"folder":true,"remote_modified_ms":1234567890000,"remote_id":"rid-sub","etag":null,"pending_upload":false,"error":false},{"path":"/docs/draft.txt","size":7,"mtime_ms":1234567890123,"hydrated":true,"folder":false,"remote_modified_ms":null,"remote_id":null,"etag":null,"pending_upload":true,"error":true},{"path":"/docs/scratch.tmp","size":3,"mtime_ms":1234567890123,"hydrated":true,"folder":false,"remote_modified_ms":null,"remote_id":null,"etag":null,"pending_upload":false,"error":false,"excluded":true}]}
 {"verb":"hydration.list","prefix":"/empty"}
 {"ok":true,"entries":[]}
+{"verb":"hydration.list","prefix":"/docs/.."}
+{"ok":false,"error":"invalid_path"}

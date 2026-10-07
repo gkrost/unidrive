@@ -6,3 +6,5 @@
 {"ok":false,"error":"not_empty"}
 {"verb":"hydration.rmdir","path":"/docs/uploading"}
 {"ok":false,"error":"busy"}
+{"verb":"hydration.rmdir","path":"/docs/.."}
+{"ok":false,"error":"invalid_path"}

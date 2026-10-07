@@ -9,6 +9,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.engine.AuditSink
+import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.EnumerationEntryPoint
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.engine.MountWiring
@@ -99,8 +100,14 @@ class MountEngine private constructor(
     /** See [RemoteOperationGuard.withTransferPermit]. */
     suspend fun <T> withTransferPermit(block: suspend () -> T): T = guard.withTransferPermit(block)
 
-    /** The hydration-cache file of a logical [path] (the host's layout). */
+    /**
+     * The hydration-cache file of a logical [path] (the host's layout). Always inside the profile's cache folder:
+     * a path that would resolve outside it throws [SecurityException] (`SyncEngine.resolveCachePath`).
+     */
     fun resolveCachePath(path: String): Path = wiring.cachePathOf(path)
+
+    // For the passes over rows: the cache file of [path], or null (logged once) when it does not resolve inside the cache.
+    private fun rowCachePath(path: String): Path? = CachePaths.forRow(path, log, wiring.cachePathOf)
 
     /**
      * One-way remote→state.db refresh for view consumers (the FUSE mount). Reuses the remote
@@ -229,9 +236,10 @@ class MountEngine private constructor(
                 // Cache-backed rows and queued uploads belong to the hydration layer. A not-hydrated
                 // row is a stub, a partial download or an edited placeholder: whether the bytes are
                 // an edit is the Reconciler's call (it may need a download to keep both).
+                // A row whose path does not resolve inside the cache is left alone too.
                 val hydrationOwned =
                     entry == null || !entry.isHydrated || uploadInFlight(path) ||
-                        (entry.cacheBacked == true && Files.isRegularFile(resolveCachePath(path)))
+                        (entry.cacheBacked == true && (rowCachePath(path)?.let { Files.isRegularFile(it) } ?: true))
                 if (hydrationOwned || failedFolders.any { path.startsWith("$it/") }) {
                     skipped++
                     continue
@@ -533,7 +541,7 @@ class MountEngine private constructor(
     fun cacheDisposition(path: String): CacheDisposition {
         val entry = db.getEntry(path) ?: return CacheDisposition.PROTECTED
         if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) return CacheDisposition.PROTECTED
-        val cache = resolveCachePath(path)
+        val cache = rowCachePath(path) ?: return CacheDisposition.PROTECTED
         return try {
             if (!Files.isRegularFile(cache)) return CacheDisposition.PROTECTED
             val size = Files.size(cache)
@@ -583,7 +591,7 @@ class MountEngine private constructor(
         hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock {
             if (cacheDisposition(path) == CacheDisposition.PROTECTED) return@withLock null
             val entry = db.getEntry(path) ?: return@withLock null
-            val cache = resolveCachePath(path)
+            val cache = rowCachePath(path) ?: return@withLock null
             val size = runCatching { Files.size(cache) }.getOrNull() ?: return@withLock null
             val mtime = runCatching { Files.getLastModifiedTime(cache).toMillis() }.getOrNull() ?: return@withLock null
             // The same test cacheDisposition used: the cache copy is the row's local file.
@@ -1207,7 +1215,8 @@ class MountEngine private constructor(
 
     private fun isTracked(remotePath: String): Boolean = guard.isTracked(remotePath)
 
-    private fun localNameIssue(path: String): String? = mirror.localNameIssue(path)
+    // The host's file-name rules (the OS the engine runs on); the hydration layer refuses a new name with them.
+    internal fun localNameIssue(path: String): String? = mirror.localNameIssue(path)
 
     // Defer the absence sweep's deletion verdict for a path this process just wrote (the gather's state).
     private fun markRecentlyUploaded(path: String) = gather.markRecentlyUploaded(path)

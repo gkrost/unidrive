@@ -241,6 +241,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
 | `cancelled` | completed event | upload aborted by hydration.cancel |
+| `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
 
 ## 8. Who may write the mounted folder
@@ -268,3 +269,6 @@ folder from its own authority — it would desync from the rows.
   and `HydrationUploadQueueTest`; the recovery-<n> handle contract in
   `HydrationImplTest`.
 - Startup liveness: `DaemonRuntimeTest.verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply`.
+- Path validation (`invalid_path`): the boundary checks in `HydrationIpcHandlerPathValidationTest`; the
+  cache-folder containment of the verbs in `HydrationPathContainmentTest`, `ResolveCachePathContainmentTest`
+  and `CachePathsTest`.
