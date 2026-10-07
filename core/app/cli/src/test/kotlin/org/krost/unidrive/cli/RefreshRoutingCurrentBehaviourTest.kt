@@ -21,8 +21,9 @@ import kotlin.test.assertTrue
 
 /**
  * #560 U1: what `refresh.run` does with state.db today, by route. RefreshRoutingTest pins which engine entry point
- * runs; these pin the `reset` handling and the flags of the reconcile route. #560 U4 changes this routing on purpose
- * (refresh of a mount profile always enumerates and never clears pending writes); these tests then change with it.
+ * runs; these pin the `reset` handling and the flags of the reconcile route. A reset keeps the rows that still await
+ * upload (RefreshResetKeepsPendingTest has the detail). #560 U4 changes this routing on purpose (refresh of a mount
+ * profile always enumerates); these tests then change with it.
  */
 class RefreshRoutingCurrentBehaviourTest {
     private lateinit var db: StateDatabase
@@ -79,17 +80,17 @@ class RefreshRoutingCurrentBehaviourTest {
     }
 
     @Test
-    fun `current routing - without a mount client, reset clears state_db, pending uploads included, then reconciles without transfers`() {
+    fun `current routing - without a mount client, reset clears state_db except the rows that await upload, then reconciles without transfers`() {
         val engine = RecordingEngine()
 
         refresh(engine, mounted = false, request = """{"verb":"refresh.run","reset":true}""")
 
         assertTrue(engine.syncOnceCalled)
         assertEquals(true to false, engine.lastSyncOnceFlags, "syncOnce(skipTransfers = true, skipRemoteGather = false)")
-        assertNull(db.getEntry("/synced.txt"), "db.resetAll() dropped the synced row")
-        assertNull(db.getEntry("/pending.txt"), "db.resetAll() dropped the pending upload row too")
-        assertTrue(db.pendingUploadPaths().isEmpty())
-        assertNull(db.getSyncState("delta_cursor"), "and the cursor")
+        assertNull(db.getEntry("/synced.txt"), "the synced row was cleared")
+        assertNotNull(db.getEntry("/pending.txt"), "the row that still awaits upload was kept")
+        assertEquals(listOf("/pending.txt"), db.pendingUploadPaths())
+        assertNull(db.getSyncState("delta_cursor"), "and the cursor was cleared")
     }
 
     @Test

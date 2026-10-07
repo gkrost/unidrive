@@ -9,6 +9,7 @@ import org.krost.unidrive.sync.EnumerateResult
 import org.krost.unidrive.sync.EnumerationStatus
 import org.krost.unidrive.sync.EnumerationTracker
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.model.SyncEntry
 import org.slf4j.Logger
 import java.nio.file.Files
 import java.nio.file.Path
@@ -46,7 +47,30 @@ class RemoteEnumeration(
         val uploadInFlight: (path: String) -> Boolean = { false },
         // The hydration-cache file of a logical path.
         val cachePathOf: (path: String) -> Path,
-    )
+    ) {
+        /**
+         * Whether the row at [path] ([row] is its alive row, if any) may hold the only copy of an edit that has
+         * not reached the cloud, so that nothing may drop the row or its cache copy (#301):
+         * - an upload of the path is queued or in flight ([uploadInFlight]);
+         * - the row never reached the cloud (`SyncEntry.isPendingUpload`);
+         * - the hydration cache holds a copy newer than the row's last-synced watermark (an edit whose upload
+         *   crashed or failed; the co-daemon's recovery scanner replays exactly this watermark).
+         * A cache path that cannot be resolved or read counts as no copy. The enumeration's reap and
+         * `refresh.run`'s reset ask the same question here.
+         */
+        fun holdsUnsyncedEdit(
+            path: String,
+            row: SyncEntry?,
+        ): Boolean {
+            if (uploadInFlight(path)) return true
+            if (row == null) return false
+            if (row.isPendingUpload) return true
+            return runCatching {
+                val cachePath = cachePathOf(path)
+                Files.exists(cachePath) && Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
+            }.getOrDefault(false)
+        }
+    }
 
     // Single-flight guard across ALL callers: the --poll-interval poller, the
     // sync.enumerate verb (EnumerateRpcHandler), and mount-routed refresh.run
@@ -234,16 +258,7 @@ class RemoteEnumeration(
                     // enumeration re-evaluates once the upload has landed (or failed).
                     val row = db.getEntry(path)
                     val cachePath = reapGuards.cachePathOf(path)
-                    val cacheDirty =
-                        if (row == null) {
-                            false
-                        } else {
-                            runCatching {
-                                Files.exists(cachePath) &&
-                                    Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
-                            }.getOrDefault(false)
-                        }
-                    if (reapGuards.uploadInFlight(path) || row?.isPendingUpload == true || cacheDirty) {
+                    if (reapGuards.holdsUnsyncedEdit(path, row)) {
                         // The daemon enumerates every poll interval: warn once per path, not once per poll.
                         val msg = "enumerate: deferring reap of {} — its hydration cache may hold the only copy of an un-uploaded edit"
                         if (deferredReapWarned.add(path)) log.warn(msg, path) else log.debug(msg, path)

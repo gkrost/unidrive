@@ -457,7 +457,6 @@ class StatusCommand : Runnable {
 
         println("Credential health check (offline — no network calls):")
         println()
-        var hasIssues = false
         for (profile in profiles) {
             val configDir = baseDir.resolve(profile.name)
             val displayName = profileDisplayLabel(profile)
@@ -469,26 +468,9 @@ class StatusCommand : Runnable {
                     is CredentialHealth.Missing -> GlyphRenderer.cross() to health.message
                     is CredentialHealth.ExpiresIn -> GlyphRenderer.warn() to health.message
                 }
-            val line = "  $icon  $displayName: $message"
-            when (health) {
-                is CredentialHealth.Ok -> println(line)
-                is CredentialHealth.Warning -> {
-                    hasIssues = true
-                    System.err.println(line)
-                }
-                is CredentialHealth.Missing -> {
-                    hasIssues = true
-                    System.err.println(line)
-                }
-                is CredentialHealth.ExpiresIn -> {
-                    hasIssues = true
-                    System.err.println(line)
-                }
-            }
-        }
-        if (hasIssues) {
-            println()
-            println("Tip: run 'unidrive -p <profile> auth' to fix credential issues.")
+            val hint = if (credentialNeedsReauth(health)) " — ${reauthHint(profile.name)}" else ""
+            val line = "  $icon  $displayName: $message$hint"
+            if (health is CredentialHealth.Ok) println(line) else System.err.println(line)
         }
     }
 
@@ -994,6 +976,21 @@ class StatusCommand : Runnable {
  * as `[⚠ STALE]`, not silently fixed-up via an interactive auth prompt.
  */
 internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
+
+/**
+ * True when [health] means the stored credentials can no longer be used and
+ * the operator has to re-run `auth`. A token that is merely close to expiry
+ * ([CredentialHealth.ExpiresIn] with hours left) still works.
+ */
+internal fun credentialNeedsReauth(health: CredentialHealth): Boolean =
+    when (health) {
+        is CredentialHealth.Ok -> false
+        is CredentialHealth.ExpiresIn -> health.hours <= 0
+        is CredentialHealth.Warning, is CredentialHealth.Missing -> true
+    }
+
+/** Remediation hint naming the profile (not the provider type) to re-auth. */
+internal fun reauthHint(profileName: String): String = "run 'unidrive -p $profileName auth'"
 
 /**
  * Pure helper: derive the (status-code, statusLabel) pair for a tracking-set

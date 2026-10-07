@@ -3,7 +3,10 @@ package org.krost.unidrive.cli
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.krost.unidrive.engine.RemoteEnumeration
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
@@ -19,6 +22,10 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Progress + terminal events are streamed post-reply via the IpcServer's
  * subscriber-set mechanism (sync.subscribe fan-out, mechanism β).
+ *
+ * `reset: true` without a mount client clears state.db and re-enumerates, keeping the rows that
+ * still await upload or whose local copy holds an edit the cloud has not seen
+ * ([StateDatabase.resetKeepingPending]); with a mount client it only clears the delta cursor.
  *
  * Invariant I6: at most one refresh.run in flight per daemon. Serialised
  * via [inFlight]; a second concurrent call returns "busy".
@@ -38,10 +45,17 @@ class RefreshRpcHandler(
     // scan, no deletion guards) instead of the legacy bidirectional reconcile.
     // See docs/dev/specs/mount-view-refresh-design.md §4.
     private val mountClientConnected: () -> Boolean = { false },
+    // Whether a hydration upload of the path is queued or in flight (HydrationImpl.hasUploadSlot, late-bound
+    // by the daemon wiring). A reset keeps the row of such a path.
+    private val uploadInFlight: (path: String) -> Boolean = { false },
     // Terminal-event sink. Defaults to the broadcast channel; injectable for tests.
     private val emit: (String) -> Unit = ipcServer::emit,
 ) {
     private val log = LoggerFactory.getLogger(RefreshRpcHandler::class.java)
+
+    // The enumeration's own rule for "this row's local copy holds an edit the cloud has not seen".
+    private val keepGuards =
+        RemoteEnumeration.ReapGuards(uploadInFlight = uploadInFlight, cachePathOf = { engine.resolveCachePath(it) })
 
     private val inFlight = AtomicReference<RefreshJob?>(null)
 
@@ -62,14 +76,13 @@ class RefreshRpcHandler(
             val existing = inFlight.get()
             return """{"ok":false,"error":"busy","message":"refresh already running (job_id=${existing?.id})"}"""
         }
-        // Parse optional `"reset": true` from the request. Spec amendment vs.
+        // Optional `"reset": true` and `"force_delete": true`. Spec amendment vs.
         // initial §4.2 ("no parameters"): F9 added `reset` to cover the
         // delta-cursor recovery path that was lost when RefreshCommand
-        // dropped SyncCommand inheritance in Task 11. JSON parse is intentionally
-        // minimal (regex over the request body) — the daemon RPC contract is
-        // append-only so a sloppy match here can't break a strict client.
-        val reset = RESET_TRUE_REGEX.containsMatchIn(jsonRequest)
-        val forceDelete = FORCE_DELETE_TRUE_REGEX.containsMatchIn(jsonRequest)
+        // dropped SyncCommand inheritance in Task 11. Read from the request as JSON:
+        // only a top-level boolean counts (see [Flags]); the daemon RPC contract is
+        // append-only, so other fields are ignored.
+        val (reset, forceDelete) = Flags.of(jsonRequest)
         val mounted = mountClientConnected()
         val launched =
             try {
@@ -98,8 +111,19 @@ class RefreshRpcHandler(
                             }
                         } else {
                             if (reset) {
-                                log.info("refresh.run reset=true: clearing state.db before re-enumerating: job_id=$jobId")
-                                db.resetAll()
+                                // Rows that still await upload, and rows whose local copy holds an edit the cloud has
+                                // not seen, are not part of what a reset rebuilds from the cloud: keep them. A write
+                                // can precede open_write and its upload/error bookkeeping, even on a never-read row.
+                                val kept =
+                                    db.resetKeepingPending { row ->
+                                        keepGuards.holdsUnsyncedEdit(row.path, row)
+                                    }
+                                log.info(
+                                    "refresh.run reset=true: cleared state.db (kept {} row(s) holding unsynced content) " +
+                                        "before re-enumerating: job_id={}",
+                                    kept,
+                                    jobId,
+                                )
                             }
                             engine.syncOnce(skipTransfers = true, skipRemoteGather = false)
                             """{"event":"refresh.done","job_id":"$jobId","ok":true}"""
@@ -150,10 +174,28 @@ class RefreshRpcHandler(
         inFlight.get()?.job?.join()
     }
 
-    companion object {
-        private val RESET_TRUE_REGEX = Regex("\"reset\"\\s*:\\s*true")
-        private val FORCE_DELETE_TRUE_REGEX = Regex("\"force_delete\"\\s*:\\s*true")
+    /**
+     * The two optional flags of a `refresh.run` request. A flag is set only by a top-level field of that
+     * name whose value is the JSON boolean `true`; a field of the same name inside a nested object or array
+     * or a string value, a value of another type (the string "true", a number, null) and a body that is not
+     * a JSON object all leave it unset.
+     */
+    internal data class Flags(val reset: Boolean, val forceDelete: Boolean) {
+        companion object {
+            fun of(jsonRequest: String): Flags {
+                val body = runCatching { Json.parseToJsonElement(jsonRequest) as? JsonObject }.getOrNull()
+                    ?: return Flags(reset = false, forceDelete = false)
+                return Flags(reset = body.isTrue("reset"), forceDelete = body.isTrue("force_delete"))
+            }
 
+            private fun JsonObject.isTrue(name: String): Boolean {
+                val value = this[name] as? JsonPrimitive ?: return false
+                return !value.isString && value.content == "true"
+            }
+        }
+    }
+
+    companion object {
         /**
          * Render [s] as a fully-escaped, quote-wrapped JSON string literal.
          * A null becomes the empty JSON string `""`. Delegates to
