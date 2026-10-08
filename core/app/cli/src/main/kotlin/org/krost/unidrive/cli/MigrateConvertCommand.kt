@@ -337,20 +337,9 @@ internal object LegacyConversion {
             LockPidReadResult.Absent -> Unit
         }
 
-        // Refusal 2: the profile must not have a mode already.
-        val configText =
-            if (Files.exists(setup.configFile)) Files.readString(setup.configFile) else "[general]\n"
-        val section = sectionLines(configText, setup.profileName)
-        if (section.isEmpty()) {
-            System.err.println("Error: no [providers.${setup.profileName}] section in ${setup.configFile} — nothing to convert.")
-            return 1
-        }
-        if (hasModeLine(section)) {
-            System.err.println("Error: profile '${setup.profileName}' already declares a mode — nothing to convert.")
-            return 1
-        }
-
-        // Journal: resume an interrupted run, or start over on --restart.
+        // Load the journal before checking mode. Publication and recording its PUBLISH phase are
+        // separate durable writes: a crash in between leaves mode in config but an unfinished
+        // journal. That is a resume point, not an already-converted profile.
         var loaded = Journal.load(setup.profileDir)
         if (loaded != null && isNewerEngine(loaded.engineVersion, setup.engineVersion)) {
             System.err.println(
@@ -359,10 +348,31 @@ internal object LegacyConversion {
             )
             return 1
         }
+        if (loaded != null && loaded.profileName != setup.profileName) {
+            System.err.println("Error: the conversion journal belongs to profile '${loaded.profileName}', not '${setup.profileName}'.")
+            return 1
+        }
         if (loaded != null && "CONVERTED" in loaded.phases) {
             System.err.println("Error: profile '${setup.profileName}' was already converted at ${loaded.convertedAt}.")
             return 1
         }
+
+        // Refusal 2: a mode without an unfinished journal means the profile has already been
+        // converted. A matching unfinished journal is allowed through so a crash immediately
+        // after config publication can finish its durable tail.
+        val configText =
+            if (Files.exists(setup.configFile)) Files.readString(setup.configFile) else "[general]\n"
+        val section = sectionLines(configText, setup.profileName)
+        if (section.isEmpty()) {
+            System.err.println("Error: no [providers.${setup.profileName}] section in ${setup.configFile} — nothing to convert.")
+            return 1
+        }
+        if (hasModeLine(section) && loaded == null) {
+            System.err.println("Error: profile '${setup.profileName}' already declares a mode — nothing to convert.")
+            return 1
+        }
+
+        // Journal: resume an interrupted run, or start over on --restart.
         if (loaded != null && restart) {
             Files.list(setup.profileDir).use { stream ->
                 stream

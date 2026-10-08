@@ -186,6 +186,28 @@ class MigrateConvertTest {
     }
 
     @Test
+    fun `a crash after publishing the mode resumes the journal tail`() {
+        val (config, profileDir, syncRoot) = fixture()
+        config.writeText(setProfileMode(config.readText(), "p", "mount"))
+        LegacyConversion.Journal.save(
+            profileDir,
+            LegacyConversion.Journal(
+                engineVersion = "0.0.1",
+                startedAt = "2026-10-08T00:00:00Z",
+                profileName = "p",
+                targetMode = "mount",
+                disposition = "retire",
+                phases = listOf("PLAN", "INVENTORY", "PRESERVE"),
+            ),
+        )
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot), "mount", "retire", restart = false, verbose = false)
+
+        assertEquals(0, code)
+        assertTrue("CONVERTED" in LegacyConversion.Journal.load(profileDir)!!.phases)
+    }
+
+    @Test
     fun `resuming with a different mode is refused`() {
         val (config, profileDir, syncRoot) = fixture()
         syncRoot.resolve("f.txt").writeText("x")
