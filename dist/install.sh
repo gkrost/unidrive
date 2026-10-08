@@ -73,6 +73,11 @@ find "${INSTALL_LIB}" -maxdepth 1 -type f -name 'unidrive*.jar' \
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 
+# jvm-flags.txt beside the jar: DaemonAutospawn reads the same single source the wrapper above was
+# rendered from when it spawns the daemon itself.
+cp "${SCRIPT_DIR}/launcher/jvm-flags.txt" "${INSTALL_LIB}/"
+echo "  ${INSTALL_LIB}/jvm-flags.txt"
+
 # Coroutine-debug probe jar (gkrost/unidrive#613 ask 1): deployed beside the fat jar so the
 # launcher's UNIDRIVE_COROUTINE_DEBUG gate can -javaagent it at daemon JVM start. Optional:
 # a tree without the probe jar (an older build, a slim release tarball) installs fine without it.

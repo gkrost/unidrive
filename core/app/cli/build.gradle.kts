@@ -472,6 +472,12 @@ fun deployWindows(
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
+    // jvm-flags.txt beside the fat jar: DaemonAutospawn reads the launchers' single source from
+    // here when it spawns the daemon itself.
+    val flagsFile = File(libDir, "jvm-flags.txt")
+    launcherDir.resolve("jvm-flags.txt").copyTo(flagsFile, overwrite = true)
+    println("[deploy] copied jvm-flags.txt -> ${flagsFile.absolutePath}")
+
     // The coroutine-debug probe jar lands beside the fat jar (the launchers and DaemonAutospawn
     // -javaagent it when UNIDRIVE_COROUTINE_DEBUG=1). A stale version is replaced; absent dep →
     // nothing deployed and the launchers' existence check skips the agent.
@@ -568,6 +574,11 @@ fun deployLinux(
         }
 
     jarFile.copyTo(targetJar, overwrite = true)
+
+    // jvm-flags.txt beside the fat jar (mirrors deployWindows): DaemonAutospawn reads the launchers'
+    // single source from here when it spawns the daemon itself.
+    launcherDir.resolve("jvm-flags.txt").copyTo(File(libDir, "jvm-flags.txt"), overwrite = true)
+    println("[deploy] copied jvm-flags.txt -> ${File(libDir, "jvm-flags.txt").absolutePath}")
 
     // Mirrors deployWindows: the coroutine-debug probe jar beside the fat jar (see the note there).
     val debugAgentTarget =
