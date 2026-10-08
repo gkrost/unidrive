@@ -223,12 +223,19 @@ tasks.shadowJar {
 
 val copyCoroutineDebugAgent =
     tasks.register<Copy>("copyCoroutineDebugAgent") {
-        from(configurations.runtimeClasspath.map { files -> files.filter { it.name.startsWith("kotlinx-coroutines-core-jvm-") && it.name.endsWith(".jar") } })
+        from(configurations.runtimeClasspath.map { files -> files.filter { it.name.startsWith("kotlinx-coroutines-debug-") && it.name.endsWith(".jar") } })
         into(layout.buildDirectory.dir("libs"))
     }
 
 tasks.shadowJar {
     finalizedBy(copyCoroutineDebugAgent)
+}
+
+// verifyThirdPartyNotices reads the plain jar from build/libs, the same directory the agent
+// copy stages into. Gradle 9 fails the build on that undeclared overlap, so the order is
+// explicit: the agent copy lands first, the notices verification reads the jar after it.
+tasks.matching { it.name == "verifyThirdPartyNotices" }.configureEach {
+    mustRunAfter(copyCoroutineDebugAgent)
 }
 
 // Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
@@ -387,7 +394,7 @@ tasks.register("deploy") {
             configurations
                 .getByName("runtimeClasspath")
                 .files
-                .firstOrNull { it.name.startsWith("kotlinx-coroutines-core-jvm-") }
+                .firstOrNull { it.name.startsWith("kotlinx-coroutines-debug-") }
 
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion, debugAgentJar)
@@ -471,7 +478,7 @@ fun deployWindows(
     val debugAgentTarget =
         debugAgentJar?.let { agent ->
             val stale =
-                libDir.listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-core-jvm-") && f.name.endsWith(".jar") } ?: emptyArray()
+                libDir.listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") } ?: emptyArray()
             stale.forEach { if (it.delete()) println("[deploy] pruned stale probe jar ${it.name}") }
             val target = File(libDir, agent.name)
             agent.copyTo(target, overwrite = true)
@@ -566,7 +573,7 @@ fun deployLinux(
     val debugAgentTarget =
         debugAgentJar?.let { agent ->
             libDir
-                .listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-core-jvm-") && f.name.endsWith(".jar") }
+                .listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") }
                 ?.forEach { it.delete() }
             val target = File(libDir, agent.name)
             agent.copyTo(target, overwrite = true)
