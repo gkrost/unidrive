@@ -837,4 +837,21 @@ class StatusCommandTest {
             outOfScopeLine(many),
         )
     }
+
+    // ── #646: status without a default profile ───────────────────────────────
+
+    @Test
+    fun `no-default notice fires when no -p and no default_profile over configured profiles`() {
+        val notice = noDefaultProfileNotice(null, null, hasConfiguredProfiles = true)
+        assertNotNull(notice)
+        assertTrue("-p <name>" in notice, "the notice names the -p remedy: $notice")
+        assertTrue("-a" in notice, "the notice names the -a remedy: $notice")
+    }
+
+    @Test
+    fun `no-default notice stays silent when a default exists is asked for or nothing is configured`() {
+        assertNull(noDefaultProfileNotice("internxt_test", null, hasConfiguredProfiles = true), "explicit -p")
+        assertNull(noDefaultProfileNotice(null, "internxt_test", hasConfiguredProfiles = true), "default_profile set")
+        assertNull(noDefaultProfileNotice(null, null, hasConfiguredProfiles = false), "no profiles: the config-missing report owns it")
+    }
 }

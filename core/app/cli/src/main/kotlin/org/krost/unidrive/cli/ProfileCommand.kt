@@ -102,14 +102,22 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
 
-        // Step 3: Sync root — the canonical default resolver: Paths-joined, so it
-        // renders with the OS's own separators (string-concatenating "$home/" mixed
-        // backslashes into the Windows form), and it honours a provider's
-        // syncRootDirName override (onedrive suggests ~/OneDrive, not ~/Onedrive).
-        val defaultRoot = SyncConfig.defaultSyncRoot(type).toString()
-        print("Sync root [$defaultRoot]: ")
-        val rootInput = console.readLine()?.trim()
-        val syncRoot = if (rootInput.isNullOrBlank()) defaultRoot else rootInput
+        // Step 3: Mode (#603, #646) — chosen before the sync-root question, because the mode
+        // decides whether that question exists at all. Fixed after creation; there is no
+        // default: nothing may assume a legacy profile, and a profile without a mode is
+        // refused by every command.
+        val mode = promptProfileMode(console)
+
+        // Step 4: Sync root (#646). A mount profile works on the client-chosen mount root, so
+        // it is not asked and gets a private folder under its own profile directory instead.
+        // A mirror profile keeps the question, but the suggestion never lands on the official
+        // Internxt Desktop client's folders (~\Internxt, ~\InternxtDrive*) — the owner
+        // reserves those for that client.
+        val syncRoot =
+            when (mode) {
+                org.krost.unidrive.sync.ProfileMode.MOUNT -> main.configBaseDir().resolve(name).resolve("sync-root").toString()
+                org.krost.unidrive.sync.ProfileMode.MIRROR -> promptMirrorSyncRoot(console, type)
+            }
 
         // Validate no duplicate sync root
         val dupCheck =
@@ -130,7 +138,7 @@ class ProfileAddCommand : Runnable {
             System.exit(1)
         }
 
-        // Step 4: Credential prompts per type — driven by SPI capability
+        // Step 5: Credential prompts per type — driven by SPI capability
         val creds = mutableMapOf<String, String>()
         val factory =
             org.krost.unidrive.ProviderRegistry
@@ -155,11 +163,7 @@ class ProfileAddCommand : Runnable {
             }
         }
 
-        // Step 4b: Mode (#603) — chosen at creation, fixed afterwards. There is no default: nothing
-        // may assume a legacy profile, and a profile without a mode is refused by every command.
-        val mode = promptProfileMode(console)
-
-        // Step 5: Generate and append TOML
+        // Step 6: Generate and append TOML
         val toml = generateProfileToml(type, name, syncRoot, creds, mode)
 
         if (!Files.exists(configPath)) {
@@ -173,6 +177,18 @@ class ProfileAddCommand : Runnable {
         println("  Config: $configPath")
         if (factory.supportsInteractiveAuth()) {
             println("  Next: run ${AnsiHelper.bold("unidrive -p $name auth")}")
+        }
+
+        // #646: when no profile is the default yet, offer the new one — `unidrive status`
+        // without a default otherwise falls back to the implicit localfs profile and looks
+        // empty even though real profiles are configured.
+        if (raw.general.default_profile.isNullOrBlank()) {
+            print("Make '${name}' the default profile? [Y/n]: ")
+            val answer = console.readLine()?.trim()?.lowercase()
+            if (answer == null || answer.isEmpty() || answer == "y" || answer == "yes") {
+                Files.writeString(configPath, org.krost.unidrive.sync.setDefaultProfile(Files.readString(configPath), name))
+                println("  Default: ${AnsiHelper.bold(name)}")
+            }
         }
     }
 
@@ -217,7 +233,43 @@ class ProfileAddCommand : Runnable {
         val value = console.readLine()?.trim()
         return if (value.isNullOrBlank()) default else value
     }
+
+    /**
+     * #646: the sync-root question for a mirror profile. The suggestion is the canonical
+     * default for the provider — except when that is one of the official Internxt Desktop
+     * client's folders (~\Internxt, ~\InternxtDrive*): the owner reserves those for that
+     * client, so the suggestion moves aside (~\InternxtSync). A root the user types anyway
+     * draws a warning, not a refusal — it is their machine; the point is that accepting the
+     * default must not silently aim a unidrive profile at the other client's folder.
+     */
+    private fun promptMirrorSyncRoot(
+        console: java.io.Console,
+        type: String,
+    ): String {
+        val computed = SyncConfig.defaultSyncRoot(type)
+        val defaultRoot =
+            if (isOfficialInternxtClientFolder(computed.fileName.toString())) {
+                computed.parent.resolve("InternxtSync").toString()
+            } else {
+                computed.toString()
+            }
+        print("Sync root [$defaultRoot]: ")
+        val rootInput = console.readLine()?.trim()
+        val syncRoot = if (rootInput.isNullOrBlank()) defaultRoot else rootInput
+        if (isOfficialInternxtClientFolder(java.nio.file.Path.of(syncRoot).fileName.toString())) {
+            println("Warning: '$syncRoot' is the official Internxt Desktop client's folder — the two clients will fight over it.")
+        }
+        return syncRoot
+    }
 }
+
+/**
+ * #646: the folder names the official Internxt Desktop client uses for its sync root — the
+ * sync root itself and the Drive-named variants. File-scope so the prompt and the tests share
+ * one predicate.
+ */
+internal fun isOfficialInternxtClientFolder(fileName: String): Boolean =
+    fileName.equals("Internxt", ignoreCase = true) || fileName.startsWith("InternxtDrive", ignoreCase = true)
 
 // ── profile list ─────────────────────────────────────────────────────────────
 

@@ -28,6 +28,31 @@ fun escapeTomlValue(value: String): String =
         .replace("\t", "\\t")
 
 /**
+ * #646: set `[general] default_profile` in config text. The value is inserted directly under
+ * the `[general]` header (an existing `default_profile` line is replaced in place) and every
+ * other line is preserved byte for byte, comments and ordering included — the same
+ * line-oriented contract as the rest of this file. Fails when the text has no `[general]`
+ * section: the CLI's config always starts with one.
+ */
+fun setDefaultProfile(
+    configText: String,
+    profileName: String,
+): String {
+    val lines = configText.lines().toMutableList()
+    val generalIdx = lines.indexOfFirst { it.trim() == "[general]" }
+    require(generalIdx >= 0) { "config text has no [general] section" }
+    val sectionEnd =
+        lines
+            .drop(generalIdx + 1)
+            .indexOfFirst { it.trim().startsWith("[") }
+            .let { if (it < 0) lines.size else generalIdx + 1 + it }
+    val line = "default_profile = \"${escapeTomlValue(profileName)}\""
+    val existing = (generalIdx + 1 until sectionEnd).firstOrNull { lines[it].trim().startsWith("default_profile") }
+    if (existing != null) lines[existing] = line else lines.add(generalIdx + 1, line)
+    return lines.joinToString("\n")
+}
+
+/**
  * Generate a TOML section string for a new profile.
  * Returns the full `[providers.<name>]` block ready to append. The mode is mandatory (#603): a
  * profile without one is refused by every command, so creation always writes it.
