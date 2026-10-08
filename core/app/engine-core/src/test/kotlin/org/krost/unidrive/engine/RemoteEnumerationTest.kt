@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
+import java.time.Instant
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -250,6 +251,103 @@ class RemoteEnumerationTest {
             assertEquals(1, invalidations.size)
             assertEquals(setOf("/a.txt"), invalidations.single().first)
             assertEquals(42, db.getEntry("/a.txt")?.remoteSize)
+        }
+
+    // ── #601: the lagging-delta parent guard ────────────────────────────────
+
+    // The #601 repro: the old folder generation was trashed, a new one was created under the
+    // same path, and the lagging delta re-delivers the dead generation's child as EXISTS.
+    private fun seedFolderRow(
+        path: String,
+        remoteId: String,
+    ) {
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = path,
+                remoteId = remoteId,
+                remoteHash = null,
+                remoteSize = 0,
+                remoteModified = null,
+                localMtime = null,
+                localSize = null,
+                isFolder = true,
+                isPinned = false,
+                isHydrated = false,
+                lastSynced = Instant.now(),
+            ),
+        )
+    }
+
+    @Test
+    fun `a stale child of a trashed folder generation is not upserted under a re-created path`() =
+        runTest {
+            seedFolderRow("/again", remoteId = "new-folder")
+            val deadGenerationChild = file("old-x", "/again/x.txt").copy(parentId = "trashed-folder")
+
+            val merge = gather().updateRemoteEntries(mapOf("/again/x.txt" to deadGenerationChild))
+
+            assertNull(db.getEntry("/again/x.txt"), "the dead generation's child must not resurrect under the new folder")
+            assertTrue("/again/x.txt" !in merge.changedPaths)
+        }
+
+    @Test
+    fun `a child whose parent id matches the live folder row is upserted as usual`() =
+        runTest {
+            seedFolderRow("/again", remoteId = "new-folder")
+            val freshChild = file("new-x", "/again/x.txt").copy(parentId = "new-folder")
+
+            val merge = gather().updateRemoteEntries(mapOf("/again/x.txt" to freshChild))
+
+            assertEquals("new-x", db.getEntry("/again/x.txt")?.remoteId)
+            assertTrue("/again/x.txt" in merge.changedPaths)
+        }
+
+    @Test
+    fun `a child preceding its replacement parent in one delta uses that parent generation`() =
+        runTest {
+            seedFolderRow("/again", remoteId = "old-folder")
+            val child = file("new-x", "/again/x.txt").copy(parentId = "new-folder")
+            val replacementParent = file("new-folder", "/again").copy(isFolder = true)
+
+            val merge = gather().updateRemoteEntries(linkedMapOf("/again/x.txt" to child, "/again" to replacementParent))
+
+            assertEquals("new-x", db.getEntry("/again/x.txt")?.remoteId)
+            assertTrue("/again/x.txt" in merge.changedPaths)
+        }
+
+    @Test
+    fun `a delta item whose parent row is unknown still lands`() =
+        runTest {
+            // First enumeration: the child can arrive before its parent row exists.
+            val orphan = file("x", "/fresh/x.txt").copy(parentId = "some-folder")
+
+            val merge = gather().updateRemoteEntries(mapOf("/fresh/x.txt" to orphan))
+
+            assertEquals("x", db.getEntry("/fresh/x.txt")?.remoteId, "unknown parent: no evidence of staleness")
+            assertTrue("/fresh/x.txt" in merge.changedPaths)
+        }
+
+    @Test
+    fun `root-level items pass the parent guard`() =
+        runTest {
+            // The drive root has no row in sync_entries, so there is nothing to mismatch against.
+            val rootChild = file("r", "/root.txt").copy(parentId = "drive-root-id")
+
+            gather().updateRemoteEntries(mapOf("/root.txt" to rootChild))
+
+            assertEquals("r", db.getEntry("/root.txt")?.remoteId)
+        }
+
+    @Test
+    fun `an item without a parent id passes the guard untouched`() =
+        runTest {
+            // Provider-neutral: OneDrive's mapper fills no parentId (null passes).
+            seedFolderRow("/again", remoteId = "new-folder")
+            val noParentId = file("x", "/again/x.txt")
+
+            gather().updateRemoteEntries(mapOf("/again/x.txt" to noParentId))
+
+            assertEquals("x", db.getEntry("/again/x.txt")?.remoteId)
         }
 
     // One page per listing; every cursor names the listing that produced it.
