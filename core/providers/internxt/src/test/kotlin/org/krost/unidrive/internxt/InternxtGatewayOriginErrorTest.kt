@@ -304,8 +304,8 @@ class InternxtGatewayOriginErrorTest {
                                 content.incrementAndGet()
                                 respond(errorBody(status), code, headers)
                             }
-                            // the paged fallback fails the same way: the folders stream dies first, the files one never runs
-                            request.url.encodedPath.endsWith("/folders/content/other/folders") -> {
+                            // the paged (cursor) fallback fails the same way: the folders stream dies first, the files one never runs
+                            request.url.encodedPath.endsWith("/folders/v2/content/other/folders") -> {
                                 pagedFolders.incrementAndGet()
                                 respond(errorBody(status), code, headers)
                             }
