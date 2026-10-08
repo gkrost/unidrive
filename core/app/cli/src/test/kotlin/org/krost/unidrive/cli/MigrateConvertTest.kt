@@ -91,9 +91,12 @@ class MigrateConvertTest {
         assertTrue(!Files.exists(syncRoot.resolve("keep.txt")), "the root is emptied of files")
         assertTrue(Files.isDirectory(syncRoot), "the root itself survives, empty")
 
-        val conversionDir = profileDir.toAbsolutePath().let { p ->
-            Files.list(p).use { s -> s.filter { it.fileName.toString().startsWith("conversion-") }.findFirst().orElseThrow() }
-        }
+        val conversionDir =
+            Files.list(profileDir).use { s ->
+                // Only the conversion DIRECTORY: the journal file also starts with "conversion-",
+                // and the listing order is unspecified (it bit on Linux).
+                s.filter { it.fileName.toString().startsWith("conversion-") && Files.isDirectory(it) }.findFirst().orElseThrow()
+            }
         assertEquals("one", Files.readString(conversionDir.resolve("quarantine/keep.txt")))
         assertEquals("two-22", Files.readString(conversionDir.resolve("quarantine/sub/dir.txt")))
         assertTrue(Files.exists(conversionDir.resolve("manifest.json")), "the manifest is written")
