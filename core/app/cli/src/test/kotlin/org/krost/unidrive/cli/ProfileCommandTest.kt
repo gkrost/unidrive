@@ -6,6 +6,7 @@ import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isValidProfileName
 import org.krost.unidrive.sync.removeProfileSection
+import org.krost.unidrive.sync.setDefaultProfile
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -279,5 +280,63 @@ class ProfileCommandTest {
             assertTrue(newAccountHint(metadata).isEmpty(), "$id prints no hint")
         }
         assertTrue(newAccountHint(null).isEmpty(), "an unknown provider prints no hint")
+    }
+
+    // ── setDefaultProfile (#646) ─────────────────────────────────────────────
+
+    @Test
+    fun `setDefaultProfile inserts under the general header and keeps everything else`() {
+        val config =
+            """
+            [general]
+
+            [providers.work]
+            type = "onedrive"
+            """.trimIndent()
+
+        val result = setDefaultProfile(config, "work")
+
+        val lines = result.lines()
+        assertEquals("[general]", lines[0])
+        assertEquals("default_profile = \"work\"", lines[1])
+        assertTrue(lines.any { it.contains("[providers.work]") }, "the provider section survives")
+        assertTrue(lines.none { it.startsWith("default_profile") && it != lines[1] }, "no duplicate key")
+    }
+
+    @Test
+    fun `setDefaultProfile replaces an existing value in place`() {
+        val config =
+            """
+            [general]
+            default_profile = "old"
+            poll_interval = 60
+            """.trimIndent()
+
+        val result = setDefaultProfile(config, "new")
+
+        assertTrue("default_profile = \"old\"" !in result)
+        assertTrue("default_profile = \"new\"" in result)
+        assertTrue("poll_interval = 60" in result, "neighbouring keys survive")
+        assertEquals(1, result.lines().count { it.trim().startsWith("default_profile") }, "no duplicate key")
+    }
+
+    @Test
+    fun `setDefaultProfile escapes paths and quotes in the profile name`() {
+        val result = setDefaultProfile("[general]\n", "weird\"name")
+
+        assertContains(result, "default_profile = \"weird\\\"name\"")
+    }
+
+    // ── the mirror sync-root suggestion (#646) ───────────────────────────────
+
+    @Test
+    fun `the official Internxt client folders are never a suggestion`() {
+        assertTrue(isOfficialInternxtClientFolder("Internxt"))
+        assertTrue(isOfficialInternxtClientFolder("internxt"))
+        assertTrue(isOfficialInternxtClientFolder("InternxtDrive"))
+        assertTrue(isOfficialInternxtClientFolder("InternxtDrive-Old"))
+        assertFalse(isOfficialInternxtClientFolder("InternxtSync"))
+        assertFalse(isOfficialInternxtClientFolder("OneDrive"))
+        assertFalse(isOfficialInternxtClientFolder("MyFiles"))
     }
 }

@@ -172,6 +172,24 @@ class StatusCommand : Runnable {
     var pending: Boolean = false
 
     override fun run() {
+        // #646: without -p, profile resolution falls back to the implicit localfs default when
+        // `[general] default_profile` is unset — a status that renders the localfs row ("never")
+        // and looks like nothing is configured even though real profiles exist. Name the remedy
+        // instead of guessing. -a shows everything and --check-auth walks every profile, so both
+        // answer without a default.
+        if (!all && !checkAuth && parent.provider == null) {
+            val configFile = parent.configBaseDir().resolve("config.toml")
+            val raw =
+                if (Files.exists(configFile)) {
+                    SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
+                } else {
+                    SyncConfig.parseRaw("[general]\n")
+                }
+            noDefaultProfileNotice(parent.provider, raw.general.default_profile, raw.providers.isNotEmpty())?.let {
+                System.err.println(it)
+                System.exit(1)
+            }
+        }
         if (checkAuth) {
             showCredentialHealthReport()
             return
@@ -976,6 +994,26 @@ class StatusCommand : Runnable {
  * as `[⚠ STALE]`, not silently fixed-up via an interactive auth prompt.
  */
 internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
+
+/**
+ * #646: the notice `status` prints instead of silently rendering the implicit localfs default.
+ * Firing condition: no `-p`, no `[general] default_profile`, and at least one configured
+ * profile — a config with no profiles at all belongs to the config-missing report instead.
+ * The remedy names both escapes: `-p <name>` for one profile, `-a` for all of them.
+ */
+internal fun noDefaultProfileNotice(
+    explicitProvider: String?,
+    defaultProfile: String?,
+    hasConfiguredProfiles: Boolean,
+): String? =
+    when {
+        explicitProvider != null -> null
+        !defaultProfile.isNullOrBlank() -> null
+        !hasConfiguredProfiles -> null
+        else ->
+            "No default profile is configured. Use -p <name> to pick one (see 'unidrive profile list') " +
+                "or -a to show all profiles."
+    }
 
 /**
  * True when [health] means the stored credentials can no longer be used and
