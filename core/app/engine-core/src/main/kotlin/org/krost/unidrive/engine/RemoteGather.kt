@@ -806,14 +806,20 @@ class RemoteGather(
             // carry no parent id (OneDrive's mapper) are unaffected — null passes.
             val parentPath = path.substringBeforeLast('/', missingDelimiterValue = "/")
             if (item.parentId != null && parentPath != "/") {
-                val parentRow = db.getEntryByRemotePath(parentPath)
-                if (parentRow?.remoteId != null && parentRow.remoteId != item.parentId) {
+                val incomingParent = remoteChanges[parentPath]
+                val liveParentId =
+                    when {
+                        incomingParent?.deleted == true -> null
+                        incomingParent != null -> incomingParent.id
+                        else -> db.getEntryByRemotePath(parentPath)?.remoteId
+                    }
+                if (incomingParent?.deleted == true || (liveParentId != null && liveParentId != item.parentId)) {
                     log.debug(
                         "#601: skipped stale delta item {}: parent id {} does not match the live row at {} ({})",
                         path,
                         item.parentId,
                         parentPath,
-                        parentRow.remoteId,
+                        liveParentId,
                     )
                     continue
                 }

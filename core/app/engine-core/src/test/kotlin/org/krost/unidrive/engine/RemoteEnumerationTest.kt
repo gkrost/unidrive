@@ -303,6 +303,19 @@ class RemoteEnumerationTest {
         }
 
     @Test
+    fun `a child preceding its replacement parent in one delta uses that parent generation`() =
+        runTest {
+            seedFolderRow("/again", remoteId = "old-folder")
+            val child = file("new-x", "/again/x.txt").copy(parentId = "new-folder")
+            val replacementParent = file("new-folder", "/again").copy(isFolder = true)
+
+            val merge = gather().updateRemoteEntries(linkedMapOf("/again/x.txt" to child, "/again" to replacementParent))
+
+            assertEquals("new-x", db.getEntry("/again/x.txt")?.remoteId)
+            assertTrue("/again/x.txt" in merge.changedPaths)
+        }
+
+    @Test
     fun `a delta item whose parent row is unknown still lands`() =
         runTest {
             // First enumeration: the child can arrive before its parent row exists.
