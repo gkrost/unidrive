@@ -794,6 +794,30 @@ class RemoteGather(
         val moved = mutableListOf<RemoteMerge.Move>()
         for ((path, item) in remoteChanges) {
             if (item.deleted) continue // skip deleted items
+            // #601: the lagging-delta parent guard. Internxt does not cascade a folder's
+            // deletion to its children (the server flags the folder alone), so a trashed
+            // folder's child keeps reporting EXISTS with the DEAD folder as its parent id.
+            // When such a stale row arrives after the path was re-created under the same
+            // name, the path-keyed upsert resurrects the dead file inside the new folder.
+            // An item is therefore upserted as alive only when its own parent id matches
+            // the remote id of the live row at its parent path. Unknown parents pass:
+            // a first enumeration may deliver a child before its parent row exists, and
+            // the next complete enumeration re-derives the truth. Providers whose items
+            // carry no parent id (OneDrive's mapper) are unaffected — null passes.
+            val parentPath = path.substringBeforeLast('/', missingDelimiterValue = "/")
+            if (item.parentId != null && parentPath != "/") {
+                val parentRow = db.getEntryByRemotePath(parentPath)
+                if (parentRow?.remoteId != null && parentRow.remoteId != item.parentId) {
+                    log.debug(
+                        "#601: skipped stale delta item {}: parent id {} does not match the live row at {} ({})",
+                        path,
+                        item.parentId,
+                        parentPath,
+                        parentRow.remoteId,
+                    )
+                    continue
+                }
+            }
             val realLocalPath = applyReverseTop(path, remoteToLocalTop)
             val isAliased = realLocalPath != path
             // Match an existing row by effective remote path (handles aliased
