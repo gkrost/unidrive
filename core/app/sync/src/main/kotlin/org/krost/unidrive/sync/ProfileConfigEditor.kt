@@ -77,6 +77,39 @@ fun generateProfileToml(
     }
 
 /**
+ * #604: set `mode` in the `[providers.<name>]` section — the publication step of the legacy
+ * conversion. Replaces an existing `mode` line in place; otherwise inserts directly after the
+ * section's `type` line (every section declares its type first). Line-oriented like the rest
+ * of this file: comments, ordering and unrelated sections are preserved byte for byte.
+ */
+fun setProfileMode(
+    configText: String,
+    name: String,
+    mode: String,
+): String {
+    val section = "[providers.$name]"
+    val lines = configText.lines().toMutableList()
+    val start = lines.indexOfFirst { it.trim() == section }
+    require(start >= 0) { "config text has no $section section" }
+    val end =
+        lines
+            .drop(start + 1)
+            .indexOfFirst { it.trim().startsWith("[") }
+            .let { if (it < 0) lines.size else start + 1 + it }
+    val line = "mode = \"${escapeTomlValue(mode)}\""
+    val existing = (start + 1 until end).firstOrNull { lines[it].trim().startsWith("mode") }
+    if (existing != null) {
+        lines[existing] = line
+    } else {
+        val typeIdx =
+            (start + 1 until end).firstOrNull { lines[it].trim().startsWith("type") }
+                ?: error("the $section section has no type line to anchor the mode")
+        lines.add(typeIdx + 1, line)
+    }
+    return lines.joinToString("\n")
+}
+
+/**
  * Remove a `[providers.<name>]` section from config lines.
  * Returns the remaining lines with the section excised.
  */
