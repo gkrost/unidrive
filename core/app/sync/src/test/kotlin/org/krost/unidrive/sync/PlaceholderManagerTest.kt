@@ -61,6 +61,32 @@ class PlaceholderManagerTest {
         assertNotNull(localNameIssue(withNul, windows = false))
     }
 
+    // ── #600: component length ───────────────────────────────────────────────
+
+    @Test
+    fun `localNameIssue allows a 255-character component and rejects 256`() {
+        // The suffix is part of the component: 251 + 4 = 255 exactly.
+        val ok = "/x/" + "n".repeat(251) + ".txt"
+        val tooLong = "/x/" + "n".repeat(252) + ".txt"
+        assertNull(localNameIssue(ok, windows = true))
+        assertNull(localNameIssue(ok, windows = false))
+        assertNotNull(localNameIssue(tooLong, windows = true))
+        // 256 ASCII characters are also 256 UTF-8 bytes: rejected on POSIX too.
+        assertNotNull(localNameIssue(tooLong, windows = false))
+    }
+
+    @Test
+    fun `localNameIssue counts UTF-16 units on Windows and UTF-8 bytes on POSIX`() {
+        // 240 ASCII characters (240 UTF-8 bytes) + 4 four-byte emoji (8 UTF-16 code
+        // units, 16 UTF-8 bytes): 248 units — inside the Windows limit; 256 bytes —
+        // over POSIX NAME_MAX.
+        val component = "n".repeat(240) + "🦋".repeat(4)
+        assertEquals(248, component.length)
+        assertEquals(256, component.toByteArray(Charsets.UTF_8).size)
+        assertNull(localNameIssue("/x/$component", windows = true))
+        assertNotNull(localNameIssue("/x/$component", windows = false))
+    }
+
     @Test
     fun `createPlaceholder creates parent directories`() {
         mgr.createPlaceholder("/deep/nested/dir/file.txt", size = 100, modified = Instant.now())
