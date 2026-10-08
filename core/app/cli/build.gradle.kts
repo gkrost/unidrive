@@ -221,6 +221,23 @@ tasks.shadowJar {
     }
 }
 
+val copyCoroutineDebugAgent =
+    tasks.register<Copy>("copyCoroutineDebugAgent") {
+        from(configurations.runtimeClasspath.map { files -> files.filter { it.name.startsWith("kotlinx-coroutines-debug-") && it.name.endsWith(".jar") } })
+        into(layout.buildDirectory.dir("libs"))
+    }
+
+tasks.shadowJar {
+    finalizedBy(copyCoroutineDebugAgent)
+}
+
+// verifyThirdPartyNotices reads the plain jar from build/libs, the same directory the agent
+// copy stages into. Gradle 9 fails the build on that undeclared overlap, so the order is
+// explicit: the agent copy lands first, the notices verification reads the jar after it.
+tasks.matching { it.name == "verifyThirdPartyNotices" }.configureEach {
+    mustRunAfter(copyCoroutineDebugAgent)
+}
+
 // Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
 // guards them from `check`.
 apply(from = "../../gradle/notices.gradle.kts")
@@ -324,6 +341,11 @@ fun staticJvmFlags(): List<String> =
 fun renderLauncher(
     template: String,
     jarPath: String,
+    // The standalone coroutine-debug probe jar deployed beside the fat jar (gkrost/unidrive#613 ask 1):
+    // the launchers pass it as -javaagent when UNIDRIVE_COROUTINE_DEBUG asks for the facility, and a
+    // JVM start is the only moment a -javaagent can arm. Null (older dep set) renders an empty path
+    // the templates' existence checks refuse.
+    agentJarPath: String?,
 ): String {
     val flags = staticJvmFlags()
     return launcherDir
@@ -333,6 +355,7 @@ fun renderLauncher(
         .replace("@STATIC_FLAGS_PS@", "\$javaArgs += @(" + flags.joinToString(", ") { "'$it'" } + ")")
         .replace("@STATIC_FLAGS_SH@", flags.joinToString(" ") { "\"$it\"" })
         .replace("@JAR@", jarPath)
+        .replace("@COROUTINES_DEBUG_AGENT@", agentJarPath ?: "")
 }
 
 tasks.register("deploy") {
@@ -364,10 +387,19 @@ tasks.register("deploy") {
         // <charset>; gradle println doesn't go through logback.
         println("[deploy] starting -- version=$projectVersion jar=${jarFile.name} target=${if (isWindows) "Windows" else "Linux"}")
 
+        // The standalone coroutine-debug probe jar (gkrost/unidrive#613 ask 1): deployed beside the
+        // fat jar, where the launchers' UNIDRIVE_COROUTINE_DEBUG gate and DaemonAutospawn find it for
+        // the -javaagent that arms the probes at JVM start.
+        val debugAgentJar =
+            configurations
+                .getByName("runtimeClasspath")
+                .files
+                .firstOrNull { it.name.startsWith("kotlinx-coroutines-debug-") }
+
         if (isWindows) {
-            deployWindows(home, jarFile, projectVersion)
+            deployWindows(home, jarFile, projectVersion, debugAgentJar)
         } else {
-            deployLinux(home, jarFile, projectVersion)
+            deployLinux(home, jarFile, projectVersion, debugAgentJar)
         }
 
         println("[deploy] complete.")
@@ -378,6 +410,7 @@ fun deployWindows(
     home: String,
     jarFile: File,
     projectVersion: String,
+    debugAgentJar: File?,
 ) {
     val localAppData = System.getenv("LOCALAPPDATA") ?: "$home\\AppData\\Local"
     val appData = System.getenv("APPDATA") ?: "$home\\AppData\\Roaming"
@@ -439,6 +472,20 @@ fun deployWindows(
     jarFile.copyTo(targetJar, overwrite = true)
     println("[deploy] copied ${jarFile.absolutePath} -> ${targetJar.absolutePath} (${jarFile.length()} bytes)")
 
+    // The coroutine-debug probe jar lands beside the fat jar (the launchers and DaemonAutospawn
+    // -javaagent it when UNIDRIVE_COROUTINE_DEBUG=1). A stale version is replaced; absent dep →
+    // nothing deployed and the launchers' existence check skips the agent.
+    val debugAgentTarget =
+        debugAgentJar?.let { agent ->
+            val stale =
+                libDir.listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") } ?: emptyArray()
+            stale.forEach { if (it.delete()) println("[deploy] pruned stale probe jar ${it.name}") }
+            val target = File(libDir, agent.name)
+            agent.copyTo(target, overwrite = true)
+            println("[deploy] copied probe jar -> ${target.absolutePath} (${agent.length()} bytes)")
+            target.absolutePath
+        }
+
     // UD-270: route the cmd shim through PowerShell. cmd.exe's batch-file
     // CTRL-C handler intercepts SIGINT and — *after* the JVM has already
     // died — emits "Terminate batch job (Y/N)?" / "Batchvorgang abbrechen
@@ -446,7 +493,7 @@ fun deployWindows(
     // still running. PowerShell exits cleanly back to the parent shell on
     // CTRL-C with no prompt.
     val ps1Launcher = file("$libDir\\unidrive.ps1")
-    ps1Launcher.writeText(renderLauncher("unidrive.ps1.tmpl", targetJar.absolutePath).replace("\n", "\r\n"))
+    ps1Launcher.writeText(renderLauncher("unidrive.ps1.tmpl", targetJar.absolutePath, debugAgentTarget).replace("\n", "\r\n"))
 
     launcher.writeText(
         """
@@ -495,6 +542,7 @@ fun deployLinux(
     home: String,
     jarFile: File,
     projectVersion: String,
+    debugAgentJar: File?,
 ) {
     val libDir = file("$home/.local/lib/unidrive")
     val binDir = file("$home/.local/bin")
@@ -521,7 +569,19 @@ fun deployLinux(
 
     jarFile.copyTo(targetJar, overwrite = true)
 
-    launcher.writeText(renderLauncher("unidrive.sh.tmpl", targetJar.absolutePath))
+    // Mirrors deployWindows: the coroutine-debug probe jar beside the fat jar (see the note there).
+    val debugAgentTarget =
+        debugAgentJar?.let { agent ->
+            libDir
+                .listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") }
+                ?.forEach { it.delete() }
+            val target = File(libDir, agent.name)
+            agent.copyTo(target, overwrite = true)
+            println("[deploy] copied probe jar -> ${target.absolutePath} (${agent.length()} bytes)")
+            target.absolutePath
+        }
+
+    launcher.writeText(renderLauncher("unidrive.sh.tmpl", targetJar.absolutePath, debugAgentTarget))
     launcher.setExecutable(true)
 
     serviceFile.writeText(
@@ -577,6 +637,16 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.slf4j) // UD-212: MDCContext for profile MDC propagation
+    // Coroutine debug probes (gkrost/unidrive#613 ask 1): installed only when UNIDRIVE_COROUTINE_DEBUG=1.
+    // Arming the capture needs the probe JAR as a -javaagent at JVM start (the launcher templates and
+    // DaemonAutospawn add it when the flag is set); on a JVM started without it the runtime
+    // self-attach fails on locked-down HotSpots and CoroutineDebug's self-check says so. The agent
+    // jars are excluded from the fat jar: the self-attach path is the one that does not work, and
+    // jna alone would drag java.desktop into the module pin the runtime image deliberately omits.
+    implementation(libs.kotlinx.coroutines.debug) {
+        exclude(group = "net.bytebuddy")
+        exclude(group = "net.java.dev.jna")
+    }
     implementation(libs.kotlinx.serialization.json) // UD-268: doctor --json output + audit-log JSONL parsing
     implementation(libs.picocli)
     implementation(libs.logback.classic)

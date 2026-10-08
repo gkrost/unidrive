@@ -73,6 +73,19 @@ find "${INSTALL_LIB}" -maxdepth 1 -type f -name 'unidrive*.jar' \
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 
+# Coroutine-debug probe jar (gkrost/unidrive#613 ask 1): deployed beside the fat jar so the
+# launcher's UNIDRIVE_COROUTINE_DEBUG gate can -javaagent it at daemon JVM start. Optional:
+# a tree without the probe jar (an older build, a slim release tarball) installs fine without it.
+DEBUG_AGENT_JAR=""
+for candidate in "$(dirname "${CLI_JAR}")"/kotlinx-coroutines-core-jvm-*.jar; do
+    if [[ -f "${candidate}" ]]; then
+        cp "${candidate}" "${INSTALL_LIB}/"
+        DEBUG_AGENT_JAR="${INSTALL_LIB}/$(basename "${candidate}")"
+        echo "  ${DEBUG_AGENT_JAR}"
+        break
+    fi
+done
+
 # CLI wrapper, rendered from the same template and flag list as the Gradle deploy launcher.
 mkdir -p "${INSTALL_BIN}"
 STATIC_FLAGS=""
@@ -81,6 +94,7 @@ while IFS= read -r flag; do
     [[ -n "${flag}" ]] && STATIC_FLAGS+="\"${flag}\" "
 done < "${SCRIPT_DIR}/launcher/jvm-flags.txt"
 sed -e "s|@STATIC_FLAGS_SH@|${STATIC_FLAGS% }|" -e "s|@JAR@|${INSTALL_LIB}/${CLI_BASENAME}|" \
+    -e "s|@COROUTINES_DEBUG_AGENT@|${DEBUG_AGENT_JAR}|" \
     "${SCRIPT_DIR}/launcher/unidrive.sh.tmpl" > "${INSTALL_BIN}/unidrive"
 chmod +x "${INSTALL_BIN}/unidrive"
 echo "  ${INSTALL_BIN}/unidrive"

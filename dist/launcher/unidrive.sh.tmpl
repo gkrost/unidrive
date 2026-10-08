@@ -23,4 +23,14 @@ if [[ -n "$locale" ]]; then
         exit 2
     fi
 fi
-exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" -jar "@JAR@" "${pass[@]}"
+# Coroutine debug probes (UNIDRIVE_COROUTINE_DEBUG=1): arm the daemon's coroutine capture. A
+# -javaagent reaches the JVM only at start, so the gate lives here; the probe jar sits beside the
+# fat jar (the deploy copies it). Without the flag, or without the jar, nothing is added. The
+# daemon then dumps its coroutines on a coroutine-dump.trigger file in the profile folder
+# (see CoroutineDebug).
+agent_args=()
+debug_agent='@COROUTINES_DEBUG_AGENT@'
+if [[ -n "${UNIDRIVE_COROUTINE_DEBUG:-}" && "${UNIDRIVE_COROUTINE_DEBUG}" != "0" && -n "$debug_agent" && -f "$debug_agent" ]]; then
+    agent_args+=("-javaagent:$debug_agent")
+fi
+exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${agent_args[@]}" "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" -jar "@JAR@" "${pass[@]}"

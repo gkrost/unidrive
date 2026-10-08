@@ -147,6 +147,14 @@ class DaemonRuntime(
             val serveScope = kotlinx.coroutines.CoroutineScope(
                 kotlin.coroutines.coroutineContext + serveJob,
             )
+            // Coroutine-debug probes (gkrost/unidrive#613 ask 1): with UNIDRIVE_COROUTINE_DEBUG=1 the
+            // daemon captures suspension stacks at start and dumps every live coroutine when a
+            // coroutine-dump.trigger file appears in the profile folder — a hung upload becomes one
+            // stack trace instead of a silent wait. Off by default; see CoroutineDebug.
+            if (CoroutineDebug.enabled()) {
+                CoroutineDebug.install()
+                CoroutineDebug.watchForDumpRequests(ipcTokenDir, serveScope)
+            }
             try {
                 // cacheKey = profileName keeps the daemon's hydration cache
                 // subtree per-account and consistent with MountCommand's

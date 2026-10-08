@@ -299,6 +299,96 @@ class HydrationUploadQueueTest {
         assertEquals("bytes", env.syncEngine.remoteContentSeen("/q/f.txt"))
     }
 
+    // #613: an upload whose provider call suspended with no progress held its path's
+    // slot for the daemon's lifetime — no provider request, no failure, no completed
+    // — and every later hand-over of the path queued behind it. The stall watchdog
+    // bounds each attempt: the hung upload runs the failed-attempt path to a failed
+    // completed, uploads of other paths keep flowing, and a later hand-over of the
+    // same path runs once the provider answers again.
+    @Test
+    fun `a stalled upload is failed by the watchdog while other paths flow and the path is reusable after`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 2,
+            uploadRetryDelaysMs = listOf(1L),
+            uploadStallTimeoutMs = 5_000L,
+        )
+        env.stateDb.insertCreatedRow("/q/hung.txt")
+        writeCache(env, "/q/hung.txt", "stuck bytes")
+        env.stateDb.insertCreatedRow("/q/flows.txt")
+        writeCache(env, "/q/flows.txt", "flowing bytes")
+        env.providerForTest.stallUploadsOf("/q/hung.txt")
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        assertIs<OpenResult.Ok>(
+            env.hydration.openForWrite("conn1", "h-hung", "/q/hung.txt", env.syncEngine.resolveCachePath("/q/hung.txt")),
+        )
+        assertIs<OpenResult.Ok>(
+            env.hydration.openForWrite("conn1", "h-flow", "/q/flows.txt", env.syncEngine.resolveCachePath("/q/flows.txt")),
+        )
+        advanceUntilIdle()
+
+        assertEquals("flowing bytes", env.syncEngine.remoteContentSeen("/q/flows.txt"), "uploads of other paths keep flowing")
+        assertEquals(3, env.syncEngine.uploadAttempts(), "the hung path made 2 attempts, the flowing path 1")
+        val failed = events.filterIsInstance<HydrationEvent.Failed>().filter { it.path == "/q/hung.txt" }
+        assertEquals(listOf(true, false), failed.map { it.retryScheduled }, "the first stall schedules a retry, the second ends the ladder")
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single { it.handleId == "h-hung" }
+        assertFalse(completed.ok)
+        assertTrue(
+            completed.error?.message?.contains("stall watchdog") == true,
+            "the completed carries the stall, got: ${completed.error?.message}",
+        )
+        assertTrue(env.stateDb.lastErrorAt("/q/hung.txt") != null, "the stalled row is stamped like any failed attempt")
+        assertFalse(env.hydration.hasUploadSlot("/q/hung.txt"), "the path's slot is freed")
+
+        // A later hand-over of the same path runs once the provider answers again.
+        env.providerForTest.releaseStalledUpload("/q/hung.txt")
+        assertIs<OpenResult.Ok>(
+            env.hydration.openForWrite("conn1", "h-hung-2", "/q/hung.txt", env.syncEngine.resolveCachePath("/q/hung.txt")),
+        )
+        advanceUntilIdle()
+        assertEquals("stuck bytes", env.syncEngine.remoteContentSeen("/q/hung.txt"))
+        collector.cancel()
+    }
+
+    // #613: the watchdog keys on silent time — an upload whose provider still
+    // reports byte progress is never cancelled, however long the transfer runs.
+    @Test
+    fun `a slow upload that keeps reporting progress is not cancelled by the watchdog`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 2,
+            uploadRetryDelaysMs = listOf(1L),
+            uploadStallTimeoutMs = 5_000L,
+        )
+        env.stateDb.insertCreatedRow("/q/slow.txt")
+        writeCache(env, "/q/slow.txt", "slow bytes")
+        env.providerForTest.stallUploadsOf("/q/slow.txt", tickProgress = true)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        assertIs<OpenResult.Ok>(
+            env.hydration.openForWrite("conn1", "h-slow", "/q/slow.txt", env.syncEngine.resolveCachePath("/q/slow.txt")),
+        )
+        advanceTimeBy(12_000L)
+        assertEquals(
+            0,
+            events.filterIsInstance<HydrationEvent.Failed>().size,
+            "no stall fired while the provider kept reporting bytes",
+        )
+        env.providerForTest.releaseStalledUpload("/q/slow.txt")
+        advanceUntilIdle()
+
+        assertEquals(1, env.syncEngine.uploadAttempts(), "one attempt carried the whole transfer")
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single()
+        assertTrue(completed.ok)
+        assertEquals("slow bytes", env.syncEngine.remoteContentSeen("/q/slow.txt"))
+        collector.cancel()
+    }
+
     @Test
     fun `full write sequence - create, write, open_write, completed, list settles`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this)

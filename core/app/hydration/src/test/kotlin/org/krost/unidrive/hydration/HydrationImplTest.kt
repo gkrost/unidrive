@@ -63,6 +63,39 @@ internal class MinimalFakeProvider(
     // Used by the promptness test to prove openForWrite returns before the upload finishes.
     var uploadGate: CompletableDeferred<Unit>? = null
 
+    // #613: paths whose upload reaches the provider and then suspends (stall-watchdog
+    // tests). A silent gate suspends with no progress at all; a ticking gate reports
+    // bytes while suspended, so an idle watchdog keyed on progress must keep re-arming.
+    private class StallGate(val tickProgress: Boolean) {
+        val release = CompletableDeferred<Unit>()
+    }
+
+    private val stallGates = java.util.concurrent.ConcurrentHashMap<String, StallGate>()
+
+    /** The path's uploads suspend at the provider until [releaseStalledUpload]. */
+    fun stallUploadsOf(remotePath: String, tickProgress: Boolean = false) {
+        stallGates[remotePath] = StallGate(tickProgress)
+    }
+
+    /** Releases a stalled upload; later attempts of the path run to completion. */
+    fun releaseStalledUpload(remotePath: String) {
+        stallGates.remove(remotePath)?.let { it.release.complete(Unit) }
+    }
+
+    private suspend fun holdForStallWatchdog(
+        gate: StallGate,
+        onProgress: ((Long, Long) -> Unit)?,
+    ) {
+        if (gate.tickProgress) {
+            while (!gate.release.isCompleted) {
+                kotlinx.coroutines.delay(500)
+                onProgress?.invoke(0L, 1L)
+            }
+        } else {
+            gate.release.await()
+        }
+    }
+
     // Upload failure injection: upload() throws while this is > 0 (decremented
     // per call). Drives the retry tests: set to N for N transient failures,
     // to a huge number for a permanent failure.
@@ -170,6 +203,7 @@ internal class MinimalFakeProvider(
         maxConcurrentUploadsTotal.getAndUpdate { prev -> maxOf(prev, totalNow) }
 
         try {
+            stallGates[remotePath]?.let { holdForStallWatchdog(it, onProgress) }
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
             remoteFiles[remotePath] = bytes
@@ -307,6 +341,13 @@ internal class HydrationTestEnv(
     val uploadQueueDepth: Int = 256,
     val maxUploadAttempts: Int = 3,
     val uploadRetryDelaysMs: List<Long> = listOf(2_000L, 10_000L),
+    /**
+     * Stall watchdog window (see [HydrationImpl.uploadStallTimeoutMs]); 0 disables it. Off by
+     * default in this harness: these tests park uploads on real-time gates and drive virtual
+     * time, so a 10-minute idle window would fire at every `advanceUntilIdle` and turn every
+     * parked upload into a stall. The stall tests opt in with a small window.
+     */
+    val uploadStallTimeoutMs: Long = 0L,
     /** Coalescing gap for `uploading` progress events (0 = emit every callback). */
     val uploadProgressMinIntervalMs: Long = 400,
     /** #493: delay of the replay of rows whose last upload failed; 0 = at once. */
@@ -354,6 +395,7 @@ internal class HydrationTestEnv(
             uploadQueueDepth = uploadQueueDepth,
             maxUploadAttempts = maxUploadAttempts,
             uploadRetryDelaysMs = uploadRetryDelaysMs,
+            uploadStallTimeoutMs = uploadStallTimeoutMs,
             uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
             failedReplayDelayMs = failedReplayDelayMs,
         )

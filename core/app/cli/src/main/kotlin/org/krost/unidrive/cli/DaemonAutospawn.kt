@@ -65,11 +65,22 @@ object DaemonAutospawn {
         )
         try {
             spawn(
-                listOf(
-                    javaBin.toString(), "-jar", jar.toString(),
-                    "--config-dir", configDir.toAbsolutePath().parent.toString(),
-                    "daemon", "run", profileName,
-                ),
+                buildList {
+                    add(javaBin.toString())
+                    // Coroutine debug probes (gkrost/unidrive#613 ask 1): the -javaagent arms the
+                    // capture only at JVM start, so it is decided here, the same gate the launcher
+                    // templates apply to operator-started daemons.
+                    if (CoroutineDebug.enabled()) {
+                        CoroutineDebug.agentJarBeside(jar)?.let { add("-javaagent=$it") }
+                    }
+                    add("-jar")
+                    add(jar.toString())
+                    add("--config-dir")
+                    add(configDir.toAbsolutePath().parent.toString())
+                    add("daemon")
+                    add("run")
+                    add(profileName)
+                },
                 logFile,
             )
         } catch (e: Exception) {

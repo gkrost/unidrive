@@ -6,6 +6,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -15,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
@@ -47,6 +51,14 @@ class HydrationImpl(
     val uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
     val maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
     val uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
+    // Stall watchdog (the mount-upload hang, gkrost/unidrive#613): one transfer
+    // attempt that has made no progress — no byte progress from the provider —
+    // for this long is cancelled and runs the normal failed-attempt path (the
+    // row is stamped, `failed` with retry_scheduled goes out, the retry ladder
+    // runs, a `completed` ends it), so the path's slot is freed and later
+    // hand-overs of the same path queue behind a bounded wait, not a lost
+    // wakeup. 0 or less disables the watchdog.
+    val uploadStallTimeoutMs: Long = DEFAULT_UPLOAD_STALL_TIMEOUT_MS,
     // Minimum wall-clock gap between `uploading` progress events per attempt;
     // coalesces provider progress callbacks to at most a few per second per
     // file. 0 emits every callback (tests).
@@ -78,6 +90,7 @@ class HydrationImpl(
         uploadQueueDepth: Int = DEFAULT_UPLOAD_QUEUE_DEPTH,
         maxUploadAttempts: Int = DEFAULT_MAX_UPLOAD_ATTEMPTS,
         uploadRetryDelaysMs: List<Long> = DEFAULT_UPLOAD_RETRY_DELAYS_MS,
+        uploadStallTimeoutMs: Long = DEFAULT_UPLOAD_STALL_TIMEOUT_MS,
         uploadProgressMinIntervalMs: Long = DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS,
         cacheMaxBytes: Long = DEFAULT_CACHE_MAX_BYTES,
         cacheAccessGraceMs: Long = CACHE_ACCESS_GRACE_MS,
@@ -87,10 +100,11 @@ class HydrationImpl(
         MountEngine.over(syncEngine),
         stateDb,
         recoveryUploadScope,
-        uploadQueueDepth,
-        maxUploadAttempts,
-        uploadRetryDelaysMs,
-        uploadProgressMinIntervalMs,
+            uploadQueueDepth,
+            maxUploadAttempts,
+            uploadRetryDelaysMs,
+            uploadStallTimeoutMs,
+            uploadProgressMinIntervalMs,
         cacheMaxBytes,
         cacheAccessGraceMs,
         evictionDelayMs,
@@ -179,6 +193,13 @@ class HydrationImpl(
 
         /** Delays preceding retries 2..N of a queued upload (see [uploadRetryDelaysMs]). */
         val DEFAULT_UPLOAD_RETRY_DELAYS_MS = listOf(2_000L, 10_000L)
+
+        /**
+         * Default idle window of the per-attempt stall watchdog (see [uploadStallTimeoutMs]).
+         * Deliberately shorter than the client's 15-minute settle timeout, so the failed-attempt
+         * path (and its `completed`) reaches a live client within one settle window.
+         */
+        const val DEFAULT_UPLOAD_STALL_TIMEOUT_MS: Long = 10L * 60 * 1000
 
         /** Default coalescing gap for `uploading` progress events (see [uploadProgressMinIntervalMs]). */
         const val DEFAULT_UPLOAD_PROGRESS_MIN_INTERVAL_MS = 400L
@@ -513,7 +534,11 @@ class HydrationImpl(
     // failed per attempt) and coalesced uploading progress. [baseEtag] is
     // forwarded to uploadFromCache for the upload-time convergence guard.
     // [onPermitAcquired] fires inside the permit block — the queue's waiting
-    // slot is handed over exactly when the transfer actually starts.
+    // slot is handed over exactly when the transfer actually starts. Each
+    // attempt runs under the stall watchdog (runWatchedTransferAttempt): an
+    // attempt with no provider progress for [uploadStallTimeoutMs] fails like
+    // any transient failure, so even a lost wakeup cannot hold a path's slot
+    // past the ladder (gkrost/unidrive#613).
     private suspend fun runUploadWithRetries(
         path: String,
         cachePath: Path,
@@ -532,11 +557,7 @@ class HydrationImpl(
         var lastError: HydrationError = HydrationError.Generic("upload failed")
         for (attempt in 1..maxUploadAttempts) {
             try {
-                mount.withTransferPermit {
-                    onPermitAcquired()
-                    _events.emit(HydrationEvent.Hydrating(path))
-                    mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
-                }
+                runWatchedTransferAttempt(path, cachePath, baseEtag, onProgress, onPermitAcquired)
                 val bytes = Files.size(cachePath)
                 _events.emit(HydrationEvent.Hydrated(path, bytes))
                 return HydrationEvent.Completed(
@@ -615,6 +636,70 @@ class HydrationImpl(
             error = lastError,
         )
     }
+
+    /**
+     * One transfer attempt under the stall watchdog (gkrost/unidrive#613): runs the
+     * transfer-permit wait and the transfer itself, and cancels both when [uploadStallTimeoutMs]
+     * elapses with no byte progress from the provider. The wait for the permit, the provider's
+     * pre-transfer work (its identical-bytes check, its resume bookkeeping) and the transfer all
+     * suspend with no timeout of their own — a single lost wakeup there held the path's slot for
+     * the daemon's lifetime, with no provider request, no failure, no event. Every attempt is now
+     * bounded: the watchdog fails the attempt with [UploadStalledException], a plain failure that
+     * [runUploadWithRetries]' normal failed-attempt path handles (row stamped, `failed` with
+     * retry_scheduled, the retry ladder, a `completed` at the end). Progress is what the provider
+     * reports through [onProgress]; a slow transfer that keeps reporting bytes never trips it.
+     * [uploadStallTimeoutMs] of 0 or less runs the attempt unwrapped (tests).
+     */
+    private suspend fun runWatchedTransferAttempt(
+        path: String,
+        cachePath: Path,
+        baseEtag: String?,
+        onProgress: (Long, Long) -> Unit,
+        onPermitAcquired: () -> Unit,
+    ) {
+        if (uploadStallTimeoutMs <= 0) {
+            mount.withTransferPermit {
+                onPermitAcquired()
+                _events.emit(HydrationEvent.Hydrating(path))
+                mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
+            }
+            return
+        }
+        // Every provider progress callback kicks the watchdog; conflated so a
+        // kick landing while the watcher is between receives is never lost. The
+        // caller's own coalescing stays downstream of the kick.
+        val kicks = Channel<Unit>(Channel.CONFLATED)
+        val kicked: (Long, Long) -> Unit = { done, total ->
+            kicks.trySend(Unit)
+            onProgress(done, total)
+        }
+        coroutineScope {
+            val watcher = launch {
+                while (true) {
+                    try {
+                        withTimeout(uploadStallTimeoutMs) { kicks.receive() }
+                    } catch (e: TimeoutCancellationException) {
+                        throw UploadStalledException(
+                            "no provider request and no byte progress for ${uploadStallTimeoutMs / 1000} s (stall watchdog)",
+                        )
+                    }
+                }
+            }
+            try {
+                mount.withTransferPermit {
+                    onPermitAcquired()
+                    _events.emit(HydrationEvent.Hydrating(path))
+                    mount.uploadMountWriteFromCache(path, cachePath, baseEtag, kicked)
+                }
+            } finally {
+                watcher.cancel()
+            }
+        }
+    }
+
+    // The failure the stall watchdog raises. Deliberately NOT a CancellationException:
+    // it must fail the attempt (and run the failed-attempt path), not cancel the worker.
+    private class UploadStalledException(message: String) : RuntimeException(message)
 
     private fun retryDelayMs(afterAttempt: Int): Long =
         uploadRetryDelaysMs.getOrNull(afterAttempt - 1)
