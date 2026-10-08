@@ -107,6 +107,21 @@ internal fun localNameIssue(
     for (component in remotePath.split('/')) {
         if (component.isEmpty() || component == "." || component == "..") continue
         if (component.any { it.code == 0 }) return "name contains a NUL character"
+        // #600: a component longer than the filesystem's name limit is unrepresentable —
+        // without this rule the engine kept such rows alive while the client hid the entry
+        // on every mount, with nothing in the state explaining it. Windows counts UTF-16
+        // code units (255, NTFS), POSIX counts UTF-8 bytes (255, NAME_MAX) — the same
+        // convention as the #529 staging helper.
+        if (windows) {
+            if (component.length > 255) {
+                return "Windows names cannot exceed 255 characters (got ${component.length}): '${component.take(80)}…'"
+            }
+        } else {
+            val bytes = component.toByteArray(Charsets.UTF_8).size
+            if (bytes > 255) {
+                return "POSIX names cannot exceed 255 UTF-8 bytes (got $bytes): '${component.take(80)}…'"
+            }
+        }
         if (!windows) continue
         if (component.last() == '.' || component.last() == ' ') {
             return "Windows names cannot end with '.' or a space: '$component'"

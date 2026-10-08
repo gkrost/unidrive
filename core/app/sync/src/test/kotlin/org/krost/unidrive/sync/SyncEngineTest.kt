@@ -4511,6 +4511,43 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `#600 a 280-character cloud name is quarantined once while normal names sync beside it`() =
+        runTest {
+            // A cloud name longer than any filesystem's component limit used to keep the row
+            // alive in state while the client hid the entry on every mount (windows#196) —
+            // no quarantine, no refusal, no state to explain it. The length rule in
+            // localNameIssue (#600) makes it unrepresentable on every platform (280 ASCII
+            // characters are 280 UTF-16 units and 280 UTF-8 bytes), so the download's
+            // unresolvable-name path (#230/#526) quarantines the row. A normal neighbour
+            // must be created beside it, and no pass may abort.
+            val longPath = "/" + "l".repeat(280) + ".txt"
+            provider.deltaItems = listOf(cloudItem("/normal.txt", size = 5), cloudItem(longPath, size = 100))
+
+            val reporter1 = RecordingReporter()
+            engineWithGuards(reporter = reporter1).syncOnce()
+
+            assertTrue(Files.exists(syncRoot.resolve("normal.txt")), "the normal neighbour is created")
+            val longRow = db.getEntry(longPath)
+            assertNotNull(longRow, "the long row exists (quarantined, not removed)")
+            assertTrue(longRow.downloadQuarantined, "the long name must be quarantined")
+            assertNotNull(longRow.lastErrorAt, "the failure is stamped on the row")
+            assertEquals(
+                1,
+                reporter1.actions.count { it.label == "down" && it.path == longPath },
+                "exactly one download attempt for the long name",
+            )
+
+            val reporter2 = RecordingReporter()
+            engineWithGuards(reporter = reporter2).syncOnce()
+
+            assertEquals(
+                0,
+                reporter2.actions.count { it.label == "down" && it.path == longPath },
+                "the quarantined long row is not retried on the next pass",
+            )
+        }
+
+    @Test
     fun `fresh delta event clears download quarantine`() =
         runTest {
             // Establish quarantine.
