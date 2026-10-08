@@ -24,6 +24,7 @@
         "exclude_patterns": { "type": "array", "items": { "type": "string" } },
         "desktop_notifications": { "type": "boolean" },
         "verify_integrity": { "type": "boolean" },
+        "quota_refresh_minutes": { "type": "integer", "minimum": 0 },
         "use_trash": { "type": "boolean" },
         "trash_emulation": { "type": "boolean" },
         "trash_retention_days": { "type": "integer", "minimum": 1 },

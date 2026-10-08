@@ -34,6 +34,9 @@ class LocalFsProviderFactory : ProviderFactory {
             signupUrl = null,
             tier = "Local",
             maxConcurrentTransfers = 8,
+            // #655: quota() probes the machine's FileStore — machine storage, not an
+            // account plan — so daemon.status carries no quota snapshot for localfs.
+            hasQuota = false,
         )
 
     override fun create(
