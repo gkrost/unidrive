@@ -64,7 +64,7 @@ class InternxtApiService(
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
-        /** Safety bound of one paged per-folder stream (10,000 pages are ~10M items at the default page size). */
+        /** Safety bound of one paged per-folder stream (10,000 pages are 10M items at the cursor page size of 1000). */
         internal const val MAX_LISTING_PAGES: Int = 10_000
 
         private fun defaultHttpClient(): HttpClient =
@@ -181,37 +181,122 @@ class InternxtApiService(
     internal val folderContentsPagedDedup = InFlightDedup<String, FolderContentResponse>()
 
     /**
-     * #523: the paginated per-folder listing — `GET /folders/content/{uuid}/folders` and
-     * `/files` with `limit`/`offset`, `sort=uuid` for offset stability, `order=ASC`. The
-     * fallback for a folder whose combined content call fails server-side or cannot fit the
-     * gateway (a 29k-file folder needs ~105 s in one 30 MB body; the gateway cuts at ~125 s,
-     * so folders beyond ~35k files never fit). Both sub-endpoints verified live: the item
-     * shapes match the combined call's, including the status/removed/deleted fields the walk
-     * filters on. Pages until an empty page (the server may cap `limit`); each page rides the same ladder and
-     * listing watchdog as the offset listings.
+     * #523/#647: the paged per-folder listing, the fallback for a folder whose combined content
+     * call fails server-side or cannot fit the gateway (a 29k-file folder needs ~105 s in one
+     * 30 MB body; the gateway cuts at ~125 s, so folders beyond ~35k files never fit).
+     *
+     * Primary: the cursor endpoints `GET /folders/v2/content/{uuid}/folders` and `/files`
+     * (`order`, `cursor`, `limit` 50..1000 per the server's CursorPaginationDto; the reply is
+     * `{folders|files: [...], nextCursor}`, `nextCursor` null on the last page). They serve only
+     * existing items, in the item shape of the combined call, and take 1000 per page: 30
+     * requests for a folder of 29,186 files.
+     *
+     * Only when such a call answers 404 or 405 (a gateway without the route) does that stream
+     * fall back to the deprecated offset endpoints `GET /folders/content/{uuid}/folders` and
+     * `/files`, whose query validation takes `limit` as REQUIRED 1..50: 50 per page, `sort=uuid`
+     * for offset stability, `order=ASC`. Any other client error, a 400 included, propagates:
+     * the request would be rejected the same way again.
+     *
+     * Each page rides the same retry ladder and listing watchdog as the offset listings.
      */
     suspend fun getFolderContentsPaged(folderUuid: String): FolderContentResponse =
         folderContentsPagedDedup.load(folderUuid, currentPriority()) {
             val folders =
-                pagedFolderStream<InternxtFolder>(folderUuid, "folders", { it.uuid }) {
-                    json.decodeFromString<PagedFolderFoldersResponse>(it).folders
-                }
+                cursorStreamOrOffsetFallback(
+                    folderUuid,
+                    "folders",
+                    { it.uuid },
+                    { parseFoldersSyncPage(it) },
+                ) { json.decodeFromString<PagedFolderFoldersResponse>(it).folders }
             val files =
-                pagedFolderStream<InternxtFile>(folderUuid, "files", { it.uuid }) {
-                    json.decodeFromString<PagedFolderFilesResponse>(it).files
-                }
+                cursorStreamOrOffsetFallback(
+                    folderUuid,
+                    "files",
+                    { it.uuid },
+                    { parseFilesSyncPage(it) },
+                ) { json.decodeFromString<PagedFolderFilesResponse>(it).files }
             FolderContentResponse(children = folders, files = files)
         }
 
+    private suspend fun <T> cursorStreamOrOffsetFallback(
+        folderUuid: String,
+        stream: String,
+        uuidOf: (T) -> String,
+        parseCursorPage: (String) -> SyncPage<T>,
+        parseOffsetPage: (String) -> List<T>,
+    ): List<T> =
+        try {
+            cursorFolderStream(folderUuid, stream, uuidOf, parseCursorPage)
+        } catch (e: InternxtApiException) {
+            if (e.statusCode != 404 && e.statusCode != 405) throw e
+            log.warn(
+                "The cursor listing of the {} of folder {} answered {}; using the offset endpoint with {} per page",
+                stream,
+                folderUuid,
+                e.statusCode,
+                InternxtConfig.FOLDER_CONTENT_OFFSET_PAGE_SIZE,
+            )
+            offsetFolderStream(folderUuid, stream, uuidOf, parseOffsetPage)
+        }
+
     /**
-     * One stream of the paged per-folder listing. The server may serve fewer items than `limit`
-     * asks for, so a short page is no sign of the last one: the stream ends only on an EMPTY page,
-     * and the offset advances by the number of items a page actually returned. A server that
-     * ignores `offset` would serve the same page for ever; that is no listing, so the stream
-     * fails (a 503, which the walk counts as a skipped folder and reports as incomplete) when a
-     * page starts with the item the page before it started with, or after [MAX_LISTING_PAGES].
+     * One stream of the cursor listing of a folder: pages until a page names no next cursor. A
+     * server that ignores the cursor would serve the same page for ever, and one that names the
+     * cursor it was just given would never advance; that is no listing, so the stream fails (a
+     * 503, which the walk counts as a skipped folder and reports as incomplete) when a page starts
+     * with the item the page before it started with, when a page names the cursor that was sent
+     * with it, or after [MAX_LISTING_PAGES].
      */
-    private suspend fun <T> pagedFolderStream(
+    private suspend fun <T> cursorFolderStream(
+        folderUuid: String,
+        stream: String,
+        uuidOf: (T) -> String,
+        parse: (String) -> SyncPage<T>,
+    ): List<T> {
+        val items = ArrayList<T>()
+        var cursor: String? = null
+        var previousFirst: String? = null
+        var pages = 0
+        while (true) {
+            val params = linkedMapOf("order" to "ASC", "limit" to InternxtConfig.FOLDER_CONTENT_CURSOR_PAGE_SIZE.toString())
+            cursor?.let { params["cursor"] = it }
+            val body =
+                authenticatedGet(
+                    "$baseUrl/folders/v2/content/$folderUuid/$stream",
+                    params,
+                    socketTimeoutMs = listingSocketTimeoutMs,
+                )
+            val page = parse(body)
+            val first = page.items.firstOrNull()?.let(uuidOf)
+            val next = page.nextCursor
+            val broken =
+                when {
+                    ++pages > MAX_LISTING_PAGES -> "exceeded $MAX_LISTING_PAGES pages without ending"
+                    first != null && first == previousFirst ->
+                        "returned the same page twice (cursor $cursor): the server does not honour the cursor"
+                    next != null && next == cursor -> "named the cursor it was given again ($next): the listing cannot advance"
+                    else -> null
+                }
+            if (broken != null) {
+                throw InternxtApiException("The cursor $stream listing of folder $folderUuid $broken, so it cannot be completed", statusCode = 503)
+            }
+            previousFirst = first ?: previousFirst
+            items.addAll(page.items)
+            if (next == null) return items
+            cursor = next
+        }
+    }
+
+    /**
+     * One stream of the deprecated offset listing of a folder, [InternxtConfig.FOLDER_CONTENT_OFFSET_PAGE_SIZE]
+     * per page (the endpoint validates `limit` as 1..50). The server may serve fewer items than `limit`
+     * asks for, so a short page is no sign of the last one: the stream ends only on an EMPTY page, and
+     * the offset advances by the number of items a page actually returned. A server that ignores
+     * `offset` would serve the same page for ever; that is no listing, so the stream fails (a 503,
+     * which the walk counts as a skipped folder and reports as incomplete) when a page starts with
+     * the item the page before it started with, or after [MAX_LISTING_PAGES].
+     */
+    private suspend fun <T> offsetFolderStream(
         folderUuid: String,
         stream: String,
         uuidOf: (T) -> String,
@@ -226,7 +311,7 @@ class InternxtApiService(
                 authenticatedGet(
                     "$baseUrl/folders/content/$folderUuid/$stream",
                     linkedMapOf(
-                        "limit" to InternxtConfig.LISTING_PAGE_SIZE.toString(),
+                        "limit" to InternxtConfig.FOLDER_CONTENT_OFFSET_PAGE_SIZE.toString(),
                         "offset" to offset.toString(),
                         "sort" to "uuid",
                         "order" to "ASC",

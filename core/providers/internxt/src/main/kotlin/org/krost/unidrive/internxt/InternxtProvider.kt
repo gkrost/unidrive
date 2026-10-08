@@ -2099,7 +2099,8 @@ class InternxtProvider(
     // the gateway cannot deliver (a 29k-file folder needs ~105 s in one 30 MB body; the gateway
     // cuts its origin at ~125 s, so beyond ~35k files the call never returns). On a server-side
     // failure (any 5xx; a gateway 524 arrives here as a synthetic 503) the folder is re-listed
-    // through the paginated per-folder endpoints instead of being skipped: every file the paged
+    // through the paged per-folder endpoints (the cursor ones; the offset ones when those answer
+    // 404/405, #647) instead of being skipped: every file the paged
     // listing returns is one the walk would otherwise have dropped, and an incremental poll
     // cannot pick them up later because their updatedAt is old. A fallback page that itself
     // fails propagates, so the callers' existing skip-on-500/503 still counts the folder and

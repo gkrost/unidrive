@@ -43,8 +43,10 @@ data class FolderContentResponse(
 )
 
 /**
- * `GET /folders/content/{uuid}/folders` (limit/offset/sort/order) — the paginated per-folder
- * listing of #523, the fallback for a folder whose combined content call does not fit the
+ * `GET /folders/content/{uuid}/folders` (limit 1..50/offset/sort/order) — the offset per-folder
+ * listing of #523 (#647: 50 per page at most). The 404/405 fallback of the cursor listing
+ * `GET /folders/v2/content/{uuid}/folders`, which is itself the fallback for a folder whose combined
+ * content call does not fit the
  * gateway. Same item shape as the combined call's `children` (verified live, incl. the
  * status/removed/deleted fields the walk filters on).
  */

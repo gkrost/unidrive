@@ -31,6 +31,18 @@ data class InternxtConfig(
         /** Default page size for /files and /folders pagination (no public maximum documented). */
         const val LISTING_PAGE_SIZE: Int = 999
 
+        /**
+         * Page size of the cursor listing of one folder (`GET /folders/v2/content/{uuid}/files|folders`): the
+         * server validates `limit` as 50..1000 there (#647), so 1000 is the largest the endpoint takes.
+         */
+        const val FOLDER_CONTENT_CURSOR_PAGE_SIZE: Int = 1000
+
+        /**
+         * Page size of the deprecated offset listing of one folder (`GET /folders/content/{uuid}/files|folders`):
+         * the server validates `limit` as REQUIRED 1..50 there (#647); 999 answers 400.
+         */
+        const val FOLDER_CONTENT_OFFSET_PAGE_SIZE: Int = 50
+
         /** swift-core parity — files at/above this size use multipart upload. */
         const val MULTIPART_MIN_SIZE_BYTES: Long = 100L * 1024L * 1024L // 100 MB
 
