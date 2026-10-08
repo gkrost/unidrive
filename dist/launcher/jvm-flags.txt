@@ -5,6 +5,9 @@
 #
 # Not listed here because they depend on the machine or the caller: -Xmx (UNIDRIVE_XMX, default 2g),
 # -Djdk.net.unixdomain.tmpdir (the host's temp dir) and -Duser.language/-Duser.country (--locale).
+# Also env-gated, added by the launcher templates and DaemonAutospawn (not a plain flag line): the
+# -javaagent of the probe jar deployed beside the fat jar, under UNIDRIVE_COROUTINE_DEBUG=1 (the
+# daemon's coroutine-dump facility, gkrost/unidrive#613 — see CoroutineDebug).
 -Dstdout.encoding=UTF-8
 -Dstderr.encoding=UTF-8
 --enable-native-access=ALL-UNNAMED

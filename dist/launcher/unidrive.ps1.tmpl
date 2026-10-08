@@ -40,6 +40,15 @@ $javaArgs = @($xmx)
 $javaArgs += $localeArgs
 # Append, never concat with a possibly-null operand: it inserts an empty element when TEMP/TMP are unset.
 if ($tmp) { $javaArgs += ('-Djdk.net.unixdomain.tmpdir=' + $tmp) }
+# Coroutine debug probes (UNIDRIVE_COROUTINE_DEBUG=1): arm the daemon's coroutine capture. A
+# -javaagent reaches the JVM only at start, so the gate lives here; the probe jar sits beside the
+# fat jar (the deploy copies it). Without the flag, or without the jar, nothing is added. The
+# daemon then dumps its coroutines on a coroutine-dump.trigger file in the profile folder
+# (see CoroutineDebug).
+$debugAgent = '@COROUTINES_DEBUG_AGENT@'
+if ($env:UNIDRIVE_COROUTINE_DEBUG -and $env:UNIDRIVE_COROUTINE_DEBUG -ne '0' -and $debugAgent -and (Test-Path $debugAgent)) {
+    $javaArgs += ('-javaagent:' + $debugAgent)
+}
 $javaArgs += @('-jar', '@JAR@')
 & java @javaArgs @passArgs
 exit $LASTEXITCODE
