@@ -1289,6 +1289,26 @@ class StateDatabase(
         }
     }
 
+    /**
+     * #604 (mirror adopt): drop every persisted enumeration baseline — the fast-bootstrap
+     * stamp and any scan-in-progress checkpoint. Those describe the OLD coordinated state;
+     * after a conversion the first mirror sync must gather fresh, so the absence of a cloud
+     * row can never be read as a delete of a file the legacy state had not known about.
+     */
+    @Synchronized
+    fun clearEnumerationBaseline() {
+        beginWrite()
+        conn.prepareStatement("DELETE FROM sync_state WHERE key IN (?, ?, ?, ?)").use { stmt ->
+            listOf(
+                SCAN_IN_PROGRESS_ID,
+                SCAN_IN_PROGRESS_MARKER,
+                SCAN_IN_PROGRESS_STARTED_AT,
+                "last_full_scan",
+            ).forEachIndexed { i, key -> stmt.setString(i + 1, key) }
+            stmt.executeUpdate()
+        }
+    }
+
     @Synchronized
     fun addPinRule(
         pattern: String,

@@ -26,16 +26,16 @@ import java.nio.file.Paths
  */
 @Command(
     name = "migrate",
-    description = ["One-time conversion of a legacy profile; today only the read-only inventory"],
+    description = ["One-time conversion of a legacy profile: inventory (read-only), convert, upload-quarantined"],
     mixinStandardHelpOptions = true,
-    subcommands = [MigrateInventoryCommand::class],
+    subcommands = [MigrateInventoryCommand::class, MigrateConvertCommand::class, MigrateUploadQuarantinedCommand::class],
 )
 class MigrateCommand : Runnable {
     @ParentCommand
     lateinit var parent: Main
 
     override fun run() {
-        println("Usage: unidrive -p <profile> migrate inventory [--json]")
+        println("Usage: unidrive -p <profile> migrate <inventory|convert|upload-quarantined>")
     }
 }
 
