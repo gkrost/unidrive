@@ -33,4 +33,21 @@ debug_agent='@COROUTINES_DEBUG_AGENT@'
 if [[ -n "${UNIDRIVE_COROUTINE_DEBUG:-}" && "${UNIDRIVE_COROUTINE_DEBUG}" != "0" && -n "$debug_agent" && -f "$debug_agent" ]]; then
     agent_args+=("-javaagent:$debug_agent")
 fi
-exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${agent_args[@]}" "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" -jar "@JAR@" "${pass[@]}"
+# Post-mortem diagnostics in one directory (UNIDRIVE_DIAG_DIR overrides): fatal-crash hs_err logs, the OOM
+# heap dump (the companion -XX:+HeapDumpOnOutOfMemoryError rides jvm-flags.txt) and the daemon's bounded
+# GC log. The JVM silently skips a heap dump into a missing directory and treats a path without a trailing
+# separator as a FILE name, so: mkdir first, trailing separator always.
+diag_dir="${UNIDRIVE_DIAG_DIR:-$HOME/.local/share/unidrive/diagnostics}"
+mkdir -p "$diag_dir" 2>/dev/null || true
+diag_args=("-XX:ErrorFile=$diag_dir/hs_err_pid%p.log" "-XX:HeapDumpPath=$diag_dir/")
+# The GC log is daemon-only: CLI one-shots are ~1 s JVMs that would contend for the same file. The
+# long-runners are `daemon run` and the systemd unit's `sync --watch`.
+prev=""
+for a in "${pass[@]}"; do
+    if [[ ( "$prev" == "daemon" && "$a" == "run" ) || ( "$prev" == "sync" && "$a" == "--watch" ) ]]; then
+        diag_args+=("-Xlog:gc*:file=$diag_dir/gc.log:time,uptime:filecount=5,filesize=10m")
+        break
+    fi
+    prev="$a"
+done
+exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${agent_args[@]}" "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" "${diag_args[@]}" -jar "@JAR@" "${pass[@]}"

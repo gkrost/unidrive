@@ -48,7 +48,11 @@ The image's JDK module set is pinned — a new dependency that changes it fails
 `check` (see `RuntimeModulesTest`), and CI runs the whole gate a second time
 with the engine executing on the bundled runtime JDK. Launchers honour
 `UNIDRIVE_XMX` (bare size, e.g. `512m`, `2g`; default `2g`) and pin
-`-Djdk.net.unixdomain.tmpdir` to the host's temp directory. The bundled runtime
+`-Djdk.net.unixdomain.tmpdir` to the host's temp directory. Launchers and the
+CLI's auto-spawn write post-mortem diagnostics — fatal-crash `hs_err` logs, OOM
+heap dumps, the daemon's bounded GC log — into `%LOCALAPPDATA%\unidrive\diagnostics`
+(Windows) or `~/.local/share/unidrive/diagnostics` (Linux), overridable with
+`UNIDRIVE_DIAG_DIR`; pruning stays manual. The bundled runtime
 follows the JDK release train: each feature release ships as a normal app
 update, with the LTS marks as the long-haul targets.
 

@@ -27,6 +27,8 @@ import java.nio.file.Path
 object DaemonAutospawn {
     private val log = LoggerFactory.getLogger(DaemonAutospawn::class.java)
 
+    private val LOCALE_SHAPE = Regex("^([A-Za-z]{2,3})(?:[_-]([A-Za-z]{2}))?$")
+
     const val DEFAULT_WAIT_TIMEOUT_MS: Long = 60_000
 
     /**
@@ -60,27 +62,17 @@ object DaemonAutospawn {
         val javaHome = Path.of(System.getProperty("java.home"))
         val javaBin = javaHome.resolve("bin").resolve(if (isWindows) "java.exe" else "java")
         val logFile = configDir.resolve("daemon-spawn.log")
+        if (!Files.exists(jar.resolveSibling("jvm-flags.txt"))) {
+            System.err.println(
+                "unidrive: no jvm-flags.txt beside ${jar.fileName}; the spawned daemon starts without the standard static JVM flags (redeploy to restore them).",
+            )
+        }
         System.err.println(
             "unidrive: the daemon for profile '$profileName' is not running; starting it (output: $logFile) and waiting for it ...",
         )
         try {
             spawn(
-                buildList {
-                    add(javaBin.toString())
-                    // Coroutine debug probes (gkrost/unidrive#613 ask 1): the -javaagent arms the
-                    // capture only at JVM start, so it is decided here, the same gate the launcher
-                    // templates apply to operator-started daemons.
-                    if (CoroutineDebug.enabled()) {
-                        CoroutineDebug.agentJarBeside(jar)?.let { add("-javaagent=$it") }
-                    }
-                    add("-jar")
-                    add(jar.toString())
-                    add("--config-dir")
-                    add(configDir.toAbsolutePath().parent.toString())
-                    add("daemon")
-                    add("run")
-                    add(profileName)
-                },
+                spawnCommand(javaBin, jar, configDir.toAbsolutePath().parent, profileName),
                 logFile,
             )
         } catch (e: Exception) {
@@ -143,6 +135,110 @@ object DaemonAutospawn {
         } catch (_: IOException) {
             false
         }
+    }
+
+    /**
+     * The command that starts the profile's daemon child, carrying the same flag set every launcher
+     * passes: the heap cap (UNIDRIVE_XMX, default 2g), the static flags from `jvm-flags.txt` beside
+     * the jar (the launchers' single source; a missing file degrades to no static flags, never to a
+     * failed spawn), the locale (UNIDRIVE_LOCALE, else the parent's own user.language/user.country),
+     * the pinned unix-domain temp dir, the coroutine-debug agent when armed, and the post-mortem
+     * diagnostics flags into the diagnostics dir — always daemon work here, so the bounded GC log
+     * rides unconditioned.
+     *
+     * [env], [props] and [windows] are the tests' seams for the process environment, the system
+     * properties and the OS family.
+     */
+    internal fun spawnCommand(
+        javaBin: Path,
+        jar: Path,
+        configRoot: Path,
+        profileName: String,
+        env: (String) -> String? = System::getenv,
+        props: (String) -> String? = { System.getProperty(it) },
+        windows: Boolean = isWindows,
+    ): List<String> =
+        buildList {
+            add(javaBin.toString())
+            add("-Xmx" + (env("UNIDRIVE_XMX")?.takeIf { it.isNotBlank() } ?: "2g"))
+            addAll(staticJvmFlags(jar.resolveSibling("jvm-flags.txt")))
+            addAll(localeArgs(env, props))
+            props("java.io.tmpdir")?.takeIf { it.isNotBlank() }?.let { add("-Djdk.net.unixdomain.tmpdir=$it") }
+            if (CoroutineDebug.enabled()) {
+                CoroutineDebug.agentJarBeside(jar)?.let { add("-javaagent=$it") }
+            }
+            addAll(diagArgs(diagDir(env, props, windows)))
+            add("-jar")
+            add(jar.toString())
+            add("--config-dir")
+            add(configRoot.toString())
+            add("daemon")
+            add("run")
+            add(profileName)
+        }
+
+    /** The static flags from the launchers' single source beside the jar; a missing or unreadable
+     *  file means no static flags (the deploy ships the file, jvm-flags.txt names this reader). */
+    private fun staticJvmFlags(flagsFile: Path): List<String> =
+        runCatching { Files.readAllLines(flagsFile) }.getOrNull()
+            ?.map { it.substringBefore('#').trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+
+    /** The child inherits the parent's locale: UNIDRIVE_LOCALE (xx / xx_YY) wins, else the parent
+     *  JVM's own user.language/user.country — which its launcher derived from --locale/UNIDRIVE_LOCALE. */
+    private fun localeArgs(
+        env: (String) -> String?,
+        props: (String) -> String?,
+    ): List<String> {
+        val parsed = env("UNIDRIVE_LOCALE")?.takeIf { it.isNotBlank() }?.let(LOCALE_SHAPE::matchEntire)
+        val language = parsed?.groupValues?.get(1)?.lowercase() ?: props("user.language")
+        if (language.isNullOrBlank()) return emptyList()
+        val country =
+            (
+                parsed?.groupValues?.get(2)?.takeIf { it.isNotEmpty() }?.uppercase()
+                    ?: props("user.country")
+            )?.takeIf { it.isNotBlank() }
+        return buildList {
+            add("-Duser.language=$language")
+            if (country != null) add("-Duser.country=$country")
+        }
+    }
+
+    /** The diagnostics dir: UNIDRIVE_DIAG_DIR overrides; the default sits under the OS data root
+     *  (%LOCALAPPDATA%\unidrive\diagnostics, ~/.local/share/unidrive/diagnostics) — dumps are
+     *  multi-GB transients, so never the roaming profile data. */
+    internal fun diagDir(
+        env: (String) -> String?,
+        props: (String) -> String?,
+        windows: Boolean,
+    ): Path {
+        env("UNIDRIVE_DIAG_DIR")?.takeIf { it.isNotBlank() }?.let { return Path.of(it) }
+        return if (windows) {
+            val localAppData =
+                env("LOCALAPPDATA")?.takeIf { it.isNotBlank() }
+                    ?: Path.of(props("user.home"), "AppData", "Local").toString()
+            Path.of(localAppData, "unidrive", "diagnostics")
+        } else {
+            Path.of(props("user.home"), ".local", "share", "unidrive", "diagnostics")
+        }
+    }
+
+    /** The child daemon's post-mortem flags into [dir]: where fatal-crash hs_err logs and the OOM
+     *  heap dump land (the dump's -XX:+HeapDumpOnOutOfMemoryError rides jvm-flags.txt), plus the
+     *  bounded GC log. The JVM silently skips a dump into a missing directory and treats a path
+     *  without a trailing separator as a FILE name: the directory is created here, the paths carry
+     *  the trailing separator. A directory that cannot be created degrades to the JVM's silent
+     *  skip — the spawn itself never fails on diagnostics. */
+    private fun diagArgs(dir: Path): List<String> {
+        runCatching { Files.createDirectories(dir) }
+        val sep = dir.fileSystem.separator
+        val diag = dir.toString().removeSuffix(sep) + sep
+        return listOf(
+            "-XX:ErrorFile=${diag}hs_err_pid%p.log",
+            "-XX:HeapDumpPath=$diag",
+            "-Xlog:gc*:file=${diag}gc.log:time,uptime:filecount=5,filesize=10m",
+        )
     }
 
     private val isWindows: Boolean
