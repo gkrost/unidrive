@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.debug.DebugProbes
 import kotlinx.coroutines.delay
@@ -38,8 +39,8 @@ class CoroutineDebugTest {
         val dir = Files.createTempDirectory("unidrive-coroutine-fork")
         val javaBin =
             Path.of(System.getProperty("java.home"), "bin", if (isWindows) "java.exe" else "java")
-        val agentJar = Path.of(DebugProbes::class.java.protectionDomain.codeSource.location.toURI())
-        assertTrue(agentJar.toString().endsWith(".jar"), "the probe jar is a real jar on the test classpath")
+        val agentJar = Path.of(Job::class.java.protectionDomain.codeSource.location.toURI())
+        assertTrue(agentJar.fileName.toString().startsWith(CoroutineDebug.AGENT_JAR_PREFIX), "the core JAR is the javaagent on the test classpath")
         val process =
             ProcessBuilder(
                 javaBin.toString(),

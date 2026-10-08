@@ -56,7 +56,7 @@ object CoroutineDebug {
     private const val ARMING_CHECK_MS = 500L
 
     /** File-name prefix of the standalone probe jar the deploy places beside the fat jar. */
-    const val AGENT_JAR_PREFIX = "kotlinx-coroutines-debug-"
+    const val AGENT_JAR_PREFIX = "kotlinx-coroutines-core-jvm-"
 
     fun enabled(): Boolean {
         val value = System.getenv(ENV_FLAG) ?: return false

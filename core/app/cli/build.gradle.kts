@@ -377,7 +377,7 @@ tasks.register("deploy") {
             configurations
                 .getByName("runtimeClasspath")
                 .files
-                .firstOrNull { it.name.startsWith("kotlinx-coroutines-debug-") }
+                .firstOrNull { it.name.startsWith("kotlinx-coroutines-core-jvm-") }
 
         if (isWindows) {
             deployWindows(home, jarFile, projectVersion, debugAgentJar)
@@ -461,7 +461,7 @@ fun deployWindows(
     val debugAgentTarget =
         debugAgentJar?.let { agent ->
             val stale =
-                libDir.listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") } ?: emptyArray()
+                libDir.listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-core-jvm-") && f.name.endsWith(".jar") } ?: emptyArray()
             stale.forEach { if (it.delete()) println("[deploy] pruned stale probe jar ${it.name}") }
             val target = File(libDir, agent.name)
             agent.copyTo(target, overwrite = true)
@@ -556,7 +556,7 @@ fun deployLinux(
     val debugAgentTarget =
         debugAgentJar?.let { agent ->
             libDir
-                .listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-debug-") && f.name.endsWith(".jar") }
+                .listFiles { f -> f.isFile && f.name.startsWith("kotlinx-coroutines-core-jvm-") && f.name.endsWith(".jar") }
                 ?.forEach { it.delete() }
             val target = File(libDir, agent.name)
             agent.copyTo(target, overwrite = true)

@@ -77,7 +77,7 @@ echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 # launcher's UNIDRIVE_COROUTINE_DEBUG gate can -javaagent it at daemon JVM start. Optional:
 # a tree without the probe jar (an older build, a slim release tarball) installs fine without it.
 DEBUG_AGENT_JAR=""
-for candidate in "$(dirname "${CLI_JAR}")"/kotlinx-coroutines-debug-*.jar; do
+for candidate in "$(dirname "${CLI_JAR}")"/kotlinx-coroutines-core-jvm-*.jar; do
     if [[ -f "${candidate}" ]]; then
         cp "${candidate}" "${INSTALL_LIB}/"
         DEBUG_AGENT_JAR="${INSTALL_LIB}/$(basename "${candidate}")"
