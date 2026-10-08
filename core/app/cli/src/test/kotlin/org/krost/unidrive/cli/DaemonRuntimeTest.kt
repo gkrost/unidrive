@@ -307,11 +307,7 @@ class DaemonRuntimeTest {
 
         val daemonJob = launch { runtime.start() }
 
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -354,11 +350,7 @@ class DaemonRuntimeTest {
             )
             val daemonJob = launch { runtime.start() }
             try {
-                repeat(100) {
-                    if (Files.exists(socketPath)) return@repeat
-                    delay(50)
-                }
-                assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
+                awaitDaemonSocket(socketPath)
 
                 // Each documented verb with its minimal real request. Distinct
                 // paths so state-mutating verbs (create, open_write_begin) never
@@ -471,11 +463,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         runtime.close()
         daemonJob.join()
@@ -547,11 +535,7 @@ class DaemonRuntimeTest {
             providerFactory = { StubProvider() },
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
         assertTrue(Files.exists(pidFile), "daemon must hold the lock before shutdown")
 
@@ -577,11 +561,7 @@ class DaemonRuntimeTest {
             syncPaths = listOf("/_INBOX", "/Docs \"x\""),
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
             val scope = kotlinx.serialization.json.Json.parseToJsonElement(reply)
@@ -609,11 +589,7 @@ class DaemonRuntimeTest {
             pollIntervalMs = 60_000,
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
             val interval = kotlinx.serialization.json.Json.parseToJsonElement(reply)
@@ -668,11 +644,7 @@ class DaemonRuntimeTest {
 
         val daemonJob = launch { runtime.start() }
 
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -733,11 +705,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -778,11 +746,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound")
+        awaitDaemonSocket(socketPath, daemonJob)
 
         val channel = connect()
         channel.configureBlocking(false)
@@ -850,19 +814,8 @@ class DaemonRuntimeTest {
             providerFactory = { provider },
         )
 
-    // Startup is fixture setup: a cold or busy runner gets 30 s, and a start that ENDED without binding
-    // fails at once instead of running out the clock (a real regression then names itself, the way the
-    // shutdown-cleanup test below checks its daemon the same way).
-    private suspend fun awaitSocket(daemonJob: Job? = null) {
-        withTimeout(30_000) {
-            while (!Files.exists(socketPath)) {
-                if (daemonJob?.isCompleted == true) {
-                    error("the daemon start finished without binding its socket")
-                }
-                delay(50)
-            }
-        }
-    }
+    // Startup is fixture setup: delegates to the shared #625 helper (30 s ceiling, died-start check).
+    private suspend fun awaitSocket(daemonJob: Job? = null) = awaitDaemonSocket(socketPath, daemonJob)
 
     // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
     private suspend fun awaitEnumeration(
