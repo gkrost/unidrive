@@ -221,6 +221,16 @@ tasks.shadowJar {
     }
 }
 
+val copyCoroutineDebugAgent =
+    tasks.register<Copy>("copyCoroutineDebugAgent") {
+        from(configurations.runtimeClasspath.map { files -> files.filter { it.name.startsWith("kotlinx-coroutines-core-jvm-") && it.name.endsWith(".jar") } })
+        into(layout.buildDirectory.dir("libs"))
+    }
+
+tasks.shadowJar {
+    finalizedBy(copyCoroutineDebugAgent)
+}
+
 // Bundles THIRD-PARTY-NOTICES.txt + the project LICENSE/NOTICE into the shadow jar and
 // guards them from `check`.
 apply(from = "../../gradle/notices.gradle.kts")
