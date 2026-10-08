@@ -20,7 +20,7 @@ import org.krost.unidrive.engine.MountWiring
 import org.krost.unidrive.engine.RemoteEnumeration
 import org.krost.unidrive.engine.RemoteGather.RemoteMerge
 import org.krost.unidrive.engine.RemoteGather
-import org.krost.unidrive.engine.SyncRootBridge
+import org.krost.unidrive.engine.localNameIssue
 import org.krost.unidrive.engine.Transfers
 import org.krost.unidrive.sync.model.*
 import org.slf4j.LoggerFactory
@@ -309,56 +309,14 @@ open class SyncEngine(
             log = log,
         )
 
-    // #560 U3: the coordinated model's sync-root access for the mount front-end (see SyncRootBridge).
-    // The sync root, its name rules, its scanner and the mirror's executors stay here.
-    private val syncRootBridge =
-        object : SyncRootBridge {
-            override val root: Path get() = syncRoot
-
-            override fun resolveLocal(path: String): Path = placeholder.resolveLocal(path)
-
-            override fun localNameIssue(path: String): String? = org.krost.unidrive.sync.localNameIssue(path)
-
-            override fun looksLikePlaceholder(
-                local: Path,
-                entry: SyncEntry,
-            ): Boolean = org.krost.unidrive.sync.looksLikePlaceholder(local, entry)
-
-            override fun <T> withEchoSuppression(
-                path: String,
-                block: () -> T,
-            ): T = this@SyncEngine.withEchoSuppression(path, block)
-
-            override fun sameRoot(
-                stored: String,
-                current: String,
-            ): Boolean = sameSyncRoot(stored, current)
-
-            // #552: the rescan only looks at NEW and MODIFIED, so it does not ask the scanner for deletions.
-            override fun scanNewAndModified(): List<SyncRootBridge.LocalChange> =
-                scanner.scan(detectDeletions = false).mapNotNull { (path, state) ->
-                    when (state) {
-                        ChangeState.NEW -> SyncRootBridge.LocalChange(path, isNew = true)
-                        ChangeState.MODIFIED -> SyncRootBridge.LocalChange(path, isNew = false)
-                        else -> null
-                    }
-                }
-
-            override suspend fun createRemoteFolder(path: String) = applyCreateRemoteFolder(SyncAction.CreateRemoteFolder(path))
-
-            override suspend fun upload(
-                path: String,
-                remoteId: String?,
-                remoteTarget: String?,
-            ) = applyUpload(SyncAction.Upload(path, remoteId = remoteId, remoteTarget = remoteTarget))
-        }
-
     /**
      * #560 U3: what the mount front-end (`MountEngine`, :app:hydration) runs on: this engine's guard,
-     * gather and enumeration (shared, not copied), its cache layout, its sync root through
-     * [syncRootBridge], its audit log, progress reporter, logger and the late-bound [uploadInFlight].
-     * Built once per engine. The view invalidation reaches [viewInvalidationSink] through the gather's
-     * listener, for the mount's rescan as for the enumeration and the scope transition.
+     * gather and enumeration (shared, not copied), its cache layout, its audit log, progress reporter,
+     * logger and the late-bound [uploadInFlight]. #560 U6: the mount touches no sync root — the
+     * `SyncRootBridge` of the coordinated model is gone, and the sync root, its name rules, its scanner
+     * and the mirror's executors stay mirror-only here. Built once per engine. The view invalidation
+     * reaches [viewInvalidationSink] through the gather's listener, as for the enumeration and the
+     * scope transition.
      */
     override val mountWiring: MountWiring by lazy {
         MountWiring(
@@ -368,7 +326,6 @@ open class SyncEngine(
             gather = remoteGather,
             enumeration = enumeration,
             cachePathOf = { resolveCachePath(it) },
-            syncRoot = syncRootBridge,
             options = MountWiring.Options(syncPaths = syncPaths, verifyIntegrity = verifyIntegrity),
             auditLog =
                 auditLog?.let { audit ->

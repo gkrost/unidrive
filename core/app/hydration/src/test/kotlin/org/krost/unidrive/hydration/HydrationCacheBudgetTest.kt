@@ -22,8 +22,9 @@ import kotlin.test.assertTrue
 /**
  * #450: the hydration cache has a per-profile budget and an eviction pass. The rules that matter most are
  * the ones that never evict: an open handle, a queued or in-flight upload (#301, #318), a row whose upload
- * is pending or failed (#136), a copy that was modified since it was recorded, a file no row owns. Only
- * after those come the order (copies identical to the sync-root file first, then least recently used).
+ * is pending or failed (#136), a copy that was modified since it was recorded, a file no row owns. After
+ * those, least recently used first. (#560 U6 retired the sync-root-copy ordering: every cache copy is the
+ * row's only local file.)
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HydrationCacheBudgetTest {
@@ -217,6 +218,13 @@ class HydrationCacheBudgetTest {
             age(cache.getValue("a.txt"), 3)
             age(cache.getValue("b.txt"), 2)
             age(cache.getValue("c.txt"), 1)
+            // #560 U6: the cache copy is the row's local file, so aging it means re-recording the
+            // baseline — an mtime the row does not know is indistinguishable from an edit, and the
+            // copy would be protected as a possible unsynced change instead of evictable.
+            for ((name, path) in cache) {
+                val row = assertNotNull(env.db.getEntry("/$name"))
+                env.db.upsertEntry(row.copy(localMtime = Files.getLastModifiedTime(path).toMillis()))
+            }
             val hydration = env.hydration(this, budget = 1000)
 
             val report = hydration.evictCache()
@@ -228,48 +236,15 @@ class HydrationCacheBudgetTest {
             assertEquals(1000L, report.bytesAfter)
             assertEquals(2, report.evictedFiles)
             assertEquals(1000L, hydration.cacheSizeBytes())
-            // The sync-root files are untouched and the rows still describe them.
+            // The mirror pass's sync-root files are untouched (the mount writes nothing there), and
+            // the row's local copy is gone with the eviction: #560 U6 marks it not hydrated, and the
+            // next open refills it from the remote.
             assertTrue(Files.exists(env.syncRoot.resolve("a.txt")))
-            assertEquals(true, env.db.getEntry("/a.txt")?.isHydrated)
+            assertEquals(false, env.db.getEntry("/a.txt")?.isHydrated)
         }
 
     @Test
-    fun `a copy identical to the sync-root file goes before an older one that is the only local copy`() =
-        runTest {
-            val env = freshEnv()
-            val redundant = env.syncedAndRead("synced.txt").getValue("synced.txt")
-            env.provider.seed("/mountonly.txt", bytesOf(3))
-            env.db.upsertEntry(
-                SyncEntry(
-                    path = "/mountonly.txt",
-                    remoteId = "id-/mountonly.txt",
-                    remoteHash = "h-/mountonly.txt",
-                    remoteSize = 1000,
-                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
-                    localMtime = null,
-                    localSize = null,
-                    isFolder = false,
-                    isPinned = false,
-                    isHydrated = false,
-                    lastSynced = Instant.now(),
-                ),
-            )
-            val onlyLocal = env.engine.ensureHydrated("/mountonly.txt")
-            age(redundant, 1)
-            // Setting the mtime back must not make the baseline stale: record it again.
-            age(onlyLocal, 5)
-            val row = assertNotNull(env.db.getEntry("/mountonly.txt"))
-            env.db.upsertEntry(row.copy(localMtime = Files.getLastModifiedTime(onlyLocal).toMillis()))
-            val hydration = env.hydration(this, budget = 1000)
-
-            hydration.evictCache()
-
-            assertFalse(Files.exists(redundant), "identical to the sync-root file: the cheapest to evict, although newer")
-            assertTrue(Files.exists(onlyLocal), "the budget is met, the older copy stays")
-        }
-
-    @Test
-    fun `evicting the only local copy marks the row not hydrated, evicting a redundant copy leaves the row alone`() =
+    fun `evicting copies marks their rows not hydrated - the cache copy is the row's only local file`() =
         runTest {
             val env = freshEnv()
             val redundant = env.syncedAndRead("synced.txt").getValue("synced.txt")
@@ -296,12 +271,12 @@ class HydrationCacheBudgetTest {
 
             assertFalse(Files.exists(redundant))
             assertFalse(Files.exists(onlyLocal))
-            assertEquals(true, env.db.getEntry("/synced.txt")?.isHydrated, "the sync-root file still holds the bytes")
-            assertEquals(false, env.db.getEntry("/mountonly.txt")?.isHydrated, "the local bytes are gone: the next open or sync refills them")
+            assertEquals(false, env.db.getEntry("/synced.txt")?.isHydrated, "the local bytes are gone: the next open refills them")
+            assertEquals(false, env.db.getEntry("/mountonly.txt")?.isHydrated, "the local bytes are gone: the next open refills them")
         }
 
     @Test
-    fun `evicting a copy of a legacy row whose sync-root file was edited leaves the row hydrated`() =
+    fun `evicting never touches a file left at the legacy sync-root path`() =
         runTest {
             val env = freshEnv()
             val cache = env.syncedAndRead("a.txt").getValue("a.txt")
@@ -315,7 +290,7 @@ class HydrationCacheBudgetTest {
             hydration.evictCache()
 
             assertFalse(Files.exists(cache), "the copy equals the recorded baseline bytes: evictable")
-            assertEquals(true, env.db.getEntry("/a.txt")?.isHydrated, "the row describes the (edited) sync-root file, not the cache")
+            assertEquals(false, env.db.getEntry("/a.txt")?.isHydrated, "the cache copy was the row's local file; the next open refills it")
             assertContentEquals(bytesOf(77), Files.readAllBytes(syncFile))
         }
 

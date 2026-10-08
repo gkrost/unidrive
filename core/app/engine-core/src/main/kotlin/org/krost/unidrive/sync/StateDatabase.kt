@@ -1170,6 +1170,27 @@ class StateDatabase(
     }
 
     /**
+     * Paths of alive FILE rows whose bytes reached the cloud at least once (a real remote id, not
+     * the `local:` synthetic). The candidates the mount's dirty-overwrite replay compares against
+     * their cache baseline (#605 U6): pending new files and dirty overwrites are distinct journal
+     * entries — [pendingUploadPaths] owns the never-uploaded half, this query the candidates for
+     * the row whose cache copy drifted from the recorded baseline while the daemon was down.
+     * Ordered by path for deterministic replay.
+     */
+    @Synchronized
+    fun uploadedMountRows(): List<String> {
+        val out = mutableListOf<String>()
+        conn.createStatement().use { stmt ->
+            val rs =
+                stmt.executeQuery(
+                    "SELECT path FROM sync_entries WHERE status='EXISTS' AND remote_id NOT GLOB 'local:*' AND is_folder=0 ORDER BY path",
+                )
+            while (rs.next()) out += rs.getString(1)
+        }
+        return out
+    }
+
+    /**
      * Clear the permanent-failure quarantine flag on a row. Called when a
      * fresh delta event reports the same `remote_id` as alive — that's the
      * cloud telling us "the object is back" (or "it was never gone, the

@@ -13,6 +13,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -32,6 +34,51 @@ class HydrationUploadQueueTest {
         val cache = env.syncEngine.resolveCachePath(path)
         Files.createDirectories(cache.parent)
         Files.writeString(cache, content)
+    }
+    private fun cacheStats(env: HydrationTestEnv, path: String): Pair<Long, Long> {
+        val cache: Path = env.syncEngine.resolveCachePath(path)
+        return Files.getLastModifiedTime(cache).toMillis() to Files.size(cache)
+    }
+
+    // #605 (U6): a dirty overwrite — a row whose cache copy drifted from its baseline while the
+    // daemon was down — is replayed by the engine itself, not only by a mount client's scanner.
+    @Test
+    fun `a dirty overwrite of an uploaded row replays from the cache`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertUploadedRow("/q/f.txt", mtime = 1_000L, size = 3L)
+        writeCache(env, "/q/f.txt", "xyz")
+
+        assertEquals(1, env.hydration.replayPendingUploads(), "the drifted cache copy is replayed")
+        advanceUntilIdle()
+        assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/f.txt"))
+    }
+
+    @Test
+    fun `a clean uploaded row - the cache copy matches its baseline - is not replayed`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        writeCache(env, "/q/f.txt", "abc")
+        val (mtime, size) = cacheStats(env, "/q/f.txt")
+        env.stateDb.insertUploadedRow("/q/f.txt", mtime = mtime, size = size)
+
+        assertEquals(0, env.hydration.replayPendingUploads())
+        advanceUntilIdle()
+        assertNull(env.syncEngine.remoteContentSeen("/q/f.txt"))
+    }
+
+    @Test
+    fun `a dirty overwrite whose last attempt failed waits for the delay, then replays`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, failedReplayDelayMs = 60_000L)
+        env.stateDb.insertUploadedRow("/q/f.txt", mtime = 1_000L, size = 3L)
+        writeCache(env, "/q/f.txt", "xyz")
+        env.stateDb.markUploadFailed("/q/f.txt", Instant.now())
+
+        assertEquals(0, env.hydration.replayPendingUploads(), "the failed row waits")
+        advanceTimeBy(30_000L)
+        runCurrent()
+        assertNull(env.syncEngine.remoteContentSeen("/q/f.txt"))
+
+        advanceUntilIdle()
+        assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/f.txt"), "then it is replayed")
     }
 
     @Test

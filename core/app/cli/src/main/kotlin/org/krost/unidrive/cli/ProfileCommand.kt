@@ -121,7 +121,7 @@ class ProfileAddCommand : Runnable {
 
         // Validate no duplicate sync root
         val dupCheck =
-            SyncConfig.detectDuplicateSyncRoots(
+            SyncConfig.detectRootIsolationConflicts(
                 raw.copy(
                     providers =
                         raw.providers + (

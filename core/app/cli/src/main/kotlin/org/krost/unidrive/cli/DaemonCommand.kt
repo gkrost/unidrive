@@ -89,7 +89,6 @@ class DaemonRunCommand : Runnable {
             excludePatterns = config.effectiveExcludePatterns(profile.name),
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
-            syncRootRescanIntervalMs = config.syncRootRescanMinutes(profile.name) * 60_000L,
             profileMode = mode,
         )
         // The startup banner reports the mode and the capabilities (#603 U4), so an operator — and a

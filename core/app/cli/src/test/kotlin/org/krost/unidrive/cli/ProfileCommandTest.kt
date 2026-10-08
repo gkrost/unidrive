@@ -226,7 +226,7 @@ class ProfileCommandTest {
     // ── Duplicate detection ──────────────────────────────────────────────────
 
     @Test
-    fun `detectDuplicateSyncRoots catches duplicate`() {
+    fun `detectRootIsolationConflicts catches duplicate`() {
         val raw =
             SyncConfig.parseRaw(
                 """
@@ -239,13 +239,73 @@ class ProfileCommandTest {
                 sync_root = "~/SameRoot"
                 """.trimIndent(),
             )
-        val err = SyncConfig.detectDuplicateSyncRoots(raw)
+        val err = SyncConfig.detectRootIsolationConflicts(raw)
         assertNotNull(err)
         assertContains(err, "SameRoot")
     }
 
     @Test
-    fun `detectDuplicateSyncRoots allows different roots`() {
+    fun `detectRootIsolationConflicts rejects a nested sync root`() {
+        val raw =
+            SyncConfig.parseRaw(
+                """
+                [general]
+                [providers.a]
+                type = "onedrive"
+                sync_root = "~/Sync"
+                [providers.b]
+                type = "s3"
+                sync_root = "~/Sync/b-archive"
+                """.trimIndent(),
+            )
+        val err = SyncConfig.detectRootIsolationConflicts(raw)
+        assertNotNull(err)
+        assertContains(err, "nested")
+    }
+
+    @Test
+    fun `detectRootIsolationConflicts rejects profiles differing only in name case`() {
+        val raw =
+            SyncConfig.parseRaw(
+                """
+                [general]
+                [providers.work]
+                type = "onedrive"
+                sync_root = "~/SyncA"
+                [providers.Work]
+                type = "s3"
+                sync_root = "~/SyncB"
+                """.trimIndent(),
+            )
+        val err = SyncConfig.detectRootIsolationConflicts(raw, caseInsensitive = true)
+        assertNotNull(err)
+        assertContains(err, "differ only in case")
+    }
+
+    @Test
+    fun `a mount profiles unused sync_root key does not conflict`() {
+        val raw =
+            SyncConfig.parseRaw(
+                """
+                [general]
+                [providers.mounted]
+                type = "onedrive"
+                mode = "mount"
+                sync_root = "~/Sync"
+                [providers.mirror]
+                type = "s3"
+                mode = "mirror"
+                sync_root = "~/Sync"
+                """.trimIndent(),
+            )
+        assertNull(
+            SyncConfig.detectRootIsolationConflicts(raw, caseInsensitive = true),
+            "the mount profile touches no sync root after the cutover",
+        )
+    }
+
+    @Test
+    fun `detectRootIsolationConflicts allows different roots`() {
         val raw =
             SyncConfig.parseRaw(
                 """
@@ -258,7 +318,7 @@ class ProfileCommandTest {
                 sync_root = "~/S3"
                 """.trimIndent(),
             )
-        assertNull(SyncConfig.detectDuplicateSyncRoots(raw))
+        assertNull(SyncConfig.detectRootIsolationConflicts(raw))
     }
 
     // ── New-account hint (#457) ──────────────────────────────────────────────

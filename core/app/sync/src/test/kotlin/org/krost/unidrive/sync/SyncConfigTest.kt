@@ -380,10 +380,10 @@ class SyncConfigTest {
         )
     }
 
-    // ── detectDuplicateSyncRoots tests ──────────────────────────────────────
+    // ── detectRootIsolationConflicts tests ──────────────────────────────────────
 
     @Test
-    fun `detectDuplicateSyncRoots finds conflict`() {
+    fun `detectRootIsolationConflicts finds conflict`() {
         val toml =
             """
             [providers.a]
@@ -395,13 +395,13 @@ class SyncConfigTest {
             sync_root = "/tmp/same"
             """.trimIndent()
         val raw = SyncConfig.parseRaw(toml)
-        val error = SyncConfig.detectDuplicateSyncRoots(raw)
+        val error = SyncConfig.detectRootIsolationConflicts(raw)
         assertNotNull(error)
         assertTrue(error.contains("a") && error.contains("b"))
     }
 
     @Test
-    fun `detectDuplicateSyncRoots returns null when no conflicts`() {
+    fun `detectRootIsolationConflicts returns null when no conflicts`() {
         val toml =
             """
             [providers.a]
@@ -413,7 +413,7 @@ class SyncConfigTest {
             sync_root = "/tmp/second"
             """.trimIndent()
         val raw = SyncConfig.parseRaw(toml)
-        assertNull(SyncConfig.detectDuplicateSyncRoots(raw))
+        assertNull(SyncConfig.detectRootIsolationConflicts(raw))
     }
 
     @Test

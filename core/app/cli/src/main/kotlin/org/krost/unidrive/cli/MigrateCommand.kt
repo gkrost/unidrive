@@ -85,7 +85,6 @@ class MigrateInventoryCommand : Runnable {
                 raw?.sync_root?.let { add("sync_root (config)" to it) }
                 raw?.root_path?.let { add("root_path" to it) }
                 raw?.hydration_cache_max_bytes?.let { add("hydration_cache_max_bytes" to it.toString()) }
-                raw?.sync_root_rescan_minutes?.let { add("sync_root_rescan_minutes" to it.toString()) }
                 raw?.fast_bootstrap?.let { add("fast_bootstrap" to it.toString()) }
                 raw?.keep_overwritten?.let { add("keep_overwritten" to it.toString()) }
                 if (profile.isOrphan) add("orphan" to "true (no [providers.${profile.name}] section)")

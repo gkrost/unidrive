@@ -327,7 +327,6 @@ data class RawProvider(
     val hydration_cache_max_bytes: Long? = null,
     // #504: how often the daemon rescans the sync root for files that arrived there out of band, in
     // minutes. 0 = off. Absent = the default (10).
-    val sync_root_rescan_minutes: Int? = null,
     // #463: how often `daemon run` polls the cloud for changes made elsewhere, in seconds. 0 = off.
     // Absent = the default (60). `daemon run --poll-interval` overrides it.
     val daemon_poll_seconds: Int? = null,
@@ -458,8 +457,6 @@ data class SyncConfig(
         (providers[profileName]?.hydrationCacheMaxBytes ?: DEFAULT_HYDRATION_CACHE_MAX_BYTES).coerceAtLeast(0L)
 
     /** #504: minutes between the daemon's sync root rescans for this profile; 0 = off. */
-    fun syncRootRescanMinutes(profileName: String): Int =
-        (providers[profileName]?.syncRootRescanMinutes ?: DEFAULT_SYNC_ROOT_RESCAN_MINUTES).coerceAtLeast(0)
 
     /** #463: seconds between the daemon's polls of the cloud for this profile; 0 = off. */
     fun daemonPollSeconds(profileName: String): Int =
@@ -474,7 +471,6 @@ data class SyncConfig(
         val conflictOverrides: Map<String, ConflictPolicy> = emptyMap(),
         val excludePatterns: List<String> = emptyList(),
         val hydrationCacheMaxBytes: Long? = null,
-        val syncRootRescanMinutes: Int? = null,
         val daemonPollSeconds: Int? = null,
     )
 
@@ -483,7 +479,6 @@ data class SyncConfig(
         const val DEFAULT_HYDRATION_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
 
         /** #504: default interval of the daemon's sync root rescan, in minutes. */
-        const val DEFAULT_SYNC_ROOT_RESCAN_MINUTES: Int = 10
 
         /**
          * #463: default interval of the daemon's poll for remote changes, in seconds. An incremental
@@ -774,16 +769,74 @@ data class SyncConfig(
             }
         }
 
-        fun detectDuplicateSyncRoots(raw: RawSyncConfig): String? {
-            val roots = mutableMapOf<String, String>() // normalized path → profile name
+        /**
+         * #560 U6: the profiles' local roots must not alias each other. Two mirror profiles may
+         * not share a sync root, may not nest one inside the other, may not reach the same folder
+         * through different paths (a symlink alias), and two profile names may not differ only in
+         * case (their profile folders, IPC sockets and cache keys would collide on a
+         * case-insensitive filesystem). A mount profile's `sync_root` key is not compared: the
+         * cutover left it unused, and a pending retire-or-adopt folder must not block unrelated
+         * profiles.
+         *
+         * Each root is compared both as the lexical path and as the resolved real path (symlinks
+         * collapsed; a not-yet-existing path keeps its lexical form), so nesting is caught before
+         * the folder exists too. Enforced by `Main` at every start and by `profile add`, before
+         * anything is mutated. [caseInsensitive] defaults to the host OS; a parameter so the
+         * Windows rules are testable anywhere.
+         */
+        fun detectRootIsolationConflicts(
+            raw: RawSyncConfig,
+            caseInsensitive: Boolean = System.getProperty("os.name", "").lowercase().contains("win"),
+        ): String? {
+            val seenNames = HashMap<String, String>() // lower-case name → first profile
+            class Root(
+                val profile: String,
+                val lexical: java.nio.file.Path,
+                val real: java.nio.file.Path,
+            )
+
+            val roots = mutableListOf<Root>()
             for ((name, rp) in raw.providers) {
-                val root = rp.sync_root?.let { expandTilde(it) } ?: continue
-                val normalized = Paths.get(root).normalize().toString()
-                val existing = roots[normalized]
-                if (existing != null) {
-                    return "Profiles '$existing' and '$name' share the same sync root $root. Each profile needs a unique sync root."
+                val lower = name.lowercase()
+                val prior = seenNames[lower]
+                if (prior != null && prior != name) {
+                    return "Profiles '$prior' and '$name' differ only in case; their profile folders, " +
+                        "IPC sockets and caches would collide. Rename one of them."
                 }
-                roots[normalized] = name
+                seenNames[lower] = name
+                if (rp.mode?.lowercase() == "mount") continue // touches no sync root after the cutover
+                val rootStr = rp.sync_root?.let { expandTilde(it) } ?: continue
+                val lexical = Paths.get(rootStr).normalize().toAbsolutePath()
+                val real = runCatching { lexical.toRealPath() }.getOrDefault(lexical)
+                roots.add(Root(name, lexical, real))
+            }
+            // Compare on '/'-separated strings so the rules read the same on every OS.
+            fun fold(p: java.nio.file.Path): String {
+                val s = p.toString().replace('\\', '/')
+                return if (caseInsensitive) s.lowercase() else s
+            }
+
+            fun nested(x: String, y: String): Boolean = x.startsWith("$y/") || y.startsWith("$x/")
+            for (i in roots.indices) {
+                for (j in roots.indices) {
+                    if (j <= i) continue
+                    val (a, b) = roots[i] to roots[j]
+                    val la = fold(a.lexical)
+                    val lb = fold(b.lexical)
+                    val ra = fold(a.real)
+                    val rb = fold(b.real)
+                    when {
+                        ra == rb ->
+                            return "Profiles '${a.profile}' and '${b.profile}' reach the same sync root " +
+                                "(${a.real}). Each profile needs its own root."
+                        nested(ra, rb) ->
+                            return "Profiles '${a.profile}' and '${b.profile}' have nested sync roots " +
+                                "(${a.real} is inside ${b.real}, or the reverse). Each profile needs its own root."
+                        nested(la, lb) ->
+                            return "Profiles '${a.profile}' and '${b.profile}' have nested sync roots " +
+                                "(${a.lexical} is inside ${b.lexical}, or the reverse). Each profile needs its own root."
+                    }
+                }
             }
             return null
         }
@@ -829,7 +882,6 @@ data class SyncConfig(
                                 .mapValues { (_, v) -> parsePolicy(v) },
                         excludePatterns = rp.exclude_patterns ?: emptyList(),
                         hydrationCacheMaxBytes = rp.hydration_cache_max_bytes,
-                        syncRootRescanMinutes = rp.sync_root_rescan_minutes,
                         daemonPollSeconds = rp.daemon_poll_seconds,
                     )
                 }

@@ -354,10 +354,11 @@ class SyncEngineTest {
             provider.deltaItems = emptyList()
             provider.deltaCursor = "c531"
 
-            // The live mkdir came from the daemon's rescan pass: a folder that is NEW locally and
-            // unknown to state.db goes to newFolders and its create runs through the same
-            // applyCreateRemoteFolder the sync path uses.
-            engine.rescanSyncRootForUpload()
+            // The mirror pass's mkdir-remote: a folder that is NEW locally and unknown to
+            // state.db is created remotely through applyCreateRemoteFolder, which adopts the
+            // existing remote id instead of failing (#531: a fast-bootstrap adopted cursor
+            // never enumerated the folder).
+            engine.syncOnce()
 
             assertEquals("exists-/docs", db.getEntry("/docs")?.remoteId, "the top-level folder adopted the existing remote id")
             assertEquals("exists-/docs/deep", db.getEntry("/docs/deep")?.remoteId, "the nested folder adopted too — any depth, any run")

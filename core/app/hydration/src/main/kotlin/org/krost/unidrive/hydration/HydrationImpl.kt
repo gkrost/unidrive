@@ -215,7 +215,7 @@ class HydrationImpl(
         const val DEFAULT_FAILED_REPLAY_DELAY_MS: Long = 10L * 60 * 1000
 
         // Temp files the engine stages beside their destination (`<name>.hydrating-<uuid>` for a
-        // download, `.ud-serve-*.tmp` for a copy out of the sync root); a crash leaves them behind.
+        // download); a crash leaves them behind.
         private const val STALE_TEMP_AGE_MS = 60L * 60 * 1000
     }
 
@@ -749,6 +749,43 @@ class HydrationImpl(
             launchSerializedUpload(path, cachePath, "engine-replay-${queued + 1}", baseEtag = null)
             queued++
         }
+        // #605 (U6 cutover): dirty overwrites. A row whose bytes reached the cloud at least once is
+        // replayed when its cache copy no longer matches the row's baseline — a write that never
+        // reached its upload before the daemon stopped. A mount profile's cache copy is the row's
+        // only local file, so without this the edit would sit in the cache until a mount client's
+        // recovery scanner happened to replay it (and never, if none came). The #493 rules are the
+        // same as for pending rows: a failed row waits, and a refusal for exactly the content the
+        // cache holds now is not retried at every start.
+        var dirty = 0
+        var dirtyDeferred = 0
+        for (path in stateDb.uploadedMountRows()) {
+            if (!replayable(path)) continue
+            if (uploadSlots.containsKey(path)) continue
+            val entry = stateDb.getEntry(path) ?: continue
+            if (entry.remoteId == null || !entry.isHydrated) continue
+            val cachePath = mount.resolveCachePath(path)
+            val stamp = refusalStamp(cachePath) ?: continue
+            val baselineMtime = entry.localMtime ?: continue
+            val baselineSize = entry.localSize ?: continue
+            if (stamp == "$baselineMtime|$baselineSize") continue // clean: the cache copy is the baseline
+            if (refusedEarlier(path, cachePath) != null) { refused++; continue }
+            if (failedReplayDelayMs > 0 && entry.lastErrorAt != null) {
+                dirtyDeferred++
+                val handleId = "engine-dirty-late-$dirtyDeferred"
+                recoveryUploadScope.launch {
+                    delay(failedReplayDelayMs)
+                    val now = stateDb.getEntry(path) ?: return@launch
+                    if (now.remoteId == null || !now.isHydrated) return@launch
+                    if (uploadSlots.containsKey(path) || !replayable(path)) return@launch
+                    val cp = mount.resolveCachePath(path)
+                    if (refusedEarlier(path, cp) != null) return@launch
+                    launchSerializedUpload(path, cp, handleId, baseEtag = null)
+                }
+                continue
+            }
+            launchSerializedUpload(path, cachePath, "engine-dirty-${dirty + 1}", baseEtag = null)
+            dirty++
+        }
         if (deferred > 0) {
             log.info(
                 "replay of {} upload(s) whose last attempt failed deferred by {} s (#493)",
@@ -757,7 +794,9 @@ class HydrationImpl(
             )
         }
         if (refused > 0) log.info("not replaying {} upload(s) the provider refused for their current content (#493)", refused)
-        return queued
+        if (dirty > 0) log.info("replayed {} dirty overwrite(s) the daemon missed before it stopped (#605)", dirty)
+        if (dirtyDeferred > 0) log.info("replay of {} dirty overwrite(s) whose last attempt failed deferred by {} s (#493)", dirtyDeferred, failedReplayDelayMs / 1000)
+        return queued + dirty
     }
 
     private fun replayable(path: String): Boolean =
@@ -883,9 +922,9 @@ class HydrationImpl(
 
     /**
      * #450: bring the cache directory under [cacheMaxBytes], least recently used first, copies that are
-     * byte-identical to the file in the sync root before the rest. A file is evicted only if the engine
+     * cheapest first. A file is evicted only if the engine
      * vouches for it ([MountEngine.cacheDisposition]: it holds nothing the cloud
-     * or the sync root does not) and nothing here uses it: no open handle, no queued or in-flight upload
+     * has no local copy) and nothing here uses it: no open handle, no queued or in-flight upload
      * (also re-checked by the engine's own lock at deletion), not accessed within the grace window.
      * Files without a row (an upload target that was renamed away, #319), unfinished creates, failed
      * uploads and modified copies are never touched, so the cache can stay over budget.
@@ -912,7 +951,6 @@ class HydrationImpl(
                 if (total <= cacheMaxBytes) break
                 if (inUse(f.path)) continue
                 when (mount.cacheDisposition(f.path)) {
-                    CacheDisposition.REDUNDANT -> evict(f)
                     CacheDisposition.DISPOSABLE -> disposable += f
                     CacheDisposition.PROTECTED -> {}
                 }

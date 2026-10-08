@@ -517,6 +517,33 @@ internal class HydrationTestEnv(
             )
         }
 
+        /**
+         * Insert an uploaded row (a real remote id) whose baseline names [mtime]/[size] —
+         * the watermark a cache copy is compared against by the #605 dirty-overwrite replay.
+         */
+        fun insertUploadedRow(
+            path: String,
+            mtime: Long,
+            size: Long,
+        ) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = "remote-$path",
+                    remoteHash = null,
+                    remoteSize = size,
+                    remoteModified = Instant.now(),
+                    localMtime = mtime,
+                    localSize = size,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                    cacheBacked = true,
+                ),
+            )
+        }
+
         fun lastErrorAt(path: String): Instant? = db.getEntry(path)?.lastErrorAt
 
         /** Drops the row outright (a rename-away / unlink / reap while an upload is queued). */
