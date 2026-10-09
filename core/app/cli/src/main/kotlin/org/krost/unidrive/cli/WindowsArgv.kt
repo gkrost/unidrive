@@ -19,10 +19,14 @@ import java.nio.charset.Charset
  * UTF-16 units, and every unit the ANSI code page can represent identical (only the units it cannot represent may
  * differ). Anything else — another launcher's quoting, a code page with multi-byte characters, a failing native call —
  * keeps the arguments as they arrived, which is today's behaviour.
+ *
+ * #528: there is deliberately NO cheap early return on "all characters are ASCII" — the degraded form of a character
+ * outside the code page IS ASCII (`?`), so an argument made only of emoji or CJK characters arrives all-ASCII and is
+ * exactly the case the recovery exists for. The `pickTrailing` verification is what proves a match; the native read is
+ * bounded (one GetCommandLineW round-trip per invocation).
  */
 object WindowsArgv {
     fun recover(args: Array<String>): Array<String> {
-        if (args.all { arg -> arg.all { it.code < 0x80 } }) return args // nothing can have been lost
         if (!System.getProperty("os.name").orEmpty().startsWith("Windows")) return args
         val full =
             try {
