@@ -80,6 +80,9 @@ class HydrationImpl(
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) : Hydration {
 
+    /** Test seam to hold a startup cache scan in flight and verify cancellation between entries. */
+    internal var cacheScanCheckpoint: () -> Unit = {}
+
     /** Cancel and join all background work owned by this hydration layer before its state DB closes. */
     suspend fun shutdownUploads() {
         recoveryUploadScope.coroutineContext[Job]?.cancelAndJoin()
@@ -894,6 +897,7 @@ class HydrationImpl(
                     while (paths.hasNext()) {
                         job?.ensureActive()
                         val path = paths.next()
+                        cacheScanCheckpoint()
                         if (!Files.isRegularFile(path) || !isStagingTemp(path.fileName.toString())) continue
                         val stale = runCatching { Files.getLastModifiedTime(path).toMillis() < cutoff }.getOrDefault(false)
                         if (stale) runCatching { Files.deleteIfExists(path) }
