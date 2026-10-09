@@ -128,6 +128,7 @@ class ProfileAddCommand : Runnable {
                             name to
                                 org.krost.unidrive.sync.RawProvider(
                                     type = type,
+                                    mode = mode.wireName,
                                     sync_root = syncRoot,
                                 )
                         ),

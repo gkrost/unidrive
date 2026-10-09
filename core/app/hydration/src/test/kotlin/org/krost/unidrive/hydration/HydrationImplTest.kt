@@ -525,12 +525,13 @@ internal class HydrationTestEnv(
             path: String,
             mtime: Long,
             size: Long,
+            remoteHash: String? = null,
         ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
                     remoteId = "remote-$path",
-                    remoteHash = null,
+                    remoteHash = remoteHash,
                     remoteSize = size,
                     remoteModified = Instant.now(),
                     localMtime = mtime,

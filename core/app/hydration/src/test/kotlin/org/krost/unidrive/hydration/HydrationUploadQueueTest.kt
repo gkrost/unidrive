@@ -45,12 +45,13 @@ class HydrationUploadQueueTest {
     @Test
     fun `a dirty overwrite of an uploaded row replays from the cache`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this)
-        env.stateDb.insertUploadedRow("/q/f.txt", mtime = 1_000L, size = 3L)
+        env.stateDb.insertUploadedRow("/q/f.txt", mtime = 1_000L, size = 3L, remoteHash = "remote-version-1")
         writeCache(env, "/q/f.txt", "xyz")
 
         assertEquals(1, env.hydration.replayPendingUploads(), "the drifted cache copy is replayed")
         advanceUntilIdle()
         assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/f.txt"))
+        assertEquals("remote-version-1", env.syncEngine.lastUploadIfMatch())
     }
 
     @Test

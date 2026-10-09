@@ -779,11 +779,11 @@ class HydrationImpl(
                     if (uploadSlots.containsKey(path) || !replayable(path)) return@launch
                     val cp = mount.resolveCachePath(path)
                     if (refusedEarlier(path, cp) != null) return@launch
-                    launchSerializedUpload(path, cp, handleId, baseEtag = null)
+                    launchSerializedUpload(path, cp, handleId, baseEtag = now.remoteHash)
                 }
                 continue
             }
-            launchSerializedUpload(path, cachePath, "engine-dirty-${dirty + 1}", baseEtag = null)
+            launchSerializedUpload(path, cachePath, "engine-dirty-${dirty + 1}", baseEtag = entry.remoteHash)
             dirty++
         }
         if (deferred > 0) {
