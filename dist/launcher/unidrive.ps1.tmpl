@@ -60,7 +60,9 @@ if (-not $diagDir) {
 }
 New-Item -ItemType Directory -Force -Path $diagDir -ErrorAction SilentlyContinue | Out-Null
 $diag = $diagDir.TrimEnd('\') + '\'
-$javaArgs += @('-XX:ErrorFile=' + $diag + 'hs_err_pid%p.log', '-XX:HeapDumpPath=' + $diag)
+# Parenthesise each element: `,` binds tighter than `+`, so unparenthesised the two flags become ONE argument with a space
+# in it, which Windows PowerShell 5.1 hands to java mis-quoted (java then prints its usage text).
+$javaArgs += @(('-XX:ErrorFile=' + $diag + 'hs_err_pid%p.log'), ('-XX:HeapDumpPath=' + $diag))
 # The GC log is daemon-only: CLI one-shots are ~1 s JVMs that would contend for the same file. The
 # long-runners are `daemon run` and `sync --watch` (the watch loop and the systemd unit's shape).
 for ($i = 0; $i -lt ($passArgs.Count - 1); $i++) {
