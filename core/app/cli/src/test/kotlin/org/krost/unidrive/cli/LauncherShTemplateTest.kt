@@ -147,4 +147,15 @@ class LauncherShTemplateTest {
         assertTrue(r.args.indexOf("-Xms64m") < r.args.indexOf("-jar"), r.args.toString())
         assertEquals(listOf("/opt/unidrive.jar", "status"), r.args.takeLast(2))
     }
+
+    // Java tries IPv4 first by default; on a dual-stack line with a flaky carrier-NAT IPv4 (measured: 58/300
+    // IPv4 connects failed, 0/300 IPv6) three failures in a row aborted every first enumeration. If this
+    // flag is dropped, such lines lose every long listing again.
+    @Test
+    fun `the launcher lets the operating system order IPv4 and IPv6`() {
+        val j25 = fakeJdk(dir.resolve("jvm"), "jdk-25", "25.0.4")
+        val r = run(j25, "status")
+        assertTrue("-Djava.net.preferIPv6Addresses=system" in r.args, r.args.toString())
+        assertTrue(r.args.indexOf("-Djava.net.preferIPv6Addresses=system") < r.args.indexOf("-jar"), r.args.toString())
+    }
 }
