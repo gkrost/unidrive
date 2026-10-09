@@ -1,6 +1,6 @@
 # Independent mirror and mount profiles
 
-> **Status: Accepted 2026-10-05, implementation in progress ([#560](https://github.com/gkrost/unidrive/issues/560)).** The Decision section describes the target. Until the migration and cutover units of #560 land, the engine keeps the coordinated behaviour described under Context (hydration cache ⇄ `sync_root` mirroring, the #459 delete guard, the daemon's `sync_root` rescan). Nothing in this ADR has shipped yet except where a section says so.
+> **Status: Accepted 2026-10-05, implementation in progress ([#560](https://github.com/gkrost/unidrive/issues/560)).** The Decision section describes the target. The engine and Windows client now require an explicit profile mode and refuse unsupported modeless profiles before mutable work. The mirror-only #459 cache-presence delete guard is retired: mirror profiles no longer share mount cache bytes, and `migrate convert --mode mirror` refuses a legacy hybrid profile that still has cache-backed hydrated rows. `cache_backed` remains until its mount-side uses are removed in a separate U8 change. Other coordinated behavior is retired only by its corresponding units.
 
 ## Context
 
@@ -12,7 +12,7 @@ A profile today can be served two ways at once, and the two are partly coordinat
 On 2026-10-01 the owner decided that both folders stay and are coordinated ([unidrive-windows#84](https://github.com/gkrost/unidrive-windows/issues/84)): #141 would make `sync` a client of the daemon, and the bytes would be kept in step. Parts of that landed:
 
 - #478 (for #449, #450): the mount serves reads from the `sync_root` copy and mirrors what it writes into the `sync_root`; a delete or rename through the mount drops or moves the `sync_root` copy.
-- #459: the Reconciler suppresses a remote delete while a hydration cache copy exists.
+- #459: the Reconciler suppressed a remote delete while a hydration cache copy existed (retired after U6 mode isolation and the pre-mutation mode gate).
 - #510 (for #504): the daemon rescans the `sync_root` at start and on a timer and uploads what appears there.
 
 The result, verified on main in #560 section 1:
@@ -43,7 +43,7 @@ Costs, and the conditions under which the cutover may ship (#560 sections 3 and 
 - **Duplicate work.** Two profiles on one account download and store their bytes separately, and changes propagate eventually, not at once. No latency is promised until discovery is defined: tested poll/notification defaults and reconnect catch-up (#463) ship with the cutover, not after it.
 - **Independent writers can conflict.** Provider capability limits, base-token handling, conflict recovery and delete-versus-edit behaviour must be specified and tested. Internxt checks metadata tokens but has no atomic If-Match-style replace, so two profiles keep a check-to-write window; lossless simultaneous edits are not promised.
 - **Shared account limits.** Throttling, retries and token refresh across two profiles on one account must be validated. The per-process transfer cap is not account-wide protection; either an account-wide budget is chosen or a tested independent-client limit is documented.
-- **Migration before cutover.** No coordination is retired, and no guard removed, before migration support and its safety gate exist. `cache_backed`, the #459 guard and the other bridges are removed last, only after supported legacy profiles are converted or blocked before mutation.
+- **Legacy boundary before cutover.** The owner decision is no legacy support or migration until first LTS. Modeless profiles are refused before mutable work. A hybrid profile with cache-backed hydrated file rows (`cache_backed` true or NULL) is refused by `migrate convert --mode mirror`, which is why the retired #459 guard is not needed: no mirror profile starts with rows whose bytes live only in the cache. Each obsolete bridge can therefore be removed separately once its owning mode and live safety invariant are proven; `cache_backed` and the remaining cross-mode hooks still require their own gates and changes.
 - **Clients and packaging.** The write verbs stay as they are, but client startup, recovery, status, banner text and test expectations change. The shipped autostarts (`dist/unidrive.service`, #325; the Windows logon autostart, #506) start `sync --watch`; they are replaced per profile mode, without leaving both launchers active.
 
 ### Migration

@@ -26,6 +26,9 @@ systemctl --user enable --now unidrive.service
 journalctl --user -u unidrive.service -f
 ```
 
+The unit runs `unidrive autostart`, which starts `sync --watch` for a mirror profile or
+`daemon run` for a mount profile. It resolves the default profile each time the service starts.
+
 ## Usage — released artefact
 
 ```bash

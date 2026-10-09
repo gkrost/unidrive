@@ -28,6 +28,7 @@ import java.nio.file.Paths
     versionProvider = Main.VersionProvider::class,
     subcommands = [
         AuthCommand::class,
+        AutostartCommand::class,
         BackupCommand::class,
         LogoutCommand::class,
         SyncCommand::class,

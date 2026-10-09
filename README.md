@@ -74,7 +74,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now unidrive.service
 ```
 
-The installed unit runs `unidrive sync --watch`. That process serves the hydration verbs and `sync.subscribe` only; `refresh`, the mount and the Windows client also need the daemon verbs (`refresh.run`, `sync.enumerate`, `daemon.status`), which only `unidrive daemon run` serves. Run `daemon run` instead of `sync --watch` when one of those clients is in use.
+The installed unit runs `unidrive autostart`: mirror profiles use `sync --watch`, while mount profiles use `daemon run`. This keeps the background process aligned with the selected profile's fixed mode.
 
 Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/log-watch.sh --summary`.
 

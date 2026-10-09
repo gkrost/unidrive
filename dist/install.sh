@@ -60,6 +60,15 @@ fi
 
 CLI_BASENAME="$(basename "${CLI_JAR}")"
 
+# Stop an active service before replacing the jar it may be running. Preserve
+# whether it was active so an upgrade restarts the newly mode-aware launcher;
+# a deliberately stopped service stays stopped.
+SERVICE_WAS_ACTIVE=0
+if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet unidrive.service 2>/dev/null; then
+    systemctl --user stop unidrive.service
+    SERVICE_WAS_ACTIVE=1
+fi
+
 echo "Installing UniDrive..."
 
 # JAR
@@ -130,13 +139,16 @@ echo "  ${SYSTEMD_DIR}/unidrive.service"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
+    if [[ "${SERVICE_WAS_ACTIVE}" == "1" ]]; then
+        systemctl --user start unidrive.service
+    fi
 fi
 
 echo ""
 echo "Done. Usage:"
 echo "  unidrive --help                                  # CLI help"
 echo "  unidrive auth                                    # authenticate first"
-echo "  unidrive sync --watch                            # manual daemon start"
+echo "  unidrive autostart                              # start the selected profile's mode"
 echo "  systemctl --user enable --now unidrive.service   # auto-start on login"
 echo "  systemctl --user status unidrive.service         # check daemon status"
 echo "  journalctl --user -u unidrive.service -f         # follow logs"

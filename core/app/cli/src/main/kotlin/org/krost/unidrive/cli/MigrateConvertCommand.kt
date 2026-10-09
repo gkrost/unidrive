@@ -372,6 +372,42 @@ internal object LegacyConversion {
             return 1
         }
 
+        // Phase INVENTORY: the same read-only classification `migrate inventory` reports. It runs
+        // before the journal is created so a refusal below leaves nothing behind (not even a PLAN
+        // journal that would pin a later, different --mode to this attempt).
+        val cacheDir =
+            org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(
+                org.krost.unidrive.sync.SyncEngine.defaultHydrationCacheRoot(),
+                setup.profileName,
+            )
+        val inventory =
+            when (val outcome = LegacyInventory.collect(legacyInventoryInputs(setup, cacheDir))) {
+                is LegacyInventory.Outcome.Refused -> {
+                    System.err.println(outcome.message)
+                    return 1
+                }
+                is LegacyInventory.Outcome.Collected -> outcome.report
+            }
+
+        // Refusal 3: a legacy hybrid profile cannot become a mirror. Its hydrated rows whose bytes
+        // live only in the hydration cache (cache_backed true or NULL) are absent from the sync root,
+        // so the first mirror sync would read them as local deletes and plan DeleteRemote. Mirror and
+        // mount profiles are independent and no migration of hybrid state is supported (#459, #680).
+        // A conversion that already published its mode (resume) passed this check before.
+        if (targetMode == "mirror" && (loaded == null || "PUBLISH" !in loaded.phases)) {
+            val cacheBackedHydrated = inventory.db?.cacheBacked?.let { (it["true"] ?: 0) + (it["null"] ?: 0) } ?: 0
+            if (cacheBackedHydrated > 0) {
+                System.err.println(
+                    "Error: profile '${setup.profileName}' is a legacy hybrid profile with $cacheBackedHydrated cache-backed " +
+                        "hydrated file(s) whose bytes live only in the hydration cache. Converting such a profile to a mirror " +
+                        "is unsupported: mirror and mount profiles are independent, and no migration of hybrid state is " +
+                        "supported in this phase. Convert it to a mount instead ('migrate convert --mode mount'), or create a " +
+                        "new mirror profile. Nothing was changed.",
+                )
+                return 1
+            }
+        }
+
         // Journal: resume an interrupted run, or start over on --restart.
         if (loaded != null && restart) {
             Files.list(setup.profileDir).use { stream ->
@@ -408,20 +444,6 @@ internal object LegacyConversion {
             return 1
         }
 
-        // Phase INVENTORY: the same read-only classification `migrate inventory` reports.
-        val cacheDir =
-            org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(
-                org.krost.unidrive.sync.SyncEngine.defaultHydrationCacheRoot(),
-                setup.profileName,
-            )
-        val inventory =
-            when (val outcome = LegacyInventory.collect(legacyInventoryInputs(setup, cacheDir))) {
-                is LegacyInventory.Outcome.Refused -> {
-                    System.err.println(outcome.message)
-                    return 1
-                }
-                is LegacyInventory.Outcome.Collected -> outcome.report
-            }
         if ("INVENTORY" !in journal.phases) {
             journal = journal.withPhase("INVENTORY")
             Journal.save(setup.profileDir, journal)
