@@ -135,6 +135,31 @@ class InternxtGatewayOriginErrorTest {
             }
         }
 
+    // The authenticated GET waits what the server asks for (Retry-After, clamped to 0.5 to 60 s) instead of the fixed 2 s / 4 s
+    // when it answers a transient status with a hint; without a hint the ladder is unchanged.
+    @Test
+    fun `a transient status with a Retry-After hint waits the hint, clamped, and without one the 2 s and 4 s ladder stays`() =
+        runTest {
+            for ((hint, expectedTotal) in listOf("5" to 10_000L, "600" to 120_000L, null to 6_000L)) {
+                val calls = AtomicInteger(0)
+                val service =
+                    serviceOn(
+                        MockEngine {
+                            calls.incrementAndGet()
+                            val headers = if (hint != null) headersOf("Content-Type" to listOf("application/json"), "Retry-After" to listOf(hint)) else json
+                            respond("{}", HttpStatusCode.TooManyRequests, headers)
+                        },
+                    )
+                val before = currentTime
+
+                assertFailsWith<InternxtApiException> { service.listFiles() }
+
+                assertEquals(3, calls.get(), "hint $hint: three attempts")
+                assertEquals(expectedTotal, currentTime - before, "hint $hint: two pauses")
+                service.close()
+            }
+        }
+
     @Test
     fun `a 522 that clears on the second attempt is used`() =
         runTest {
