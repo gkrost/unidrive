@@ -1893,10 +1893,11 @@ class InternxtProvider(
         // ancestors and the ancestor is genuinely gone). Such drops are counted so
         // `complete` reflects the residual gap and the engine skips
         // detectMissingAfterFullSync + leaves the cursor un-advanced.
+        val nameDecryptor = mnemonicOrNull()
         val rawFiles =
-            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor) }
+            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, nameDecryptor) }
         val rawFolders =
-            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor) }
+            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, nameDecryptor) }
         val filesDropped = rawFiles.count { it == null }
         val foldersDropped = rawFolders.count { it == null }
         val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
@@ -2353,15 +2354,23 @@ class InternxtProvider(
     // UD-317: instance wrappers; actual CloudItem construction (with name
     // sanitisation) lives as pure companion functions below so tests can
     // exercise the conversion directly without a real InternxtProvider.
-    private fun InternxtFile.toCloudItem(parentPath: String): CloudItem = fileToCloudItem(this, parentPath)
+    private suspend fun InternxtFile.toCloudItem(parentPath: String): CloudItem = fileToCloudItem(this, parentPath, mnemonicOrNull())
 
-    private fun InternxtFolder.toCloudItem(parentPath: String): CloudItem = folderToCloudItem(this, parentPath)
+    private suspend fun InternxtFolder.toCloudItem(parentPath: String): CloudItem = folderToCloudItem(this, parentPath, mnemonicOrNull())
+
+    /**
+     * #314: the mnemonic for the legacy-name decryption fallback (`decryptName` needs
+     * `<mnemonic>-<parentUuid>` as its password), resolved once per pass. Null when no
+     * credentials are loaded — the converters then keep today's fallback.
+     */
+    private suspend fun mnemonicOrNull(): String? = runCatching { authService.getValidCredentials().mnemonic }.getOrNull()
 
     private suspend fun InternxtFile.toDeltaCloudItem(
         folderMap: MutableMap<String, InternxtFolder>,
         rootUuid: String,
         unfetchable: MutableSet<String>,
         fetchFolder: suspend (String) -> InternxtFolder?,
+        mnemonic: String? = null,
     ): CloudItem? {
         val parentPath =
             when (val fUuid = folderUuid) {
@@ -2370,7 +2379,7 @@ class InternxtProvider(
                     Companion.buildFolderPathFetching(fUuid, folderMap, rootUuid, unfetchable, fetchFolder)
                         ?: return null
             }
-        return fileToDeltaCloudItem(this, parentPath)
+        return fileToDeltaCloudItem(this, parentPath, mnemonic)
     }
 
     private suspend fun InternxtFolder.toDeltaCloudItem(
@@ -2378,6 +2387,7 @@ class InternxtProvider(
         rootUuid: String,
         unfetchable: MutableSet<String>,
         fetchFolder: suspend (String) -> InternxtFolder?,
+        mnemonic: String? = null,
     ): CloudItem? {
         val parentPath =
             when (val pUuid = parentUuid) {
@@ -2386,7 +2396,7 @@ class InternxtProvider(
                     Companion.buildFolderPathFetching(pUuid, folderMap, rootUuid, unfetchable, fetchFolder)
                         ?: return null
             }
-        return folderToDeltaCloudItem(this, parentPath)
+        return folderToDeltaCloudItem(this, parentPath, mnemonic)
     }
 
     companion object {
@@ -2711,11 +2721,32 @@ class InternxtProvider(
             status == "TRASHED" || status == "DELETED" || removed || deleted
 
         // UD-317: pure converter for `listChildren` / `getMetadata` file entries.
+        // #314: a legacy row (older clients predating plainName) carries only the encrypted
+        // name; attempt the client-side decryption against the item's parent scope before
+        // falling back to the ciphertext blob. Never throws: an undecryptable name keeps
+        // today's fallback.
+        private val legacyNameLog = org.slf4j.LoggerFactory.getLogger(InternxtProvider::class.java)
+
+        private fun resolvedBaseName(
+            plainName: String?,
+            encryptedName: String?,
+            parentUuid: String?,
+            mnemonic: String?,
+        ): String {
+            if (!plainName.isNullOrBlank() || encryptedName.isNullOrEmpty() || mnemonic.isNullOrEmpty() || parentUuid.isNullOrEmpty()) {
+                return plainName ?: encryptedName ?: ""
+            }
+            return runCatching { InternxtCrypto().decryptName(encryptedName, "$mnemonic-$parentUuid") }
+                .onFailure { legacyNameLog.debug("#314: could not decrypt a legacy name: {}", it.message) }
+                .getOrNull() ?: encryptedName
+        }
+
         internal fun fileToCloudItem(
             file: InternxtFile,
             parentPath: String,
+            mnemonic: String? = null,
         ): CloudItem {
-            val baseName = sanitizeName(file.plainName ?: file.name ?: "")
+            val baseName = sanitizeName(resolvedBaseName(file.plainName, file.name, file.folderUuid, mnemonic))
             val cleanType = file.type?.let { sanitizeName(it) }
             val name =
                 if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) {
@@ -2761,8 +2792,9 @@ class InternxtProvider(
         internal fun folderToCloudItem(
             folder: InternxtFolder,
             parentPath: String,
+            mnemonic: String? = null,
         ): CloudItem {
-            val name = sanitizeName(folder.plainName ?: folder.name ?: "")
+            val name = sanitizeName(resolvedBaseName(folder.plainName, folder.name, folder.parentUuid, mnemonic))
             val fullPath = if (parentPath == "/") "/$name" else "$parentPath/$name"
             return CloudItem(
                 id = folder.uuid,
@@ -2783,8 +2815,9 @@ class InternxtProvider(
         internal fun fileToDeltaCloudItem(
             file: InternxtFile,
             parentPath: String,
+            mnemonic: String? = null,
         ): CloudItem {
-            val baseName = sanitizeName(file.plainName ?: file.name ?: "")
+            val baseName = sanitizeName(resolvedBaseName(file.plainName, file.name, file.folderUuid, mnemonic))
             val cleanType = file.type?.let { sanitizeName(it) }
             val name =
                 if (!cleanType.isNullOrEmpty() && !baseName.endsWith(".$cleanType")) {
@@ -2905,8 +2938,9 @@ class InternxtProvider(
         internal fun folderToDeltaCloudItem(
             folder: InternxtFolder,
             parentPath: String,
+            mnemonic: String? = null,
         ): CloudItem {
-            val name = sanitizeName(folder.plainName ?: folder.name ?: "")
+            val name = sanitizeName(resolvedBaseName(folder.plainName, folder.name, folder.parentUuid, mnemonic))
             return CloudItem(
                 id = folder.uuid,
                 name = name,
