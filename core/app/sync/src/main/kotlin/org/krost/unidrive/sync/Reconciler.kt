@@ -42,9 +42,6 @@ class Reconciler(
     // / resolveSlice() call using the remote top-level names from that call's
     // remoteChanges argument (canonical name = existing cloud folder).
     private val xdgUserDirsOverrides: Map<String, String> = emptyMap(),
-    // Mount-write bytes live in the hydration cache until the platform client
-    // mirrors them into sync_root. Their absence from sync_root is not a delete.
-    private val isHydrationCachePresent: (String) -> Boolean = { false },
     // #532: content-equality for the MODIFIED/MODIFIED branch. The engine wires HashVerifier
     // (hash of the local file, provider algorithm, vs the remote item's hash). Null keeps the
     // plain conflict — a provider without a content hash has nothing to compare.
@@ -897,14 +894,6 @@ class Reconciler(
                 SyncAction.Upload(path, remoteId = entry?.remoteId, remoteTarget = aliasTarget(alias, path))
             localState == ChangeState.DELETED && remoteState == ChangeState.UNCHANGED ->
                 when {
-                    // A real mount unlink removes this cache file before sync; only a row whose bytes live
-                    // in the cache is protected from a false delete. #449: a row whose baseline describes the
-                    // sync-root file (cacheBacked == false: a file synced, read through the mount, or
-                    // mirrored after a mount write) is NOT: the cache copy it leaves behind (#450) must not
-                    // turn the user's deliberate delete of the sync-root file into nothing. Rows from before
-                    // the column (null) keep the old protection.
-                    entry != null && entry.isHydrated && !entry.isFolder && entry.cacheBacked != false &&
-                        isHydrationCachePresent(path) -> null
                     // UD-901: a pending-upload row (entry.remoteId == null) that vanished
                     // before its first upload has nothing to delete on the remote side —
                     // just drop the placeholder row. #136: the remoteId half alone is
