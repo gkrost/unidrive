@@ -1,6 +1,9 @@
 package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -12,6 +15,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -341,5 +347,33 @@ class HydrationCacheBudgetTest {
             assertTrue(Files.exists(freshDownload), "a staging file of a download that may be running now")
             assertFalse(Files.exists(cache), "over budget at start: the leftover copy of a synced file goes")
             assertContentEquals(bytesOf(1), Files.readAllBytes(env.syncRoot.resolve("a.txt")), "the sync-root file is untouched")
+        }
+
+    @Test
+    fun `cancelling an in-flight cache scan is observed before eviction`() =
+        runTest {
+            val env = freshEnv()
+            env.syncedAndRead("a.txt")
+            val hydration = env.hydration(this, budget = 500)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val heldOnce = AtomicBoolean(false)
+            hydration.cacheScanCheckpoint = {
+                if (heldOnce.compareAndSet(false, true)) {
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                }
+            }
+
+            val sweep = launch(Dispatchers.IO) { hydration.sweepCache() }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "the sweep entered its filesystem walk")
+                sweep.cancel()
+            } finally {
+                release.countDown()
+            }
+            sweep.join()
+
+            assertTrue(sweep.isCancelled, "the cancelled sweep must not continue into eviction")
         }
 }
