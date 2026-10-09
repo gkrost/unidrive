@@ -133,13 +133,17 @@ default_profile = "$runProfile"
 
 [providers.$runProfile]
 type = "localfs"
+mode = "mount"
 root_path = "$(To-Toml $remote)"
 sync_root = "$(To-Toml $mirror)"
 sync_path = ["/_INBOX"]
 "@
 [IO.File]::WriteAllText((Join-Path $cfg 'config.toml'), $toml, $utf8)
-$savedCfg = $env:UNIDRIVE_CONFIG_DIR; $savedTrace = $env:UNIDRIVE_TRACE
+$savedCfg = $env:UNIDRIVE_CONFIG_DIR; $savedTrace = $env:UNIDRIVE_TRACE; $savedDiag = $env:UNIDRIVE_DIAG_DIR
 $env:UNIDRIVE_CONFIG_DIR = $cfg
+# the run's own diagnostics dir: the daemon's bounded GC log and any post-mortem artifacts land
+# under -Work, not in the machine's shared default
+$env:UNIDRIVE_DIAG_DIR = Join-Path $out 'diagnostics'
 if ($Trace) { $env:UNIDRIVE_TRACE = '1' }
 
 $summary = [System.Collections.Generic.List[object]]::new()
@@ -257,12 +261,12 @@ try {
     }
 }
 finally {
-    $env:UNIDRIVE_CONFIG_DIR = $savedCfg; $env:UNIDRIVE_TRACE = $savedTrace
+    $env:UNIDRIVE_CONFIG_DIR = $savedCfg; $env:UNIDRIVE_TRACE = $savedTrace; $env:UNIDRIVE_DIAG_DIR = $savedDiag
     if (-not $KeepRunning -and (Test-Path -LiteralPath $mountScript)) {
         Step 'stop'
         $env:UNIDRIVE_CONFIG_DIR = $cfg
         [void](Mount-Script @('stop'))
-        $env:UNIDRIVE_CONFIG_DIR = $savedCfg
+        $env:UNIDRIVE_CONFIG_DIR = $savedCfg; $env:UNIDRIVE_DIAG_DIR = $savedDiag
     }
 }
 

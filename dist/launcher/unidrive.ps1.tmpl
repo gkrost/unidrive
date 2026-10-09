@@ -49,6 +49,26 @@ $debugAgent = '@COROUTINES_DEBUG_AGENT@'
 if ($env:UNIDRIVE_COROUTINE_DEBUG -and $env:UNIDRIVE_COROUTINE_DEBUG -ne '0' -and $debugAgent -and (Test-Path $debugAgent)) {
     $javaArgs += ('-javaagent:' + $debugAgent)
 }
+# Post-mortem diagnostics in one directory (UNIDRIVE_DIAG_DIR overrides): fatal-crash hs_err logs, the OOM
+# heap dump (the companion -XX:+HeapDumpOnOutOfMemoryError rides jvm-flags.txt) and the daemon's bounded
+# GC log. The JVM silently skips a heap dump into a missing directory and treats a path without a trailing
+# separator as a FILE name, so: create it first, trailing separator always.
+$diagDir = $env:UNIDRIVE_DIAG_DIR
+if (-not $diagDir) {
+    $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }
+    $diagDir = Join-Path $localAppData 'unidrive\diagnostics'
+}
+New-Item -ItemType Directory -Force -Path $diagDir -ErrorAction SilentlyContinue | Out-Null
+$diag = $diagDir.TrimEnd('\') + '\'
+$javaArgs += @('-XX:ErrorFile=' + $diag + 'hs_err_pid%p.log', '-XX:HeapDumpPath=' + $diag)
+# The GC log is daemon-only: CLI one-shots are ~1 s JVMs that would contend for the same file. The
+# long-runners are `daemon run` and `sync --watch` (the watch loop and the systemd unit's shape).
+for ($i = 0; $i -lt ($passArgs.Count - 1); $i++) {
+    if (($passArgs[$i] -eq 'daemon' -and $passArgs[$i + 1] -eq 'run') -or ($passArgs[$i] -eq 'sync' -and $passArgs[$i + 1] -eq '--watch')) {
+        $javaArgs += ('-Xlog:gc*:file=' + $diag + 'gc.log:time,uptime:filecount=5,filesize=10m')
+        break
+    }
+}
 $javaArgs += @('-jar', '@JAR@')
 & java @javaArgs @passArgs
 exit $LASTEXITCODE

@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.engine.localNameIssue
 import org.junit.Assume.assumeFalse
 import java.nio.file.Files
 import java.nio.file.Path
@@ -29,6 +30,62 @@ class PlaceholderManagerTest {
         val file = syncRoot.resolve("docs/test.txt")
         assertTrue(Files.exists(file))
         assertEquals(0, Files.size(file))
+    }
+
+    // ── #230: local-name representability ────────────────────────────────────
+
+    @Test
+    fun `localNameIssue allows normal names including spaces and dot segments`() {
+        for (w in listOf(true, false)) {
+            assertNull(localNameIssue("/Documents/my report.txt", windows = w))
+            assertNull(localNameIssue("/a/b/c.pdf", windows = w))
+            assertNull(localNameIssue("/", windows = w))
+            // `.` / `..` are path navigation, not all-dots names.
+            assertNull(localNameIssue("/a/./b", windows = w))
+            assertNull(localNameIssue("/a/../b", windows = w))
+        }
+    }
+
+    @Test
+    fun `localNameIssue rejects Windows-invalid names only on Windows`() {
+        val bad = listOf("/x/....", "/x/foo.", "/x/foo ", "/x/CON", "/x/nul.txt", "/x/a:b", "/x/a?b", "/x/a<b")
+        for (p in bad) {
+            assertNotNull(localNameIssue(p, windows = true), "expected '$p' rejected on Windows")
+            assertNull(localNameIssue(p, windows = false), "expected '$p' allowed on POSIX")
+        }
+    }
+
+    @Test
+    fun `localNameIssue rejects an embedded NUL on every platform`() {
+        val withNul = "/x/a" + Char(0) + "b"
+        assertNotNull(localNameIssue(withNul, windows = true))
+        assertNotNull(localNameIssue(withNul, windows = false))
+    }
+
+    // ── #600: component length ───────────────────────────────────────────────
+
+    @Test
+    fun `localNameIssue allows a 255-character component and rejects 256`() {
+        // The suffix is part of the component: 251 + 4 = 255 exactly.
+        val ok = "/x/" + "n".repeat(251) + ".txt"
+        val tooLong = "/x/" + "n".repeat(252) + ".txt"
+        assertNull(localNameIssue(ok, windows = true))
+        assertNull(localNameIssue(ok, windows = false))
+        assertNotNull(localNameIssue(tooLong, windows = true))
+        // 256 ASCII characters are also 256 UTF-8 bytes: rejected on POSIX too.
+        assertNotNull(localNameIssue(tooLong, windows = false))
+    }
+
+    @Test
+    fun `localNameIssue counts UTF-16 units on Windows and UTF-8 bytes on POSIX`() {
+        // 240 ASCII characters (240 UTF-8 bytes) + 4 four-byte emoji (8 UTF-16 code
+        // units, 16 UTF-8 bytes): 248 units — inside the Windows limit; 256 bytes —
+        // over POSIX NAME_MAX.
+        val component = "n".repeat(240) + "🦋".repeat(4)
+        assertEquals(248, component.length)
+        assertEquals(256, component.toByteArray(Charsets.UTF_8).size)
+        assertNull(localNameIssue("/x/$component", windows = true))
+        assertNotNull(localNameIssue("/x/$component", windows = false))
     }
 
     @Test

@@ -90,6 +90,11 @@ class DaemonRunCommand : Runnable {
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
             profileMode = mode,
+            // #655: the quota snapshot's TTL (profile config quota_refresh_minutes, default 15
+            // min, 0 = off) and whether the provider reports an ACCOUNT quota at all (localfs
+            // probes machine storage — daemon.status carries no quota field for it).
+            quotaRefreshMs = config.quotaRefreshMs(),
+            providerHasQuota = org.krost.unidrive.ProviderRegistry.getMetadata(profile.type)?.hasQuota ?: true,
         )
         // The startup banner reports the mode and the capabilities (#603 U4), so an operator — and a
         // client reading the log — can see what this daemon serves without asking it over IPC.

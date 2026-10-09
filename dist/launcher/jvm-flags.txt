@@ -1,10 +1,13 @@
 # The JVM flags every unidrive launcher passes, one per line ('#' starts a comment).
 # Single source: the Gradle deploy launchers, dist/install.sh, scripts/dev/unidrive-jfr.sh and
-# scripts/golden/unicode-tree/run-localfs.ps1 read this file; unidrive-windows mirrors it in
-# EngineHost.JvmFlags (a different repository: change both together).
+# scripts/golden/unicode-tree/run-localfs.ps1 read this file, DaemonAutospawn reads it beside the
+# deployed jar (the deploys copy it there), and unidrive-windows mirrors it in EngineHost.JvmFlags
+# (a different repository: change both together).
 #
 # Not listed here because they depend on the machine or the caller: -Xmx (UNIDRIVE_XMX, default 2g),
-# -Djdk.net.unixdomain.tmpdir (the host's temp dir) and -Duser.language/-Duser.country (--locale).
+# -Djdk.net.unixdomain.tmpdir (the host's temp dir), -Duser.language/-Duser.country (--locale), and
+# the diagnostics paths (-XX:ErrorFile, -XX:HeapDumpPath, the daemon's -Xlog:gc*:file), which ride
+# the launcher templates and DaemonAutospawn under UNIDRIVE_DIAG_DIR.
 # Also env-gated, added by the launcher templates and DaemonAutospawn (not a plain flag line): the
 # -javaagent of the probe jar deployed beside the fat jar, under UNIDRIVE_COROUTINE_DEBUG=1 (the
 # daemon's coroutine-dump facility, gkrost/unidrive#613 — see CoroutineDebug).
@@ -14,3 +17,7 @@
 # A daemon that survives an OutOfMemoryError runs on with dead worker threads; exit so the supervisor restarts it.
 # The JVM exits with code 3 then, distinct from the CLI's own 0 (ok), 1 (aborted) and 2 (per-action failures).
 -XX:+ExitOnOutOfMemoryError
+# The companion -XX:HeapDumpPath (a machine path) rides the launcher templates and DaemonAutospawn; without
+# it the dump lands next to the process CWD. A dump is about as large as the heap (about 2 GB at the
+# default -Xmx2g); pruning stays manual.
+-XX:+HeapDumpOnOutOfMemoryError

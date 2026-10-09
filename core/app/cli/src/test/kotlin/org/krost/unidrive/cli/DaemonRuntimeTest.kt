@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -27,16 +28,20 @@ import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
 import org.krost.unidrive.sync.IpcEndpoint
+import org.krost.unidrive.sync.StateDatabase
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
+import java.time.Instant
 import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -307,11 +312,7 @@ class DaemonRuntimeTest {
 
         val daemonJob = launch { runtime.start() }
 
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -354,11 +355,7 @@ class DaemonRuntimeTest {
             )
             val daemonJob = launch { runtime.start() }
             try {
-                repeat(100) {
-                    if (Files.exists(socketPath)) return@repeat
-                    delay(50)
-                }
-                assertTrue(Files.exists(socketPath), "socket must be bound within 5s")
+                awaitDaemonSocket(socketPath)
 
                 // Each documented verb with its minimal real request. Distinct
                 // paths so state-mutating verbs (create, open_write_begin) never
@@ -471,11 +468,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         runtime.close()
         daemonJob.join()
@@ -547,11 +540,7 @@ class DaemonRuntimeTest {
             providerFactory = { StubProvider() },
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         val pidFile = lockFile.resolveSibling("${lockFile.fileName}.pid")
         assertTrue(Files.exists(pidFile), "daemon must hold the lock before shutdown")
 
@@ -577,11 +566,7 @@ class DaemonRuntimeTest {
             syncPaths = listOf("/_INBOX", "/Docs \"x\""),
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
             val scope = kotlinx.serialization.json.Json.parseToJsonElement(reply)
@@ -609,11 +594,7 @@ class DaemonRuntimeTest {
             pollIntervalMs = 60_000,
         )
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
         try {
             val reply = sendOneRequest("""{"verb":"daemon.status"}""")
             val interval = kotlinx.serialization.json.Json.parseToJsonElement(reply)
@@ -668,11 +649,7 @@ class DaemonRuntimeTest {
 
         val daemonJob = launch { runtime.start() }
 
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -733,11 +710,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         val channel = connect()
         try {
@@ -778,11 +751,7 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound")
+        awaitDaemonSocket(socketPath, daemonJob)
 
         val channel = connect()
         channel.configureBlocking(false)
@@ -839,30 +808,157 @@ class DaemonRuntimeTest {
 
     private fun enumerationOf(reply: String): JsonObject = Json.parseToJsonElement(reply).jsonObject.getValue("enumeration").jsonObject
 
-    private fun startDaemon(provider: CloudProvider) =
-        DaemonRuntime(
-            profileMode = ProfileMode.MOUNT,
-            profileName = "test_profile",
-            lockFile = lockFile,
-            dbPath = dbPath,
-            syncRoot = tempDir,
-            socketPath = socketPath,
-            providerFactory = { provider },
+    private fun startDaemon(
+        provider: CloudProvider,
+        quotaRefreshMs: Long = 15 * 60_000L,
+        providerHasQuota: Boolean = true,
+    ) = DaemonRuntime(
+        profileMode = ProfileMode.MOUNT,
+        profileName = "test_profile",
+        lockFile = lockFile,
+        dbPath = dbPath,
+        syncRoot = tempDir,
+        socketPath = socketPath,
+        providerFactory = { provider },
+        quotaRefreshMs = quotaRefreshMs,
+        providerHasQuota = providerHasQuota,
         )
 
-    // Startup is fixture setup: a cold or busy runner gets 30 s, and a start that ENDED without binding
-    // fails at once instead of running out the clock (a real regression then names itself, the way the
-    // shutdown-cleanup test below checks its daemon the same way).
-    private suspend fun awaitSocket(daemonJob: Job? = null) {
-        withTimeout(30_000) {
-            while (!Files.exists(socketPath)) {
-                if (daemonJob?.isCompleted == true) {
-                    error("the daemon start finished without binding its socket")
-                }
-                delay(50)
-            }
+    // Startup is fixture setup: delegates to the shared #625 helper (30 s ceiling, died-start check).
+    private suspend fun awaitSocket(daemonJob: Job? = null) = awaitDaemonSocket(socketPath, daemonJob)
+
+    // ── #655: the quota snapshot in daemon.status ───────────────────────────
+
+    // Seeds the sync_state cache the same way `quota` (UD-214) persists it, with an
+    // old fetched_at so the daemon's first status sees an expired TTL.
+    private fun seedQuotaCache(
+        used: Long,
+        total: Long,
+        fetchedAt: Instant,
+    ) {
+        val db = StateDatabase(dbPath)
+        db.initialize()
+        try {
+            db.setSyncState("quota_used", used.toString())
+            db.setSyncState("quota_total", total.toString())
+            db.setSyncState("quota_remaining", (total - used).toString())
+            db.setSyncState("quota_fetched_at", fetchedAt.toString())
+        } finally {
+            db.close()
         }
     }
+
+    private suspend fun awaitQuotaCalls(stub: StubProvider, count: Int) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (stub.quotaCalls < count && System.currentTimeMillis() < deadline) delay(50)
+    }
+
+    @Test
+    fun `daemon status carries the quota snapshot and respects the ttl`() =
+        runBlocking(Dispatchers.IO) {
+            val stub = StubProvider()
+            seedQuotaCache(used = 5, total = 50, fetchedAt = Instant.now().minusSeconds(7_200))
+            val daemon = startDaemon(stub, quotaRefreshMs = 60_000)
+            val job = launch { daemon.start() }
+            try {
+                awaitSocket()
+                // The first status sees an expired TTL and triggers the fetch; its own
+                // reply may still carry the cached (stale) values — the refresh lands
+                // for the next one.
+                sendOneRequest("""{"verb":"daemon.status"}""")
+                awaitQuotaCalls(stub, 1)
+                assertEquals(1, stub.quotaCalls, "one refresh, single-flight")
+
+                val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+                val quota = Json.parseToJsonElement(reply).jsonObject.getValue("quota").jsonObject
+                assertEquals(1L, quota.getValue("used_bytes").jsonPrimitive.long, "the fresh fetch replaced the cache")
+                assertEquals(10L, quota.getValue("total_bytes").jsonPrimitive.long)
+                assertEquals(false, quota.getValue("stale").jsonPrimitive.boolean)
+                assertTrue(quota.getValue("fetched_at_ms").jsonPrimitive.long > 0)
+                assertEquals(1, stub.quotaCalls, "inside the TTL the snapshot is served from memory")
+
+                // The cache is updated for offline `quota --json` reads too.
+                val db = StateDatabase(dbPath)
+                db.initialize()
+                try {
+                    assertEquals("1", db.getSyncState("quota_used"), "the shared cache tuple is refreshed")
+                } finally {
+                    db.close()
+                }
+            } finally {
+                daemon.close()
+                job.join()
+            }
+        }
+
+    @Test
+    fun `a failed quota refresh keeps the cached values flagged stale with the error named`() =
+        runBlocking(Dispatchers.IO) {
+            val stub = StubProvider()
+            stub.quotaFailure = RuntimeException("quota endpoint down")
+            seedQuotaCache(used = 5, total = 50, fetchedAt = Instant.now().minusSeconds(7_200))
+            val daemon = startDaemon(stub, quotaRefreshMs = 60_000)
+            val job = launch { daemon.start() }
+            try {
+                awaitSocket()
+                val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+                awaitQuotaCalls(stub, 1)
+
+                val deadline = System.currentTimeMillis() + 5_000
+                var quota: JsonObject? = null
+                while (System.currentTimeMillis() < deadline) {
+                    quota =
+                        Json.parseToJsonElement(sendOneRequest("""{"verb":"daemon.status"}"""))
+                            .jsonObject.getValue("quota").jsonObject
+                    if (quota.getValue("stale").jsonPrimitive.boolean) break
+                    delay(50)
+                }
+                val q = assertNotNull(quota)
+                assertTrue(q.getValue("stale").jsonPrimitive.boolean, "the failed refresh flags the snapshot stale")
+                assertTrue(
+                    (q.getValue("error")!!.jsonPrimitive.content).contains("quota endpoint down"),
+                    "the error is named on the snapshot",
+                )
+                assertEquals(5L, q.getValue("used_bytes").jsonPrimitive.long, "the last known values are kept")
+            } finally {
+                daemon.close()
+                job.join()
+            }
+        }
+
+    @Test
+    fun `a provider without an account quota omits the quota field`() =
+        runBlocking(Dispatchers.IO) {
+            val stub = StubProvider()
+            val daemon = startDaemon(stub, providerHasQuota = false)
+            val job = launch { daemon.start() }
+            try {
+                awaitSocket()
+                val reply = sendOneRequest("""{"verb":"daemon.status"}""")
+                assertNull(Json.parseToJsonElement(reply).jsonObject["quota"], "no quota field for a provider without an account quota")
+                assertEquals(0, stub.quotaCalls, "and no fetch is attempted")
+            } finally {
+                daemon.close()
+                job.join()
+            }
+        }
+
+    @Test
+    fun `the quota is not fetched when no client ever connects`() =
+        runBlocking(Dispatchers.IO) {
+            val stub = StubProvider()
+            val daemon = startDaemon(stub)
+            val job = launch { daemon.start() }
+            try {
+                awaitSocket()
+                delay(300)
+                assertEquals(0, stub.quotaCalls, "no status request, no provider call — no polling for nobody")
+            } finally {
+                daemon.close()
+                job.join()
+            }
+        }
+
 
     // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
     private suspend fun awaitEnumeration(
@@ -976,6 +1072,11 @@ class DaemonRuntimeTest {
         override val displayName: String = "Stub"
         override var isAuthenticated: Boolean = true
 
+        // #655: quota snapshot fixtures. A failure injected here exercises the stale path.
+        var quotaCalls: Int = 0
+        var quotaResult: QuotaInfo = QuotaInfo(total = 10L, used = 1L, remaining = 9L)
+        var quotaFailure: Exception? = null
+
         override fun capabilities(): Set<Capability> = emptySet()
 
         override suspend fun authenticate() { /* no-op: already authenticated */ }
@@ -1011,7 +1112,11 @@ class DaemonRuntimeTest {
             scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage = DeltaPage(items = emptyList(), cursor = "x", hasMore = false)
 
-        override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
+        override suspend fun quota(): QuotaInfo {
+            quotaCalls += 1
+            quotaFailure?.let { throw it }
+            return quotaResult
+        }
     }
 
     /**

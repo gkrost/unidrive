@@ -82,7 +82,6 @@ internal fun safeResolveLocalOrNull(
         runCatching { safeResolveLocal(syncRoot, remotePath) }.getOrNull()
     }
 
-
 // The shapes a placeholder or download artifact in the sync root can have — anything else
 // is real user content, which the recovery download must never overwrite:
 //  - a fresh placeholder / interrupted-before-first-byte download: a 0-byte stub

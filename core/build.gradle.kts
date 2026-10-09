@@ -206,6 +206,8 @@ subprojects {
 
     tasks.withType<JavaCompile>().configureEach {
         options.release.set(21)
+        // Report-only lint for the few Java sources: no -Werror, the gate stays `check`.
+        options.compilerArgs.add("-Xlint:all")
     }
 
     afterEvaluate {
