@@ -814,7 +814,7 @@ class IpcServer(
          * sockets resolvable.
          */
         fun canonicalDiskName(profileName: String): String {
-            return canonicalDiskName(profileName, Path.of("/"))
+            return canonicalDiskName(profileName, defaultSocketDirectory())
         }
 
         internal fun canonicalDiskName(profileName: String, socketDirectory: Path): String {
