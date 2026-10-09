@@ -133,6 +133,7 @@ default_profile = "$runProfile"
 
 [providers.$runProfile]
 type = "localfs"
+mode = "mount"
 root_path = "$(To-Toml $remote)"
 sync_root = "$(To-Toml $mirror)"
 sync_path = ["/_INBOX"]
