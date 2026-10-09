@@ -34,6 +34,21 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
+
+/**
+ * Marks the coroutines of a drive enumeration (#693). A GET inside one that fails to connect at all
+ * (status 0: no route, refused, unknown host, a timeout before any response) keeps retrying on a backoff
+ * of up to [InternxtApiService.CONNECT_OUTAGE_BUDGET_MS] instead of ending after the 2 s / 4 s ladder,
+ * because that one failure otherwise discards the whole listing and the next attempt starts again at
+ * item 0. Calls outside an enumeration (a mount lookup, an upload, a download) keep the short ladder.
+ * HTTP status errors are not affected.
+ */
+internal class EnumerationOutageRetry : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<EnumerationOutageRetry>
+}
 
 class InternxtApiService(
     private val config: InternxtConfig,
@@ -60,10 +75,18 @@ class InternxtApiService(
     // The limits of the shard PUT's write-progress watchdog (#571). A parameter so that loopback tests can run on a
     // scale of milliseconds.
     private val shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
+    // How long a GET inside an enumeration (see [EnumerationOutageRetry]) keeps retrying a connect failure
+    // that got no response at all. A parameter so that tests can shrink or switch it off.
+    private val connectOutageBudgetMs: Long = CONNECT_OUTAGE_BUDGET_MS,
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
 
     companion object {
+        /** Total backoff a connect failure inside an enumeration may wait before the call fails ([EnumerationOutageRetry]). */
+        internal const val CONNECT_OUTAGE_BUDGET_MS: Long = 180_000L
+        private const val OUTAGE_FIRST_DELAY_MS: Long = 2_000L
+        private const val OUTAGE_MAX_DELAY_MS: Long = 30_000L
+
         /** Safety bound of one paged per-folder stream (10,000 pages are 10M items at the cursor page size of 1000). */
         internal const val MAX_LISTING_PAGES: Int = 10_000
 
@@ -1181,7 +1204,15 @@ class InternxtApiService(
         // the auth-replay sits inside one transient-retry iteration so a mid-call
         // 401 doesn't restart the full 3-iteration delay ladder — it consumes
         // only the current attempt's slot.
-        for (index in 0..delays.size) {
+        // A connect failure (status 0) during an enumeration is retried on its own, longer schedule and does
+        // not consume the ladder above; see EnumerationOutageRetry.
+        val outageRetry = coroutineContext[EnumerationOutageRetry] != null
+        var outageWaitedMs = 0L
+        var outageStep = 0
+        var index = -1
+        while (true) {
+            index++
+            if (index > delays.size) break
             val delay = delays.getOrElse(index) { delays.last() }
             // Per-attempt start, taken after the budget slot is granted so the
             // elapsed time matches what the socket watchdog measures (connect +
@@ -1264,7 +1295,30 @@ class InternxtApiService(
                     } else {
                         InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
                     }
-                if (index < delays.size) kotlinx.coroutines.delay(delay)
+                if (outageRetry && lastException!!.statusCode == 0) {
+                    val remainingMs = connectOutageBudgetMs - outageWaitedMs
+                    // The budget is spent: give up now. Falling through would run the rest of the ladder as
+                    // immediate attempts, since the ladder's delay is skipped on this branch.
+                    if (remainingMs <= 0) break
+                    val waitMs =
+                        (OUTAGE_FIRST_DELAY_MS shl outageStep.coerceAtMost(10))
+                            .coerceAtMost(OUTAGE_MAX_DELAY_MS)
+                            .coerceAtMost(remainingMs)
+                    outageStep++
+                    outageWaitedMs += waitMs
+                    log.warn(
+                        "GET {} has no connection ({}); retrying in {} ms ({} of {} ms spent)",
+                        url,
+                        e.message,
+                        waitMs,
+                        outageWaitedMs,
+                        connectOutageBudgetMs,
+                    )
+                    kotlinx.coroutines.delay(waitMs)
+                    index-- // the outage schedule, not the ladder, paces this retry
+                } else if (index < delays.size) {
+                    kotlinx.coroutines.delay(delay)
+                }
             }
         }
         throw lastException!!

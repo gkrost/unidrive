@@ -519,4 +519,61 @@ class InternxtScopedDeltaTest {
                 "_INBOX listed; a.txt and _INBOX found",
             )
         }
+
+    private val oneFolder = """{"children":[],"files":[{"uuid":"a","plainName":"a","type":"txt","size":"3","status":"EXISTS"}]}"""
+
+    @Test
+    fun `a tree walk that loses the network briefly lists everything and is complete`() =
+        runTest {
+            val calls = java.util.concurrent.atomic.AtomicInteger(0)
+            val engine =
+                MockEngine {
+                    if (calls.incrementAndGet() <= 8) throw java.net.NoRouteToHostException("No route to host")
+                    respond(oneFolder, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+                }
+            val page =
+                provider(engine).delta(
+                    cursor = null,
+                    onPageProgress = null,
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/")),
+                )
+            assertEquals(setOf("/a.txt"), page.items.map { it.path }.toSet())
+            assertTrue(page.complete)
+            // 8 lost calls outlast the old 3-attempt ladder plus the 3-attempt paged fallback (6 calls, ~12 s of waits).
+            assertTrue(testScheduler.currentTime > 12_000L, "waited out the outage: ${testScheduler.currentTime} ms")
+        }
+
+    @Test
+    fun `a tree walk whose outage outlasts the window fails and never returns a page`() =
+        runTest {
+            val engine = MockEngine { throw java.net.NoRouteToHostException("No route to host") }
+            val result =
+                runCatching {
+                    provider(engine).delta(
+                        cursor = null,
+                        onPageProgress = null,
+                        scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/")),
+                    )
+                }
+            assertTrue(result.exceptionOrNull() is InternxtApiException, "failed, not a partial page: $result")
+            assertTrue(testScheduler.currentTime >= InternxtApiService.CONNECT_OUTAGE_BUDGET_MS, "waited the window first: ${testScheduler.currentTime} ms")
+        }
+
+    @Test
+    fun `an incremental poll does not wait out a connect outage`() =
+        runTest {
+            val calls = java.util.concurrent.atomic.AtomicInteger(0)
+            val engine =
+                MockEngine {
+                    calls.incrementAndGet()
+                    throw java.net.NoRouteToHostException("No route to host")
+                }
+            val result =
+                runCatching {
+                    provider(engine).delta(cursor = "2026-10-09T00:00:00Z", onPageProgress = null, scanContext = null)
+                }
+            val e = result.exceptionOrNull()
+            assertTrue(e is InternxtApiException && e.statusCode == 0, "failed fast with the connect error: $result")
+            assertTrue(testScheduler.currentTime < 30_000L, "the poll fails on the short ladder, the poller retries: ${testScheduler.currentTime} ms")
+        }
 }
