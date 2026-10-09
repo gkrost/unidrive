@@ -50,4 +50,57 @@ for a in "${pass[@]}"; do
     fi
     prev="$a"
 done
-exec java "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${agent_args[@]}" "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" "${diag_args[@]}" -jar "@JAR@" "${pass[@]}"
+# Java runtime: Linux runs unidrive on the system's JDK, not a bundled one. Java 25+ is preferred: the JVM
+# runtime spike (#624) measured Java 21 at ~30 % more CPU to a ready daemon than Java 25. Order:
+# UNIDRIVE_JAVA; else `java` on PATH when it is 25+; else the newest 25+ JDK under UNIDRIVE_JVM_DIR
+# (default /usr/lib/jvm); else `java` on PATH. Versions come from the JDK's `release` file, so choosing
+# costs no extra JVM start. The daemon a command autospawns runs on this same java (its java.home).
+java_major() {
+    local rel
+    rel="$(dirname "$(dirname "$(readlink -f "$1")")")/release"
+    [[ -f "$rel" ]] && sed -n 's/^JAVA_VERSION="\([0-9]*\).*/\1/p' "$rel"
+    return 0
+}
+java_bin="${UNIDRIVE_JAVA:-}"
+if [[ -z "$java_bin" ]]; then
+    java_bin="$(command -v java || true)"
+    major=""
+    [[ -n "$java_bin" ]] && major="$(java_major "$java_bin")"
+    if [[ -z "$major" || "$major" -lt 25 ]]; then
+        best_major=0
+        for cand in "${UNIDRIVE_JVM_DIR:-/usr/lib/jvm}"/*/bin/java; do
+            [[ -x "$cand" ]] || continue
+            m="$(java_major "$cand")"
+            if [[ -n "$m" && "$m" -ge 25 && "$m" -gt "$best_major" ]]; then
+                java_bin="$cand"
+                best_major="$m"
+            fi
+        done
+    fi
+fi
+if [[ -z "$java_bin" ]]; then
+    echo "unidrive: no Java runtime found. Install one (Debian/Ubuntu: sudo apt install openjdk-25-jre-headless) or set UNIDRIVE_JAVA." >&2
+    exit 1
+fi
+major="$(java_major "$java_bin")"
+if [[ -n "$major" && "$major" -lt 21 ]]; then
+    echo "unidrive: needs Java 21 or newer, found Java $major at $java_bin. Install openjdk-25-jre-headless or set UNIDRIVE_JAVA." >&2
+    exit 1
+fi
+if [[ -n "$major" && "$major" -lt 25 && "${#diag_args[@]}" -gt 2 ]]; then
+    # Long-runners only (they armed the GC log above): a one-shot command is not worth the noise.
+    echo "unidrive: running on Java $major; Java 25 or newer uses noticeably less CPU (Debian/Ubuntu: sudo apt install openjdk-25-jre-headless)." >&2
+fi
+# A JDK package upgrade replaces the runtime under a running daemon, and classes or native libraries it
+# loads later then come from the new files. Say so on every command until that daemon is restarted.
+for pid in $(pgrep -u "$(id -u)" -f 'unidrive[^ ]*\.jar .*daemon run' 2>/dev/null); do
+    if grep -q 'libjvm\.so (deleted)' "/proc/$pid/maps" 2>/dev/null; then
+        profile="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | tail -1)"
+        if [[ -n "$profile" && "$profile" != "run" ]]; then
+            echo "unidrive: the Java runtime was updated after the daemon for profile '$profile' (pid $pid) started; restart it: unidrive -p $profile daemon stop" >&2
+        else
+            echo "unidrive: the Java runtime was updated after the unidrive daemon (pid $pid) started; restart it (unidrive daemon stop)." >&2
+        fi
+    fi
+done
+exec "$java_bin" "-Xmx${UNIDRIVE_XMX:-2g}" @STATIC_FLAGS_SH@ "${agent_args[@]}" "${locale_args[@]}" "-Djdk.net.unixdomain.tmpdir=${TMPDIR:-/tmp}" "${diag_args[@]}" -jar "@JAR@" "${pass[@]}"

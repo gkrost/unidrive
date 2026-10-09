@@ -193,7 +193,7 @@ class OneDriveProvider(
                     log.warn(
                         "UD-307: OneDrive rejected '{}' with nameAlreadyExists on a replace — likely a " +
                             "ZWJ-compound emoji filename or other server-side normalisation collision. " +
-                            "See docs/SPECS.md §3.1. Sync continues; rename the source file to work around.",
+                            "Sync continues; rename the source file to work around.",
                         remotePath,
                     )
                 }

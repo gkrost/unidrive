@@ -117,7 +117,7 @@ open class SyncEngine(
     // Default false; flipped by the CLI flag + TOML key.
     private val streamingReconciliation: Boolean = false,
     // Root directory for the hydration cache used by the mount front-end (MountEngine
-    // ensureHydrated / uploadFromCache, #560 U3) and the Reconciler's #459 guard. Null means resolve via XDG_CACHE_HOME (or ~/.cache).
+    // ensureHydrated / uploadFromCache, #560 U3). Null means resolve via XDG_CACHE_HOME (or ~/.cache).
     // Injected in tests so the cache stays inside the temp directory.
     private val cacheRoot: Path? = null,
     // Per-account namespace for the hydration cache subtree. MUST be unique
@@ -432,7 +432,7 @@ open class SyncEngine(
     /**
      * Resolves the cache file path for a given path within the hydration cache.
      * The mount front-end resolves through it ([MountWiring.cachePathOf], #560 U3), as do the
-     * Reconciler's #459 guard, the enumeration's reap and test fixtures.
+     * enumeration's reap and test fixtures.
      *
      * The result is normalised and always lies inside the profile's cache folder
      * (`<cacheRoot>/unidrive/hydration/<cacheKey>`), the way [safeResolveLocal] keeps local files
@@ -3645,6 +3645,34 @@ open class SyncEngine(
         fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
             cacheRoot
                 .resolve("unidrive/hydration")
-                .resolve(cacheKey.ifBlank { "default" })
+                // #135: the same canonical disk name the IPC socket uses, so the two never
+                // disagree about what identifies a profile on disk for long profile names.
+                .resolve(IpcServer.canonicalDiskName(cacheKey.ifBlank { "default" }, IpcServer.defaultSocketDirectory()))
+
+        /** Move a pre-canonical profile cache into the new directory before the daemon scans it. */
+        fun migrateLegacyHydrationCacheRoot(cacheRoot: Path, cacheKey: String) {
+            val key = cacheKey.ifBlank { "default" }
+            val parent = cacheRoot.resolve("unidrive/hydration")
+            val legacy = parent.resolve(key)
+            val canonical = hydrationCacheRoot(cacheRoot, key)
+            if (legacy == canonical || !Files.exists(legacy, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+
+            Files.createDirectories(parent)
+            if (Files.exists(canonical, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                val hasContents = Files.list(canonical).use { it.findAny().isPresent }
+                if (hasContents) {
+                    throw IllegalStateException(
+                        "Both legacy and canonical hydration cache directories exist for profile '$key'; " +
+                            "refusing to merge or discard either directory automatically.",
+                    )
+                }
+                Files.delete(canonical)
+            }
+            try {
+                Files.move(legacy, canonical, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(legacy, canonical)
+            }
+        }
     }
 }

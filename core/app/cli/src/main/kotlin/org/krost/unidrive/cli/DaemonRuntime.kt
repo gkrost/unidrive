@@ -1,9 +1,12 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.hydration.HydrationEvent
@@ -79,6 +82,10 @@ class DaemonRuntime(
     private val providerHasQuota: Boolean = true,
     // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit).
     private val exitProcess: (Int) -> Unit = { code -> System.exit(code) },
+    // #678: where the startup replay and the cache sweep run their blocking per-record walks.
+    // Dispatchers.IO in production; a seam for tests, which pin that a stop does not wait for them.
+    private val startupIoDispatcher: CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
+    private val afterProfileLockAcquired: () -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -122,6 +129,8 @@ class DaemonRuntime(
         lifecycleActive = true
 
         try {
+            afterProfileLockAcquired()
+
             // 2. Stale-mount warn (spec §3.3) — best-effort, never aborts.
             val staleMounts = StaleMountDetector.detectStaleFuseUnidriveMounts()
             if (staleMounts.isNotEmpty()) {
@@ -249,8 +258,16 @@ class DaemonRuntime(
                     // #450: what a stopped daemon left in the hydration cache (staging temp files, the
                     // copies of synced files read through the mount) is trimmed to the budget at start.
                     serveScope.launch {
-                        runCatching { hydrationImpl.sweepCache() }
-                            .onFailure { log.warn("hydration cache sweep at start failed", it) }
+                        // #678: blocking walk; off the event loop so it cannot delay a stop.
+                        withContext(startupIoDispatcher) {
+                            try {
+                                hydrationImpl.sweepCache()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                log.warn("hydration cache sweep at start failed", e)
+                            }
+                        }
                     }
                     val hydrationIpcHandler = HydrationIpcHandler(hydrationImpl)
                     hydrationIpcRef = hydrationIpcHandler
@@ -334,9 +351,20 @@ class DaemonRuntime(
                     // The hydration layer is built above whenever mountMode holds.
                     val h = requireNotNull(hydration) { "mount mode without a hydration layer" }
                     serveScope.launch {
-                        runCatching { h.replayPendingUploads() }
-                            .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
-                            .onFailure { log.warn("pending-upload replay failed", it) }
+                        // #678: the replay walks every record with blocking file-system work and no
+                        // suspension point; on the event loop it starved closeSignal.await(), so a
+                        // stop waited for the whole backlog. Off the loop, and with the walk checking
+                        // cancellation between records, a stop lands within one record.
+                        withContext(startupIoDispatcher) {
+                            try {
+                                val n = h.replayPendingUploads()
+                                if (n > 0) log.info("replayed {} pending upload(s) from state.db", n)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                log.warn("pending-upload replay failed", e)
+                            }
+                        }
                     }
                 }
 

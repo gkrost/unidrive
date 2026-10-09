@@ -1173,14 +1173,16 @@ class InternxtApiService(
         socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
     ): String {
         var lastException: InternxtApiException? = null
-        val delays = listOf(2_000L, 4_000L, 8_000L)
+        // Three attempts have two retry gaps; keep only the delays that are used.
+        val delays = listOf(2_000L, 4_000L)
         // Budget acquisition is per-attempt (inside the retry loop) so a retrying
         // call doesn't hold a slot through its full backoff and starve other callers.
         // Composition order is `loop { withAuthRetry { budget.awaitSlot(); ... } }`:
         // the auth-replay sits inside one transient-retry iteration so a mid-call
         // 401 doesn't restart the full 3-iteration delay ladder — it consumes
         // only the current attempt's slot.
-        for ((index, delay) in delays.withIndex()) {
+        for (index in 0..delays.size) {
+            val delay = delays.getOrElse(index) { delays.last() }
             // Per-attempt start, taken after the budget slot is granted so the
             // elapsed time matches what the socket watchdog measures (connect +
             // send + wait for the first response byte). 0 = no attempt started.
@@ -1221,10 +1223,13 @@ class InternxtApiService(
                     // A 524 ends the call: the gateway had waited about two minutes, a repeat gets the same answer.
                     if (e.statusCode == GATEWAY_ORIGIN_TIMEOUT) throw unavailable
                     lastException = unavailable
-                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                    if (index < delays.size) kotlinx.coroutines.delay(delay)
                 } else if (e.statusCode in TRANSIENT_STATUSES) {
                     lastException = e
-                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                    if (index < delays.size) {
+                        val retryAfterMs = e.retryAfterMs ?: parseRetryAfter(e.message)
+                        kotlinx.coroutines.delay(retryAfterMs?.coerceIn(500L, 60_000L) ?: delay)
+                    }
                 } else {
                     throw e
                 }
@@ -1259,7 +1264,7 @@ class InternxtApiService(
                     } else {
                         InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
                     }
-                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                if (index < delays.size) kotlinx.coroutines.delay(delay)
             }
         }
         throw lastException!!

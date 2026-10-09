@@ -364,6 +364,31 @@ class IpcServerTest {
         assertTrue(baseName.endsWith(".sock"), "Should end with .sock: $baseName")
     }
 
+    @Test
+    fun `the canonical disk name matches the socket name for long profile names (#135)`() {
+        val longName = "a".repeat(100)
+        assertEquals(
+            IpcServer.socketBaseName(longName).removePrefix("unidrive-").removeSuffix(".sock"),
+            IpcServer.canonicalDiskName(longName),
+            "the socket name derives from the canonical",
+        )
+        assertEquals("short", IpcServer.canonicalDiskName("short"), "a short name stays verbatim")
+        assertTrue(IpcServer.canonicalDiskName(longName).length == 8, "the long name hashes to the 8-hex truncation")
+        assertEquals(
+            IpcServer.canonicalDiskName(longName),
+            IpcServer.canonicalDiskName(longName),
+            "stable across calls",
+        )
+    }
+
+    @Test
+    fun `canonical name accounts for the socket directory when the basename alone fits`() {
+        val longSocketDirectory = Path.of("/run/user/1000")
+        val profileName = "a".repeat(70)
+        assertTrue("unidrive-$profileName.sock".length <= 90)
+        assertEquals(8, IpcServer.canonicalDiskName(profileName, longSocketDirectory).length)
+    }
+
     // ── Bug regression tests — these MUST fail until the bugs are fixed ──
 
     // UD-816: same runTest+real-UDS race. Switch to runBlocking(IO).

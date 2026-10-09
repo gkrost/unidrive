@@ -1,12 +1,14 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.IpcAuth
+import org.krost.unidrive.sync.IpcServer
 import picocli.CommandLine
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -122,6 +124,48 @@ class MountCommandTest {
         val root = Paths.get("/tmp/xdg-cache")
         val resolved = MountCommand.hydrationCacheRoot(root, "")
         assertEquals(Paths.get("/tmp/xdg-cache/unidrive/hydration/default"), resolved)
+    }
+
+    // ── #135: the cache root shares the socket's canonical disk name ─────────
+
+    @Test
+    fun `hydrationCacheRoot uses the canonical disk name for long profile names`() {
+        val longName = "a".repeat(100)
+        val root = Paths.get("/tmp/xdg-cache")
+
+        val resolved = MountCommand.hydrationCacheRoot(root, longName)
+
+        val canonical = IpcServer.canonicalDiskName(longName)
+        assertEquals(
+            Paths.get("/tmp/xdg-cache/unidrive/hydration/$canonical"),
+            resolved,
+            "the cache root derives from the same canonical the socket name uses",
+        )
+        assertFalse(resolved.toString().contains(longName), "the verbatim long name is not used")
+    }
+
+    @Test
+    fun `canonicalDiskName is verbatim for short names and the hashed form for long ones`() {
+        assertEquals("short", IpcServer.canonicalDiskName("short"))
+        val long = IpcServer.canonicalDiskName("a".repeat(100))
+        assertEquals(8, long.length, "long names hash to the 8-hex truncation: $long")
+        assertTrue(long.all { it.isDigit() || it in 'a'..'f' }, "the truncation is hex: $long")
+        assertEquals(long, IpcServer.canonicalDiskName("a".repeat(100)), "stable across calls")
+    }
+
+    @Test
+    fun `migrates an existing long profile cache before using the canonical directory`() {
+        val root = Files.createTempDirectory("ud-cache-migration")
+        val key = "long-profile-" + "x".repeat(90)
+        val legacy = root.resolve("unidrive/hydration/$key")
+        Files.createDirectories(legacy)
+        Files.writeString(legacy.resolve("pending-upload.txt"), "keep me")
+
+        org.krost.unidrive.sync.SyncEngine.migrateLegacyHydrationCacheRoot(root, key)
+
+        val canonical = org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(root, key)
+        assertEquals("keep me", Files.readString(canonical.resolve("pending-upload.txt")))
+        assertFalse(Files.exists(legacy), "the legacy directory was moved, not abandoned")
     }
 
     @Test
