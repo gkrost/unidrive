@@ -802,22 +802,23 @@ class IpcServer(
             }
         }
 
-        fun socketBaseName(profileName: String): String {
-            val base = "unidrive-$profileName.sock"
-            if (base.length > MAX_SOCKET_PATH_LENGTH) {
-                return hashedSocketName(profileName)
-            }
-            return base
-        }
+        fun socketBaseName(profileName: String): String = "unidrive-${canonicalDiskName(profileName)}.sock"
 
-        private fun hashedSocketName(profileName: String): String {
-            val hash =
-                MessageDigest
-                    .getInstance("SHA-1")
-                    .digest(profileName.toByteArray(Charsets.UTF_8))
-                    .take(4)
-                    .joinToString("") { "%02x".format(it) }
-            return "unidrive-$hash.sock"
+        /**
+         * #135: the one canonical on-disk name for a profile — verbatim when it is short
+         * enough for every consumer, the 8-hex SHA-1 truncation when the socket path would
+         * exceed [MAX_SOCKET_PATH_LENGTH]. `hydrationCacheRoot` derives its directory from
+         * the same function, so the socket and the cache never disagree about what
+         * identifies a profile on disk. The `.meta` sidecar keeps already-deployed hashed
+         * sockets resolvable.
+         */
+        fun canonicalDiskName(profileName: String): String {
+            if ("unidrive-$profileName.sock".length <= MAX_SOCKET_PATH_LENGTH) return profileName
+            return MessageDigest
+                .getInstance("SHA-1")
+                .digest(profileName.toByteArray(Charsets.UTF_8))
+                .take(4)
+                .joinToString("") { "%02x".format(it) }
         }
 
         private fun writeMetaFile(
@@ -891,7 +892,7 @@ class IpcServer(
             val candidate = dir.resolve(socketBaseName(profileName))
             val result =
                 if (candidate.toString().length > MAX_SOCKET_PATH_LENGTH) {
-                    dir.resolve(hashedSocketName(profileName))
+                    dir.resolve("unidrive-${canonicalDiskName(profileName)}.sock")
                 } else {
                     candidate
                 }

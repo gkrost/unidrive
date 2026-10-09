@@ -3645,6 +3645,8 @@ open class SyncEngine(
         fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
             cacheRoot
                 .resolve("unidrive/hydration")
-                .resolve(cacheKey.ifBlank { "default" })
+                // #135: the same canonical disk name the IPC socket uses, so the two never
+                // disagree about what identifies a profile on disk for long profile names.
+                .resolve(IpcServer.canonicalDiskName(cacheKey.ifBlank { "default" }))
     }
 }
