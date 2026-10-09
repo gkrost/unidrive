@@ -17,6 +17,12 @@
 # Linux with no wall-clock or CPU cost (the JVM runtime spike, #624). Java 27's
 # G1 already starts at ~72 MB; the flag is harmless there.
 -Xms64m
+# Pick IPv4 or IPv6 the way the operating system orders them (RFC 6724; IPv6 first on a normal dual-stack
+# host), as curl and browsers do. Java's own default tries IPv4 first, and on a dual-stack line whose IPv4
+# runs through a carrier NAT (DS-Lite) that path can drop connections while IPv6 is clean: measured on one
+# such line, 58 of 300 IPv4 connects to the Internxt gateway failed and 0 of 300 IPv6 ones, and three
+# failures in a row aborted a 700 GiB first enumeration each time.
+-Djava.net.preferIPv6Addresses=system
 -Dstdout.encoding=UTF-8
 -Dstderr.encoding=UTF-8
 --enable-native-access=ALL-UNNAMED
