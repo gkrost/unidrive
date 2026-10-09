@@ -97,6 +97,10 @@ class IpcServer(
     private val closeListeners = CopyOnWriteArrayList<(String) -> Unit>()
     private var serverChannel: ServerSocketChannel? = null
 
+    // Wakes the connection readers when their socket has data (#687); set by start(), cleared by close().
+    @Volatile
+    private var readSelector: IpcReadSelector? = null
+
     // #419: set once start() has bound the socket, so close() removes only files this server owns.
     @Volatile
     private var ownsSocketFiles = false
@@ -196,7 +200,7 @@ class IpcServer(
         } catch (e: IOException) {
             log.debug("IPC: writeToConnection failed for id={}: {}", entry.id, e.message)
             clients.remove(entry)
-            runCatching { entry.channel.close() }
+            closeChannel(entry.channel)
             closeListeners.forEach { it(entry.id) }
             false
         }
@@ -268,6 +272,9 @@ class IpcServer(
         if (!restricted.restricted) log.warn("IPC: could not restrict the permissions of {}: {}", socketPath, restricted)
         serverChannel = server
 
+        val selector = IpcReadSelector()
+        readSelector = selector
+
         val transport: kotlinx.coroutines.CoroutineDispatcher = transportDispatcher ?: run {
             val es = java.util.concurrent.Executors.newFixedThreadPool(
                 TRANSPORT_POOL_SIZE,
@@ -318,7 +325,13 @@ class IpcServer(
                                             log.info("IPC: closing idle connection id={} (no request for {} ms)", connId, idleTimeoutMs)
                                             break
                                         }
-                                        delay(20)
+                                        // Sleep until the socket has data (#687); the timeout only re-runs the checks above.
+                                        val recheckMs = recheckDelayMs(connId, entry)
+                                        if (recheckMs == null) {
+                                            selector.awaitReadable(sc)
+                                        } else {
+                                            withTimeoutOrNull(recheckMs) { selector.awaitReadable(sc) }
+                                        }
                                         continue
                                     }
                                     buf.flip()
@@ -376,7 +389,7 @@ class IpcServer(
                     }
                     for (entry in dead) {
                         clients.remove(entry)
-                        runCatching { entry.channel.close() }
+                        closeChannel(entry.channel)
                         closeListeners.forEach { it(entry.id) }
                     }
                 }
@@ -393,6 +406,9 @@ class IpcServer(
             closeListeners.forEach { it(entry.id) }
         }
         clients.clear()
+        // Readers waiting for data resume and end with their closed channels.
+        readSelector?.close()
+        readSelector = null
         syncSubscribers.clear()
         pendingPostReply.clear()
         authSessions.clear()
@@ -600,6 +616,32 @@ class IpcServer(
             !entry.idleExempt &&
             entry.id !in syncSubscribers
 
+    // Closes a connection from outside its reader and wakes the reader, which would otherwise sleep
+    // until data arrives (closing a channel does not interrupt the selector).
+    private fun closeChannel(sc: SocketChannel) {
+        runCatching { sc.close() }
+        readSelector?.wake(sc)
+    }
+
+    // How long the reader may sleep before it re-runs its timeout checks, or null when none applies
+    // (data, a close or a cancellation then wake it). The handshake timeout has no accessor for its
+    // remaining time, so an unauthenticated connection is rechecked often; the idle timeout is
+    // rechecked at most every IDLE_RECHECK_MS (the clock is injectable, so the remaining time alone
+    // is not a safe sleep).
+    private fun recheckDelayMs(
+        connId: String,
+        entry: ClientEntry,
+    ): Long? {
+        val handshake = if (authSessions[connId]?.let { it.scope == null } == true) HANDSHAKE_RECHECK_MS else null
+        val idle =
+            if (idleTimeoutMs > 0 && !entry.idleExempt && connId !in syncSubscribers) {
+                (idleTimeoutMs - (clock() - entry.lastRequestAtMs)).coerceIn(1L, IDLE_RECHECK_MS)
+            } else {
+                null
+            }
+        return if (handshake != null && idle != null) minOf(handshake, idle) else handshake ?: idle
+    }
+
     // A connection over maxClients: best effort, one line that says why, then close. A fresh
     // connection's send buffer is empty, so the line goes out at once; the short deadline only
     // bounds a peer that reads nothing. What the client already sent is read and dropped first:
@@ -682,6 +724,8 @@ class IpcServer(
         private const val MAX_SOCKET_PATH_LENGTH = 90
         private const val MAX_REQUEST_BYTES = 64 * 1024
         private const val TRANSPORT_POOL_SIZE = 4
+        private const val IDLE_RECHECK_MS = 1_000L
+        private const val HANDSHAKE_RECHECK_MS = 250L
 
         /**
          * [s] as one JSON string literal, quotes included: the one escaper for the lines this
