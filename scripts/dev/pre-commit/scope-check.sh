@@ -108,8 +108,9 @@ case "$TYPE($SCOPE)" in
     ;;
   "docs(backlog)")
     UNEXPECTED="$(filter_unexpected "$STAGED" \
-      'docs/backlog/*.md')"
-    [[ -n "$UNEXPECTED" ]] && fail "docs/backlog/*.md only" "$UNEXPECTED"
+      'BACKLOG.md' \
+      'CLOSED.md')"
+    [[ -n "$UNEXPECTED" ]] && fail "BACKLOG.md / CLOSED.md only" "$UNEXPECTED"
     ;;
   "docs(handover)")
     UNEXPECTED="$(filter_unexpected "$STAGED" \
@@ -122,16 +123,9 @@ case "$TYPE($SCOPE)" in
     # contains a UD-### id. If it doesn't, warn but do not block
     # (code_refs drift is common enough that blocking would cost more
     # than it buys).
-    if [[ "$SCOPE" =~ UD-[0-9]{3}[a-z]? ]]; then
-      # Multiple ticket ids in one scope are legal (e.g. "UD-237, UD-235").
-      IDS=()
-      while IFS= read -r id; do IDS+=("$id"); done < <(grep -oE 'UD-[0-9]{3}[a-z]?' <<< "$SCOPE")
-      for id in "${IDS[@]}"; do
-        if ! grep -q "^id: $id$" docs/backlog/BACKLOG.md docs/backlog/CLOSED.md 2>/dev/null; then
-          echo "scope-check: warning — $id not found in BACKLOG.md or CLOSED.md."
-        fi
-      done
-    fi
+    # The ticket ids (UD-###) and docs/backlog/ are gone: the backlog lives in GitHub issues (BACKLOG.md is an index).
+    # Nothing to cross-check here any more.
+    :
     ;;
 esac
 

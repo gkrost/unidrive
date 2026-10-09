@@ -117,7 +117,7 @@ open class SyncEngine(
     // Default false; flipped by the CLI flag + TOML key.
     private val streamingReconciliation: Boolean = false,
     // Root directory for the hydration cache used by the mount front-end (MountEngine
-    // ensureHydrated / uploadFromCache, #560 U3) and the Reconciler's #459 guard. Null means resolve via XDG_CACHE_HOME (or ~/.cache).
+    // ensureHydrated / uploadFromCache, #560 U3). Null means resolve via XDG_CACHE_HOME (or ~/.cache).
     // Injected in tests so the cache stays inside the temp directory.
     private val cacheRoot: Path? = null,
     // Per-account namespace for the hydration cache subtree. MUST be unique
@@ -432,7 +432,7 @@ open class SyncEngine(
     /**
      * Resolves the cache file path for a given path within the hydration cache.
      * The mount front-end resolves through it ([MountWiring.cachePathOf], #560 U3), as do the
-     * Reconciler's #459 guard, the enumeration's reap and test fixtures.
+     * enumeration's reap and test fixtures.
      *
      * The result is normalised and always lies inside the profile's cache folder
      * (`<cacheRoot>/unidrive/hydration/<cacheKey>`), the way [safeResolveLocal] keeps local files
