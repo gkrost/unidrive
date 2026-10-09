@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.SyncEngine
@@ -80,9 +81,20 @@ class MountCommand : Runnable {
         )
 
         Files.createDirectories(cacheRoot)
-        val argv = buildArgv(binary, mountPath, socketPath, cacheRoot)
+        // IPC protocol 2 (#632): the co-daemon authenticates every connection with the profile's
+        // full-scope token, which the daemon rewrites at each start; the co-daemon re-reads it on
+        // every connect. Without these two arguments it cannot connect to a protocol-2 daemon.
+        val tokenFile = IpcAuth.tokenFile(parent.providerConfigDir(), IpcAuth.Scope.FULL)
+        val argv = buildArgv(binary, mountPath, socketPath, cacheRoot, tokenFile, profile.name)
         val exit = superviseProcess(argv)
-        if (exit != 0) {
+        if (exit == EX_USAGE) {
+            // A co-daemon older than IPC protocol 2 rejects --ipc-token-file as an unknown argument.
+            System.err.println(
+                "unidrive mount: co-daemon at $binary rejected its arguments (exit $EX_USAGE). " +
+                    "It is likely older than IPC protocol 2: rebuild unidrive-mount-linux and " +
+                    "reinstall it (`unidrive-mount --version` must report ipc-protocol 2).",
+            )
+        } else if (exit != 0) {
             // Per spec §3.4 "Daemon-not-running error path": the co-daemon's
             // inherited stderr already prints "failed to connect IPC at ...:
             // Connection refused". Augment with the operator hint.
@@ -97,6 +109,7 @@ class MountCommand : Runnable {
 
     companion object {
         const val EX_CONFIG: Int = 78
+        const val EX_USAGE: Int = 64
         const val SIGTERM_GRACE_MS: Long = 10_000
 
         fun defaultBinaryPath(): Path =
@@ -116,6 +129,8 @@ class MountCommand : Runnable {
             mountPath: Path,
             socketPath: Path,
             cacheRoot: Path,
+            tokenFile: Path,
+            profileName: String,
         ): List<String> =
             listOf(
                 binary.toString(),
@@ -125,6 +140,11 @@ class MountCommand : Runnable {
                 socketPath.toString(),
                 "--cache",
                 cacheRoot.toString(),
+                "--ipc-token-file",
+                tokenFile.toString(),
+                // Exactly as in config.toml: the profile name is part of the HMAC message.
+                "--profile",
+                profileName,
             )
 
         fun checkBinaryExists(binary: Path): Int =

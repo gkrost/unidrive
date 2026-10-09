@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.IpcAuth
 import picocli.CommandLine
 import java.nio.file.Files
 import java.nio.file.Path
@@ -33,13 +34,14 @@ class MountCommandTest {
     }
 
     @Test
-    fun `buildArgv produces canonical mount, ipc, cache triplet`() {
+    fun `buildArgv produces canonical mount, ipc, cache, token and profile arguments`() {
         val binary = Paths.get("/home/u/.local/lib/unidrive/unidrive-mount")
         val mountPoint = Paths.get("/tmp/mnt")
         val socket = Paths.get("/run/user/1000/unidrive-foo.sock")
         val cacheRoot = Paths.get("/home/u/.cache/unidrive/hydration/onedrive")
+        val tokenFile = Paths.get("/home/u/.config/unidrive/foo/ipc.token")
 
-        val argv = MountCommand.buildArgv(binary, mountPoint, socket, cacheRoot)
+        val argv = MountCommand.buildArgv(binary, mountPoint, socket, cacheRoot, tokenFile, "foo")
 
         // #239: assert the argv structure against the inputs' own toString() rather than
         // hard-coded POSIX strings, so the test holds on Windows (where Paths.get renders
@@ -54,9 +56,31 @@ class MountCommandTest {
                 socket.toString(),
                 "--cache",
                 cacheRoot.toString(),
+                "--ipc-token-file",
+                tokenFile.toString(),
+                "--profile",
+                "foo",
             ),
             argv,
         )
+    }
+
+    // IPC protocol 2 (#632): a protocol-2 daemon refuses every verb from an unauthenticated
+    // connection, so a co-daemon started without the token file and the exact profile name
+    // cannot mount at all. If this test is removed or loosened, mount silently breaks again.
+    @Test
+    fun `buildArgv passes the full-scope token file and the profile name unnormalised`() {
+        val profileDir = Paths.get("/home/u/.config/unidrive/caf\u00e9")
+        val tokenFile = IpcAuth.tokenFile(profileDir, IpcAuth.Scope.FULL)
+
+        val argv =
+            MountCommand.buildArgv(
+                Paths.get("/b"), Paths.get("/m"), Paths.get("/s.sock"), Paths.get("/c"), tokenFile, "caf\u00e9",
+            )
+
+        assertEquals(tokenFile.toString(), argv[argv.indexOf("--ipc-token-file") + 1])
+        assertEquals(profileDir.resolve("ipc.token"), tokenFile, "full scope must use ipc.token, not the read token")
+        assertEquals("caf\u00e9", argv[argv.indexOf("--profile") + 1])
     }
 
     @Test
@@ -67,7 +91,7 @@ class MountCommandTest {
         // The load-bearing claim: cache argv ends with /<providerId>, never the bare root.
         val cacheRoot = Paths.get("/home/u/.cache/unidrive/hydration/posteo_onedrive")
 
-        val argv = MountCommand.buildArgv(binary, mountPoint, socket, cacheRoot)
+        val argv = MountCommand.buildArgv(binary, mountPoint, socket, cacheRoot, Paths.get("/t/ipc.token"), "posteo_onedrive")
 
         val cacheIdx = argv.indexOf("--cache")
         assertTrue(cacheIdx >= 0, "argv must contain --cache flag")
