@@ -40,6 +40,18 @@ import java.util.concurrent.atomic.AtomicReference
  * rejection) is retried on a timer, since it would otherwise never report
  * again. The periodic poll is the safety net throughout.
  *
+ * ## Which `connect_error` is permanent
+ *
+ * An endpoint that cannot be the notifications server stops the client for the
+ * rest of the process: the TLS identity fails (hostname not verified, untrusted
+ * or invalid certificate — e.g. 2026-10-09 `notifications.internxt.com` served a
+ * certificate for `*.coolabor.de`), or the websocket upgrade is answered with an
+ * HTTP status that is not an upgrade, an auth rejection or a temporary error
+ * (2xx, 3xx, 404, 410). Retrying those every ≤ 60 s for days only repeats the
+ * handshake against the wrong server; the poll is the safety net. One WARN says
+ * so; restarting the process tries again. Transport errors (offline at boot,
+ * timeout, refused, 5xx) are not permanent and keep socket.io's backoff.
+ *
  * ## Logging
  *
  * One WARN per outage (the first `connect_error`, with the first error and its
@@ -173,6 +185,18 @@ internal class NotificationsClient(
             attempt = ++failedAttempts
             firstOfOutage = !outageWarned
             outageWarned = true
+        }
+        val permanent = if (looksLikeAuthRejection(error)) null else permanentFailure(error)
+        if (permanent != null) {
+            log.warn(
+                "Internxt notifications endpoint {} is not usable ({}); notifications are off for this process " +
+                    "and sync polls only. Restart the process to try again. {}",
+                notificationsUrl,
+                permanent,
+                description,
+            )
+            disconnect()
+            return
         }
         if (firstOfOutage) {
             log.warn(
@@ -357,6 +381,36 @@ internal class NotificationsClient(
                 depth++
             }
             return false
+        }
+
+        // OkHttp reports a refused websocket upgrade as "Expected HTTP 101 response but was '404 Not Found'".
+        private val UPGRADE_STATUS = Regex("Expected HTTP 101 response but was '(\\d{3})")
+
+        /**
+         * Why a `connect_error` means this endpoint can never be the notifications server, or null
+         * when it may be temporary (see "Which `connect_error` is permanent"). Auth rejections are
+         * classified by [looksLikeAuthRejection] first and never reach this.
+         */
+        internal fun permanentFailure(error: Any?): String? {
+            if (error !is Throwable) return null
+            var t: Throwable? = error
+            var depth = 0
+            while (t != null && depth < MAX_CAUSE_DEPTH) {
+                when {
+                    t is javax.net.ssl.SSLPeerUnverifiedException ->
+                        return "TLS: the server's certificate is not valid for this host name"
+                    t is java.security.cert.CertificateException || t is java.security.cert.CertPathValidatorException ||
+                        t.javaClass.name == "sun.security.validator.ValidatorException" ->
+                        return "TLS: the server's certificate is not trusted"
+                }
+                val status = t.message?.let { UPGRADE_STATUS.find(it) }?.groupValues?.get(1)?.toInt()
+                if (status != null && (status in 200..399 || status == 404 || status == 410)) {
+                    return "the websocket upgrade was answered with HTTP $status"
+                }
+                t = t.cause?.takeIf { it !== t }
+                depth++
+            }
+            return null
         }
 
         /** One line for the log: the exception chain, so "websocket error" comes with its real cause. */
