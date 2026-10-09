@@ -1,5 +1,6 @@
 package org.krost.unidrive.hydration
 
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -736,6 +737,9 @@ class HydrationImpl(
         var deferred = 0
         var refused = 0
         for (path in stateDb.pendingUploadPaths()) {
+            // #678: the walk between records is blocking file-system work with no suspension
+            // point, so a stop is only honoured if the loop itself checks for it.
+            coroutineContext.ensureActive()
             if (!replayable(path)) continue
             val cachePath = mount.resolveCachePath(path)
             if (refusedEarlier(path, cachePath) != null) { refused++; continue } // #493: not replayed at every start
@@ -765,6 +769,7 @@ class HydrationImpl(
         var dirty = 0
         var dirtyDeferred = 0
         for (path in stateDb.uploadedMountRows()) {
+            coroutineContext.ensureActive() // #678: see the pending loop above
             if (!replayable(path)) continue
             if (uploadSlots.containsKey(path)) continue
             val entry = stateDb.getEntry(path) ?: continue

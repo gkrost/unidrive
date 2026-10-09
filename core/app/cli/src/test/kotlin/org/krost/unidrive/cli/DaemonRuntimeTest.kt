@@ -1,8 +1,10 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
@@ -30,6 +32,7 @@ import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
 import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.model.SyncEntry
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -853,6 +856,7 @@ class DaemonRuntimeTest {
         provider: CloudProvider,
         quotaRefreshMs: Long = 15 * 60_000L,
         providerHasQuota: Boolean = true,
+        startupIoDispatcher: CoroutineDispatcher = Dispatchers.IO,
     ) = DaemonRuntime(
         profileMode = ProfileMode.MOUNT,
         profileName = "test_profile",
@@ -863,10 +867,96 @@ class DaemonRuntimeTest {
         providerFactory = { provider },
         quotaRefreshMs = quotaRefreshMs,
         providerHasQuota = providerHasQuota,
+        startupIoDispatcher = startupIoDispatcher,
         )
 
     // Startup is fixture setup: delegates to the shared #625 helper (30 s ceiling, died-start check).
     private suspend fun awaitSocket(daemonJob: Job? = null) = awaitDaemonSocket(socketPath, daemonJob)
+
+    // ── #678: startup work must not delay a stop ─────────────────────────────────────────────
+
+    /** A dispatcher that queues tasks until [release], then runs them on the caller's thread. */
+    private class HoldingDispatcher : CoroutineDispatcher() {
+        private val queue = java.util.ArrayDeque<Runnable>()
+
+        @Volatile private var released = false
+
+        val size: Int
+            get() = synchronized(queue) { queue.size }
+
+        override fun dispatch(
+            context: CoroutineContext,
+            block: Runnable,
+        ) {
+            synchronized(queue) {
+                if (released) block.run() else queue.add(block)
+            }
+        }
+
+        /** Run everything queued so far. Called after the stop was issued, so the queued startup
+         * work observes the cancellation and the shutdown's join can complete. */
+        fun release() {
+            val toRun =
+                synchronized(queue) {
+                    released = true
+                    val out = queue.toList()
+                    queue.clear()
+                    out
+                }
+            toRun.forEach { it.run() }
+        }
+    }
+
+    /**
+     * The startup replay and the cache sweep are blocking walks with no suspension point of their
+     * own. They run off the event loop (the injected dispatcher stands in for Dispatchers.IO): the
+     * socket binds while both are still queued, and once the stop was issued the queued work runs,
+     * observes the cancellation, and the daemon exits. On the event loop they starved
+     * closeSignal.await() and a stop waited for the whole replay (#678's 38-65 s stalls).
+     */
+    @Test
+    fun `a stop is honoured while the startup replay and sweep are still queued on their dispatcher`() =
+        runBlocking(Dispatchers.IO) {
+            // A backlog the replay would walk; its records are never reached while it is queued.
+            val seeded = StateDatabase(dbPath)
+            seeded.initialize()
+            try {
+                for (i in 1..25) {
+                    seeded.upsertEntry(
+                        SyncEntry(
+                            path = "/q/f$i.txt",
+                            remoteId = null,
+                            remoteHash = null,
+                            remoteSize = 0,
+                            remoteModified = null,
+                            localMtime = 1,
+                            localSize = 1,
+                            isFolder = false,
+                            isPinned = false,
+                            isHydrated = true,
+                            lastSynced = Instant.now(),
+                        ),
+                    )
+                }
+            } finally {
+                seeded.close()
+            }
+
+            val holding = HoldingDispatcher()
+            val runtime = startDaemon(StubProvider(), startupIoDispatcher = holding)
+            val daemonJob = launch { runtime.start() }
+            try {
+                awaitSocket(daemonJob)
+                assertTrue(holding.size >= 2, "precondition: replay and sweep are queued off the loop")
+                runtime.close()
+                holding.release() // the queued work now runs and observes the cancellation
+                withTimeout(10_000) { daemonJob.join() }
+            } finally {
+                holding.release()
+                runtime.close()
+                runCatching { withTimeout(10_000) { daemonJob.join() } }
+            }
+        }
 
     // ── #655: the quota snapshot in daemon.status ───────────────────────────
 
