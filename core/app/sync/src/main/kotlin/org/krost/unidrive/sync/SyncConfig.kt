@@ -267,6 +267,8 @@ data class RawGeneral(
     val exclude_patterns: List<String>? = null,
     val desktop_notifications: Boolean? = null,
     val verify_integrity: Boolean? = null,
+    // #655: TTL of the daemon's quota snapshot in daemon.status (quota), in minutes; 0 = off.
+    val quota_refresh_minutes: Int? = null,
     val use_trash: Boolean? = null,
     val trash_emulation: Boolean? = null,
     val trash_retention_days: Int? = null,
@@ -430,6 +432,8 @@ data class SyncConfig(
     val globalExcludePatterns: List<String> = emptyList(),
     val desktopNotifications: Boolean = false,
     val verifyIntegrity: Boolean = false,
+    // #655: TTL of the daemon's quota snapshot in daemon.status (quota), in minutes; 0 = off.
+    val quotaRefreshMinutes: Int = 15,
     val useTrash: Boolean = true,
     val trashEmulation: Boolean = false,
     val trashRetentionDays: Int = 30,
@@ -464,6 +468,13 @@ data class SyncConfig(
     /** #463: seconds between the daemon's polls of the cloud for this profile; 0 = off. */
     fun daemonPollSeconds(profileName: String): Int =
         (providers[profileName]?.daemonPollSeconds ?: DEFAULT_DAEMON_POLL_SECONDS).coerceAtLeast(0)
+
+    /**
+     * #655: TTL of the daemon's quota snapshot in daemon.status (`quota`), in ms; 0 = refresh
+     * off. The snapshot itself is served from memory/cache even when stale — the TTL only
+     * decides whether a client's status request triggers a provider fetch.
+     */
+    fun quotaRefreshMs(): Long = quotaRefreshMinutes.toLong() * 60_000L
 
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
@@ -853,6 +864,7 @@ data class SyncConfig(
                 globalExcludePatterns = general.exclude_patterns ?: emptyList(),
                 desktopNotifications = general.desktop_notifications ?: false,
                 verifyIntegrity = general.verify_integrity ?: false,
+                quotaRefreshMinutes = (general.quota_refresh_minutes ?: 15).coerceAtLeast(0),
                 useTrash = general.use_trash ?: true,
                 trashEmulation = general.trash_emulation ?: false,
                 trashRetentionDays = (general.trash_retention_days ?: 30).coerceAtLeast(1),

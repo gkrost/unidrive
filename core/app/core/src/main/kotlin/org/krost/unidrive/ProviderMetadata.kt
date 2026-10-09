@@ -25,6 +25,14 @@ data class ProviderMetadata(
      */
     val maxConcurrentTransfers: Int = 4,
     /**
+     * #655: whether the provider's `quota()` reports the ACCOUNT's storage plan
+     * (used/total of the user's subscription). `daemon.status` carries the `quota` snapshot
+     * only for such providers; a provider whose quota() answers something else (localfs
+     * probes the machine's FileStore) declares false so the field is absent rather than
+     * mislabelled. Default true — the cloud providers all report a real plan.
+     */
+    val hasQuota: Boolean = true,
+    /**
      * UD-263: minimum spacing (ms) the provider should leave between two
      * back-to-back request starts. 0 for providers without a documented
      * pacing requirement; > 0 for endpoints whose throttle policy is

@@ -139,6 +139,10 @@ class IpcContractCorpusTest {
             syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { StubProvider() },
+            // #655: the corpus pins the no-account-quota shape (localfs-like) — a quota-bearing
+            // provider's snapshot values are machine-dependent, so daemon.status here carries
+            // no `quota` field; the quota-present shape is pinned in DaemonRuntimeTest.
+            providerHasQuota = false,
         )
         val daemonJob = launch { runtime.start() }
         try {
@@ -236,6 +240,10 @@ class IpcContractCorpusTest {
             syncRoot = tempDir,
             socketPath = socketPath,
             providerFactory = { StubProvider() },
+            // #655: the corpus pins the no-account-quota shape (localfs-like) — a quota-bearing
+            // provider's snapshot values are machine-dependent, so daemon.status here carries
+            // no `quota` field; the quota-present shape is pinned in DaemonRuntimeTest.
+            providerHasQuota = false,
         )
         val daemonJob = launch { runtime.start() }
         val held = mutableListOf<SocketChannel>()
