@@ -12,7 +12,12 @@ the service — that step is yours.
 
 ## Prerequisites
 
-- Java 21+ runtime on `$PATH` (JRE is enough; JDK only required to build).
+- Java 21+ runtime (JRE is enough; JDK only required to build); Java 25+ recommended
+  (Debian/Ubuntu: `sudo apt install openjdk-25-jre-headless`). The launcher uses `java` on
+  `$PATH` when it is 25+, else the newest 25+ JDK under `/usr/lib/jvm`, else `java` on `$PATH`;
+  `UNIDRIVE_JAVA=/path/to/bin/java` overrides the choice. Long-running commands warn on Java
+  21–24, and every command warns while a running daemon still uses a Java runtime that a package
+  upgrade has since replaced (restart it with `unidrive -p <profile> daemon stop`).
 - `~/.local/bin` on your `$PATH`.
 - For the systemd unit: a systemd-user instance (standard on Ubuntu, Fedora,
   Arch, Debian; absent on minimal containers).
