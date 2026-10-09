@@ -7,6 +7,7 @@ import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 import java.nio.file.FileSystems
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -133,6 +134,52 @@ class OwnerOnlyTest {
         val dacl = WindowsAclProbe.dacl(path)
         val sids = WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet()
         assertEquals(setOf(WindowsAclProbe.userSddlSid, "SY", "BA"), sids, dacl)
+    }
+
+    @Test
+    fun `restrictDirectory reaches files beyond the classic Windows path limit`() {
+        assumeWindows()
+        val dir = Files.createDirectory(parent.resolve("long-path"))
+        var nested = dir
+        while (nested.toString().length < 240) {
+            nested = createLongPathDirectory(nested.resolve("segment-${"x".repeat(70)}"))
+        }
+        val file = nested.resolve("long-cache-file.pdf")
+        createLongPathFile(file)
+        assertTrue(file.toString().length > 260, "test path must exceed MAX_PATH: ${file.toString().length}")
+        WindowsAclProbe.grantRead(file, WindowsAclProbe.USERS_SID)
+
+        assertEquals(OwnerOnly.Outcome.Changed, OwnerOnly.restrictDirectory(dir))
+
+        val dacl = WindowsAclProbe.dacl(file)
+        assertTrue(dacl.startsWith("D:P"), dacl)
+        assertEquals(
+            setOf(WindowsAclProbe.userSddlSid, "SY", "BA"),
+            WindowsAclProbe.aces(dacl).map { it.substringAfterLast(';') }.toSet(),
+            dacl,
+        )
+    }
+
+    private fun createLongPathDirectory(path: Path): Path =
+        try {
+            Files.createDirectory(path)
+        } catch (e: FileSystemException) {
+            if (isLongPathUnavailable(e)) assumeTrue("Windows long paths are unavailable: ${e.message}", false)
+            throw e
+        }
+
+    private fun createLongPathFile(path: Path) {
+        try {
+            Files.writeString(path, "cache")
+        } catch (e: FileSystemException) {
+            if (isLongPathUnavailable(e)) assumeTrue("Windows long paths are unavailable: ${e.message}", false)
+            throw e
+        }
+    }
+
+    private fun isLongPathUnavailable(e: FileSystemException): Boolean {
+        val reason = (e.reason ?: e.message.orEmpty()).lowercase()
+        return "too long" in reason || "206" in reason
     }
 
     @Test
