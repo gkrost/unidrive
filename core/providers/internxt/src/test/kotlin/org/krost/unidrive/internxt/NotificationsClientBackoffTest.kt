@@ -176,6 +176,81 @@ class NotificationsClientBackoffTest {
         assertFalse(messages().any { it.contains("after token refresh") }, "no refresh happened, so no such INFO")
     }
 
+    // 2026-10-09: notifications.internxt.com resolved (public DNS too) to a host serving a
+    // certificate for *.coolabor.de. Every attempt failed hostname verification and the client
+    // retried every <= 60 s for the whole process lifetime. A wrong-server endpoint is permanent:
+    // stop after the first error. If this test is removed or loosened, the retry storm returns.
+    @Test
+    fun `a certificate for another host stops the client after the first error and warns once`() {
+        val h = Harness()
+        h.client.connect("token-0")
+
+        h.socket.emit(
+            "connect_error",
+            EngineIOException(
+                "websocket error",
+                javax.net.ssl.SSLPeerUnverifiedException("Hostname notifications.internxt.com not verified"),
+            ),
+        )
+        repeat(5) { h.socket.emit("connect_error", transportError()) }
+
+        assertTrue(h.socket.closed, "the socket must be closed, so socket.io stops reconnecting")
+        assertEquals(1, h.scheduler.shutdownCalls, "the client is stopped")
+        assertEquals(1, h.factory.sockets.size, "no rebuild")
+        assertEquals(0, h.supplierCalls.size, "a certificate problem says nothing about the token")
+        val warns = events(Level.WARN).map { it.formattedMessage }
+        assertEquals(1, warns.size, "one WARN, and later errors are ignored: $warns")
+        assertTrue(warns.single().contains("is not usable (TLS: the server's certificate is not valid for this host name)"), warns.single())
+        assertTrue(warns.single().contains("Restart the process to try again"), warns.single())
+        assertFalse(messages().any { it.contains("connect_error (attempt") }, "nothing is handled after the stop: ${messages()}")
+    }
+
+    @Test
+    fun `an untrusted certificate is permanent too`() {
+        val handshake =
+            javax.net.ssl.SSLHandshakeException("PKIX path building failed").apply {
+                initCause(java.security.cert.CertificateException("unable to find valid certification path"))
+            }
+        assertEquals(
+            "TLS: the server's certificate is not trusted",
+            NotificationsClient.permanentFailure(EngineIOException("websocket error", handshake)),
+        )
+    }
+
+    // The endpoint must answer with a websocket upgrade. A page (200), a redirect or 404/410 means
+    // it is not the notifications server; 5xx, 429 and 408 may pass and keep the backoff.
+    @Test
+    fun `an upgrade answered with a non-upgrade status is permanent but temporary statuses are not`() {
+        for (status in listOf("200 OK", "301 Moved Permanently", "404 Not Found", "410 Gone")) {
+            val reason = NotificationsClient.permanentFailure(unauthorizedUpgrade(status))
+            assertEquals("the websocket upgrade was answered with HTTP ${status.take(3)}", reason, status)
+        }
+        for (status in listOf("500 Internal Server Error", "502 Bad Gateway", "503 Service Unavailable", "429 Too Many Requests", "408 Request Timeout")) {
+            assertNull(NotificationsClient.permanentFailure(unauthorizedUpgrade(status)), "$status must keep the backoff")
+        }
+    }
+
+    @Test
+    fun `offline and refused connections are not permanent and keep the backoff`() {
+        assertNull(NotificationsClient.permanentFailure(transportError()))
+        assertNull(NotificationsClient.permanentFailure(transportError(java.net.UnknownHostException("notifications.internxt.com"))))
+        assertNull(NotificationsClient.permanentFailure(transportError(java.net.SocketTimeoutException("connect timed out"))))
+        val h = Harness()
+        h.client.connect("token-0")
+        h.socket.emit("connect_error", transportError())
+        assertFalse(h.socket.closed, "a transport error must not stop the client")
+        assertEquals(0, h.scheduler.shutdownCalls)
+    }
+
+    @Test
+    fun `an auth rejection is never classified permanent`() {
+        val h = Harness()
+        h.client.connect("token-0")
+        h.socket.emit("connect_error", unauthorizedUpgrade("401 Unauthorized"))
+        assertFalse(h.socket.closed, "401 goes to the refresh path, not the permanent stop")
+        assertEquals(listOf(true), h.supplierCalls, "one forced refresh")
+    }
+
     @Test
     fun `transport errors that merely mention 401 403 or proxy auth are not auth rejections`() {
         val h = Harness()
