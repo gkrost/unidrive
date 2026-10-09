@@ -11,6 +11,12 @@
 # Also env-gated, added by the launcher templates and DaemonAutospawn (not a plain flag line): the
 # -javaagent of the probe jar deployed beside the fat jar, under UNIDRIVE_COROUTINE_DEBUG=1 (the
 # daemon's coroutine-dump facility, gkrost/unidrive#613 — see CoroutineDebug).
+# Start with a small heap. Without it JDK <= 25 commit 1/64 of RAM up front (about 500 MB on a 32 GB
+# machine), touch 80-140 MB of it during start and give it back only at a later GC: a one-shot sync then
+# peaks at ~385 MB RSS instead of ~200 MB, and a daemon can sit at ~470 MB until that GC. Measured on
+# Linux with no wall-clock or CPU cost (the JVM runtime spike, #624). Java 27's
+# G1 already starts at ~72 MB; the flag is harmless there.
+-Xms64m
 -Dstdout.encoding=UTF-8
 -Dstderr.encoding=UTF-8
 --enable-native-access=ALL-UNNAMED

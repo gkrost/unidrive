@@ -64,6 +64,10 @@ fi
 rm -f "${target}"
 cp "${jar}" "${target}"
 log "unidrive: deployed ${target} ($(stat -c%s "${target}") bytes)"
+# DaemonAutospawn reads the launchers' static JVM flags from jvm-flags.txt beside the jar; without it a
+# spawned daemon starts with only the heap cap.
+cp "${REPO_ROOT}/dist/launcher/jvm-flags.txt" "${LIB_DIR}/jvm-flags.txt"
+log "unidrive: deployed ${LIB_DIR}/jvm-flags.txt"
 
 # --- unidrive-mount-linux Rust co-daemon ---
 if [[ -e "${MOUNT_REPO}/.git" ]]; then # -e not -d: a git worktree's .git is a file, not a dir
