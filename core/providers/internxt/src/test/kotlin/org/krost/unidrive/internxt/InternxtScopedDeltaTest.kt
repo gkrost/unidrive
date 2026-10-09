@@ -519,4 +519,41 @@ class InternxtScopedDeltaTest {
                 "_INBOX listed; a.txt and _INBOX found",
             )
         }
+
+    private val oneFolder = """{"children":[],"files":[{"uuid":"a","plainName":"a","type":"txt","size":"3","status":"EXISTS"}]}"""
+
+    @Test
+    fun `a tree walk that loses the network briefly lists everything and is complete`() =
+        runTest {
+            val calls = java.util.concurrent.atomic.AtomicInteger(0)
+            val engine =
+                MockEngine {
+                    if (calls.incrementAndGet() <= 4) throw java.net.NoRouteToHostException("No route to host")
+                    respond(oneFolder, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+                }
+            val page =
+                provider(engine).delta(
+                    cursor = null,
+                    onPageProgress = null,
+                    scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/")),
+                )
+            assertEquals(setOf("/a.txt"), page.items.map { it.path }.toSet())
+            assertTrue(page.complete)
+        }
+
+    @Test
+    fun `a tree walk whose outage outlasts the window fails and never returns a page`() =
+        runTest {
+            val engine = MockEngine { throw java.net.NoRouteToHostException("No route to host") }
+            val result =
+                runCatching {
+                    provider(engine).delta(
+                        cursor = null,
+                        onPageProgress = null,
+                        scanContext = ScanContext(null, emptyList(), { _, _ -> }, scopeRoots = listOf("/")),
+                    )
+                }
+            assertTrue(result.exceptionOrNull() is InternxtApiException, "failed, not a partial page: $result")
+            assertTrue(testScheduler.currentTime >= InternxtApiService.CONNECT_OUTAGE_BUDGET_MS, "waited the window first: $testScheduler.currentTime ms")
+        }
 }

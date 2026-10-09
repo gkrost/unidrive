@@ -7,6 +7,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ClosedReadChannelException
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import org.krost.unidrive.internxt.model.InternxtFile
@@ -31,7 +32,10 @@ class InternxtGetRetryTest {
 
     private fun ktorPrematureClose() = ClosedReadChannelException(java.io.EOFException(prematureClose))
 
-    private fun serviceOn(engine: MockEngine) =
+    private fun serviceOn(
+        engine: MockEngine,
+        connectOutageBudgetMs: Long = InternxtApiService.CONNECT_OUTAGE_BUDGET_MS,
+    ) =
         InternxtApiService(
             InternxtConfig(),
             credentialsProvider = { _ ->
@@ -44,6 +48,7 @@ class InternxtGetRetryTest {
             },
             driveBudget = HttpRetryBudget(maxConcurrency = 2, minSpacingMs = 0, stormSpacingMs = 0),
             httpClient = HttpClient(engine),
+            connectOutageBudgetMs = connectOutageBudgetMs,
         )
 
     @Test
@@ -112,6 +117,80 @@ class InternxtGetRetryTest {
             assertEquals(0, e.statusCode, "not a server that is unavailable: no fallback walk for a connection that cannot be made")
             assertEquals(3, calls.get(), "network errors without a status are retried (canonical matrix)")
             assertTrue(e.message.orEmpty().startsWith("Connection error for GET"), e.message)
+            service.close()
+        }
+
+    private fun io.ktor.client.engine.mock.MockRequestHandleScope.emptyList200() = respond(content = "[]", status = HttpStatusCode.OK, headers = headersOf("Content-Type", "application/json"))
+
+    @Test
+    fun `an enumeration GET survives a connect outage that ends inside the budget`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val service =
+                serviceOn(
+                    MockEngine {
+                        if (calls.incrementAndGet() <= 6) throw java.net.NoRouteToHostException("No route to host")
+                        emptyList200()
+                    },
+                )
+            val result = withContext(EnumerationOutageRetry()) { service.listFiles() }
+            assertEquals(emptyList<InternxtFile>(), result)
+            assertEquals(7, calls.get(), "six lost attempts, the seventh answered")
+            assertTrue(testScheduler.currentTime < InternxtApiService.CONNECT_OUTAGE_BUDGET_MS, "recovered inside the window: $testScheduler.currentTime ms")
+            service.close()
+        }
+
+    @Test
+    fun `an enumeration GET stops waiting for a connect outage when the budget is spent`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val service =
+                serviceOn(
+                    MockEngine {
+                        calls.incrementAndGet()
+                        throw java.net.NoRouteToHostException("No route to host")
+                    },
+                    connectOutageBudgetMs = 60_000L,
+                )
+            val e = assertFailsWith<InternxtApiException> { withContext(EnumerationOutageRetry()) { service.listFiles() } }
+            assertEquals(0, e.statusCode)
+            assertEquals(60_000L, testScheduler.currentTime, "waited exactly the budget, in virtual time")
+            assertTrue(calls.get() in 4..20, "bounded number of attempts: ${calls.get()}")
+            service.close()
+        }
+
+    @Test
+    fun `a connect failure outside an enumeration keeps the short ladder`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val service =
+                serviceOn(
+                    MockEngine {
+                        calls.incrementAndGet()
+                        throw java.net.UnknownHostException("drive.internxt.com")
+                    },
+                )
+            assertFailsWith<InternxtApiException> { service.listFiles() }
+            assertEquals(3, calls.get())
+            assertEquals(6_000L, testScheduler.currentTime)
+            service.close()
+        }
+
+    @Test
+    fun `HTTP status errors inside an enumeration keep the short ladder`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val service =
+                serviceOn(
+                    MockEngine {
+                        calls.incrementAndGet()
+                        respond(content = "unavailable", status = HttpStatusCode.ServiceUnavailable)
+                    },
+                )
+            val e = assertFailsWith<InternxtApiException> { withContext(EnumerationOutageRetry()) { service.listFiles() } }
+            assertEquals(503, e.statusCode)
+            assertEquals(3, calls.get())
+            assertTrue(testScheduler.currentTime < 60_000L, "no outage wait for a status error: $testScheduler.currentTime ms")
             service.close()
         }
 }

@@ -1658,6 +1658,12 @@ class InternxtProvider(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
         scanContext: org.krost.unidrive.ScanContext?,
+    ): DeltaPage = kotlinx.coroutines.withContext(EnumerationOutageRetry()) { deltaImpl(cursor, onPageProgress, scanContext) }
+
+    private suspend fun deltaImpl(
+        cursor: String?,
+        onPageProgress: ((itemsSoFar: Int) -> Unit)?,
+        scanContext: org.krost.unidrive.ScanContext?,
     ): DeltaPage {
         foldersScanned.set(0)
         foldersSkipped.set(0)
