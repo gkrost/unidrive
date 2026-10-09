@@ -513,16 +513,18 @@ fun deployWindows(
     )
 
     // Batch wrapper — restart loop with sentinel-based stop. It calls the generated PowerShell launcher, so the
-    // watch loop runs on exactly the flags of every other entry point.
+    // mode-selected long-running process runs on exactly the flags of every other entry point.
     val batchWrapper = file("$libDir\\unidrive-watch.cmd")
     batchWrapper.writeText(
         "@echo off\r\n" +
             ":loop\r\n" +
-            "powershell -NoProfile -ExecutionPolicy Bypass -File \"${ps1Launcher.absolutePath}\" sync --watch\r\n" +
+            "powershell -NoProfile -ExecutionPolicy Bypass -File \"${ps1Launcher.absolutePath}\" autostart\r\n" +
             "if exist \"${localAppData}\\unidrive\\stop\" (\r\n" +
             "    del \"${localAppData}\\unidrive\\stop\"\r\n" +
             "    exit /b 0\r\n" +
             ")\r\n" +
+            "set \"exit_code=%ERRORLEVEL%\"\r\n" +
+            "if \"%exit_code%\"==\"78\" exit /b 78\r\n" +
             "timeout /t 30 /nobreak >nul\r\n" +
             "goto loop\r\n",
     )
@@ -598,15 +600,15 @@ fun deployLinux(
     serviceFile.writeText(
         """
         |[Unit]
-        |Description=UniDrive cloud storage sync daemon
+        |Description=UniDrive profile background process
         |After=network-online.target
         |Wants=network-online.target
         |
         |[Service]
         |Type=simple
         |EnvironmentFile=-%h/.config/unidrive/vault-env
-        |ExecStart=%h/.local/bin/unidrive sync --watch
-        |SuccessExitStatus=143
+        |ExecStart=%h/.local/bin/unidrive autostart
+        |SuccessExitStatus=78 143
         |Restart=on-failure
         |RestartSec=30
         |
@@ -626,7 +628,7 @@ fun deployLinux(
     println("Deployed unidrive $projectVersion:")
     println("  JAR:      $targetJar")
     println("  Launcher: $launcher")
-    println("  Service:  $serviceFile")
+    println("  Service:  $serviceFile (starts the selected profile's mode)")
 }
 
 dependencies {

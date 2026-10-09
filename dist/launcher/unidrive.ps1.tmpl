@@ -64,9 +64,9 @@ $diag = $diagDir.TrimEnd('\') + '\'
 # in it, which Windows PowerShell 5.1 hands to java mis-quoted (java then prints its usage text).
 $javaArgs += @(('-XX:ErrorFile=' + $diag + 'hs_err_pid%p.log'), ('-XX:HeapDumpPath=' + $diag))
 # The GC log is daemon-only: CLI one-shots are ~1 s JVMs that would contend for the same file. The
-# long-runners are `daemon run` and `sync --watch` (the watch loop and the systemd unit's shape).
+# long-runners are `daemon run`, `sync --watch`, and `autostart` (which selects one by profile mode).
 for ($i = 0; $i -lt ($passArgs.Count - 1); $i++) {
-    if (($passArgs[$i] -eq 'daemon' -and $passArgs[$i + 1] -eq 'run') -or ($passArgs[$i] -eq 'sync' -and $passArgs[$i + 1] -eq '--watch')) {
+    if (($passArgs[$i] -eq 'daemon' -and $passArgs[$i + 1] -eq 'run') -or ($passArgs[$i] -eq 'sync' -and $passArgs[$i + 1] -eq '--watch') -or $passArgs[$i] -eq 'autostart') {
         $javaArgs += ('-Xlog:gc*:file=' + $diag + 'gc.log:time,uptime:filecount=5,filesize=10m')
         break
     }
