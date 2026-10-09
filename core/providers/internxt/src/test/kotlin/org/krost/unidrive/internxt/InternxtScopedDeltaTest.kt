@@ -528,7 +528,7 @@ class InternxtScopedDeltaTest {
             val calls = java.util.concurrent.atomic.AtomicInteger(0)
             val engine =
                 MockEngine {
-                    if (calls.incrementAndGet() <= 4) throw java.net.NoRouteToHostException("No route to host")
+                    if (calls.incrementAndGet() <= 8) throw java.net.NoRouteToHostException("No route to host")
                     respond(oneFolder, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
                 }
             val page =
@@ -539,6 +539,8 @@ class InternxtScopedDeltaTest {
                 )
             assertEquals(setOf("/a.txt"), page.items.map { it.path }.toSet())
             assertTrue(page.complete)
+            // 8 lost calls outlast the old 3-attempt ladder plus the 3-attempt paged fallback (6 calls, ~12 s of waits).
+            assertTrue(testScheduler.currentTime > 12_000L, "waited out the outage: ${testScheduler.currentTime} ms")
         }
 
     @Test
