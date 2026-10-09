@@ -884,15 +884,25 @@ class HydrationImpl(
      * cache copies of synced files that were read through the mount in earlier runs.
      */
     suspend fun sweepCache(): CacheEvictionReport {
+        val job = coroutineContext[Job]
         val dir = mount.hydrationCacheDir()
         if (Files.isDirectory(dir)) {
             val cutoff = System.currentTimeMillis() - STALE_TEMP_AGE_MS
-            runCatching {
+            try {
                 Files.walk(dir).use { stream ->
-                    stream.filter { Files.isRegularFile(it) && isStagingTemp(it.fileName.toString()) }
-                        .filter { runCatching { Files.getLastModifiedTime(it).toMillis() < cutoff }.getOrDefault(false) }
-                        .forEach { runCatching { Files.deleteIfExists(it) } }
+                    val paths = stream.iterator()
+                    while (paths.hasNext()) {
+                        job?.ensureActive()
+                        val path = paths.next()
+                        if (!Files.isRegularFile(path) || !isStagingTemp(path.fileName.toString())) continue
+                        val stale = runCatching { Files.getLastModifiedTime(path).toMillis() < cutoff }.getOrDefault(false)
+                        if (stale) runCatching { Files.deleteIfExists(path) }
+                    }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort startup cleanup; inaccessible cache entries are left in place.
             }
         }
         return evictCache()
@@ -905,21 +915,33 @@ class HydrationImpl(
 
     private class CacheFile(val path: String, val file: Path, val size: Long, val lastUsed: Long)
 
-    private fun listCacheFiles(): List<CacheFile> {
+    private fun listCacheFiles(checkCancelled: () -> Unit = {}): List<CacheFile> {
         val dir = mount.hydrationCacheDir()
         if (!Files.isDirectory(dir)) return emptyList()
         val result = mutableListOf<CacheFile>()
-        runCatching {
+        try {
             Files.walk(dir).use { stream ->
-                stream.filter { Files.isRegularFile(it) }.forEach { f ->
-                    runCatching {
+                val paths = stream.iterator()
+                while (paths.hasNext()) {
+                    checkCancelled()
+                    val f = paths.next()
+                    if (!Files.isRegularFile(f)) continue
+                    try {
                         val attrs = Files.readAttributes(f, java.nio.file.attribute.BasicFileAttributes::class.java)
                         val path = "/" + dir.relativize(f).toString().replace('\\', '/')
                         val fileTime = maxOf(attrs.lastModifiedTime().toMillis(), attrs.lastAccessTime().toMillis())
                         result += CacheFile(path, f, attrs.size(), lastAccess[path] ?: fileTime)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // A disappearing or unreadable cache file is skipped, as before.
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Preserve best-effort cache accounting when the directory cannot be read.
         }
         return result
     }
@@ -942,7 +964,8 @@ class HydrationImpl(
      */
     suspend fun evictCache(): CacheEvictionReport =
         evictionMutex.withLock {
-            val files = listCacheFiles()
+            val job = coroutineContext[Job]
+            val files = listCacheFiles { job?.ensureActive() }
             val before = files.sumOf { it.size }
             if (cacheMaxBytes <= 0 || before <= cacheMaxBytes) return@withLock CacheEvictionReport(cacheMaxBytes, before, before, 0)
             var total = before
@@ -959,6 +982,7 @@ class HydrationImpl(
             }
 
             for (f in files.sortedBy { it.lastUsed }) {
+                job?.ensureActive()
                 if (total <= cacheMaxBytes) break
                 if (inUse(f.path)) continue
                 when (mount.cacheDisposition(f.path)) {
@@ -967,6 +991,7 @@ class HydrationImpl(
                 }
             }
             for (f in disposable) {
+                job?.ensureActive()
                 if (total <= cacheMaxBytes) break
                 evict(f)
             }
