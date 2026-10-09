@@ -211,11 +211,7 @@ class LsCommandTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        repeat(50) {
-            if (Files.exists(socketPath)) return@repeat
-            delay(50)
-        }
-        assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+        awaitDaemonSocket(socketPath)
 
         try {
             // Trigger the reactive enumerate so state.db is populated, then wait for

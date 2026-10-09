@@ -146,11 +146,7 @@ class IpcContractCorpusTest {
         )
         val daemonJob = launch { runtime.start() }
         try {
-            repeat(50) {
-                if (Files.exists(socketPath)) return@repeat
-                delay(50)
-            }
-            assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+            awaitDaemonSocket(socketPath)
 
             for (verb in daemonVerbs) {
                 for ((request, expectedReply) in loadPairs(verb)) {
@@ -248,11 +244,7 @@ class IpcContractCorpusTest {
         val daemonJob = launch { runtime.start() }
         val held = mutableListOf<SocketChannel>()
         try {
-            repeat(50) {
-                if (Files.exists(socketPath)) return@repeat
-                delay(50)
-            }
-            assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+            awaitDaemonSocket(socketPath)
 
             // Each connection is confirmed by a daemon.status reply before the next one opens,
             // so the daemon has counted it; the first connection past the cap reads the refusal
