@@ -128,6 +128,10 @@ class DaemonRuntime(
         lifecycleActive = true
 
         try {
+            // #135: keep an existing long-profile hydration cache visible after its
+            // canonical on-disk name changes to match the IPC socket.
+            SyncEngine.migrateLegacyHydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profileName)
+
             // 2. Stale-mount warn (spec §3.3) — best-effort, never aborts.
             val staleMounts = StaleMountDetector.detectStaleFuseUnidriveMounts()
             if (staleMounts.isNotEmpty()) {

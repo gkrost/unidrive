@@ -3647,6 +3647,32 @@ open class SyncEngine(
                 .resolve("unidrive/hydration")
                 // #135: the same canonical disk name the IPC socket uses, so the two never
                 // disagree about what identifies a profile on disk for long profile names.
-                .resolve(IpcServer.canonicalDiskName(cacheKey.ifBlank { "default" }))
+                .resolve(IpcServer.canonicalDiskName(cacheKey.ifBlank { "default" }, IpcServer.defaultSocketDirectory()))
+
+        /** Move a pre-canonical profile cache into the new directory before the daemon scans it. */
+        fun migrateLegacyHydrationCacheRoot(cacheRoot: Path, cacheKey: String) {
+            val key = cacheKey.ifBlank { "default" }
+            val parent = cacheRoot.resolve("unidrive/hydration")
+            val legacy = parent.resolve(key)
+            val canonical = hydrationCacheRoot(cacheRoot, key)
+            if (legacy == canonical || !Files.exists(legacy, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+
+            Files.createDirectories(parent)
+            if (Files.exists(canonical, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                val hasContents = Files.list(canonical).use { it.findAny().isPresent }
+                if (hasContents) {
+                    throw IllegalStateException(
+                        "Both legacy and canonical hydration cache directories exist for profile '$key'; " +
+                            "refusing to merge or discard either directory automatically.",
+                    )
+                }
+                Files.delete(canonical)
+            }
+            try {
+                Files.move(legacy, canonical, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(legacy, canonical)
+            }
+        }
     }
 }

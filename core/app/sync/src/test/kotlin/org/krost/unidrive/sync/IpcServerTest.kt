@@ -381,6 +381,14 @@ class IpcServerTest {
         )
     }
 
+    @Test
+    fun `canonical name accounts for the socket directory when the basename alone fits`() {
+        val longSocketDirectory = Path.of("/run/user/1000")
+        val profileName = "a".repeat(70)
+        assertTrue("unidrive-$profileName.sock".length <= 90)
+        assertEquals(8, IpcServer.canonicalDiskName(profileName, longSocketDirectory).length)
+    }
+
     // ── Bug regression tests — these MUST fail until the bugs are fixed ──
 
     // UD-816: same runTest+real-UDS race. Switch to runBlocking(IO).

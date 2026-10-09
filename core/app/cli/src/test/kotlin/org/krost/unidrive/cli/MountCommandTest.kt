@@ -154,6 +154,21 @@ class MountCommandTest {
     }
 
     @Test
+    fun `migrates an existing long profile cache before using the canonical directory`() {
+        val root = Files.createTempDirectory("ud-cache-migration")
+        val key = "long-profile-" + "x".repeat(90)
+        val legacy = root.resolve("unidrive/hydration/$key")
+        Files.createDirectories(legacy)
+        Files.writeString(legacy.resolve("pending-upload.txt"), "keep me")
+
+        org.krost.unidrive.sync.SyncEngine.migrateLegacyHydrationCacheRoot(root, key)
+
+        val canonical = org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(root, key)
+        assertEquals("keep me", Files.readString(canonical.resolve("pending-upload.txt")))
+        assertFalse(Files.exists(legacy), "the legacy directory was moved, not abandoned")
+    }
+
+    @Test
     fun `supervisor propagates child exit code`() {
         // Use /bin/false (always exits 1) and /bin/true (always exits 0) — POSIX
         // canonical "tiny supervised child" stand-ins. No need to actually mount.

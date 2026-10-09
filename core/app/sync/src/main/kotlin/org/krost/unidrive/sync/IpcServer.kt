@@ -802,7 +802,8 @@ class IpcServer(
             }
         }
 
-        fun socketBaseName(profileName: String): String = "unidrive-${canonicalDiskName(profileName)}.sock"
+        fun socketBaseName(profileName: String): String =
+            "unidrive-${canonicalDiskName(profileName, defaultSocketDirectory())}.sock"
 
         /**
          * #135: the one canonical on-disk name for a profile — verbatim when it is short
@@ -813,7 +814,11 @@ class IpcServer(
          * sockets resolvable.
          */
         fun canonicalDiskName(profileName: String): String {
-            if ("unidrive-$profileName.sock".length <= MAX_SOCKET_PATH_LENGTH) return profileName
+            return canonicalDiskName(profileName, Path.of("/"))
+        }
+
+        internal fun canonicalDiskName(profileName: String, socketDirectory: Path): String {
+            if (socketDirectory.resolve("unidrive-$profileName.sock").toString().length <= MAX_SOCKET_PATH_LENGTH) return profileName
             return MessageDigest
                 .getInstance("SHA-1")
                 .digest(profileName.toByteArray(Charsets.UTF_8))
@@ -872,30 +877,38 @@ class IpcServer(
             tmpDir: Path,
             windows: Boolean,
         ): Path {
+            val dir = defaultSocketDirectory(tmpDir, windows)
             if (windows) {
                 // Windows AF_UNIX sockets don't work in %LOCALAPPDATA% directly
                 // but do work in %TEMP% (which is %LOCALAPPDATA%\Temp)
-                return resolveAndMeta(IpcSocketDir.ensureWindowsDir(tmpDir), profileName)
+                IpcSocketDir.ensureWindowsDir(tmpDir)
+                return resolveAndMeta(dir, profileName)
             }
             // Linux / macOS: /run/user/$UID/, else the per-user folder in the temp dir
             // (a fixed name, so clients find the socket there too).
             val uid = OwnerOnly.posixUid()
             val runDir = Path.of("/run/user/$uid")
-            val dir = if (Files.isDirectory(runDir)) runDir else IpcSocketDir.ensurePosixFallbackDir(tmpDir, uid)
+            if (!Files.isDirectory(runDir)) IpcSocketDir.ensurePosixFallbackDir(tmpDir, uid)
             return resolveAndMeta(dir, profileName)
+        }
+
+        internal fun defaultSocketDirectory(): Path =
+            defaultSocketDirectory(
+                Path.of(System.getProperty("java.io.tmpdir")),
+                System.getProperty("os.name", "").lowercase().contains("win"),
+            )
+
+        private fun defaultSocketDirectory(tmpDir: Path, windows: Boolean): Path {
+            if (windows) return tmpDir.resolve(IpcSocketDir.WINDOWS_DIR_NAME)
+            val runDir = Path.of("/run/user/${OwnerOnly.posixUid()}")
+            return if (Files.isDirectory(runDir)) runDir else tmpDir.resolve(IpcSocketDir.posixFallbackName(OwnerOnly.posixUid()))
         }
 
         private fun resolveAndMeta(
             dir: Path,
             profileName: String,
         ): Path {
-            val candidate = dir.resolve(socketBaseName(profileName))
-            val result =
-                if (candidate.toString().length > MAX_SOCKET_PATH_LENGTH) {
-                    dir.resolve("unidrive-${canonicalDiskName(profileName)}.sock")
-                } else {
-                    candidate
-                }
+            val result = dir.resolve("unidrive-${canonicalDiskName(profileName, dir)}.sock")
             // Write .meta file when name was hashed so UI can recover the profile name
             if (result.fileName.toString() != "unidrive-$profileName.sock") {
                 writeMetaFile(result, profileName)
