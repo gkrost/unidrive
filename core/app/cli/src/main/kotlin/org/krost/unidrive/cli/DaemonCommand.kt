@@ -95,6 +95,9 @@ class DaemonRunCommand : Runnable {
             // probes machine storage — daemon.status carries no quota field for it).
             quotaRefreshMs = config.quotaRefreshMs(),
             providerHasQuota = org.krost.unidrive.ProviderRegistry.getMetadata(profile.type)?.hasQuota ?: true,
+            afterProfileLockAcquired = {
+                SyncEngine.migrateLegacyHydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name)
+            },
         )
         // The startup banner reports the mode and the capabilities (#603 U4), so an operator — and a
         // client reading the log — can see what this daemon serves without asking it over IPC.
