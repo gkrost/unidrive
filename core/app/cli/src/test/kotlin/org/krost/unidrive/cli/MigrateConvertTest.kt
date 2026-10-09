@@ -2,9 +2,11 @@ package org.krost.unidrive.cli
 
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.model.SyncEntry
 import org.krost.unidrive.sync.setProfileMode
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -149,6 +151,92 @@ class MigrateConvertTest {
         val journal = LegacyConversion.Journal.load(profileDir)!!
         assertTrue(journal.baselineCleared)
         assertTrue("CONVERTED" in journal.phases)
+    }
+
+    // ── legacy hybrid profiles (#680) ────────────────────────────────────────
+
+    private fun hydratedRow(
+        path: String,
+        cacheBacked: Boolean?,
+        isFolder: Boolean = false,
+    ) = SyncEntry(
+        path = path,
+        remoteId = "id-$path",
+        remoteHash = null,
+        remoteSize = 3,
+        remoteModified = null,
+        localMtime = 1L,
+        localSize = 3L,
+        isFolder = isFolder,
+        isPinned = false,
+        isHydrated = true,
+        lastSynced = Instant.parse("2026-10-01T00:00:00Z"),
+        cacheBacked = cacheBacked,
+    )
+
+    private fun seed(
+        profileDir: Path,
+        vararg rows: SyncEntry,
+    ) {
+        val db = StateDatabase(profileDir.resolve("state.db"))
+        db.initialize()
+        try {
+            rows.forEach { db.upsertEntry(it) }
+        } finally {
+            db.close()
+        }
+    }
+
+    private fun dump(profileDir: Path): List<SyncEntry> {
+        val db = StateDatabase(profileDir.resolve("state.db"))
+        db.initialize()
+        try {
+            return db.getAllEntries().sortedBy { it.path }
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `a mirror conversion refuses a hybrid profile with cache-backed hydrated rows and changes nothing`() {
+        val (config, profileDir, syncRoot) = fixture()
+        seed(profileDir, hydratedRow("/cached-true.txt", true), hydratedRow("/cached-null.txt", null))
+        val configBefore = config.readText()
+        val rowsBefore = dump(profileDir)
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(1, code)
+        assertEquals(configBefore, config.readText(), "config.toml is untouched")
+        assertEquals(rowsBefore, dump(profileDir), "state.db rows are untouched")
+        assertNull(LegacyConversion.Journal.load(profileDir), "no journal is left behind")
+
+        // The refusal pinned nothing: the same profile still converts to a mount.
+        val mountCode = LegacyConversion.execute(setup(config, profileDir, syncRoot), "mount", "retire", restart = false, verbose = false)
+        assertEquals(0, mountCode)
+        assertTrue(config.readText().contains("mode = \"mount\""))
+    }
+
+    @Test
+    fun `a mirror conversion still succeeds when no hydrated row is cache-backed`() {
+        val (config, profileDir, syncRoot) = fixture()
+        seed(profileDir, hydratedRow("/synced.txt", false), hydratedRow("/dir", null, isFolder = true))
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(0, code)
+        assertTrue(config.readText().contains("mode = \"mirror\""), "the mode is published")
+    }
+
+    @Test
+    fun `a mount conversion is unaffected by cache-backed hydrated rows`() {
+        val (config, profileDir, syncRoot) = fixture()
+        seed(profileDir, hydratedRow("/cached-true.txt", true), hydratedRow("/cached-null.txt", null))
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot), "mount", "retire", restart = false, verbose = false)
+
+        assertEquals(0, code)
+        assertTrue(config.readText().contains("mode = \"mount\""), "the mode is published")
     }
 
     // ── resume and refusals ──────────────────────────────────────────────────
