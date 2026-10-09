@@ -119,7 +119,7 @@ open class Main : Runnable {
         if (raw.providers.isEmpty()) {
             reportConfigMissingAndExit(configFile)
         }
-        val dupError = SyncConfig.detectDuplicateSyncRoots(raw)
+        val dupError = SyncConfig.detectRootIsolationConflicts(raw)
         if (dupError != null) {
             System.err.println("Error: $dupError")
             System.exit(1)

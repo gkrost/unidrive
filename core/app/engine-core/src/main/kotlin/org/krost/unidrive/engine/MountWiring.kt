@@ -30,7 +30,6 @@ class MountWiring(
     // The hydration-cache file of a logical path (the layout belongs to the host: the mirror's
     // Reconciler and the enumeration's reap read the same paths).
     val cachePathOf: (path: String) -> Path,
-    val syncRoot: SyncRootBridge,
     val options: Options,
     // UD-113: the audit log of mutations, or null when none is configured.
     val auditLog: AuditSink?,

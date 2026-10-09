@@ -53,6 +53,14 @@ internal object StoragePermissions {
     }
 
     /** The folder logback writes unidrive.log to (see logback.xml: LOCALAPPDATA, else ~/.local/share). */
+    /**
+     * Restrict the log directory only (#560 U6): a mirror profile keeps no hydration cache, so
+     * there is no cache folder to tighten at a sync start.
+     */
+    fun restrictLogDir(logDir: Path?) {
+        if (logDir != null && Files.isDirectory(logDir)) timed(logDir) { OwnerOnly.restrictDirectory(logDir) }
+    }
+
     fun defaultLogDir(): Path =
         Paths.get(System.getenv("LOCALAPPDATA") ?: Paths.get(System.getProperty("user.home"), ".local", "share").toString(), "unidrive")
 

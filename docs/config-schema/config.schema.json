@@ -64,11 +64,6 @@
             "type": "integer",
             "minimum": 0
           },
-          "sync_root_rescan_minutes": {
-            "description": "How often the daemon rescans the sync root for files that arrived there other than through the mount (copied in, dropped while the daemon was stopped, restored from a backup) and uploads them, in minutes. One pass also runs at daemon start. Upload-only: never downloads or deletes. 0 turns it off. Default 10.",
-            "type": "integer",
-            "minimum": 0
-          },
           "daemon_poll_seconds": {
             "description": "How often `unidrive daemon run` polls the cloud for changes made elsewhere (web UI, another device, another profile on the same account), in seconds. The first poll runs at daemon start; after a provider failure the interval backs off (up to 10 min). Each poll is an incremental delta from the stored cursor. 0 turns polling off. Default 60. `daemon run --poll-interval` overrides it.",
             "type": "integer",

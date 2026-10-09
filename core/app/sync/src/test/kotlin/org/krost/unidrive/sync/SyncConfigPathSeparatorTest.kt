@@ -32,7 +32,7 @@ class SyncConfigPathSeparatorTest {
                 """.trimIndent(),
                 "test.toml",
             )
-        val error = SyncConfig.detectDuplicateSyncRoots(raw)
+        val error = SyncConfig.detectRootIsolationConflicts(raw)
         assertNotNull(error)
         assertTrue(
             error.contains(Paths.get(home, "Docs").toString()),

@@ -89,7 +89,6 @@ class DaemonRunCommand : Runnable {
             excludePatterns = config.effectiveExcludePatterns(profile.name),
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
-            syncRootRescanIntervalMs = config.syncRootRescanMinutes(profile.name) * 60_000L,
             profileMode = mode,
             // #655: the quota snapshot's TTL (profile config quota_refresh_minutes, default 15
             // min, 0 = off) and whether the provider reports an ACCOUNT quota at all (localfs

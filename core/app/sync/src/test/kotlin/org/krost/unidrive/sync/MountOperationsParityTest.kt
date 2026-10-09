@@ -29,7 +29,7 @@ import kotlin.test.assertTrue
 /**
  * #560 U1: characterization tests for the mount-only operations that still live in [SyncEngine]
  * (`ensureHydrated`, `uploadFromCache`, `deleteRemote`, `renameRemote`, `createRemoteFolder`,
- * `remoteItemOrNull`, `enumerateRemoteIntoState`, `rescanSyncRootForUpload`) and the scope-transition
+ * `remoteItemOrNull`, `enumerateRemoteIntoState`) and the scope-transition
  * view invalidation. They pin what the code does today, so each extraction PR of #560 proves parity.
  * Only behaviour no other test pins is covered here; a test whose name starts with "current behaviour"
  * pins something a later unit may change on purpose.
@@ -170,58 +170,6 @@ class MountOperationsParityTest {
             assertEquals(content.size.toLong(), row.localSize)
         }
 
-    @Test
-    fun `ensureHydrated served from a current sync-root copy marks the row as describing the sync-root file`() =
-        runTest {
-            val e = engine()
-            syncDown(e, "/doc.txt")
-
-            e.ensureHydrated("/doc.txt")
-
-            assertEquals(0, downloads(), "precondition: served from the sync root (copySyncRootCopyIntoCache)")
-            assertEquals(false, db.getEntry("/doc.txt")?.cacheBacked)
-        }
-
-    @Test
-    fun `ensureHydrated download for a row that describes the sync-root file keeps that file as the baseline`() =
-        runTest {
-            val e = engine()
-            syncDown(e, "/doc.txt")
-            val baseline = assertNotNull(db.getEntry("/doc.txt"))
-            // The remote moved on (an enumeration refreshed the remote side); the sync-root file still matches the baseline.
-            val newer = "the remote moved on and grew".toByteArray()
-            provider.files["/doc.txt"] = newer
-            db.upsertEntry(baseline.copy(remoteSize = newer.size.toLong()))
-
-            e.ensureHydrated("/doc.txt")
-
-            assertEquals(1, downloads())
-            val row = assertNotNull(db.getEntry("/doc.txt"))
-            assertEquals(false, row.cacheBacked)
-            assertEquals(baseline.localMtime, row.localMtime, "the baseline is still the sync-root file")
-            assertEquals(baseline.localSize, row.localSize)
-            assertEquals(newer.size.toLong(), row.remoteSize, "the download refreshes remoteSize")
-        }
-
-    @Test
-    fun `ensureHydrated warm path settles a legacy row that describes the sync-root file and leaves a cache-only one unknown`() =
-        runTest {
-            val e = engine()
-            syncDown(e, "/doc.txt")
-            e.ensureHydrated("/doc.txt")
-            db.upsertEntry(assertNotNull(db.getEntry("/doc.txt")).copy(cacheBacked = null))
-
-            e.ensureHydrated("/doc.txt")
-            assertEquals(false, db.getEntry("/doc.txt")?.cacheBacked, "a legacy row whose baseline is the sync-root file is settled")
-
-            // A cache-only legacy row (no sync-root file): the warm path leaves it alone.
-            writeCache(e, "/cache-only.txt", content)
-            db.upsertEntry(remoteRow("/cache-only.txt", hydrated = true).copy(cacheBacked = null))
-            e.ensureHydrated("/cache-only.txt")
-            assertNull(db.getEntry("/cache-only.txt")?.cacheBacked)
-            assertEquals(0, downloads(), "both were warm")
-        }
-
     // ── cancellation ─────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -271,31 +219,15 @@ class MountOperationsParityTest {
 
             assertEquals(created, db.getEntry("/new.txt"), "the row stays a pending upload")
             assertTrue(Files.exists(cache), "the cache copy stays")
-            assertFalse(Files.exists(syncRoot.resolve("new.txt")), "nothing is mirrored into the sync root")
             val lines = Files.readAllLines(audit.pathForToday()).filter { it.isNotBlank() }
             assertEquals(1, lines.size)
             assertTrue(lines[0].contains("failed:CancellationException"), lines[0])
         }
 
-    @Test
-    fun `a cancelled rescan rethrows and releases its single-flight guard`() =
-        runTest {
-            val e = engine()
-            Files.writeString(syncRoot.resolve("a.txt"), "x")
-            provider.duringUpload = { throw CancellationException("daemon stopping") }
-
-            assertFailsWith<CancellationException> { e.rescanSyncRootForUpload() }
-
-            provider.duringUpload = null
-            val next = e.rescanSyncRootForUpload()
-            assertFalse(next.notRun, "the guard was released by the cancelled pass")
-            assertEquals(1, next.uploaded)
-        }
-
     // ── uploadFromCache failure ──────────────────────────────────────────────────────────────
 
     @Test
-    fun `a failed uploadFromCache leaves the row, the cache copy and the sync root untouched`() =
+    fun `a failed uploadFromCache leaves the row and the cache copy untouched`() =
         runTest {
             val e = engine()
             val created = mountCreatedRow("/new.txt")
@@ -309,10 +241,25 @@ class MountOperationsParityTest {
             assertEquals(created, db.getEntry("/new.txt"))
             assertTrue(db.pendingUploadPaths().contains("/new.txt"), "still a pending upload")
             assertContentEquals("mount bytes".toByteArray(), Files.readAllBytes(cache))
-            assertFalse(Files.exists(syncRoot.resolve("new.txt")))
         }
 
     // ── deleteRemote / renameRemote / createRemoteFolder ─────────────────────────────────────
+
+    // #560 U6: a remote delete no longer touches a file left at the legacy sync-root path —
+    // the mount owns no local folder, so a leftover from the coordinated model stays untouched.
+    @Test
+    fun `deleteRemote leaves a file at the legacy sync-root path alone`() =
+        runTest {
+            val e = engine()
+            db.upsertEntry(remoteRow("/gone.txt"))
+            Files.createDirectories(syncRoot)
+            Files.writeString(syncRoot.resolve("gone.txt"), "left over from the coordinated model")
+
+            e.deleteRemote("/gone.txt")
+
+            assertTrue(provider.deletedPaths.contains("/gone.txt"), "the remote item is deleted")
+            assertTrue(Files.exists(syncRoot.resolve("gone.txt")), "the mount touches no sync root")
+        }
 
     @Test
     fun `deleteRemote of a folder tombstones every row below it and nothing beside it`() =
@@ -334,10 +281,6 @@ class MountOperationsParityTest {
             assertNotNull(db.getEntry("/dx/z.txt"), "a same-prefix sibling is not below the folder")
         }
 
-    // deleteRemote and the sync-root copy of a deleted file: found here as a bug (an unsynced edit the mirror skipped
-    // was deleted with the remote item) and fixed in #568, whose tests in UploadFromCacheKeepsWriteTest pin the
-    // corrected behaviour. Deliberately not pinned here, so the two land in either order.
-
     @Test
     fun `renameRemote of a folder repaths every row below it`() =
         runTest {
@@ -355,37 +298,7 @@ class MountOperationsParityTest {
         }
 
     @Test
-    fun `renameRemote moves the sync-root file only for a row whose baseline is that file`() =
-        runTest {
-            val e = engine()
-            for ((name, backed) in listOf("cache.txt" to true, "legacy.txt" to null)) {
-                Files.writeString(syncRoot.resolve(name), "local $name")
-                db.upsertEntry(remoteRow("/$name", hydrated = true).copy(cacheBacked = backed))
-
-                e.renameRemote("/$name", "/moved-$name")
-
-                assertTrue(Files.exists(syncRoot.resolve(name)), "cacheBacked=$backed: the sync-root file stays where it was")
-                assertFalse(Files.exists(syncRoot.resolve("moved-$name")))
-            }
-        }
-
-    @Test
-    fun `renameRemote never replaces a file at the destination in the sync root`() =
-        runTest {
-            val e = engine()
-            Files.writeString(syncRoot.resolve("a.txt"), "source")
-            Files.writeString(syncRoot.resolve("b.txt"), "already there")
-            db.upsertEntry(remoteRow("/a.txt", hydrated = true).copy(cacheBacked = false))
-
-            e.renameRemote("/a.txt", "/b.txt")
-
-            assertEquals("source", Files.readString(syncRoot.resolve("a.txt")), "the old copy stays, the next sync decides")
-            assertEquals("already there", Files.readString(syncRoot.resolve("b.txt")))
-            assertNotNull(db.getEntry("/b.txt"), "the row moved anyway")
-        }
-
-    @Test
-    fun `createRemoteFolder that the provider refuses writes no row and no sync-root folder`() =
+    fun `createRemoteFolder that the provider refuses writes no row`() =
         runTest {
             val e = engine()
             provider.createFolderFailPaths.add("/newdir")
@@ -393,7 +306,6 @@ class MountOperationsParityTest {
             assertFailsWith<ProviderException> { e.createRemoteFolder("/newdir") }
 
             assertNull(db.getEntry("/newdir"))
-            assertFalse(Files.exists(syncRoot.resolve("newdir")))
         }
 
     @Test
@@ -404,7 +316,6 @@ class MountOperationsParityTest {
             val row = assertNotNull(db.getEntry("/newdir"))
             assertEquals(item.id, row.remoteId)
             assertTrue(row.isFolder)
-            assertTrue(Files.isDirectory(syncRoot.resolve("newdir")))
         }
 
     // ── remoteItemOrNull ─────────────────────────────────────────────────────────────────────

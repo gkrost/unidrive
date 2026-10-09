@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.engine.localNameIssue
 import org.krost.unidrive.HashAlgorithm
 import org.krost.unidrive.ScanHeartbeat
 import org.krost.unidrive.sync.model.ChangeState

@@ -61,9 +61,6 @@ class DaemonRuntime(
     private val pollIntervalMs: Long = 0,
     // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited.
     private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
-    // #504: > 0 = rescan the sync root for files that arrived out of band (a pass at start, then every
-    // this many ms), uploading them; 0 = off. Profile key sync_root_rescan_minutes (default 10 min).
-    private val syncRootRescanIntervalMs: Long = 0,
     // #603 (U4): the profile's hosting mode, resolved and gated by `daemon run` before this runtime is
     // constructed. A mount daemon serves the hydration verbs, sync.enumerate and the poller, and routes
     // refresh.run to the always-enumerate path; a mirror daemon refuses the mount verbs (wrong_mode) and
@@ -220,21 +217,41 @@ class DaemonRuntime(
                         hydrationIpcRef?.dispatchEvent(event)
                     },
                 )
-                // #560 U3: the mount operations (hydration, uploads, remote folder/delete/rename, the
-                // enumeration and the sync-root rescan) run on MountEngine, over this engine's shared core
-                // (guard, gather, enumeration: one of each per daemon). The engine itself stays for the
-                // refresh.run fallback (RefreshRpcHandler, U4). See MountEngine for who owns what.
+                // #560 U3: the mount operations (hydration, uploads, remote folder/delete/rename and
+                // the enumeration) run on MountEngine, over this engine's shared core (guard, gather,
+                // enumeration: one of each per daemon). The engine itself stays for the refresh.run
+                // fallback (RefreshRpcHandler, U4). See MountEngine for who owns what.
                 val mount = MountEngine.over(engine)
-                val hydration = HydrationImpl(mount, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
-                hydrationRef = hydration
-                // #450: what a stopped daemon left in the hydration cache (staging temp files, the
-                // copies of synced files read through the mount) is trimmed to the budget at start.
-                serveScope.launch {
-                    runCatching { hydration.sweepCache() }
-                        .onFailure { log.warn("hydration cache sweep at start failed", it) }
+                val wrongModeReply = """{"ok":false,"error":"wrong_mode"}"""
+                val mountMode = profileMode == ProfileMode.MOUNT
+                // #560 U6 (cutover): the hydration runtime exists only on a mount profile. A mirror
+                // daemon constructs no hydration layer and keeps no cache — its local bytes live in
+                // the sync root its reconcile owns, and every hydration verb gets wrong_mode below.
+                var hydration: HydrationImpl? = null
+                var pollerRef: EnumeratePoller? = null
+                if (mountMode) {
+                    val hydrationImpl = HydrationImpl(mount, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
+                    hydration = hydrationImpl
+                    hydrationRef = hydrationImpl
+                    // #450: what a stopped daemon left in the hydration cache (staging temp files, the
+                    // copies of synced files read through the mount) is trimmed to the budget at start.
+                    serveScope.launch {
+                        runCatching { hydrationImpl.sweepCache() }
+                            .onFailure { log.warn("hydration cache sweep at start failed", it) }
+                    }
+                    val hydrationIpcHandler = HydrationIpcHandler(hydrationImpl)
+                    hydrationIpcRef = hydrationIpcHandler
+
+                    // #463: a hydration or upload that succeeded is (nearly always) a provider round trip
+                    // that worked, so it cuts the poller's back-off short. Even when it was not, the poller
+                    // polls at most once per plain interval. Late-bound: the poller is built further down.
+                    serveScope.launch {
+                        hydrationImpl.events.collect {
+                            hydrationIpcHandler.dispatchEvent(it)
+                            if (it is HydrationEvent.Hydrated || (it is HydrationEvent.Completed && it.ok)) pollerRef?.providerReachable()
+                        }
+                    }
                 }
-                val hydrationIpc = HydrationIpcHandler(hydration)
-                hydrationIpcRef = hydrationIpc
 
                 // sync.enumerate handler (mount-view-refresh-design.md §4.1): one-way
                 // remote→state.db refresh for mount view consumers. Constructed before the
@@ -253,18 +270,18 @@ class DaemonRuntime(
                 // #603 (U4): the mount verbs exist only on a mount profile. A mirror daemon answers every
                 // hydration verb and sync.enumerate with wrong_mode — the client's command gate refuses
                 // before this, but nothing here may serve mount semantics on a mirror profile either.
-                // The mount wiring below (handlers, subscribe-hook, upload replay, root rescan, poller)
+                // The mount wiring below (handlers, subscribe-hook, upload replay, poller)
                 // is mount-only; a mirror daemon keeps sync.subscribe, refresh.run (legacy reconcile)
                 // and daemon.status.
-                val wrongModeReply = """{"ok":false,"error":"wrong_mode"}"""
-                val mountMode = profileMode == ProfileMode.MOUNT
                 for (verb in HydrationIpcHandler.VERBS) {
                     if (!mountMode) {
                         server.registerHandler(verb) { _, _ -> wrongModeReply }
                         continue
                     }
+                    // The hydration layer is built above whenever mountMode holds.
+                    val ipc = requireNotNull(hydrationIpcRef) { "mount mode without a hydration layer" }
                     server.registerHandler(verb) { connId, json ->
-                        val reply = hydrationIpc.handle(connectionId = connId, jsonRequest = json)
+                        val reply = ipc.handle(connectionId = connId, jsonRequest = json)
                         if (verb == "hydration.subscribe" && reply.contains("\"ok\":true")) {
                             server.scheduleAfterReply(connId) {
                                 runCatching { enumerateHandler.runGuarded(reset = false) }
@@ -277,24 +294,16 @@ class DaemonRuntime(
                 if (!mountMode) {
                     server.registerHandler("sync.enumerate") { _, _ -> wrongModeReply }
                 }
-                server.registerConnectionCloseListener { connId ->
-                    hydration.onConnectionClosed(connId)
-                }
-                // A mount client's connections are never closed for being idle: its open handles and
-                // its event subscription live on them, and refresh.run routing counts them.
-                server.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
-                hydrationIpc.start(serveScope, server::writeToConnection)
-                server.registerConnectionCloseListener { connId ->
-                    hydrationIpc.onSubscriberDisconnect(connId)
-                }
-                // #463: a hydration or upload that succeeded is (nearly always) a provider round trip
-                // that worked, so it cuts the poller's back-off short. Even when it was not, the poller
-                // polls at most once per plain interval. Late-bound: the poller is built further down.
-                var pollerRef: EnumeratePoller? = null
-                serveScope.launch {
-                    hydration.events.collect {
-                        hydrationIpc.dispatchEvent(it)
-                        if (it is HydrationEvent.Hydrated || (it is HydrationEvent.Completed && it.ok)) pollerRef?.providerReachable()
+                if (mountMode) {
+                    server.registerConnectionCloseListener { connId ->
+                        hydration?.onConnectionClosed(connId)
+                    }
+                    // A mount client's connections are never closed for being idle: its open handles and
+                    // its event subscription live on them, and refresh.run routing counts them.
+                    server.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
+                    hydrationIpcRef?.start(serveScope, server::writeToConnection)
+                    server.registerConnectionCloseListener { connId ->
+                        hydrationIpcRef?.onSubscriberDisconnect(connId)
                     }
                 }
 
@@ -307,24 +316,14 @@ class DaemonRuntime(
                 // stays as the client-side complement for cache files the row
                 // scan cannot see.
                 //
-                // #603 (U4): mount-only. A mirror profile's sync_root belongs to its reconcile, not to
-                // an upload rescan, and a mirror daemon serves no hydration uploads to replay.
+                // #603 (U4): mount-only. A mirror daemon serves no hydration uploads to replay.
                 if (mountMode) {
+                    // The hydration layer is built above whenever mountMode holds.
+                    val h = requireNotNull(hydration) { "mount mode without a hydration layer" }
                     serveScope.launch {
-                        runCatching { hydration.replayPendingUploads() }
+                        runCatching { h.replayPendingUploads() }
                             .onSuccess { if (it > 0) log.info("replayed {} pending upload(s) from state.db", it) }
                             .onFailure { log.warn("pending-upload replay failed", it) }
-                        // #504: the sync root is nobody's inbox but the engine's: files that reach it
-                        // other than through the mount (copied in, dropped while the daemon was down,
-                        // restored from a backup) are uploaded by an upload-only rescan, once now (after
-                        // the replay above, so a mount write's own queued upload goes first) and then on
-                        // a timer. Never downloads or deletes; see MountEngine.rescanSyncRootForUpload.
-                        SyncRootRescanner(syncRootRescanIntervalMs) {
-                            val r = mount.rescanSyncRootForUpload()
-                            if (r.uploaded > 0 || r.foldersCreated > 0) {
-                                log.info("sync root rescan: {} file(s) uploaded, {} folder(s) created", r.uploaded, r.foldersCreated)
-                            }
-                        }.run()
                     }
                 }
 
@@ -358,7 +357,7 @@ class DaemonRuntime(
                         serveScope,
                         mountClientConnected = { profileMode == ProfileMode.MOUNT },
                         // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
-                        uploadInFlight = { path -> hydration.hasUploadSlot(path) },
+                        uploadInFlight = { path -> hydration?.hasUploadSlot(path) ?: false },
                     )
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)

@@ -27,9 +27,6 @@ import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.SyncScope
 import org.krost.unidrive.sync.ThrottledProvider
 import org.krost.unidrive.sync.TrashManager
-import org.krost.unidrive.hydration.HydrationImpl
-import org.krost.unidrive.hydration.HydrationIpcHandler
-import org.krost.unidrive.hydration.serialiseHydrationEvent
 import org.krost.unidrive.sync.computePollIntervalWithWs
 import org.krost.unidrive.sync.pollStateName
 import org.slf4j.LoggerFactory
@@ -353,10 +350,8 @@ open class SyncCommand : Runnable {
         // daemon." Profile lock (UD-272) ensures only one sync per profile
         // runs at a time, so socket creation can't collide.
         val socketPath = IpcServer.defaultSocketPath(profile.name)
-        StoragePermissions.restrictCacheAndLogs(
-            SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name),
-            StoragePermissions.defaultLogDir(),
-        )
+        // #560 U6: a mirror profile keeps no hydration cache, so only the logs are restricted here.
+        StoragePermissions.restrictLogDir(StoragePermissions.defaultLogDir())
         // New IPC tokens for this run, before the socket listens (docs/dev/specs/ipc-authentication.md):
         // the sync serves the same verbs as the daemon, so it authenticates its clients the same way and
         // never runs without its IPC (the refusal is already reported as one line).
@@ -462,11 +457,6 @@ open class SyncCommand : Runnable {
                 sentinel = streamingSentinel,
             )
 
-        // #301: late-binding, like DaemonRuntime's hydrationRef — the engine's
-        // enumerate-reap asks the hydration layer whether an upload of a path is
-        // queued or in flight before it evicts that path's cache file. The
-        // hydration instance only exists further down, inside runBlocking.
-        var hydrationRef: HydrationImpl? = null
         val engine =
             SyncEngine(
                 provider = provider,
@@ -511,8 +501,9 @@ open class SyncCommand : Runnable {
                 ignoreTopLevelGuard = ignoreTopLevelGuard,
                 skippedOpsLogPath = parent.providerConfigDir().resolve("skipped-ops.jsonl"),
                 streamingReconciliation = effectiveStreaming,
-                // #301: see hydrationRef above.
-                uploadInFlight = { path -> hydrationRef?.hasUploadSlot(path) ?: false },
+                // #301/#560 U6: a mirror has no hydration uploads to ask about — the cache-eviction
+                // reap guard is permanently clear here.
+                uploadInFlight = { _ -> false },
             )
 
         // Webhook subscription store (shared DB file, separate table)
@@ -541,38 +532,10 @@ open class SyncCommand : Runnable {
             runBlocking {
                 ipcServer.start(this)
 
-                // Wire Phase-1 hydration SPI as IpcServer handlers.
-                // Pass `this` (the runBlocking scope) as recoveryUploadScope so that
-                // crash-recovery open_write calls run on the daemon's managed scope
-                // rather than a fire-and-forget orphan scope.
-                val hydration =
-                    HydrationImpl(
-                        engine,
-                        db,
-                        recoveryUploadScope = this,
-                        cacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
-                    )
-                hydrationRef = hydration
-                launch {
-                    runCatching { hydration.sweepCache() }
-                        .onFailure { System.err.println("hydration cache sweep at start failed: ${it.message}") }
-                }
-                val hydrationIpc = HydrationIpcHandler(hydration)
-                for (verb in HydrationIpcHandler.VERBS) {
-                    ipcServer.registerHandler(verb) { connId, json ->
-                        hydrationIpc.handle(connectionId = connId, jsonRequest = json)
-                    }
-                }
-                ipcServer.registerConnectionCloseListener { connId ->
-                    hydration.onConnectionClosed(connId)
-                }
-                // As in DaemonRuntime: a mount client's connections are never closed for being idle.
-                ipcServer.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
-                // Fan hydration events out only to connections that ran hydration.subscribe,
-                // with a bounded queue + drop-oldest+sentinel backpressure per subscriber.
-                hydrationIpc.start(this, ipcServer::writeToConnection)
-                ipcServer.registerConnectionCloseListener { connId -> hydrationIpc.onSubscriberDisconnect(connId) }
-                launch { hydration.events.collect { hydrationIpc.dispatchEvent(it) } }
+                // #560 U6 (cutover): a mirror profile runs no hydration runtime and serves no
+                // hydration verbs — its local bytes live in the sync root its reconcile owns, and
+                // there is no cache. A mount profile is served by `daemon run` (the hosting
+                // contract, #603), which constructs the hydration layer there.
 
                 // Register sync.subscribe verb (spec docs/dev/specs/sync-progress-subscriber-set-design.md).
                 // Symmetric with hydration.subscribe at the wire level: client issues the

@@ -269,7 +269,7 @@ still leave a remote item; the caller follows with the row-level verb
 
 ## 8. Who may write the mounted folder
 
-> **Superseded in part (2026-10-05), see [`docs/adr/independent-profiles.md`](../../adr/independent-profiles.md) and #560.** The single-writer rule below is the target for a mount profile. Today it does not hold in full: since #478 the daemon also writes the mount's files into the profile's `sync_root`, and since #510 it uploads what appears there; this stays until the #560 cutover. Under the decision, a mirror of the same account is a separate profile, an independent cloud-side writer whose changes reach the view only through enumeration. The verbs and events in this document are unchanged.
+> **In force since the #560 cutover (2026-10-08), see [`docs/adr/independent-profiles.md`](../../adr/independent-profiles.md).** The single-writer rule below holds for a mount profile: the mount's co-client is the only local writer — the daemon writes the mount's files only into the hydration cache and uploads from there (#478's `sync_root` mirroring and #510's rescan are retired). A mirror of the same account is a separate profile, an independent cloud-side writer whose changes reach the view only through enumeration. The verbs and events in this document are unchanged.
 
 While a mount runs, the mount's co-daemon is the single writer of the
 profile's view: the daemon serves reads from the hydration cache and writes

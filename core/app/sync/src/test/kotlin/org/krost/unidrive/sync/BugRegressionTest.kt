@@ -159,7 +159,7 @@ class BugRegressionTest {
         // BUG: If ~ is replaced everywhere, "/home/~user/same" becomes
         // "/home/<user.home>/home/user/same" — still matches itself, so
         // duplicate detection passes. But the path value is wrong.
-        val error = SyncConfig.detectDuplicateSyncRoots(raw)
+        val error = SyncConfig.detectRootIsolationConflicts(raw)
         assertNotNull(error, "Duplicate sync roots should be detected")
     }
 

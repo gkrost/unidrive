@@ -40,8 +40,6 @@ internal suspend fun SyncEngine.renameRemote(
 
 internal suspend fun SyncEngine.remoteItemOrNull(path: String) = mount.remoteItemOrNull(path)
 
-internal suspend fun SyncEngine.rescanSyncRootForUpload() = mount.rescanSyncRootForUpload()
-
 internal fun SyncEngine.enumerationStatus() = mount.enumerationStatus()
 
 internal fun SyncEngine.isOutOfScope(path: String) = mount.isOutOfScope(path)

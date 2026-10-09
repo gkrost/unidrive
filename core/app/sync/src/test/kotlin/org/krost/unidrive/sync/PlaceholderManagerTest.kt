@@ -1,5 +1,6 @@
 package org.krost.unidrive.sync
 
+import org.krost.unidrive.engine.localNameIssue
 import org.junit.Assume.assumeFalse
 import java.nio.file.Files
 import java.nio.file.Path
