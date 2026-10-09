@@ -1,11 +1,12 @@
 [Unit]
-Description=UniDrive cloud storage sync daemon
+Description=UniDrive profile background process
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/unidrive sync --watch
+ExecStart=%h/.local/bin/unidrive autostart
+SuccessExitStatus=78 143
 Restart=on-failure
 RestartSec=30
 EnvironmentFile=-%h/.config/unidrive/vault-env

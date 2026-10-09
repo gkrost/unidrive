@@ -26,9 +26,8 @@ class LauncherTemplateTest {
         error("dist/launcher/unidrive.ps1.tmpl not found above ${System.getProperty("user.dir")}")
     }
 
-    @Test
-    fun `the powershell launcher passes every diagnostics flag as an argument of its own`() {
-        assumeTrue("Windows PowerShell 5.1 only exists on Windows", System.getProperty("os.name").startsWith("Windows"))
+    /** Renders the template, lets the real powershell.exe build the JVM argument list for [passArgs] and returns it. */
+    private fun launcherArgs(vararg passArgs: String): List<String> {
         val dir = Files.createTempDirectory("launcher-tmpl")
         try {
             val flags = templateFile().parent.resolve("jvm-flags.txt").toFile().readLines()
@@ -42,22 +41,41 @@ class LauncherTemplateTest {
             val script = dir.resolve("launcher.ps1")
             Files.writeString(script, rendered)
             val process = ProcessBuilder(
-                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString(), "daemon", "run", "p",
+                listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString()) + passArgs,
             ).redirectErrorStream(true)
                 .also { it.environment()["UNIDRIVE_DIAG_DIR"] = dir.resolve("diag").toString() }
                 .start()
             val output = process.inputStream.bufferedReader().readText()
             assertTrue(process.waitFor(60, TimeUnit.SECONDS), "powershell.exe did not finish")
-            val args = output.lines().filter { it.startsWith("ARG:") }.map { it.removePrefix("ARG:") }
-            val errorFile = args.filter { it.startsWith("-XX:ErrorFile=") }
-            val dumpPath = args.filter { it.startsWith("-XX:HeapDumpPath=") }
-            assertEquals(1, errorFile.size, "one -XX:ErrorFile argument, got: $args")
-            assertEquals(1, dumpPath.size, "one -XX:HeapDumpPath argument, got: $args")
-            assertTrue(!errorFile[0].removePrefix("-XX:ErrorFile=").contains("-XX:"), "the ErrorFile argument swallowed another flag: ${errorFile[0]}")
-            assertTrue(dumpPath[0].endsWith(java.io.File.separator), "the heap dump path ends with a separator: ${dumpPath[0]}")
-            assertTrue(args.any { it.startsWith("-Xlog:gc*:file=") }, "daemon run arms the GC log: $args")
+            return output.lines().filter { it.startsWith("ARG:") }.map { it.removePrefix("ARG:") }
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `the powershell launcher passes every diagnostics flag as an argument of its own`() {
+        assumeTrue("Windows PowerShell 5.1 only exists on Windows", System.getProperty("os.name").startsWith("Windows"))
+        val args = launcherArgs("daemon", "run", "p")
+        val errorFile = args.filter { it.startsWith("-XX:ErrorFile=") }
+        val dumpPath = args.filter { it.startsWith("-XX:HeapDumpPath=") }
+        assertEquals(1, errorFile.size, "one -XX:ErrorFile argument, got: $args")
+        assertEquals(1, dumpPath.size, "one -XX:HeapDumpPath argument, got: $args")
+        assertTrue(!errorFile[0].removePrefix("-XX:ErrorFile=").contains("-XX:"), "the ErrorFile argument swallowed another flag: ${errorFile[0]}")
+        assertTrue(dumpPath[0].endsWith(java.io.File.separator), "the heap dump path ends with a separator: ${dumpPath[0]}")
+        assertTrue(args.any { it.startsWith("-Xlog:gc*:file=") }, "daemon run arms the GC log: $args")
+    }
+
+    // `autostart` is a one-word command and normally the LAST argument (`unidrive.ps1 autostart`,
+    // `unidrive.ps1 -p work autostart`): a loop bounded by Count - 1 never looks at it.
+    @Test
+    fun `the powershell launcher arms the GC log for autostart as the last argument and for no one-shot command`() {
+        assumeTrue("Windows PowerShell 5.1 only exists on Windows", System.getProperty("os.name").startsWith("Windows"))
+        for (pass in listOf(arrayOf("autostart"), arrayOf("-p", "work", "autostart"), arrayOf("sync", "--watch"))) {
+            assertTrue(launcherArgs(*pass).any { it.startsWith("-Xlog:gc*:file=") }, "GC log for ${pass.toList()}")
+        }
+        for (pass in listOf(arrayOf("status"), arrayOf("sync", "--once"), arrayOf("-p", "work", "ls"))) {
+            assertTrue(launcherArgs(*pass).none { it.startsWith("-Xlog:gc*") }, "no GC log for the one-shot ${pass.toList()}")
         }
     }
 }
