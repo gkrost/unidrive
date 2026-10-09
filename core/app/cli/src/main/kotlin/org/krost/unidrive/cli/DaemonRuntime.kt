@@ -85,6 +85,7 @@ class DaemonRuntime(
     // #678: where the startup replay and the cache sweep run their blocking per-record walks.
     // Dispatchers.IO in production; a seam for tests, which pin that a stop does not wait for them.
     private val startupIoDispatcher: CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
+    private val afterProfileLockAcquired: () -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
 
@@ -128,9 +129,7 @@ class DaemonRuntime(
         lifecycleActive = true
 
         try {
-            // #135: keep an existing long-profile hydration cache visible after its
-            // canonical on-disk name changes to match the IPC socket.
-            SyncEngine.migrateLegacyHydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profileName)
+            afterProfileLockAcquired()
 
             // 2. Stale-mount warn (spec §3.3) — best-effort, never aborts.
             val staleMounts = StaleMountDetector.detectStaleFuseUnidriveMounts()
