@@ -1223,10 +1223,10 @@ class InternxtApiService(
                     // A 524 ends the call: the gateway had waited about two minutes, a repeat gets the same answer.
                     if (e.statusCode == GATEWAY_ORIGIN_TIMEOUT) throw unavailable
                     lastException = unavailable
-                    if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                    if (index < delays.size) kotlinx.coroutines.delay(delay)
                 } else if (e.statusCode in TRANSIENT_STATUSES) {
                     lastException = e
-                    if (index < delays.lastIndex) {
+                    if (index < delays.size) {
                         val retryAfterMs = e.retryAfterMs ?: parseRetryAfter(e.message)
                         kotlinx.coroutines.delay(retryAfterMs?.coerceIn(500L, 60_000L) ?: delay)
                     }
@@ -1264,7 +1264,7 @@ class InternxtApiService(
                     } else {
                         InternxtApiException("Connection error for GET $url: ${e.message}", 0, cause = e)
                     }
-                if (index < delays.lastIndex) kotlinx.coroutines.delay(delay)
+                if (index < delays.size) kotlinx.coroutines.delay(delay)
             }
         }
         throw lastException!!
