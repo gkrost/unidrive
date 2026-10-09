@@ -39,6 +39,7 @@ internal object WindowsSecurity {
     private const val TOKEN_QUERY = 0x8
     private const val TOKEN_USER = 1
     private const val TOKEN_USER_BUFFER = 256L
+    private const val EXTENDED_PATH_THRESHOLD = 247
 
     private val INT = ValueLayout.JAVA_INT
     private val PTR = ValueLayout.ADDRESS
@@ -116,7 +117,7 @@ internal object WindowsSecurity {
             val state = arena.allocate(callState)
             // WIN32_FIND_DATAW: DWORD attributes, three FILETIMEs, size fields, then dwReserved0.
             val data = arena.allocate(WIN32_FIND_DATA_SIZE, 4)
-            val handle = findFirstFile.invoke(state, arena.wide(path.toAbsolutePath().toString()), data) as MemorySegment
+            val handle = findFirstFile.invoke(state, arena.wide(win32Path(path)), data) as MemorySegment
             if (handle.address() == -1L) throw failure("FindFirstFileW", path, lastError(state))
             try {
                 data.get(INT, 0) and FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
@@ -133,7 +134,7 @@ internal object WindowsSecurity {
             val sdOut = arena.allocate(PTR)
             val rc =
                 getNamedSecurityInfo.invoke(
-                    arena.wide(path.toAbsolutePath().toString()),
+                    arena.wide(win32Path(path)),
                     SE_FILE_OBJECT,
                     OWNER_SECURITY_INFORMATION or DACL_SECURITY_INFORMATION,
                     ownerOut,
@@ -184,7 +185,7 @@ internal object WindowsSecurity {
                 }
                 val rc =
                     setNamedSecurityInfo.invoke(
-                        arena.wide(path.toAbsolutePath().toString()),
+                        arena.wide(win32Path(path)),
                         SE_FILE_OBJECT,
                         DACL_SECURITY_INFORMATION or PROTECTED_DACL_SECURITY_INFORMATION,
                         MemorySegment.NULL,
@@ -287,6 +288,17 @@ internal object WindowsSecurity {
     }
 
     private fun lastError(state: MemorySegment): Int = state.get(INT, lastErrorOffset)
+
+    /** Use Win32's extended-length namespace before the classic MAX_PATH limit is reached. */
+    internal fun win32Path(path: Path): String {
+        val absolute = path.toAbsolutePath().toString()
+        if (absolute.length <= EXTENDED_PATH_THRESHOLD || absolute.startsWith("\\\\?\\")) return absolute
+        return if (absolute.startsWith("\\\\")) {
+            "\\\\?\\UNC\\" + absolute.substring(2)
+        } else {
+            "\\\\?\\" + absolute
+        }
+    }
 
     /**
      * The exception for [call] on [path] failing with Windows error [code]: [NoSuchFileException] when
