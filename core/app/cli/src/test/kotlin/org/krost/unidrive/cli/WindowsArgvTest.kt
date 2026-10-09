@@ -54,8 +54,28 @@ class WindowsArgvTest {
         assertNull(WindowsArgv.pickTrailing(listOf("x"), arrayOf("a", "b"), cp1252))
     }
 
+    // ── #528: an argument made ONLY of unrepresentable characters arrives all-ASCII (`?`) ──
+
     @Test
-    fun `ASCII arguments are returned as they are, without a native call`() {
+    fun `an argument made only of emoji characters is recovered from its all-question-mark form`() {
+        val folder = cps(0x1F4C1) + "folder" // U+1F4C1 is a surrogate pair → arrives as two '?'
+        val full = listOf("java.exe", "-jar", "u.jar", "ls", "--live", "/dir/$folder")
+        val received = arrayOf("ls", "--live", "/dir/" + "?".repeat(2) + "folder")
+
+        assertContentEquals(arrayOf("ls", "--live", "/dir/$folder"), WindowsArgv.pickTrailing(full, received, cp1252))
+    }
+
+    @Test
+    fun `an argument made only of CJK characters is recovered`() {
+        val name = cps(0x65E5, 0x672C) // 日本, each outside Cp1252, one '?' each
+        val full = listOf("java.exe", "-jar", "u.jar", "ls", "--live", "/zz$name")
+        val received = arrayOf("ls", "--live", "/zz??")
+
+        assertContentEquals(arrayOf("ls", "--live", "/zz$name"), WindowsArgv.pickTrailing(full, received, cp1252))
+    }
+
+    @Test
+    fun `ASCII arguments are returned as they are`() {
         val args = arrayOf("ls", "--live", "/plain")
         assertContentEquals(args, WindowsArgv.recover(args))
     }
