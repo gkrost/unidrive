@@ -213,12 +213,6 @@ open class SyncEngine(
         // #115: wire real user-dirs.dirs content so the reconciler can map locale-
         // aliased local folder names to their cloud-canonical equivalents.
         xdgUserDirsOverrides = xdgUserDirsOverrides,
-        // A row whose path does not resolve inside the cache answers true: it is kept out of the
-        // delete plan rather than read as a local delete.
-        isHydrationCachePresent = { path ->
-            org.krost.unidrive.engine.CachePaths.forRow(path, log) { resolveCachePath(it) }
-                ?.let { Files.isRegularFile(it) } ?: true
-        },
         // #532: identical edits on both sides are convergence, not a conflict — compare the
         // local file against the remote item with the provider's own content hash. Strict
         // (matches, not verify): a provider without a hash keeps the conflict.

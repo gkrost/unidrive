@@ -383,61 +383,16 @@ class ReconcilerTest {
     }
 
     @Test
-    fun `cache-backed hydrated row + local-missing does not delete remote`() {
-        db.upsertEntry(dbEntry("/mount-written.txt", isHydrated = true))
-        val cacheBacked = Reconciler(
-            db,
-            syncRoot,
-            ConflictPolicy.LAST_WRITER_WINS,
-            isHydrationCachePresent = { it == "/mount-written.txt" },
+    fun `mount cache metadata does not suppress mirror deletes`() {
+        val paths = listOf("/cache-backed.txt" to true, "/legacy-row.txt" to null, "/sync-root.txt" to false)
+        for ((path, backed) in paths) db.upsertEntry(dbEntry(path, isHydrated = true).copy(cacheBacked = backed))
+
+        val actions = reconciler.reconcile(
+            paths.associate { (path, _) -> path to cloudItem(path) },
+            paths.associate { (path, _) -> path to ChangeState.DELETED },
         )
 
-        val actions = cacheBacked.reconcile(
-            mapOf("/mount-written.txt" to cloudItem("/mount-written.txt")),
-            mapOf("/mount-written.txt" to ChangeState.DELETED),
-        )
-
-        assertTrue(actions.none { it is SyncAction.DeleteRemote })
-    }
-
-    @Test
-    fun `hydrated row whose baseline is the sync-root file + local-missing + cache copy present deletes remote`() {
-        // #449: the sync-root file was synced (or read through the mount, or mirrored after a mount write).
-        // The cache copy that stays behind (#450) must not block the user's deliberate delete.
-        db.upsertEntry(dbEntry("/was-synced.txt", isHydrated = true).copy(cacheBacked = false))
-        val cachePresent = Reconciler(
-            db,
-            syncRoot,
-            ConflictPolicy.LAST_WRITER_WINS,
-            isHydrationCachePresent = { true },
-        )
-
-        val actions = cachePresent.reconcile(
-            mapOf("/was-synced.txt" to cloudItem("/was-synced.txt")),
-            mapOf("/was-synced.txt" to ChangeState.DELETED),
-        )
-
-        assertTrue(actions.any { it is SyncAction.DeleteRemote }, "got $actions")
-    }
-
-    @Test
-    fun `hydrated row whose baseline is the cache copy + local-missing is protected, with or without the column`() {
-        for ((name, backed) in listOf("/cache-only.txt" to true, "/legacy-row.txt" to null)) {
-            db.upsertEntry(dbEntry(name, isHydrated = true).copy(cacheBacked = backed))
-        }
-        val cachePresent = Reconciler(
-            db,
-            syncRoot,
-            ConflictPolicy.LAST_WRITER_WINS,
-            isHydrationCachePresent = { true },
-        )
-
-        val actions = cachePresent.reconcile(
-            mapOf("/cache-only.txt" to cloudItem("/cache-only.txt"), "/legacy-row.txt" to cloudItem("/legacy-row.txt")),
-            mapOf("/cache-only.txt" to ChangeState.DELETED, "/legacy-row.txt" to ChangeState.DELETED),
-        )
-
-        assertTrue(actions.none { it is SyncAction.DeleteRemote }, "got $actions")
+        assertEquals(paths.size, actions.count { it is SyncAction.DeleteRemote }, "got $actions")
     }
 
     @Test
