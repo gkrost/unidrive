@@ -1297,25 +1297,25 @@ class InternxtApiService(
                     }
                 if (outageRetry && lastException!!.statusCode == 0) {
                     val remainingMs = connectOutageBudgetMs - outageWaitedMs
-                    if (remainingMs > 0) {
-                        val waitMs =
-                            (OUTAGE_FIRST_DELAY_MS shl outageStep.coerceAtMost(10))
-                                .coerceAtMost(OUTAGE_MAX_DELAY_MS)
-                                .coerceAtMost(remainingMs)
-                        outageStep++
-                        outageWaitedMs += waitMs
-                        log.warn(
-                            "GET {} has no connection ({}); retrying in {} ms ({} of {} ms spent)",
-                            url,
-                            e.message,
-                            waitMs,
-                            outageWaitedMs,
-                            connectOutageBudgetMs,
-                        )
-                        kotlinx.coroutines.delay(waitMs)
-                        index-- // the outage schedule, not the ladder, paces this retry
-                        continue
-                    }
+                    // The budget is spent: give up now. Falling through would run the rest of the ladder as
+                    // immediate attempts, since the ladder's delay is skipped on this branch.
+                    if (remainingMs <= 0) break
+                    val waitMs =
+                        (OUTAGE_FIRST_DELAY_MS shl outageStep.coerceAtMost(10))
+                            .coerceAtMost(OUTAGE_MAX_DELAY_MS)
+                            .coerceAtMost(remainingMs)
+                    outageStep++
+                    outageWaitedMs += waitMs
+                    log.warn(
+                        "GET {} has no connection ({}); retrying in {} ms ({} of {} ms spent)",
+                        url,
+                        e.message,
+                        waitMs,
+                        outageWaitedMs,
+                        connectOutageBudgetMs,
+                    )
+                    kotlinx.coroutines.delay(waitMs)
+                    index-- // the outage schedule, not the ladder, paces this retry
                 } else if (index < delays.size) {
                     kotlinx.coroutines.delay(delay)
                 }

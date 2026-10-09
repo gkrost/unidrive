@@ -136,7 +136,7 @@ class InternxtGetRetryTest {
             val result = withContext(EnumerationOutageRetry()) { service.listFiles() }
             assertEquals(emptyList<InternxtFile>(), result)
             assertEquals(7, calls.get(), "six lost attempts, the seventh answered")
-            assertTrue(testScheduler.currentTime < InternxtApiService.CONNECT_OUTAGE_BUDGET_MS, "recovered inside the window: $testScheduler.currentTime ms")
+            assertTrue(testScheduler.currentTime < InternxtApiService.CONNECT_OUTAGE_BUDGET_MS, "recovered inside the window: ${testScheduler.currentTime} ms")
             service.close()
         }
 
@@ -155,7 +155,7 @@ class InternxtGetRetryTest {
             val e = assertFailsWith<InternxtApiException> { withContext(EnumerationOutageRetry()) { service.listFiles() } }
             assertEquals(0, e.statusCode)
             assertEquals(60_000L, testScheduler.currentTime, "waited exactly the budget, in virtual time")
-            assertTrue(calls.get() in 4..20, "bounded number of attempts: ${calls.get()}")
+            assertEquals(6, calls.get(), "attempts at 0, 2, 6, 14, 30 and 60 s, then it gives up at once")
             service.close()
         }
 
@@ -190,7 +190,7 @@ class InternxtGetRetryTest {
             val e = assertFailsWith<InternxtApiException> { withContext(EnumerationOutageRetry()) { service.listFiles() } }
             assertEquals(503, e.statusCode)
             assertEquals(3, calls.get())
-            assertTrue(testScheduler.currentTime < 60_000L, "no outage wait for a status error: $testScheduler.currentTime ms")
+            assertTrue(testScheduler.currentTime < 60_000L, "no outage wait for a status error: ${testScheduler.currentTime} ms")
             service.close()
         }
 }

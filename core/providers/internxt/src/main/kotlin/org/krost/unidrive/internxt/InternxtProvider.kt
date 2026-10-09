@@ -1658,7 +1658,15 @@ class InternxtProvider(
         cursor: String?,
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
         scanContext: org.krost.unidrive.ScanContext?,
-    ): DeltaPage = kotlinx.coroutines.withContext(EnumerationOutageRetry()) { deltaImpl(cursor, onPageProgress, scanContext) }
+    ): DeltaPage =
+        // Only a full enumeration waits out a connect outage (#693): it has a long listing to lose. An incremental
+        // poll is one cheap query that the poller repeats on its cadence, and it must fail fast so that an offline
+        // account is reported as such instead of hanging for minutes.
+        if (cursor == null) {
+            kotlinx.coroutines.withContext(EnumerationOutageRetry()) { deltaImpl(cursor, onPageProgress, scanContext) }
+        } else {
+            deltaImpl(cursor, onPageProgress, scanContext)
+        }
 
     private suspend fun deltaImpl(
         cursor: String?,
