@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
@@ -551,6 +552,46 @@ class DaemonRuntimeTest {
         kotlinx.coroutines.withTimeout(10_000) { daemonJob.join() }
         assertFalse(Files.exists(socketPath), "socket file must be gone after daemon.shutdown")
         assertFalse(Files.exists(pidFile), ".lock.pid must be gone after daemon.shutdown")
+    }
+
+    @Test
+    fun `shutdown cancels and joins a hydration upload before closing the state database`() = runBlocking(Dispatchers.IO) {
+        val provider = BlockingUploadProvider()
+        val runtime = startDaemon(provider)
+        val daemonJob = launch { runtime.start() }
+        try {
+            awaitSocket(daemonJob)
+            val created = Json.parseToJsonElement(
+                sendOneRequest("""{"verb":"hydration.create","handle_id":"create-1","path":"/shutdown.txt"}"""),
+            ).jsonObject
+            assertTrue(created.getValue("ok").jsonPrimitive.content.toBoolean(), "create should succeed: $created")
+            val cachePath = Path.of(created.getValue("cache_path").jsonPrimitive.content)
+            Files.writeString(cachePath, "upload in flight")
+
+            val cacheJson = kotlinx.serialization.json.JsonPrimitive(cachePath.toString()).toString()
+            val opened = Json.parseToJsonElement(
+                sendOneRequest("""{"verb":"hydration.open_write","handle_id":"write-1","path":"/shutdown.txt","cache_path":$cacheJson}"""),
+            ).jsonObject
+            assertTrue(opened.getValue("ok").jsonPrimitive.content.toBoolean(), "open_write should start the upload: $opened")
+            withTimeout(5_000) { provider.uploadStarted.await() }
+
+            runtime.close()
+            withTimeout(10_000) { daemonJob.join() }
+            assertTrue(provider.uploadStopped.isCompleted, "the upload scope must be joined before state.db closes")
+
+            val reopened = StateDatabase(dbPath)
+            reopened.initialize()
+            try {
+                val row = assertNotNull(reopened.getEntry("/shutdown.txt"))
+                assertNull(row.remoteId, "an interrupted upload stays pending for startup replay")
+                assertTrue("/shutdown.txt" in reopened.pendingUploadPaths())
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
     }
 
     @Test
@@ -1116,6 +1157,26 @@ class DaemonRuntimeTest {
             quotaCalls += 1
             quotaFailure?.let { throw it }
             return quotaResult
+        }
+    }
+
+    private class BlockingUploadProvider : StubProvider() {
+        val uploadStarted = CompletableDeferred<Unit>()
+        val uploadStopped = CompletableDeferred<Unit>()
+
+        override suspend fun upload(
+            localPath: Path,
+            remotePath: String,
+            existingRemoteId: String?,
+            ifMatchETag: String?,
+            onProgress: ((Long, Long) -> Unit)?,
+        ): CloudItem {
+            uploadStarted.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                uploadStopped.complete(Unit)
+            }
         }
     }
 

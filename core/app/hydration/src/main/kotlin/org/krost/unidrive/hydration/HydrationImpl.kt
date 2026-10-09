@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -77,6 +78,11 @@ class HydrationImpl(
     // that can succeed (and the client's fresh writes) goes first. 0 = replay at once, as before.
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
 ) : Hydration {
+
+    /** Cancel and join all background work owned by this hydration layer before its state DB closes. */
+    suspend fun shutdownUploads() {
+        recoveryUploadScope.coroutineContext[Job]?.cancelAndJoin()
+    }
 
     /**
      * #560 U3 compatibility adapter: hydration over the mount front-end of [syncEngine] (`MountEngine.over`,

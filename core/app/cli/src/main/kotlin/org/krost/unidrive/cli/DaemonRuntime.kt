@@ -1,6 +1,7 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import org.krost.unidrive.CloudProvider
@@ -173,6 +174,7 @@ class DaemonRuntime(
             val serveScope = kotlinx.coroutines.CoroutineScope(
                 kotlin.coroutines.coroutineContext + serveJob,
             )
+            var hydrationForShutdown: HydrationImpl? = null
             // Coroutine-debug probes (gkrost/unidrive#613 ask 1): with UNIDRIVE_COROUTINE_DEBUG=1 the
             // daemon captures suspension stacks at start and dumps every live coroutine when a
             // coroutine-dump.trigger file appears in the profile folder — a hung upload becomes one
@@ -230,8 +232,19 @@ class DaemonRuntime(
                 var hydration: HydrationImpl? = null
                 var pollerRef: EnumeratePoller? = null
                 if (mountMode) {
-                    val hydrationImpl = HydrationImpl(mount, db!!, cacheMaxBytes = hydrationCacheMaxBytes)
+                    // Upload and replay jobs outlive IPC handlers but not this daemon. Keep their
+                    // scope separate so shutdown can cancel/join it without cancelling the serve scope.
+                    val hydrationUploadScope = kotlinx.coroutines.CoroutineScope(
+                        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+                    )
+                    val hydrationImpl = HydrationImpl(
+                        mount,
+                        db!!,
+                        recoveryUploadScope = hydrationUploadScope,
+                        cacheMaxBytes = hydrationCacheMaxBytes,
+                    )
                     hydration = hydrationImpl
+                    hydrationForShutdown = hydrationImpl
                     hydrationRef = hydrationImpl
                     // #450: what a stopped daemon left in the hydration cache (staging temp files, the
                     // copies of synced files read through the mount) is trimmed to the budget at start.
@@ -486,11 +499,12 @@ class DaemonRuntime(
                 closeSignal.await()
                 log.info("daemon: shutting down")
             } finally {
-                // Cancel all serve-scope children (hydration.events collector,
-                // IpcServer accept loop, HydrationIpcHandler subscriber writers,
-                // etc.) so this method can return. State.db + lock cleanup is
-                // handled by the outer finally calling cleanup().
-                serveJob.cancel()
+                // Stop accepting hydration verbs and cancel in-flight request handlers first. Upload
+                // workers have their own scope, so join them explicitly before cleanup closes state.db.
+                server.close()
+                ipcServer = null
+                serveJob.cancelAndJoin()
+                hydrationForShutdown?.shutdownUploads()
             }
         } catch (e: Exception) {
             // An IPC startup refusal is already reported as its one line.
