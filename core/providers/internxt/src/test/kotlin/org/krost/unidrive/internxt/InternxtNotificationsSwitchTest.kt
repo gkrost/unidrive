@@ -33,6 +33,63 @@ class InternxtNotificationsSwitchTest {
         }
     }
 
+    private fun writeValidCredentials(dir: java.nio.file.Path) {
+        val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+        val exp = System.currentTimeMillis() / 1000 + 10L * 24 * 3600
+        val jwt =
+            encoder.encodeToString("""{"alg":"HS256","typ":"JWT"}""".toByteArray()) + "." +
+                encoder.encodeToString("""{"exp":$exp}""".toByteArray()) + ".fake-signature"
+        val creds = InternxtCredentials(jwt = jwt, mnemonic = "m", rootFolderId = "root", email = "t@example.invalid")
+        Files.writeString(dir.resolve("credentials.json"), Json.encodeToString(InternxtCredentials.serializer(), creds))
+    }
+
+    private fun notificationsClientOf(provider: InternxtProvider): Any? =
+        InternxtProvider::class.java.getDeclaredField("notificationsClient").also { it.isAccessible = true }.get(provider)
+
+    // A one-shot command (`status`, `ls`, `quota`, one-shot `sync`) registers no remote-change
+    // listener, so it must never reach the notifications endpoint: 2026-10-09 every `unidrive status`
+    // opened the websocket and printed the endpoint's certificate WARN.
+    @Test
+    fun `authenticate without a remote-change listener starts no notifications client`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-notif-oneshot-")
+            try {
+                writeValidCredentials(tmp)
+                val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
+                try {
+                    provider.authenticate()
+                    provider.authenticate()
+                    assertNull(notificationsClientOf(provider), "no listener, no websocket")
+                } finally {
+                    provider.close()
+                }
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
+    @Test
+    fun `a listener starts the client whether it registers before or after authenticate`() =
+        runBlocking {
+            val tmp = Files.createTempDirectory("internxt-notif-listener-")
+            try {
+                writeValidCredentials(tmp)
+                for (registerFirst in listOf(true, false)) {
+                    val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
+                    try {
+                        if (registerFirst) provider.onRemoteChangeHint { }
+                        provider.authenticate()
+                        if (!registerFirst) provider.onRemoteChangeHint { }
+                        assertTrue(notificationsClientOf(provider) != null, "registerFirst=$registerFirst: listener present, client started")
+                    } finally {
+                        provider.close()
+                    }
+                }
+            } finally {
+                Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+
     @Test
     fun `a disabled provider starts no notifications client and logs one INFO line`() =
         runBlocking {
@@ -52,6 +109,7 @@ class InternxtNotificationsSwitchTest {
 
                 val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsEnabled = false))
                 try {
+                    provider.onRemoteChangeHint { }
                     provider.authenticate()
                     provider.authenticate()
 

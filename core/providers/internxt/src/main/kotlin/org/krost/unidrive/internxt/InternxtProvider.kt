@@ -41,11 +41,11 @@ class InternxtProvider(
     // of a resumable-upload protocol.
     private val tombstoneStore = UploadTombstoneStore(config.tokenPath.resolve("upload-tombstones"))
 
-    // Internxt notifications (socket.io). Constructed lazily on the first
-    // authenticate() success so we have a JWT to hand to the WS handshake;
-    // disposed in close() / logout(). The current remote-change callback is
-    // stashed in a volatile reference so onRemoteChangeHint() called BEFORE
-    // authenticate() still wires through once the socket comes up.
+    // Internxt notifications (socket.io). Only a process that consumes remote-change
+    // hints (onRemoteChangeHint, today `sync --watch`) opens the socket: a one-shot
+    // `status` / `ls` / `sync` has no use for it and must not reach the endpoint.
+    // Started by whichever comes second, authenticate() success (we need a JWT for
+    // the handshake) or onRemoteChangeHint(); disposed in close() / logout().
     @Volatile
     private var notificationsClient: NotificationsClient? = null
 
@@ -55,6 +55,11 @@ class InternxtProvider(
 
     @Volatile
     private var remoteChangeCallback: () -> Unit = {}
+
+    @Volatile
+    private var remoteHintsWanted = false
+
+    private val notificationsStartLock = Mutex()
 
     // UD-357: process-local cache of (parentUuid, sanitizedName) -> uuid for
     // folder lookups. Populated on createFolder success (the API returns the
@@ -133,10 +138,10 @@ class InternxtProvider(
         if (!authService.isAuthenticated || authService.isJwtExpired()) {
             authService.authenticateInteractive()
         }
-        // Bring up the notifications WS now that we have a JWT. Failures are
-        // logged inside NotificationsClient; the periodic poll is the safety
-        // net so a WS that won't connect mustn't fail the authenticate path.
-        ensureNotificationsClient()
+        // Bring up the notifications WS now that we have a JWT, if anyone listens.
+        // Failures are logged inside NotificationsClient; the periodic poll is the
+        // safety net so a WS that won't connect mustn't fail the authenticate path.
+        if (remoteHintsWanted) ensureNotificationsClient()
     }
 
     override suspend fun logout() {
@@ -154,6 +159,11 @@ class InternxtProvider(
 
     override fun onRemoteChangeHint(callback: () -> Unit) {
         remoteChangeCallback = callback
+        remoteHintsWanted = true
+        // Registered after authenticate(): start now. Before it: authenticate() starts it.
+        if (authService.isAuthenticated) {
+            runBlocking { ensureNotificationsClient() }
+        }
     }
 
     private suspend fun ensureNotificationsClient() {
@@ -164,6 +174,10 @@ class InternxtProvider(
             }
             return
         }
+        notificationsStartLock.withLock { startNotificationsClientLocked() }
+    }
+
+    private suspend fun startNotificationsClientLocked() {
         if (notificationsClient != null) return
         val creds =
             try {
