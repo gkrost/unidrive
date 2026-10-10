@@ -44,28 +44,34 @@ internal object SparseProbe {
     private fun allSampledZero(
         path: Path,
         size: Long,
-    ): Boolean {
-        val pages = (size + PAGE - 1) / PAGE
-        val offsets: LongArray =
-            if (pages <= MAX_SAMPLED_PAGES) {
-                LongArray(pages.toInt()) { it.toLong() * PAGE }
-            } else {
-                val step = (pages - 1).toDouble() / (MAX_SAMPLED_PAGES - 1)
-                LongArray(MAX_SAMPLED_PAGES) { (it * step).toLong() * PAGE }
-            }
-        val buf = ByteBuffer.allocate(PAGE)
+    ): Boolean =
         FileChannel.open(path, StandardOpenOption.READ).use { ch ->
-            for (offset in offsets) {
-                buf.clear()
-                var read = 0
-                while (buf.hasRemaining()) {
-                    val n = ch.read(buf, offset + read)
-                    if (n < 0) break
-                    read += n
-                }
-                for (i in 0 until read) if (buf.get(i) != 0.toByte()) return false
-            }
+            sampleOffsets(size).none { offset -> hasNonZeroByte(ch, offset) }
         }
-        return true
+
+    /** Page-aligned offsets to sample: every page when there are few, else head, tail and evenly spaced ones. */
+    private fun sampleOffsets(size: Long): LongArray {
+        val pages = (size + PAGE - 1) / PAGE
+        if (pages <= MAX_SAMPLED_PAGES) return LongArray(pages.toInt()) { it.toLong() * PAGE }
+        val step = (pages - 1).toDouble() / (MAX_SAMPLED_PAGES - 1)
+        return LongArray(MAX_SAMPLED_PAGES) { (it * step).toLong() * PAGE }
+    }
+
+    /** Reads up to one page at [offset] and reports whether any byte read is non-zero. */
+    private fun hasNonZeroByte(
+        ch: FileChannel,
+        offset: Long,
+    ): Boolean {
+        val buf = ByteBuffer.allocate(PAGE)
+        var read = 0
+        while (buf.hasRemaining()) {
+            val n = ch.read(buf, offset + read)
+            if (n < 0) break
+            read += n
+        }
+        for (i in 0 until read) {
+            if (buf.get(i) != 0.toByte()) return true
+        }
+        return false
     }
 }
