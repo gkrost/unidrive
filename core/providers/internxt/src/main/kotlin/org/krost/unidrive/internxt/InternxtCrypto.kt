@@ -109,8 +109,10 @@ open class InternxtCrypto {
     /**
      * BIP39 mnemonic to 512-bit seed.
      * PBKDF2-SHA512 with "mnemonic" as salt, 2048 iterations.
+     *
+     * #730: open so a counting subclass can assert the caller's cache derives once.
      */
-    fun mnemonicToSeed(mnemonic: String): ByteArray {
+    open fun mnemonicToSeed(mnemonic: String): ByteArray {
         val spec =
             PBEKeySpec(
                 mnemonic.toCharArray(),
