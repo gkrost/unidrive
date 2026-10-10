@@ -100,6 +100,13 @@ server dispatches on; anything else is `forbidden`, so a handler that reads the 
 on another verb than the one checked. `hello` and `hello.proof` after authentication are ordinary
 (unregistered) verbs.
 
+**Observing is not working.** A `hydration.subscribe` on a `read` connection is accepted with the same reply
+(`{"ok":true}`) and delivers events, but it never starts the enumerate that a `full` connection's subscribe
+triggers after its reply: an observer (a status UI) cannot make the daemon scan the remote. Of the read
+class, only `hydration.open_read` does work: it downloads and caches the file's content, so a front-end that
+only observes must not call it. The other read verbs (`daemon.status`, `hydration.list`,
+`hydration.last_synced`, `sync.subscribe`) answer from state the daemon already holds.
+
 `IpcContractCorpusTest` keeps the table equal to the contract corpus: every corpus verb has a class and
 the table holds no verb the daemon does not register.
 

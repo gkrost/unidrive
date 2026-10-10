@@ -781,6 +781,71 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    fun `a read-scope subscribe is accepted and starts no enumerate`() = runBlocking {
+        // An observer (a status UI) holds a READ token: it may subscribe to events, but a subscribe
+        // must not start a scan of the remote on its behalf. Only a full-scope mount client's
+        // subscribe triggers the reactive enumerate.
+        val provider = OneRemoteFileStubProvider()
+        val runtime = startDaemon(provider)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+
+        val channel = connect(IpcAuth.Scope.READ)
+        try {
+            channel.configureBlocking(false)
+            channel.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
+            assertEquals("""{"ok":true}""", readFirstReplyLine(channel, 5_000), "the reply does not depend on the scope")
+
+            // The enumerate of a full-scope subscribe pushes view.invalidated within milliseconds
+            // (see the test above); give a wrongly scheduled one ample time to show.
+            val pushed = readUntil(channel, "view.invalidated", timeoutMs = 2_000)
+            assertTrue(!pushed.contains("view.invalidated"), "a read-scope subscribe must not enumerate; got: $pushed")
+            assertEquals(0, provider.deltaCalls.get(), "no enumerate job may start")
+
+            val status = Json.parseToJsonElement(sendOneRequest("""{"verb":"daemon.status"}""")).jsonObject
+            assertTrue(status.getValue("refresh_job_id") is kotlinx.serialization.json.JsonNull, "no refresh job: $status")
+            assertEquals(0, provider.deltaCalls.get())
+        } finally {
+            channel.close()
+        }
+
+        runtime.close()
+        daemonJob.join()
+    }
+
+    @Test
+    fun `the subscribe-time enumerate is for full scope or an unauthenticated server only`() {
+        // The daemon always runs with authentication; the auth-off branch is the protocol-1 fallback.
+        assertTrue(DaemonRuntime.subscribeEnumerates(authEnabled = true, scope = "full"))
+        assertTrue(!DaemonRuntime.subscribeEnumerates(authEnabled = true, scope = "read"))
+        assertTrue(!DaemonRuntime.subscribeEnumerates(authEnabled = true, scope = null), "an unknown scope is not full")
+        assertTrue(DaemonRuntime.subscribeEnumerates(authEnabled = false, scope = null))
+    }
+
+    @Test
+    fun `a full-scope subscribe enumerates exactly once`() = runBlocking {
+        val provider = OneRemoteFileStubProvider()
+        val runtime = startDaemon(provider)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+
+        val channel = connect(IpcAuth.Scope.FULL)
+        try {
+            channel.configureBlocking(false)
+            channel.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
+            val collected = readUntil(channel, "view.invalidated", timeoutMs = 10_000)
+            assertTrue(collected.contains("\"event\":\"view.invalidated\""), "a full-scope subscribe enumerates; got: $collected")
+            delay(500) // a second, unwanted enumerate would have started by now
+            assertEquals(1, provider.deltaCalls.get(), "exactly one enumerate per subscribe")
+        } finally {
+            channel.close()
+        }
+
+        runtime.close()
+        daemonJob.join()
+    }
+
+    @Test
     fun daemon_status_returns_uptime_clients_and_refresh_state() = runBlocking {
         val provider: CloudProvider = StubProvider()
 
@@ -1352,6 +1417,9 @@ class DaemonRuntimeTest {
         override val displayName: String = "Stub (one remote file)"
         override var isAuthenticated: Boolean = true
 
+        /** How many times the daemon asked this provider for a delta page, i.e. started an enumeration. */
+        val deltaCalls = java.util.concurrent.atomic.AtomicInteger()
+
         override fun capabilities(): Set<Capability> = emptySet()
 
         override suspend fun authenticate() { /* no-op */ }
@@ -1380,8 +1448,9 @@ class DaemonRuntimeTest {
             cursor: String?,
             onPageProgress: ((Int) -> Unit)?,
             scanContext: org.krost.unidrive.ScanContext?,
-        ): DeltaPage =
-            DeltaPage(
+        ): DeltaPage {
+            deltaCalls.incrementAndGet()
+            return DeltaPage(
                 items = listOf(
                     CloudItem(
                         id = "remote-1",
@@ -1398,6 +1467,7 @@ class DaemonRuntimeTest {
                 cursor = "cursor-1",
                 hasMore = false,
             )
+        }
 
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
     }

@@ -312,7 +312,11 @@ class DaemonRuntime(
                     val ipc = requireNotNull(hydrationIpcRef) { "mount mode without a hydration layer" }
                     server.registerHandler(verb) { connId, json ->
                         val reply = ipc.handle(connectionId = connId, jsonRequest = json)
-                        if (verb == "hydration.subscribe" && reply.contains("\"ok\":true")) {
+                        // A READ-scope subscribe (an observer such as a status UI) never starts the enumerate:
+                        // observing must not scan the remote. #657
+                        if (verb == "hydration.subscribe" && reply.contains("\"ok\":true") &&
+                            subscribeEnumerates(server.authEnabled, server.scopeOf(connId))
+                        ) {
                             server.scheduleAfterReply(connId) {
                                 runCatching { enumerateHandler.runGuarded(reset = false) }
                                     .onFailure { log.warn("enumerate-on-subscribe failed", it) }
@@ -699,5 +703,16 @@ class DaemonRuntime(
         // shape (IpcContractCorpusTest). Version 2 authenticates every
         // connection (IpcAuth, docs/dev/specs/ipc-authentication.md).
         const val IPC_PROTOCOL_VERSION: Int = IpcAuth.PROTOCOL_VERSION
+
+        /**
+         * Whether a successful `hydration.subscribe` is followed by the one guarded enumerate: only for a
+         * full-scope connection, or when the server does not authenticate at all (the protocol-1 fallback,
+         * until the handshake is mandatory everywhere). With authentication on, anything but `full`, an
+         * unknown scope included, does not enumerate.
+         */
+        internal fun subscribeEnumerates(
+            authEnabled: Boolean,
+            scope: String?,
+        ): Boolean = !authEnabled || scope == IpcAuth.Scope.FULL.wire
     }
 }

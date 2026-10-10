@@ -215,8 +215,9 @@ class LsCommandTest {
 
         try {
             // Trigger the reactive enumerate so state.db is populated, then wait for
-            // view.invalidated to confirm the enumerate completed.
-            IpcAuthClient.connect(endpoint(), IpcAuth.Scope.READ).use { sub ->
+            // view.invalidated to confirm the enumerate completed. The mount client holds the full token:
+            // only a full-scope subscribe enumerates (a read-scope observer never does).
+            IpcAuthClient.connect(endpoint(), IpcAuth.Scope.FULL).use { sub ->
                 sub.configureBlocking(false)
                 sub.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
                 val collected = readUntil(sub, "view.invalidated", timeoutMs = 10_000)
