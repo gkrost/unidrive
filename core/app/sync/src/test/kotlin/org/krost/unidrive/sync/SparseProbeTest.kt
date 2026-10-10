@@ -15,17 +15,21 @@ import kotlin.test.assertTrue
 class SparseProbeTest {
     private lateinit var dir: Path
     private lateinit var db: StateDatabase
+    private lateinit var dbDir: Path
 
     @BeforeTest
     fun setUp() {
         dir = Files.createTempDirectory("unidrive-sparse-probe")
-        db = StateDatabase(Files.createTempDirectory("unidrive-sparse-db").resolve("state.db"))
+        dbDir = Files.createTempDirectory("unidrive-sparse-db")
+        db = StateDatabase(dbDir.resolve("state.db"))
         db.initialize()
     }
 
     @AfterTest
     fun tearDown() {
         db.close()
+        dir.toFile().deleteRecursively()
+        dbDir.toFile().deleteRecursively()
     }
 
     private fun stub(
@@ -66,6 +70,20 @@ class SparseProbeTest {
             ch.write(ByteBuffer.wrap(ByteArray(SparseProbe.PAGE * 1024) { 9 }), pageStart)
         }
         assertFalse(SparseProbe.isStub(big, Files.size(big)))
+    }
+
+    @Test
+    fun `real bytes in a page between the samples keep the file real`() {
+        // 1000 pages: the probe samples 64 of them (pages 0, 15, 31, ..., 491, 507, ...), so pages 1, 8
+        // and 500 are not sampled. A disk or ISO image can hold its first real bytes exactly there.
+        val size = 1000L * SparseProbe.PAGE
+        for (page in listOf(1L, 8L, 500L)) {
+            val p = stub("gap-$page.bin", size)
+            FileChannel.open(p, StandardOpenOption.WRITE).use { ch ->
+                ch.write(ByteBuffer.wrap(byteArrayOf(1)), page * SparseProbe.PAGE + 17)
+            }
+            assertFalse(SparseProbe.isStub(p, size), "a non-zero byte in page $page must keep the file real")
+        }
     }
 
     @Test
