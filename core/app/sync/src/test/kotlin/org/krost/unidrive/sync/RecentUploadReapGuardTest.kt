@@ -29,7 +29,7 @@ import kotlin.test.assertTrue
 class RecentUploadReapGuardTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -37,7 +37,7 @@ class RecentUploadReapGuardTest {
         val dbPath = Files.createTempDirectory("ud-reap-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest

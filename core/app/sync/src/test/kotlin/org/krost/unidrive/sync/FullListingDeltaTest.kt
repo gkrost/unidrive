@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
 class FullListingDeltaTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     private val modified = Instant.parse("2026-03-28T12:00:00Z")
 
@@ -35,7 +35,7 @@ class FullListingDeltaTest {
         val dbPath = Files.createTempDirectory("ud-422-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
         provider.deltaFullListing = true
     }
 

@@ -1,6 +1,9 @@
 plugins {
     kotlin("jvm")
     kotlin("plugin.serialization")
+    // The engine test fakes (FakeCloudProvider) are shared with the mount front-end's tests in
+    // :app:hydration, which build their SyncEngine host on them.
+    `java-test-fixtures`
 }
 
 kotlin {
@@ -20,12 +23,12 @@ dependencies {
     implementation(libs.ktoml.file)
     implementation(libs.logback.classic)
 
+    // FakeCloudProvider implements the provider SPI and suspends (delay).
+    testFixturesApi(project(":app:core"))
+    testFixturesImplementation(libs.kotlinx.coroutines.core)
+
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
-    // #560 U3: the tests of the mount operations that moved to MountEngine still call them on a
-    // SyncEngine, through MountEngineTestAdapters.kt. Test scope only; checkModuleEdges forbids the
-    // main edge :app:sync -> :app:hydration.
-    testImplementation(project(":app:hydration"))
     // UD-284: MDCContext-propagation regression test pins kotlinx-coroutines-slf4j
     // for the calling-side wrapping pattern that RelocateCommand uses.
     testImplementation(libs.kotlinx.coroutines.slf4j)

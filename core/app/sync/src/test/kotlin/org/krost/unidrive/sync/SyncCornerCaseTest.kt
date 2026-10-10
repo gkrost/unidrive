@@ -44,7 +44,7 @@ private fun createSparsePlaceholder(
 class SyncCornerCaseTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -52,7 +52,7 @@ class SyncCornerCaseTest {
         val dbPath = Files.createTempDirectory("unidrive-corner-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest

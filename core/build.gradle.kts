@@ -342,11 +342,30 @@ val mainProjectEdges: () -> Map<String, Set<String>> = {
     }
 }
 
+// Test-scope project edges (the test and test-fixture source sets), for the one test-scope rule below.
+val testProjectEdges: () -> Map<String, Set<String>> = {
+    val testConfigs =
+        setOf(
+            "testImplementation", "testApi", "testCompileOnly", "testRuntimeOnly",
+            "testFixturesApi", "testFixturesImplementation", "testFixturesCompileOnly", "testFixturesRuntimeOnly",
+        )
+    subprojects.associate { sp ->
+        sp.path to sp.configurations
+            .filter { it.name in testConfigs }
+            .flatMap { c -> c.dependencies.withType<ProjectDependency>().map { it.path } }
+            .toSortedSet()
+    }
+}
+
 tasks.register("checkModuleEdges") {
     group = "verification"
     description = "Fails on a forbidden module dependency edge (#560) or a cycle between modules."
     doLast {
         val edges = mainProjectEdges()
+        // The mount front-end's tests run on a SyncEngine host (the only MountHost in production), so
+        // :app:hydration's tests depend on :app:sync. The reverse test edge made the two test scopes
+        // mutually dependent (#560 U3); the mount-operation tests live in :app:hydration since U8.
+        val testEdges = testProjectEdges()
         edges.toSortedMap().forEach { (from, to) ->
             if (to.isNotEmpty()) logger.info("module edge: $from -> ${to.joinToString(", ")}")
         }
@@ -371,6 +390,9 @@ tasks.register("checkModuleEdges") {
             if (from == ":app:sync" && ":app:hydration" in to) {
                 violations += "$from -> :app:hydration (the mirror engine does not depend on the mount front-end)"
             }
+        }
+        if (":app:hydration" in testEdges[":app:sync"].orEmpty()) {
+            violations += ":app:sync (test) -> :app:hydration (mount-operation tests belong in :app:hydration, whose tests depend on :app:sync)"
         }
         // Cycle check (depth-first, three colours).
         val state = mutableMapOf<String, Int>()

@@ -1,4 +1,4 @@
-package org.krost.unidrive.sync
+package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -6,13 +6,16 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.sync.FakeCloudProvider
+import org.krost.unidrive.sync.ProgressReporter
+import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.audit.AuditLog
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.krost.unidrive.sync.model.EntryStatus
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.attribute.FileTime
 import java.time.Instant
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -20,25 +23,25 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
- * #560 U1: characterization tests for the mount-only operations that still live in [SyncEngine]
- * (`ensureHydrated`, `uploadFromCache`, `deleteRemote`, `renameRemote`, `createRemoteFolder`,
- * `remoteItemOrNull`, `enumerateRemoteIntoState`) and the scope-transition
- * view invalidation. They pin what the code does today, so each extraction PR of #560 proves parity.
- * Only behaviour no other test pins is covered here; a test whose name starts with "current behaviour"
- * pins something a later unit may change on purpose.
+ * #560 U1: characterization tests for the mount operations (`ensureHydrated`, `uploadFromCache`,
+ * `deleteRemote`, `renameRemote`, `createRemoteFolder`, `remoteItemOrNull`), which moved from
+ * `SyncEngine` to [MountEngine] in U3. They run on the mount front-end of a `SyncEngine` host (the
+ * production wiring, `MountEngine.over`) and pin what the code does today, so each extraction PR of
+ * #560 proves parity. Only behaviour no other test pins is covered here; a test whose name starts
+ * with "current behaviour" pins something a later unit may change on purpose. The enumeration and
+ * scope-transition parity of the mirror engine stays in :app:sync (`EnumerationParityTest`).
  */
 class MountOperationsParityTest {
     private lateinit var syncRoot: Path
     private lateinit var cacheRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
     private val invalidations = mutableListOf<Pair<Set<String>, Boolean>>()
 
     private val remoteModified = Instant.parse("2026-03-28T12:00:00Z")
@@ -50,7 +53,7 @@ class MountOperationsParityTest {
         cacheRoot = Files.createTempDirectory("ud-560-cache")
         db = StateDatabase(Files.createTempDirectory("ud-560-db").resolve("state.db"))
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest
@@ -208,7 +211,8 @@ class MountOperationsParityTest {
     @Test
     fun `current behaviour - a cancelled uploadFromCache rethrows, is audited as failed and leaves the row pending`() =
         runTest {
-            val audit = AuditLog(Files.createTempDirectory("ud-560-audit"), profileName = "parity")
+            val auditDir = Files.createTempDirectory("ud-560-audit")
+            val audit = AuditLog(auditDir, profileName = "parity")
             val e = engine(auditLog = audit)
             val created = mountCreatedRow("/new.txt")
             db.upsertEntry(created)
@@ -219,7 +223,7 @@ class MountOperationsParityTest {
 
             assertEquals(created, db.getEntry("/new.txt"), "the row stays a pending upload")
             assertTrue(Files.exists(cache), "the cache copy stays")
-            val lines = Files.readAllLines(audit.pathForToday()).filter { it.isNotBlank() }
+            val lines = Files.readAllLines(auditFileIn(auditDir)).filter { it.isNotBlank() }
             assertEquals(1, lines.size)
             assertTrue(lines[0].contains("failed:CancellationException"), lines[0])
         }
@@ -351,95 +355,6 @@ class MountOperationsParityTest {
                 val thrown = assertFailsWith<Exception> { e.remoteItemOrNull("/x") }
                 assertSame(error, thrown, "a non-absence failure propagates unchanged")
             }
-        }
-
-    // ── enumerateRemoteIntoState ─────────────────────────────────────────────────────────────
-
-    @Test
-    fun `a failed gather with reset keeps every row, leaves the cursor cleared and invalidates nothing`() =
-        runTest {
-            val e = engine()
-            provider.files["/a.txt"] = content
-            provider.deltaItems = listOf(remoteItem("/a.txt"), remoteItem("/b", isFolder = true))
-            assertTrue(e.enumerateRemoteIntoState(reset = false).ok)
-            val before = db.getAllEntries().associateBy { it.path }
-            assertEquals(setOf("/a.txt", "/b"), before.keys)
-            invalidations.clear()
-            provider.deltaFailCount = 1
-
-            val r = e.enumerateRemoteIntoState(reset = true)
-
-            assertFalse(r.ok)
-            assertEquals("Network timeout on delta", r.error)
-            assertEquals(before, db.getAllEntries().associateBy { it.path }, "a failed gather keeps the last good rows")
-            assertEquals("", db.getSyncState("delta_cursor"), "reset cleared the cursor, the next gather is a full one")
-            assertEquals(emptyList(), invalidations, "nothing changed, nothing is invalidated")
-        }
-
-    @Test
-    fun `a reset enumeration sweeps a row the remote no longer lists without clearing the others`() =
-        runTest {
-            val e = engine()
-            provider.deltaItems = listOf(remoteItem("/keep.txt"), remoteItem("/gone.txt"))
-            e.enumerateRemoteIntoState(reset = false)
-            provider.deltaItems = listOf(remoteItem("/keep.txt"))
-            provider.deltaCursor = "cursor-2"
-
-            val r = e.enumerateRemoteIntoState(reset = true)
-
-            assertTrue(r.ok && r.complete)
-            assertEquals(1, r.reaped)
-            assertEquals(EntryStatus.DELETED, db.statusOf("/gone.txt"))
-            assertNotNull(db.getEntry("/keep.txt"))
-            assertTrue(provider.deletedPaths.isEmpty(), "a reap never deletes on the remote")
-        }
-
-    // ── scope transition (viewInvalidationSink, full = true) ─────────────────────────────────
-
-    @Test
-    fun `widening the standing scope invalidates the whole view once`() =
-        runTest {
-            provider.deltaItems = listOf(remoteItem("/a", isFolder = true), remoteItem("/b", isFolder = true))
-            engine(scope = listOf("/a")).enumerateRemoteIntoState(reset = false)
-            invalidations.clear()
-
-            engine(scope = listOf("/a", "/b")).enumerateRemoteIntoState(reset = false)
-
-            assertEquals(listOf(emptySet<String>() to true), invalidations.filter { it.second })
-            assertNotNull(db.getEntry("/b"), "the widened subtree is enumerated")
-        }
-
-    @Test
-    fun `a sync pass that narrows the standing scope invalidates the whole view once`() =
-        runTest {
-            provider.files["/a/x.txt"] = content
-            provider.files["/b/y.txt"] = content
-            provider.deltaItems =
-                listOf(
-                    remoteItem("/a", isFolder = true),
-                    remoteItem("/a/x.txt"),
-                    remoteItem("/b", isFolder = true),
-                    remoteItem("/b/y.txt"),
-                )
-            engine().syncOnce()
-            assertTrue(invalidations.none { it.second }, "an unscoped first pass over an empty scope record is no transition")
-
-            engine(scope = listOf("/a")).syncOnce()
-
-            assertEquals(listOf(emptySet<String>() to true), invalidations.filter { it.second })
-            assertNull(db.getEntry("/b/y.txt"))
-        }
-
-    @Test
-    fun `a sync pass with an unchanged scope does not invalidate the whole view`() =
-        runTest {
-            provider.deltaItems = listOf(remoteItem("/a", isFolder = true))
-            engine(scope = listOf("/a")).syncOnce()
-            invalidations.clear()
-
-            engine(scope = listOf("/a")).syncOnce()
-
-            assertTrue(invalidations.none { it.second }, "got $invalidations")
         }
 }
 

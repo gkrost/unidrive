@@ -24,7 +24,7 @@ import kotlin.test.assertFalse
 class SyncRetryNonFatalTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -32,7 +32,7 @@ class SyncRetryNonFatalTest {
         val dbPath = Files.createTempDirectory("unidrive-retry-nofatal-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest

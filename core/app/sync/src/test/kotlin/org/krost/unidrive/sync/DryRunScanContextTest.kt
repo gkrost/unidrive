@@ -14,7 +14,7 @@ import kotlin.test.assertEquals
  */
 class DryRunScanContextTest {
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
     private lateinit var engine: SyncEngine
 
     @BeforeTest
@@ -22,7 +22,7 @@ class DryRunScanContextTest {
         // Dry-runs require a disposable database; an in-memory one serves both passes.
         db = StateDatabase(Files.createTempDirectory("ud-400-db").resolve("state.db"), inMemory = true)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
         engine =
             SyncEngine(
                 provider = provider,
