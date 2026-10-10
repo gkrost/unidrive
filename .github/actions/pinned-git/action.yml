@@ -1,0 +1,46 @@
+name: Pinned git
+description: >
+  Builds git from a release tag (cached), checks the tag against a pinned commit, and exports the oracle
+  variables the ignore-matcher conformance test reads (UNIDRIVE_ORACLE_GIT, UNIDRIVE_ORACLE_GIT_VERSION,
+  UNIDRIVE_ORACLE_REQUIRED). The runner's own git is never used: it moves with the runner image.
+
+inputs:
+  version:
+    description: git release, e.g. 2.55.0
+    required: true
+  commit:
+    description: commit the release tag v<version> must resolve to (git rev-parse of the tag, peeled)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore pinned git
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/pinned-git/${{ inputs.version }}
+        key: pinned-git-${{ runner.os }}-${{ inputs.version }}-${{ inputs.commit }}-v1
+
+    - name: Build pinned git
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        src="$RUNNER_TEMP/git-src-${{ inputs.version }}"
+        git clone --quiet --depth 1 --branch "v${{ inputs.version }}" https://github.com/git/git.git "$src"
+        test "$(git -C "$src" rev-parse HEAD)" = "${{ inputs.commit }}"
+        # Only what check-ignore needs: no gettext, curl, expat, openssl, perl, python, tcl/tk.
+        make -C "$src" -j"$(nproc)" prefix="$HOME/pinned-git/${{ inputs.version }}" \
+          NO_GETTEXT=1 NO_TCLTK=1 NO_CURL=1 NO_EXPAT=1 NO_OPENSSL=1 NO_PERL=1 NO_PYTHON=1 NO_INSTALL_HARDLINKS=1 install
+
+    - name: Export oracle variables
+      shell: bash
+      run: |
+        git_bin="$HOME/pinned-git/${{ inputs.version }}/bin/git"
+        "$git_bin" --version
+        {
+          echo "UNIDRIVE_ORACLE_GIT=$git_bin"
+          echo "UNIDRIVE_ORACLE_GIT_VERSION=${{ inputs.version }}"
+          echo "UNIDRIVE_ORACLE_REQUIRED=1"
+        } >> "$GITHUB_ENV"

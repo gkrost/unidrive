@@ -1,0 +1,190 @@
+=== ascii-case-differences
+--- .gitignore
+README
+*.JPG
+Build/
+--- paths
+README
+readme
+ReadMe
+a.jpg
+a.JPG
+a.Jpg
+build/
+BUILD/
+Build/
+x/build/y
+
+=== ascii-case-in-anchored-pattern
+--- .gitignore
+/Docs/Api
+src/Main/*.KT
+--- paths
+Docs/Api
+docs/api
+DOCS/API
+src/main/a.kt
+Src/Main/a.KT
+
+=== ascii-case-with-bracket-classes
+--- .gitignore
+[A-C]file
+[a-c]data
+[ABC]x
+[[:upper:]]y
+[[:lower:]]z
+--- paths
+afile
+Afile
+dfile
+adata
+Adata
+ax
+Ax
+ay
+Ay
+az
+Az
+
+=== ascii-case-with-escapes-and-questions
+--- .gitignore
+\Abc
+A?C
+--- paths
+abc
+Abc
+aBc
+ABC
+aXc
+
+=== ascii-case-in-doublestar-forms
+--- .gitignore
+**/Node_Modules/
+A/**/B
+--- paths
+node_modules/
+x/NODE_MODULES/
+a/b
+A/b
+a/x/b
+A/X/B
+
+=== non-ascii-case-is-not-folded
+--- .gitignore
+{u:00C9}cole
+r{u:00E9}sum{u:00E9}
+--- paths
+{u:00C9}cole
+{u:00E9}cole
+r{u:00E9}sum{u:00E9}
+r{u:00C9}sum{u:00C9}
+R{u:00E9}SUM{u:00E9}
+
+=== nfc-rule-vs-nfd-path
+--- .gitignore
+caf{u:00E9}
+caf{u:00E9}.txt
+--- paths
+caf{u:00E9}
+caf{u:0065,0301}
+caf{u:00E9}.txt
+caf{u:0065,0301}.txt
+dir/caf{u:00E9}
+dir/caf{u:0065,0301}
+
+=== nfd-rule-vs-nfc-path
+--- .gitignore
+caf{u:0065,0301}
+na{u:0069,0308}ve/
+--- paths
+caf{u:00E9}
+caf{u:0065,0301}
+na{u:00EF}ve/
+na{u:0069,0308}ve/
+na{u:00EF}ve/x
+na{u:0069,0308}ve/x
+
+=== nfd-in-directory-names-and-anchored-rules
+--- .gitignore
+/M{u:00FC}ll/*.dat
+**/Caf{u:00E9}/
+--- paths
+M{u:00FC}ll/a.dat
+M{u:0075,0308}ll/a.dat
+x/Caf{u:00E9}/
+x/Caf{u:0065,0301}/
+Caf{u:0065,0301}/y
+
+=== question-mark-counts-bytes-not-characters
+--- .gitignore
+caf?
+caf??
+na?ve
+--- paths
+caf{u:00E9}
+caf{u:0065,0301}
+cafe
+na{u:00EF}ve
+na{u:0069,0308}ve
+naive
+
+=== star-and-non-ascii
+--- .gitignore
+*{u:00E9}
+*{u:6F22}{u:5B57}*
+--- paths
+caf{u:00E9}
+caf{u:0065,0301}
+{u:6F22}{u:5B57}
+x{u:6F22}{u:5B57}y
+{u:6F22}
+
+=== non-ascii-bracket-members
+--- .gitignore
+[{u:00E9}]x
+[a-{u:00E9}]y
+--- paths
+{u:00E9}x
+ax
+{u:00E9}y
+by
+
+=== emoji-and-supplementary-planes
+--- .gitignore
+*{u:1F600}*
+{u:1F4C1}/
+--- paths
+a{u:1F600}b
+{u:1F4C1}/
+{u:1F4C1}
+x/{u:1F4C1}/y
+
+=== ligature-and-compatibility-forms-are-not-equal
+--- .gitignore
+{u:FB01}le
+--- paths
+{u:FB01}le
+file
+
+=== ascii-case-with-single-bracket-members-escapes-and-ranges
+## With core.ignorecase an escaped letter and a single bracket member are compared as written with the folded
+## name (so upper-case ones match nothing), while a range also takes the other case.
+--- .gitignore
+[A]r
+[a]s
+x[!a]
+r[A-C]
+q\ay
+--- paths
+Ar
+ar
+As
+as
+xA
+xa
+xb
+ra
+rB
+rz
+qay
+qAy

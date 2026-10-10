@@ -1,0 +1,258 @@
+## Every example the gitignore documentation gives, plus the project-level rule sets a developer writes first.
+## IG-6 (docs) must only advertise examples that are in this file.
+
+=== doc-frotz-directory-only
+--- .gitignore
+doc/frotz/
+--- paths
+doc/frotz
+doc/frotz/
+doc/frotz/x
+a/doc/frotz/
+a/doc/frotz
+frotz/
+
+=== doc-frotz-any-level-directory-only
+--- .gitignore
+frotz/
+--- paths
+frotz
+frotz/
+a/frotz/
+a/b/frotz/
+a/frotz
+doc/frotz/x
+
+=== doc-everything-except-foo-bar
+--- .gitignore
+# exclude everything except directory foo/bar
+/*
+!/foo
+/foo/*
+!/foo/bar
+--- paths
+other
+other/
+foo
+foo/
+foo/x
+foo/x/
+foo/bar
+foo/bar/
+foo/bar/deep.txt
+foo/x/y
+
+=== doc-leading-doublestar
+--- .gitignore
+**/foo
+**/foo/bar
+--- paths
+foo
+a/foo
+a/foo/bar
+a/b/foo/bar
+foo/bar
+a/bar
+
+=== doc-trailing-doublestar
+--- .gitignore
+abc/**
+--- paths
+abc/x
+abc/x/y
+x/abc/y
+abc
+
+=== doc-middle-doublestar
+--- .gitignore
+a/**/b
+--- paths
+a/b
+a/x/b
+a/x/y/b
+a/xb
+
+=== doc-hash-and-bang-escapes
+--- .gitignore
+\#hash
+\!bang
+--- paths
+#hash
+!bang
+hash
+bang
+
+=== doc-trailing-space-escape
+--- .gitignore
+keep-space\{SP}
+--- paths
+keep-space{SP}
+keep-space
+
+=== doc-anchored-leading-slash
+--- .gitignore
+/TODO
+--- paths
+TODO
+subdir/TODO
+
+=== project-gradle-kotlin
+--- .gitignore
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+*.class
+*.log
+.idea/
+*.iml
+out/
+local.properties
+--- paths
+.gradle/
+.gradle/8.0/x
+build/
+build/classes/Main.class
+core/build/
+core/build/libs/a.jar
+core/src/main/kotlin/build/
+core/src/main/kotlin/build/Script.kt
+gradle/wrapper/gradle-wrapper.jar
+gradle/wrapper/gradle-wrapper.properties
+app/Main.class
+run.log
+.idea/
+.idea/workspace.xml
+app.iml
+out/
+out/production/a
+local.properties
+src/local.properties
+
+=== project-node
+--- .gitignore
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+npm-debug.log*
+.next/
+--- paths
+node_modules/
+node_modules/left-pad/index.js
+packages/web/node_modules/
+dist/
+dist/bundle.js
+packages/web/dist/
+src/dist.ts
+coverage/
+.env
+.env.local
+.env.example
+config/.env.production
+a.tsbuildinfo
+npm-debug.log
+npm-debug.log.1
+.next/
+.next/cache/x
+
+=== project-rust-cargo
+--- .gitignore
+/target
+**/*.rs.bk
+Cargo.lock
+!/Cargo.lock
+--- paths
+target
+target/
+target/debug/app
+crate/target/debug/app
+src/main.rs.bk
+sub/lib.rs.bk
+Cargo.lock
+crate/Cargo.lock
+
+=== project-os-and-editor-junk
+--- .gitignore
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+.#*
+\#*#
+~$*
+--- paths
+.DS_Store
+a/.DS_Store
+Thumbs.db
+a/b/Thumbs.db
+desktop.ini
+notes.txt~
+.notes.txt.swp
+.#lock
+#autosave#
+~$Report.docx
+a/~$Report.docx
+keep.txt
+
+=== project-gitkeep-pattern
+--- .gitignore
+cache/*
+!cache/.gitkeep
+tmp/
+!tmp/.gitkeep
+--- paths
+cache/a
+cache/.gitkeep
+cache/sub/b
+tmp/
+tmp/.gitkeep
+tmp/a
+
+=== project-dotgit-lookalike
+## A literal '.hg' stands in for '.git': git's own check-ignore refuses to look inside '.git'.
+--- .gitignore
+.hg/
+!.hg/hgrc
+--- paths
+.hg/
+.hg/hgrc
+.hg/store/data
+sub/.hg/
+sub/.hg/hgrc
+
+=== project-ide-and-build-mix
+--- .gitignore
+**/.idea/
+**/*.pyc
+__pycache__/
+*.egg-info/
+/build
+/dist
+!/dist/keep.txt
+venv/
+.venv/
+--- paths
+.idea/
+mod/.idea/workspace.xml
+a.pyc
+pkg/a.pyc
+__pycache__/
+pkg/__pycache__/a.cpython-312.pyc
+pkg.egg-info/
+build
+build/
+build/lib/x.py
+dist/
+dist/keep.txt
+dist/a.whl
+sub/dist/keep.txt
+venv/
+venv/bin/python
+.venv/
