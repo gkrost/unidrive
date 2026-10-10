@@ -3127,6 +3127,7 @@ open class SyncEngine(
         if (action.remoteItem != null && !action.remoteItem.deleted) {
             // Both sides diverged: preserve the local edit as a side copy, then
             // let the remote take the canonical path.
+            var keptCopyPath: String? = null
             if ((action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) &&
                 Files.exists(localPath)
             ) {
@@ -3138,12 +3139,26 @@ open class SyncEngine(
                 withEchoSuppression(conflictPath) {
                     Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
+                keptCopyPath = conflictPath
             }
             // The remote version takes the canonical path and becomes the tracked
             // entity (real bytes, not a NUL stub).
             applyCreatePlaceholder(
                 SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
             )
+            // #694: the side copy goes up in this pass, not on the next one (the plan was made before the copy
+            // existed). Best effort: a failed upload leaves the copy local-only, and the next scan uploads it.
+            if (keptCopyPath != null && syncDirection != SyncDirection.DOWNLOAD) {
+                try {
+                    applyUpload(SyncAction.Upload(keptCopyPath))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: AuthenticationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.warn("Conflict copy {} was kept locally but not uploaded yet: {}", keptCopyPath, e.message)
+                }
+            }
         } else if (action.localState == ChangeState.DELETED && action.remoteItem != null) {
             // UD-222: remote wins the conflict — download real bytes, not a NUL stub.
             applyCreatePlaceholder(

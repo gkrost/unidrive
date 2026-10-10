@@ -3459,6 +3459,70 @@ class SyncEngineTest {
             assertNull(db.getEntry(sideCopies.single().fileName.toString()), "the side copy must be untracked")
         }
 
+    private fun seedBothModifiedConflict() {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = "/c.txt",
+                remoteId = "id-c",
+                remoteHash = "base",
+                remoteSize = 4,
+                remoteModified = now,
+                localMtime = now.toEpochMilli(),
+                localSize = 4,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = now,
+            ),
+        )
+        db.setSyncState("delta_cursor", "existing-cursor")
+        Files.writeString(syncRoot.resolve("c.txt"), "MINE")
+        Files.setLastModifiedTime(
+            syncRoot.resolve("c.txt"),
+            java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000),
+        )
+        provider.files["/c.txt"] = "THEIRS".toByteArray()
+        provider.deltaItems = listOf(cloudItem("/c.txt", size = 6))
+    }
+
+    @Test
+    fun `keep_both_conflict_copy_is_uploaded_in_the_same_pass`() =
+        runTest {
+            seedBothModifiedConflict()
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            val copy = provider.uploadedPaths.singleOrNull { it.contains(".conflict-local-") }
+            assertNotNull(copy, "the side copy must be uploaded in this pass; uploaded=${provider.uploadedPaths}")
+            assertEquals("MINE", String(provider.files[copy]!!), "the uploaded copy holds the user's own edit")
+            assertNotNull(db.getEntry(copy), "the uploaded copy is recorded so the next scan does not re-upload it")
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "the canonical path still holds the remote version")
+        }
+
+    @Test
+    fun `keep_both_conflict_copy_stays_local_when_its_upload_fails`() =
+        runTest {
+            seedBothModifiedConflict()
+            provider.uploadFailCount = 1
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "the conflict is still resolved")
+            val copies = Files.list(syncRoot).use { st -> st.filter { it.fileName.toString().contains(".conflict-local-") }.toList() }
+            assertEquals("MINE", Files.readString(copies.single()), "the user's edit survives a failed copy upload")
+        }
+
+    @Test
+    fun `keep_both_conflict_copy_is_not_uploaded_by_a_download_only_sync`() =
+        runTest {
+            seedBothModifiedConflict()
+
+            engineWithDirection(SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
+
+            assertTrue(provider.uploadedPaths.none { it.contains(".conflict-local-") }, "uploaded=${provider.uploadedPaths}")
+        }
+
     @Test
     fun `parent folders are created before their children under bounded concurrency`() =
         runTest {
