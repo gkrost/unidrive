@@ -155,7 +155,7 @@ class DoctorCommand : Runnable {
                     // normal open, so a state.db stamped at the current version but missing a later
                     // additive column passes initialize() and the first read throws. Report it as a
                     // state-db error instead of aborting doctor with a stack trace.
-                    while (results.size > marker) results.removeAt(results.size - 1)
+                    results.subList(marker, results.size).clear()
                     results += CheckResult(
                         "state-db",
                         Severity.ERR,
