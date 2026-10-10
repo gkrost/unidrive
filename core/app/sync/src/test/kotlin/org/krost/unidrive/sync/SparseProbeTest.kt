@@ -106,13 +106,13 @@ class SparseProbeTest {
     @Test
     fun `no subprocess is spawned for sparse detection`() {
         val src = java.io.File("src/main/kotlin/org/krost/unidrive/sync")
+        assertTrue(src.isDirectory, "the module source dir must exist; cwd=${System.getProperty("user.dir")}")
+        val sources = src.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+        assertFalse(sources.isEmpty(), "no Kotlin sources were scanned; cwd=${System.getProperty("user.dir")}")
         val offenders =
-            src
-                .walkTopDown()
-                .filter { it.isFile && it.extension == "kt" }
+            sources
                 .filter { "ProcessBuilder(" in it.readText() && "\"stat\"" in it.readText() }
                 .map { it.name }
-                .toList()
         assertTrue(offenders.isEmpty(), "stat subprocess still present in: $offenders")
     }
 }
