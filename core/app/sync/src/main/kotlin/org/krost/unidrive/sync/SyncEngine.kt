@@ -3149,8 +3149,13 @@ open class SyncEngine(
             // #694: the side copy goes up in this pass, not on the next one (the plan was made before the copy
             // existed). Best effort: a failed upload leaves the copy local-only, and the next scan uploads it.
             if (keptCopyPath != null && syncDirection != SyncDirection.DOWNLOAD) {
+                // #115: keptCopyPath is real-local. Under a locale alias (/Bilder <-> /Pictures) the copy
+                // belongs next to the canonical remote file, as the reconciler's own Upload would target it.
+                val canonicalCopy =
+                    action.remoteItem.path.substringBeforeLast('/') + "/" + keptCopyPath.substringAfterLast('/')
+                val copyTarget = if (canonicalCopy != keptCopyPath) canonicalCopy else null
                 try {
-                    applyUpload(SyncAction.Upload(keptCopyPath))
+                    applyUpload(SyncAction.Upload(keptCopyPath, remoteTarget = copyTarget))
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: AuthenticationException) {

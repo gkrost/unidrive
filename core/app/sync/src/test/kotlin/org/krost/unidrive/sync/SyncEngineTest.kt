@@ -3527,6 +3527,63 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `keep_both_conflict_copy_under_a_locale_alias_is_uploaded_next_to_the_canonical_remote_file`() =
+        runTest {
+            // Local /Bilder is the locale alias of the remote /Pictures (#115): rows are keyed at the
+            // real-local path and carry the canonical remote path.
+            val now = Instant.parse("2026-03-28T12:00:00Z")
+            fun row(
+                path: String,
+                remotePath: String,
+                isFolder: Boolean,
+            ) = org.krost.unidrive.sync.model.SyncEntry(
+                path = path,
+                remotePath = remotePath,
+                remoteId = "id-$remotePath",
+                remoteHash = if (isFolder) null else "base",
+                remoteSize = if (isFolder) 0 else 4,
+                remoteModified = now,
+                localMtime = now.toEpochMilli(),
+                localSize = if (isFolder) null else 4,
+                isFolder = isFolder,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = now,
+            )
+            db.upsertEntry(row("/Bilder", "/Pictures", isFolder = true))
+            db.upsertEntry(row("/Bilder/c.txt", "/Pictures/c.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            Files.createDirectories(syncRoot.resolve("Bilder"))
+            val local = syncRoot.resolve("Bilder/c.txt")
+            Files.writeString(local, "MINE")
+            Files.setLastModifiedTime(local, java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000))
+            provider.files["/Pictures/c.txt"] = "THEIRS".toByteArray()
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/Pictures", size = 0, isFolder = true).copy(hash = null),
+                    cloudItem("/Pictures/c.txt", size = 6),
+                )
+
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+                syncDirection = SyncDirection.BIDIRECTIONAL,
+                xdgUserDirsOverridesForTest = mapOf("XDG_PICTURES_DIR" to "Bilder"),
+            ).syncOnce(dryRun = false)
+
+            val copies = provider.uploadedPaths.filter { it.contains(".conflict-local-") }
+            assertEquals(1, copies.size, "the side copy must be uploaded once; uploaded=${provider.uploadedPaths}")
+            assertTrue(
+                copies.single().startsWith("/Pictures/c.conflict-local-"),
+                "the copy goes next to the canonical remote file, not under the local alias; uploaded=${provider.uploadedPaths}",
+            )
+            assertEquals("MINE", String(provider.files[copies.single()]!!), "the uploaded copy holds the user's own edit")
+        }
+
+    @Test
     fun `parent folders are created before their children under bounded concurrency`() =
         runTest {
             // A multi-level tree with several same-depth siblings exercises the
