@@ -168,7 +168,8 @@ class IgnoreMatcher(
                     dir = true
                     p = p.dropLast(1)
                 }
-                require(p.isNotEmpty() && '\\' !in p) { "path must use canonical '/'-separated components" }
+                // A backslash is an ordinary character of a name (git on POSIX reads it so; a Linux file may be called a\b), not a separator: the engine's paths are '/'-separated on every OS.
+                require(p.isNotEmpty()) { "path must use canonical '/'-separated components" }
                 require(p.split('/').all { it.isNotEmpty() && it != "." && it != ".." }) {
                     "path must use canonical '/'-separated components"
                 }

@@ -2,6 +2,7 @@ package org.krost.unidrive.sync.ignore
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -131,5 +132,31 @@ class IgnoreMatcherTest {
         val t0 = System.nanoTime()
         assertFalse(m.isIgnored(name))
         assertTrue((System.nanoTime() - t0) / 1_000_000 < 5_000, "a star chain on a non-matching name must fail fast")
+    }
+
+    @Test
+    fun aBackslashIsAnOrdinaryCharacterOfAName() {
+        // The oracle corpus has file names with a backslash (\foo, f\o\o, foo\, a\b). Git on POSIX reads it as a plain character of the
+        // name, so the matcher answers for them instead of rejecting the path. Expected values are git's own (2.53, Linux, check-ignore).
+        val escaped = matcher("\\f\\o\\o\n") // each backslash escapes an ordinary character: the pattern is foo
+        assertTrue(escaped.isIgnored("foo"))
+        assertFalse(escaped.isIgnored("\\foo"))
+        assertFalse(escaped.isIgnored("f\\o\\o"))
+        val trailing = matcher("foo\\\n") // a pattern that ends in a lone backslash never matches
+        assertFalse(trailing.isIgnored("foo"))
+        assertFalse(trailing.isIgnored("foo\\"))
+        val classes = matcher("a[\\]]b\na[\\-]b\na[\\\\]b\n") // a class member can be an escaped backslash
+        assertTrue(classes.isIgnored("a]b"))
+        assertTrue(classes.isIgnored("a-b"))
+        assertTrue(classes.isIgnored("a\\b"))
+        assertFalse(classes.isIgnored("azb"))
+        assertFalse(matcher("*.log\n").isIgnored("dir/a\\b"))
+    }
+    @Test
+    fun structurallyMalformedPathsAreRejected() {
+        val m = matcher("*.log\n")
+        for (p in listOf("/a", "a//b", "./a", "a/./b", "a/../b", "../a")) {
+            assertFailsWith<IllegalArgumentException>(p) { m.isIgnored(p) }
+        }
     }
 }
