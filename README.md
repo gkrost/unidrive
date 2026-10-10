@@ -101,7 +101,7 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 ### Daemon & Mount
 - `daemon` — per-profile daemon: `run` (foreground until SIGTERM), `status`, `stop`
 - `mount` — start the Linux FUSE co-daemon for a profile ([`unidrive-mount-linux`](https://github.com/gkrost/unidrive-mount-linux)); needs a running `daemon run`
-- `migrate` — one-time conversion of a legacy profile to a fixed mirror or mount mode ([independent-profiles](docs/adr/independent-profiles.md)); only the read-only `inventory` step exists so far
+- `migrate` — one-time conversion of a legacy profile to a fixed mirror or mount mode ([independent-profiles](docs/adr/independent-profiles.md)): `inventory` (read-only dry run), `convert --mode mount|mirror`, and `upload-quarantined` for the files a mount conversion set aside
 
 ### Storage
 - `ls` — list a remote folder (no recursion; `--live` forces a provider query)
