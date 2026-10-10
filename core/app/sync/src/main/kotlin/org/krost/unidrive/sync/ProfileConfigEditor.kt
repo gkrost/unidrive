@@ -236,6 +236,9 @@ fun isProfileAuthenticated(
                     "client_id" to rp.client_id,
                     "client_secret" to rp.client_secret,
                     "rclone_remote" to rp.rclone_remote,
+                    // localfs answers isAuthenticated from this key; without it every localfs
+                    // profile reads as "none" regardless of its root.
+                    "root_path" to rp.root_path,
                 )
             factory.isAuthenticated(properties, profileDir)
         } else {
@@ -279,7 +282,7 @@ fun editProfileKey(
     val crlf = configText.contains("\r\n")
     val eol = if (crlf) "\r" else ""
     val lines = configText.split("\n").toMutableList()
-    val start = lines.indexOfFirst { it.trim() == "[providers.$name]" }
+    val start = lines.indexOfFirst { it.substringBefore('#').filterNot(Char::isWhitespace) == "[providers.$name]" }
     if (start < 0) return ProfileKeyEdit.NoSuchProfile
     val end =
         (start + 1 until lines.size).firstOrNull { lines[it].trim().startsWith("[") } ?: lines.size
