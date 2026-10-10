@@ -1,0 +1,171 @@
+=== lone-bang-and-lone-slash-lines
+--- .gitignore
+!
+/
+//
+foo
+--- paths
+foo
+!
+a/
+a
+
+=== bang-bang
+--- .gitignore
+foo
+!!foo
+--- paths
+foo
+!foo
+
+=== slash-star
+--- .gitignore
+/*
+--- paths
+a
+a/
+a/b
+.x
+
+=== star-slash
+--- .gitignore
+*/
+--- paths
+a
+a/
+a/b
+a/b/
+a/b/c
+
+=== just-star
+--- .gitignore
+*
+--- paths
+a
+a/
+a/b/c
+
+=== just-question-mark
+--- .gitignore
+?
+--- paths
+a
+ab
+a/b
+a/
+
+=== empty-brackets
+--- .gitignore
+[]
+a[]b
+--- paths
+[]
+a[]b
+ab
+
+=== pattern-with-dot-slash
+--- .gitignore
+./foo
+../foo
+foo/./bar
+--- paths
+foo
+foo/bar
+=== double-slash-in-pattern
+--- .gitignore
+a//b
+//a
+--- paths
+a/b
+a
+
+=== long-literal-and-long-path
+--- .gitignore
+this/is/a/rather/long/literal/path/that/goes/on/and/on/file.txt
+**/deeply/**/nested/**/leaf
+--- paths
+this/is/a/rather/long/literal/path/that/goes/on/and/on/file.txt
+x/this/is/a/rather/long/literal/path/that/goes/on/and/on/file.txt
+a/deeply/b/nested/c/leaf
+deeply/nested/leaf
+a/b/c/d/e/f/g/h/deeply/i/j/k/nested/l/m/n/leaf
+a/b/c/d/e/f/g/h/deeply/i/j/k/nested/l/m/n/leaf/x
+
+=== many-rules-last-match-semantics
+--- .gitignore
+a
+!a
+a
+!a/
+a/
+!a
+--- paths
+a
+a/
+b/a
+b/a/
+a/c
+
+=== dir-pattern-matches-only-dirs-but-children-follow
+--- .gitignore
+cache/
+--- paths
+cache
+cache/
+cache/x
+cache/x/y
+x/cache/y
+
+=== rule-on-intermediate-file-component
+--- .gitignore
+data.bin
+--- paths
+data.bin/child
+data.bin/child/
+x/data.bin/child
+
+=== hyphen-and-dot-and-underscore
+--- .gitignore
+my-file_v1.0.txt
+*-backup.*
+--- paths
+my-file_v1.0.txt
+my-file_v1x0.txt
+a-backup.zip
+dir/a-backup.tar.gz
+backup.zip
+
+=== plus-and-parens-are-literals
+--- .gitignore
+c++/
+(draft)*
+a+b
+a{b,c}
+--- paths
+c++/
+c++/x
+(draft) notes
+a+b
+aab
+a{b,c}
+ab
+
+=== percent-dollar-at-and-hash-in-the-middle
+--- .gitignore
+50%.txt
+$HOME
+@eaDir
+a#b
+--- paths
+50%.txt
+$HOME
+x/@eaDir/
+@eaDir
+a#b
+
+=== very-long-star-chain
+--- .gitignore
+*a*a*a*a*a*a*a*a*a*b
+--- paths
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab

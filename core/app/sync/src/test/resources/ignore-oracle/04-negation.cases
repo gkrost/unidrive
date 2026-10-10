@@ -1,0 +1,134 @@
+=== reinclude-file-from-glob
+--- .gitignore
+*.log
+!important.log
+--- paths
+a.log
+important.log
+logs/important.log
+logs/x.log
+
+=== cannot-reinclude-below-ignored-directory
+--- .gitignore
+build/
+!build/keep.txt
+--- paths
+build/
+build/keep.txt
+build/other.txt
+build/sub/keep.txt
+a/build/keep.txt
+
+=== cannot-reinclude-below-ignored-directory-no-slash
+--- .gitignore
+build
+!build/keep.txt
+--- paths
+build
+build/keep.txt
+build/other.txt
+
+=== reinclude-with-star-glob-dir
+--- .gitignore
+/*
+!/foo
+/foo/*
+!/foo/bar
+--- paths
+a
+foo
+foo/
+foo/a
+foo/bar
+foo/bar/
+foo/bar/c.txt
+foo/baz/d.txt
+
+=== reinclude-directory-itself
+--- .gitignore
+build/*
+!build/keep/
+!build/keep/**
+--- paths
+build/a
+build/keep/
+build/keep/a.txt
+build/keep/sub/b.txt
+build/x/y
+
+=== ignore-everything-but
+--- .gitignore
+*
+!*/
+!*.java
+!/.keep
+--- paths
+.keep
+Foo.java
+Foo.class
+src/
+src/Foo.java
+src/Foo.class
+src/pkg/Bar.java
+README.md
+
+=== negation-then-reignore
+--- .gitignore
+*.txt
+!a.txt
+a.txt
+--- paths
+a.txt
+b.txt
+d/a.txt
+
+=== negation-of-nonmatching
+--- .gitignore
+!nothing
+foo
+--- paths
+nothing
+foo
+x/nothing
+
+=== negation-dir-only-vs-file
+--- .gitignore
+data
+!data/
+--- paths
+data
+data/
+data/x
+
+=== negated-pattern-reported-with-bang
+--- .gitignore
+*.cfg
+!local.cfg
+--- paths
+local.cfg
+a/local.cfg
+other.cfg
+other.txt
+
+=== ancestor-excluded-by-glob-then-negated-glob
+--- .gitignore
+vendor*
+!vendor/keep
+!vendor-keep/
+--- paths
+vendor/keep
+vendor-keep/
+vendor-keep/a
+vendors/x
+vendor/
+
+=== topmost-excluded-ancestor-is-reported
+--- .gitignore
+a/
+a/b/
+b/
+--- paths
+a/b/c
+a/b/
+x/a/b/c
+b/c

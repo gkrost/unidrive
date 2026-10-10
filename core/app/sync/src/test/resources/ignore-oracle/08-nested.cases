@@ -1,0 +1,81 @@
+=== nested-file-applies-below-its-directory
+--- .gitignore
+*.log
+--- sub/.gitignore
+*.tmp
+!a.log
+--- paths
+a.log
+sub/a.log
+sub/x.log
+sub/b.tmp
+other/b.tmp
+sub/deep/b.tmp
+sub/deep/a.log
+
+=== nested-anchored-rule-is-relative-to-its-file
+--- sub/.gitignore
+/only
+inner/file
+--- paths
+only
+sub/only
+sub/x/only
+sub/inner/file
+sub/y/inner/file
+inner/file
+sub/a/inner/file
+
+=== nested-file-closer-wins-over-root
+--- .gitignore
+foo
+--- sub/.gitignore
+!foo
+--- paths
+foo
+sub/foo
+sub/x/foo
+other/foo
+
+=== nested-file-cannot-reinclude-below-ignored-directory
+--- .gitignore
+sub/
+--- sub/.gitignore
+!keep
+--- paths
+sub/keep
+sub/other
+
+=== nested-dir-only-and-doublestar
+--- .gitignore
+**/gen/
+--- a/b/.gitignore
+!gen/keep/
+**/tmp
+--- paths
+gen/x
+a/b/gen/
+a/b/gen/keep/
+a/b/gen/keep/x
+a/b/tmp
+a/b/c/tmp
+a/tmp
+
+=== three-levels
+--- .gitignore
+*.a
+--- x/.gitignore
+!*.a
+*.b
+--- x/y/.gitignore
+*.a
+!*.b
+--- paths
+1.a
+x/1.a
+x/1.b
+x/y/1.a
+x/y/1.b
+x/y/z/1.a
+x/y/z/1.b
+q/1.b
