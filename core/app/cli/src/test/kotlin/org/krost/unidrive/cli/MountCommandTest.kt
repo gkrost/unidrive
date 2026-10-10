@@ -247,4 +247,16 @@ class MountCommandTest {
         assertFalse(msg.contains("is not running"), msg)
         assertTrue(msg.contains("still be starting") && msg.contains("stale"), msg)
     }
+
+    @Test
+    fun `an_answering_daemon_is_status_answering_whatever_the_socket_file_says`() {
+        assertEquals(MountCommand.DaemonStatus.ANSWERING, MountCommand.resolveDaemonStatus(answers = true, socketExists = true))
+        assertEquals(MountCommand.DaemonStatus.ANSWERING, MountCommand.resolveDaemonStatus(answers = true, socketExists = false))
+    }
+
+    @Test
+    fun `only_a_missing_socket_reads_as_not_running_and_a_present_silent_one_as_not_answering`() {
+        assertEquals(MountCommand.DaemonStatus.SOCKET_NOT_ANSWERING, MountCommand.resolveDaemonStatus(answers = false, socketExists = true))
+        assertEquals(MountCommand.DaemonStatus.NOT_RUNNING, MountCommand.resolveDaemonStatus(answers = false, socketExists = false))
+    }
 }

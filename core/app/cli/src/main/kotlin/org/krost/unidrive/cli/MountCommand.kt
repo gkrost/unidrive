@@ -98,13 +98,10 @@ class MountCommand : Runnable {
             // The co-daemon's inherited stderr already says why it stopped. Ask the daemon before
             // blaming it: only a failed status check may claim it is not running (#202).
             val daemonStatus =
-                if (DaemonAutospawn.daemonAnswers(profile.name, socketPath, parent.providerConfigDir())) {
-                    DaemonStatus.ANSWERING
-                } else if (Files.exists(socketPath)) {
-                    DaemonStatus.SOCKET_NOT_ANSWERING
-                } else {
-                    DaemonStatus.NOT_RUNNING
-                }
+                resolveDaemonStatus(
+                    answers = DaemonAutospawn.daemonAnswers(profile.name, socketPath, parent.providerConfigDir()),
+                    socketExists = Files.exists(socketPath),
+                )
             System.err.println(coDaemonExitMessage(exit, profile.name, daemonStatus))
         }
         System.exit(exit)
@@ -152,6 +149,17 @@ class MountCommand : Runnable {
                 "--profile",
                 profileName,
             )
+
+        /** Maps the status check onto the exit hint's wording: only a missing socket claims "not running". */
+        internal fun resolveDaemonStatus(
+            answers: Boolean,
+            socketExists: Boolean,
+        ): DaemonStatus =
+            when {
+                answers -> DaemonStatus.ANSWERING
+                socketExists -> DaemonStatus.SOCKET_NOT_ANSWERING
+                else -> DaemonStatus.NOT_RUNNING
+            }
 
         /** The operator hint for a non-zero co-daemon exit; claims "not running" only when the status check said so. */
         fun coDaemonExitMessage(
