@@ -1171,6 +1171,38 @@ class StateDatabase(
     }
 
     /**
+     * One row awaiting upload, as [pendingUploadRows] reports it: when it was written ([lastSynced]) and
+     * when an upload of it last failed ([lastErrorAt], null = no attempt has failed since).
+     */
+    data class PendingUploadRow(
+        val path: String,
+        val lastSynced: Instant,
+        val lastErrorAt: Instant?,
+    )
+
+    /**
+     * The rows [pendingUploadPaths] names, with the two stamps the daemon's upload health (#658) reads: how
+     * long a row has been waiting (a `local:` row is written once, so `last_synced` is when its content
+     * first existed only on this machine) and whether an attempt failed. Unordered; the caller aggregates.
+     */
+    @Synchronized
+    fun pendingUploadRows(): List<PendingUploadRow> {
+        val out = mutableListOf<PendingUploadRow>()
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT path, last_synced, last_error_at FROM sync_entries WHERE $PENDING_UPLOAD_ROWS")
+            while (rs.next()) {
+                out +=
+                    PendingUploadRow(
+                        path = rs.getString(1),
+                        lastSynced = IsoInstants.parse(rs.getString(2)),
+                        lastErrorAt = rs.getString(3)?.let { IsoInstants.parse(it) },
+                    )
+            }
+        }
+        return out
+    }
+
+    /**
      * Paths of alive FILE rows whose bytes reached the cloud at least once (a real remote id, not
      * the `local:` synthetic). The candidates the mount's dirty-overwrite replay compares against
      * their cache baseline (#605 U6): pending new files and dirty overwrites are distinct journal

@@ -465,8 +465,24 @@ class DaemonRuntime(
                     ).toString()
                     val providerJson = kotlinx.serialization.json.JsonPrimitive(provider.id).toString()
                     val providerNameJson = kotlinx.serialization.json.JsonPrimitive(provider.displayName).toString()
-                    val enumerationJson = mount.enumerationStatus().toJson().toString()
+                    val enumerationStatus = mount.enumerationStatus()
+                    val enumerationJson = enumerationStatus.toJson().toString()
                     val engineVersionJson = kotlinx.serialization.json.JsonPrimitive(BuildInfo.versionString()).toString()
+                    // uploads / cache / provider_health (#658): the engine's own account of whether everything
+                    // is uploaded, how much the hydration cache holds and when the provider last answered.
+                    // uploads and cache exist only where a hydration layer does (a mount profile): a mirror
+                    // daemon leaves them out, and so does an upload queue that has never been read, because a
+                    // front-end must never read an unknown as "nothing pending". Neither read blocks this reply
+                    // behind state.db or the cache directory: the previous reading is served (uploadHealthSnapshot),
+                    // and the cache walk runs off this request (bytes null until the first).
+                    val healthJson = hydration?.let { h ->
+                        h.requestCacheMeasurement()
+                        val uploads = h.uploadHealthSnapshot()
+                        (uploads?.let { ",\"uploads\":${it.toJson()}" } ?: "") + ",\"cache\":${h.cacheHealth().toJson()}"
+                    } ?: ""
+                    val providerHealth = providerHealthJson(
+                        lastProviderContactMs(enumerationStatus.lastSuccessAtMs, pollerRef?.lastReachableAtMs),
+                    )
                     // mode + capabilities (#603 U4): what this daemon serves, so a client can check the
                     // hosting contract before it sends a verb the profile refuses (additive, read-only).
                     val modeJson = kotlinx.serialization.json.JsonPrimitive(profileMode.wireName).toString()
@@ -499,6 +515,8 @@ class DaemonRuntime(
                     // as semver build metadata (VERSION+COMMIT[.dirty]), so the release part orders.
                     """{"ok":true,"protocol_version":$IPC_PROTOCOL_VERSION,"engine_version":$engineVersionJson,"mode":$modeJson,"capabilities":$capabilitiesJson,"uptime_ms":$uptimeMs,"clients_connected":$clientCount,"refresh_in_flight":$refreshInFlight,"refresh_job_id":$jobIdJson,"sync_paths":$syncPathsJson,"provider":$providerJson,"provider_name":$providerNameJson,"authenticated":${provider.isAuthenticated},"enumeration":$enumerationJson,"poll_interval_ms":$pollIntervalMs""" +
                         (quotaJson?.let { ",\"quota\":$it" } ?: "") +
+                        healthJson +
+                        ",\"provider_health\":$providerHealth" +
                         "}"
                 }
 

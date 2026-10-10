@@ -352,6 +352,8 @@ internal class HydrationTestEnv(
     val uploadProgressMinIntervalMs: Long = 400,
     /** #493: delay of the replay of rows whose last upload failed; 0 = at once. */
     val failedReplayDelayMs: Long = HydrationImpl.DEFAULT_FAILED_REPLAY_DELAY_MS,
+    /** #658: the cache budget in bytes; 0 = unlimited. */
+    val cacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
     providerId: String = "fake-hydration",
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
@@ -398,6 +400,7 @@ internal class HydrationTestEnv(
             uploadStallTimeoutMs = uploadStallTimeoutMs,
             uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
             failedReplayDelayMs = failedReplayDelayMs,
+            cacheMaxBytes = cacheMaxBytes,
         )
     }
 
@@ -499,7 +502,7 @@ internal class HydrationTestEnv(
          * the shape HydrationImpl.create writes for a file made through the
          * mount before its upload runs.
          */
-        fun insertCreatedRow(path: String) {
+        fun insertCreatedRow(path: String, lastSynced: Instant = Instant.now()) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
@@ -512,7 +515,7 @@ internal class HydrationTestEnv(
                     isFolder = false,
                     isPinned = false,
                     isHydrated = true,
-                    lastSynced = Instant.now(),
+                    lastSynced = lastSynced,
                 ),
             )
         }
@@ -554,6 +557,9 @@ internal class HydrationTestEnv(
         fun localMtimeOf(path: String): Long? = db.getEntry(path)?.localMtime
 
         fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
+
+        /** Runs [block] holding the database's monitor, as a long batch (an enumeration's save) does. */
+        fun <T> holdingDatabase(block: () -> T): T = synchronized(db) { block() }
 
         fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()
     }

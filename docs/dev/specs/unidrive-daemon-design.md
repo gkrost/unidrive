@@ -315,6 +315,29 @@ The reply also carries `poll_interval_ms` (additive, #463): the effective interv
 
 A running enumeration is answered from memory, never from state.db, so a status request does not wait for the batch that saves the result.
 
+**The `uploads`, `cache` and `provider_health` objects** (additive, #658; the protocol version does not change). They are the engine's own account of "is everything uploaded?", which a front-end cannot work out from its own journal: the engine knows its start-up replays, its keep-local rows and its stuck uploads. A value the daemon does not have is `null`, or the whole object is absent, never `0` and never a "healthy" default.
+
+```json
+{
+  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000},
+  "cache": {"bytes": 1288490188, "budget_bytes": 21474836480},
+  "provider_health": {"last_contact_ms": 1700000000000}
+}
+```
+
+| field | meaning |
+|---|---|
+| `uploads` | mount profiles only; absent on a mirror profile (no hydration layer) and until the upload queue has been read once after the start |
+| `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local (`exclude_patterns`) rows and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
+| `uploads.in_flight` | transfer attempts that hold a transfer permit right now (a subset of `pending`); a path waiting for its turn, for the transfer budget or in a retry backoff is pending but not in flight |
+| `uploads.failed` | never-uploaded rows with a failed attempt on record (a subset of `pending`); a daemon restart replays them |
+| `uploads.oldest_pending_age_ms` | how long the oldest pending path has been waiting (ms), `null` when nothing is pending. A never-uploaded row waits since it was written, a dirty overwrite since its upload was submitted, so a stalled upload's age keeps growing from one status reply to the next |
+| `cache.bytes` | size of the profile's hydration cache directory (every regular file, protected or not: what the budget eviction counts) at the last walk; `null` until the first walk. A walk runs after the start and at most once per 10 s on a status request, never inside it |
+| `cache.budget_bytes` | `hydration_cache_max_bytes`; `null` when the profile has no budget (unlimited). `bytes` above the budget is possible: copies that are open, uploading, failed or modified are never evicted |
+| `provider_health.last_contact_ms` | epoch ms of the last time the provider answered: the later of the last completed enumeration (`enumeration.last_success_at_ms`) and the last download or upload through the daemon that succeeded. `null` until the first success since the daemon started. A failure or an outage never moves it, so a client words an outage as "last contact N minutes ago" |
+
+`uploads` is read from state.db at most once per second, and a status request waits for that read for 100 ms at most (1 s for the very first one): an enumeration's save holds the database for as long as it takes, and the reply serves the previous reading (its `oldest_pending_age_ms` carried forward to now) instead of stalling behind it.
+
 ### 4.4 `sync.subscribe` (existing, unchanged semantics)
 
 The verb stays registered on the daemon's `IpcServer` with the same `scheduleAfterReply` post-reply hook mechanism (β) the `SyncCommand` uses today. On the daemon side, the only events emitted are refresh-progress events (the daemon has no reconcile loop). On the `SyncCommand` side today, the same verb emits sync-progress events. Both implementations honor the same subscriber-set contract; the event source differs by which IPC server the client connects to.
