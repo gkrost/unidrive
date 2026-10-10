@@ -142,7 +142,7 @@ This spec introduces `unidrive daemon` — a per-profile, long-lived JVM that ow
 - **`DaemonStatusCommand` (new)** — reads `~/.config/unidrive/<profile>/.lock.pid`. If absent, prints "no daemon running for profile '<X>'" to stderr and exits 1. If present, prints `pid <N>, mode <X>` immediately from the file, THEN attempts to RPC the daemon for the richer fields (uptime, refresh-in-flight, clients connected). If the RPC fails (daemon mid-shutdown, socket gone), still prints the file-derived data plus a "daemon socket unreachable" note. Read-only; never acquires the lock.
 - **`DaemonStopCommand` (new)** — reads `.lock.pid`. If absent, prints "no daemon running" + exit 0 (idempotent stop). If present and mode is `daemon`, sends `SIGTERM` to the PID, waits up to 12s (10s grace + 2s buffer), reports outcome. Does not acquire the lock itself. If mode is not `daemon` (e.g. `sync`), refuses with a clear error.
 - **`RefreshCommand` (existing, refactored)** — becomes a thin client. Connects to the daemon socket; issues `sync.subscribe` first; then issues `refresh.run`; subscribes to progress events; prints them to stdout; exits when the daemon emits the `refresh.done` terminal event. If `Connection refused`, prints a clear error pointing at `unidrive daemon run`. The pre-existing standalone-JVM refresh path (calling `SyncCommand.run()` with `skipTransfers=true`) is removed from `RefreshCommand`; that code body moves into the daemon's `RefreshRpcHandler`.
-- **`MountCommand` (existing, modified)** — removes the `parent.acquireProfileLockForMount()` call. Still constructs the socket path via `IpcServer.defaultSocketPath(profile.name)`. Still supervises the Rust co-daemon subprocess. On co-daemon exit with `Connection refused` stderr, prints a clear error pointing at `unidrive daemon run`. Otherwise unchanged.
+- **`MountCommand` (existing, modified)** — removes the `parent.acquireProfileLockForMount()` call. Still constructs the socket path via `IpcServer.defaultSocketPath(profile.name)`. Still supervises the Rust co-daemon subprocess. On a non-zero co-daemon exit, runs one authenticated `daemon.status` round-trip and words the hint from the result (running-and-answering / socket-present-but-silent / not-running; #202). Otherwise unchanged.
 - **`ProcessLock.Mode` (existing, modified at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt`)** — `enum class Mode { SYNC, DAEMON }`. The `MOUNT` value is removed. The unknown-mode forward-compat path (already implemented at the `readHolderInfo()` reader per spec mount-sync-mode-mutex-design.md §3.1) handles any pre-existing `.lock.pid` files containing `mount` token gracefully: `HolderInfo(mode=null, rawMode="mount")`. The contention error names it verbatim ("Profile 'X' is held by an unidrive process running in unknown mode 'mount' — this binary may be older than the holder"), which is honest if a downgrade ever happens.
 - **`Main.acquireProfileLock()` (existing, modified)** — keeps Mode.SYNC acquisition. The mount-holder branch becomes a daemon-holder branch (renders "currently in use by `unidrive daemon`"). The unknown-mode branch handles legacy `mount` token gracefully.
 - **`Main.acquireProfileLockForMount()` (existing, REMOVED)** — no longer needed. Mount does not acquire the profile lock at all.
@@ -172,15 +172,30 @@ operator:  mkdir /tmp/onedrive/new_folder                 # works → folder cre
 operator:  echo hello > /tmp/onedrive/new_file.txt        # works → uploaded
 ```
 
-**Daemon-not-running error path:**
+**Co-daemon exit error path** (#202): the co-daemon's inherited stderr already says why it stopped.
+After a non-zero co-daemon exit the engine runs one authenticated `daemon.status` round-trip and words
+its hint from the result, so it claims the daemon is down only when the status check says so:
 
 ```
 operator:  unidrive mount posteo_onedrive /tmp/onedrive
 co-daemon: [Rust] failed to connect IPC at /run/user/1000/unidrive-posteo_onedrive.sock:
               io: Connection refused (os error 111)
-mount:     unidrive mount: daemon for profile 'posteo_onedrive' is not running.
-mount:     Start it first: `unidrive daemon run posteo_onedrive` (in another terminal).
-exit 1.
+
+# the daemon is running and answering → the cause is the co-daemon's own
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           is running and answering, so the cause is the co-daemon's own (see its output above; run
+           again with RUST_LOG=debug for more).
+
+# the socket file is present but silent → it may still be starting, or the socket is stale
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           has a socket but did not answer: it may still be starting (run the mount again in a
+           moment) or a killed daemon left a stale socket (check `unidrive -p posteo_onedrive
+           daemon status`).
+
+# no socket file at all → the only case that claims the daemon is down
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           is not running. Start it with: `unidrive -p posteo_onedrive daemon run`.
+exit <the co-daemon's exit code, unchanged>.
 ```
 
 ## 4. Wire contract
@@ -450,10 +465,11 @@ unidrive daemon stop posteo_onedrive
 # Expected: daemon exits cleanly in <10s, mount terminal A's mount exits (co-daemon
 # notices socket gone, FUSE unmounts).
 
-# 7. Daemon-not-running error path (terminal D)
+# 7. Co-daemon exit error path (terminal D)
 unidrive mount posteo_onedrive /tmp/onedrive-smoke
-# Expected: exit 1, stderr "daemon for profile 'posteo_onedrive' is not running.
-# Start it first: unidrive daemon run posteo_onedrive"
+# Expected: exit <co-daemon exit code>, stderr "unidrive mount: co-daemon exited with code <N>.
+# The daemon for profile 'posteo_onedrive' is not running. Start it with:
+# `unidrive -p posteo_onedrive daemon run`." (no socket exists; see §3.4 for the other two wordings)
 ```
 
 If any step diverges from the expected output, file the divergence as a finding before merge.
