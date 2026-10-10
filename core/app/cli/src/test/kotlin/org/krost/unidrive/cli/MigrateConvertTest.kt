@@ -340,6 +340,22 @@ class MigrateConvertTest {
         assertTrue(config.readText().contains("mode = \"mirror\""), "the mode is published")
     }
 
+    @Test
+    fun `a NULL hydrated row with no local copy at all is refused`() {
+        val (config, profileDir, syncRoot) = fixture()
+        val cache = Files.createTempDirectory("u5-cache")
+        // Neither a sync_root file nor a cache copy: the row's bytes are absent from the sync root, so
+        // the first mirror sync would read it as a local delete and plan DeleteRemote (#706).
+        seed(profileDir, mirrorRow("/gone.txt"))
+        val configBefore = config.readText()
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot, cache), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(1, code)
+        assertEquals(configBefore, config.readText(), "config.toml is untouched")
+        assertNull(LegacyConversion.Journal.load(profileDir), "no journal is left behind")
+    }
+
     // ── resume and refusals ──────────────────────────────────────────────────
 
     @Test
