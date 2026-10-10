@@ -150,6 +150,18 @@ class MountCommand : Runnable {
                 profileName,
             )
 
+        /**
+         * The co-daemon's log filter when the operator set none or a blank one (#150). Its start and
+         * teardown breadcrumbs ("co-daemon starting", "co-daemon shutting down (signal|session ended)")
+         * are info-level, so a `warn` default would drop exactly the lines a teardown needs; `info` is
+         * also the co-daemon's own default when RUST_LOG is unset.
+         */
+        const val DEFAULT_RUST_LOG: String = "info"
+
+        fun applyDefaultCoDaemonLogLevel(env: MutableMap<String, String>) {
+            if (env["RUST_LOG"].isNullOrBlank()) env["RUST_LOG"] = DEFAULT_RUST_LOG
+        }
+
         /** Maps the status check onto the exit hint's wording: only a missing socket claims "not running". */
         internal fun resolveDaemonStatus(
             answers: Boolean,
@@ -187,6 +199,7 @@ class MountCommand : Runnable {
 
         fun superviseProcess(argv: List<String>): Int {
             val pb = ProcessBuilder(argv).inheritIO()
+            applyDefaultCoDaemonLogLevel(pb.environment())
             val proc = pb.start()
             val hook = Thread {
                 if (proc.isAlive) {

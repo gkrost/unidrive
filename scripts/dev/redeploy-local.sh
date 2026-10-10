@@ -13,18 +13,28 @@
 # a .jar on a running JVM". A running daemon keeps the OLD code until you
 # restart it.
 #
+# Warns up front when a unidrive FUSE mount or a daemon is running: restarting the daemon under a
+# live mount tears its IPC socket and in-flight FUSE operations fail with EIO. The script itself never
+# restarts the daemon or unmounts anything.
+#
+# Usage: redeploy-local.sh [--check-running]
+#   --check-running   only report a live mount / daemon (exit 0), build and deploy nothing
+#
 # Env:
 #   UNIDRIVE_MOUNT_REPO   path to the unidrive-mount-linux repo
 #                         (default: <this repo>/../unidrive-mount-linux)
 #
 set -euo pipefail
 
+check_only=0
+
 case "${1:-}" in
   -h | --help)
-    sed -n '2,18p' "$0"
+    sed -n '2,26p' "$0"
     exit 0
     ;;
   "") ;;
+  --check-running) check_only=1 ;;
   *)
     printf 'unknown argument: %s (try --help)\n' "$1" >&2
     exit 2
@@ -40,6 +50,29 @@ die() {
   printf '[redeploy] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+# Active unidrive FUSE mounts (source "unidrive") and running daemons / co-daemons.
+warn_if_running() {
+  local mounts daemons codaemons
+  mounts="$(findmnt -rn -t fuse,fuse.unidrive -S unidrive -o TARGET 2>/dev/null || true)"
+  daemons="$(pgrep -f 'unidrive[^ ]*\.jar.* (daemon run|autostart)' 2>/dev/null || true)"
+  codaemons="$(pgrep -x unidrive-mount 2>/dev/null || true)"
+  if [[ -n "${mounts}" ]]; then
+    log "WARNING: active unidrive FUSE mount(s): $(tr '\n' ' ' <<<"${mounts}")"
+  fi
+  if [[ -n "${daemons}" || -n "${codaemons}" ]]; then
+    log "WARNING: unidrive daemon/co-daemon running (pids: $(tr '\n' ' ' <<<"${daemons} ${codaemons}"))"
+  fi
+  if [[ -n "${mounts}" || -n "${daemons}" || -n "${codaemons}" ]]; then
+    log "WARNING: restarting the daemon under a live mount fails in-flight FUSE operations with EIO;"
+    log "WARNING: finish or stop work on the mount first. This script does not restart anything itself."
+  fi
+}
+
+warn_if_running
+if [[ "${check_only}" -eq 1 ]]; then
+  exit 0
+fi
 
 # --- unidrive JVM CLI ---
 ud_branch="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD)"
