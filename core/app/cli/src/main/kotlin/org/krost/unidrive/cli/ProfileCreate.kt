@@ -212,6 +212,13 @@ internal object ProfileCreator {
         if (!Files.exists(configPath)) {
             Files.createDirectories(configPath.parent)
             Files.writeString(configPath, "[general]\n\n")
+        } else if (makeDefault != null) {
+            // setDefaultProfile rewrites the [general] section; a config that exists without one is a
+            // supported shape, so anchor it before appending rather than letting the rewrite throw.
+            val existing = Files.readString(configPath)
+            if (existing.lineSequence().none { it.trim() == "[general]" }) {
+                Files.writeString(configPath, "[general]\n\n$existing")
+            }
         }
         val section =
             if (label != null) toml.trimEnd('\n') + "\nlabel = \"${escapeTomlValue(label)}\"\n" else toml
