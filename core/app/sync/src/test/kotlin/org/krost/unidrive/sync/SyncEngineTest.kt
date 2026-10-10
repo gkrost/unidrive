@@ -3454,9 +3454,12 @@ class SyncEngineTest {
                 }
             assertEquals(1, sideCopies.size, "exactly one conflict-local side copy must exist; got $sideCopies")
             assertEquals("MINE", Files.readString(sideCopies.single()), "the side copy must hold the user's own edit")
-            // The side copy is NOT the tracked entity, so a later delete of the
-            // canonical by another actor cannot reap the user's edit.
-            assertNull(db.getEntry(sideCopies.single().fileName.toString()), "the side copy must be untracked")
+            // The side copy is uploaded in this same pass and tracked at its own path, so a later
+            // delete of the canonical by another actor cannot reap the user's edit.
+            assertNotNull(
+                db.getEntry("/" + sideCopies.single().fileName.toString()),
+                "the uploaded side copy must be tracked at its own path",
+            )
         }
 
     private fun seedBothModifiedConflict() {

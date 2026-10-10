@@ -3133,9 +3133,9 @@ open class SyncEngine(
             ) {
                 val conflictPath = "$base$conflictSuffix"
                 val conflictLocal = placeholder.resolveLocal(conflictPath)
-                // Move the user's edit aside under the conflict-local name. It is a
-                // local-only file (untracked, never uploaded) — the user's recoverable
-                // copy of their own work.
+                // Move the user's edit aside under the conflict-local name. It is uploaded in this same
+                // pass (below) and tracked at its own path, so a later delete of the canonical cannot
+                // reap the user's recoverable copy of their own work.
                 withEchoSuppression(conflictPath) {
                     Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
