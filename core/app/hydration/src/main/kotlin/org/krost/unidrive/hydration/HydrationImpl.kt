@@ -39,6 +39,9 @@ import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+// One class for the mount hydration front-end: the upload queue, the open set, the cache budget and
+// the #658 health view. Accepted as a LargeClass in-source rather than split.
+@Suppress("LargeClass")
 class HydrationImpl(
     // #560 U3: the mount operations (hydrate, upload, remote create/delete/rename) run on the mount
     // front-end; this class owns the upload queue, the open set and the cache budget on top of it.

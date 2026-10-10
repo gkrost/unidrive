@@ -329,6 +329,8 @@ internal class MinimalFakeProvider(
  * - [syncEngine] — exposes seedRemoteContent
  * - [hydration] — the [HydrationImpl] under test
  */
+// The harness threads each HydrationImpl tuning knob through as its own parameter.
+@Suppress("LongParameterList")
 internal class HydrationTestEnv(
     /** Optional scope for recovery uploads. Pass the [runTest] scope to control
      *  background-job dispatch in recovery-path tests; null uses the default. */
