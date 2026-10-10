@@ -17,7 +17,9 @@ ExecStartPre=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
 ExecStartPre=/usr/bin/mkdir -p ${UNIDRIVE_MOUNTPOINT}
 ExecStart=%h/.local/bin/unidrive -p %i mount ${UNIDRIVE_MOUNTPOINT}
 ExecStopPost=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
-SuccessExitStatus=143
+# 78: a permanent refusal (a wrong-mode or modeless profile, or the co-daemon binary is not
+# installed) must leave the unit cleanly inactive, not restart-loop. 143: a stop.
+SuccessExitStatus=78 143
 Restart=on-failure
 RestartSec=15
 

@@ -65,7 +65,7 @@ class SystemdUnitsTest {
         assertTrue("ExecStartPre=-/usr/bin/fusermount3 -uz \${UNIDRIVE_MOUNTPOINT}" in d)
         assertTrue("ExecStopPost=-/usr/bin/fusermount3 -uz \${UNIDRIVE_MOUNTPOINT}" in d)
         assertTrue("ExecStart=%h/.local/bin/unidrive -p %i mount \${UNIDRIVE_MOUNTPOINT}" in d)
-        assertTrue("SuccessExitStatus=143" in d)
+        assertTrue("SuccessExitStatus=78 143" in d, "a permanent refusal (78) must not restart-loop: $d")
         // The setuid fusermount3 is blocked by NoNewPrivileges, and a private mount namespace hides the mount.
         val sandboxing = listOf("NoNewPrivileges", "RestrictSUIDSGID", "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateMounts")
         assertFalse(d.any { line -> sandboxing.any { line.startsWith("$it=") } }, "mount unit must not sandbox: $d")
