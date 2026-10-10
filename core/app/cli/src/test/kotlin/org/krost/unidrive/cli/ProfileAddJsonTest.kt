@@ -154,6 +154,20 @@ class ProfileAddJsonTest {
     }
 
     @Test
+    fun `making a new profile the default anchors a general section in a config that has none`() {
+        // A config without a [general] section is a supported shape; the default rewrite must not
+        // throw after the new section was appended.
+        Files.writeString(configFile, "[providers.a]\ntype = \"localfs\"\nmode = \"mount\"\n")
+
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "b", "--mode", "mount", "--option", "root_path=/b", "--make-default", "--json"))
+
+        assertEquals("b", json().getValue("default_profile").jsonPrimitive.content)
+        val parsed = SyncConfig.parseRaw(Files.readString(configFile))
+        assertEquals(setOf("a", "b"), parsed.providers.keys)
+        assertEquals("b", parsed.general.default_profile)
+    }
+
+    @Test
     fun `an Internxt folder as the mirror root draws a warning, not a refusal`() {
         val root = dir.resolve("InternxtDrive").toString()
 
