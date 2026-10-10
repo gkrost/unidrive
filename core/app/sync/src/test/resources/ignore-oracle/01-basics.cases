@@ -1,0 +1,141 @@
+## Format: see IgnoreCorpus.kt. A line "=== name" starts a case, "key: value" header lines follow, "--- <file>" starts
+## a rule file, "--- paths" the path list (a trailing / marks a directory). Tokens: {SP} {TAB} {CR} {u:0065,0301}.
+
+=== literal-name
+--- .gitignore
+foo
+--- paths
+foo
+foo/
+a/foo
+a/foo/
+a/b/foo
+foobar
+barfoo
+foo.txt
+Foo
+FOO/
+a/Foo
+
+=== star-extension
+--- .gitignore
+*.log
+--- paths
+a.log
+.log
+dir/b.log
+dir/b.log/
+dir/b.log/c.txt
+a.logx
+a.LOG
+log
+x/y/z/q.log
+
+=== trailing-slash-directories-only
+--- .gitignore
+build/
+--- paths
+build
+build/
+build/out.o
+a/build
+a/build/
+a/build/out.o
+a/b/build/c/d.txt
+rebuild/
+build.txt
+
+=== literal-with-trailing-slash-and-file-named-the-same
+--- .gitignore
+logs/
+--- paths
+logs
+logs/
+logs/a.txt
+sub/logs
+sub/logs/
+
+=== question-mark
+--- .gitignore
+?.tmp
+a?c
+--- paths
+a.tmp
+ab.tmp
+.tmp
+abc
+a/c
+aXc
+dir/a.tmp
+dir/abc
+
+=== prefix-star-suffix-star
+--- .gitignore
+*cache*
+tmp*
+*~
+--- paths
+cache
+mycache1
+tmpfile
+tmp/
+a/tmp
+a/Cache
+file~
+file~1
+dir/.cache/x
+
+=== last-match-wins-within-file
+--- .gitignore
+*.o
+!keep.o
+*.o
+--- paths
+a.o
+keep.o
+dir/keep.o
+
+=== last-match-wins-negation-last
+--- .gitignore
+*.o
+!keep.o
+--- paths
+a.o
+keep.o
+dir/keep.o
+dir/other.o
+
+=== comment-and-blank-lines
+--- .gitignore
+# a comment
+
+#another
+foo
+
+   # indented hash is a pattern
+--- paths
+foo
+#another
+   # indented hash is a pattern
+# a comment
+a/foo
+
+=== line-numbers-and-sources
+--- .gitignore
+# 1
+
+a
+# 4
+b/
+!c
+d
+--- paths
+a
+b/
+b
+c
+d
+x/a
+x/b/
+x/c
+x/d

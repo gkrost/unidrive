@@ -1,0 +1,127 @@
+=== bracket-set
+--- .gitignore
+file[abc].txt
+--- paths
+filea.txt
+fileb.txt
+filed.txt
+file[abc].txt
+file.txt
+
+=== bracket-range
+--- .gitignore
+[0-9].dat
+log[a-c]
+--- paths
+5.dat
+a.dat
+10.dat
+loga
+logd
+logB
+
+=== bracket-negation
+--- .gitignore
+x[!a-c]
+y[^0-9]
+--- paths
+xa
+xd
+xA
+y1
+yz
+y/
+
+=== bracket-does-not-match-slash
+--- .gitignore
+a[/]b
+a[!x]b
+--- paths
+a/b
+axb
+ayb
+
+=== bracket-posix-classes
+--- .gitignore
+[[:digit:]]*.csv
+x[[:upper:]]
+y[[:alpha:][:digit:]]
+z[[:space:]]
+w[[:punct:]]
+--- paths
+1a.csv
+a.csv
+xA
+xa
+ya
+y1
+y-
+z{SP}
+za
+w!
+wa
+w_
+
+=== bracket-unknown-class
+--- .gitignore
+a[[:nosuchclass:]]
+--- paths
+a1
+a:
+
+=== bracket-unterminated
+--- .gitignore
+a[bc
+x[
+--- paths
+a[bc
+ab
+x[
+xy
+
+=== bracket-literal-close-first
+--- .gitignore
+a[]]b
+a[!]]b
+--- paths
+a]b
+axb
+ab
+
+=== bracket-dash-edges
+--- .gitignore
+a[-x]b
+a[x-]b
+a[a-]b
+--- paths
+a-b
+axb
+aab
+acb
+
+=== bracket-escaped-members
+--- .gitignore
+a[\]]b
+a[\-]b
+a[\\]b
+--- paths
+a]b
+a-b
+a\b
+azb
+
+=== bracket-reversed-range
+--- .gitignore
+a[z-a]b
+--- paths
+amb
+azb
+aab
+
+=== bracket-with-caret-literal-later
+--- .gitignore
+a[x^]b
+--- paths
+a^b
+axb
+ayb

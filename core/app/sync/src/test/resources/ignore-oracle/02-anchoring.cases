@@ -1,0 +1,109 @@
+=== leading-slash-anchors-to-root
+--- .gitignore
+/foo
+--- paths
+foo
+foo/
+a/foo
+a/foo/
+foo/bar
+foobar
+
+=== leading-slash-dir-only
+--- .gitignore
+/build/
+--- paths
+build
+build/
+build/x.o
+a/build/
+a/build/x.o
+
+=== middle-slash-anchors
+--- .gitignore
+doc/frotz
+a/b/c
+--- paths
+doc/frotz
+doc/frotz/
+a/doc/frotz
+doc/frotz/x
+a/b/c
+x/a/b/c
+a/b/c/d
+
+=== middle-slash-with-star
+--- .gitignore
+src/*.o
+a/*/c
+--- paths
+src/a.o
+src/sub/a.o
+x/src/a.o
+src/a.o/
+a/b/c
+a/b/b/c
+a/c
+a/b/c/d
+
+=== trailing-slash-with-middle-slash
+--- .gitignore
+a/b/
+--- paths
+a/b
+a/b/
+a/b/c
+x/a/b/
+a/b/c/d/e
+
+=== star-does-not-cross-slash
+--- .gitignore
+a/*
+--- paths
+a
+a/
+a/b
+a/b/
+a/b/c
+x/a/b
+
+=== star-with-literal-then-slash
+--- .gitignore
+foo*/bar
+f*o/bar
+*/bar
+--- paths
+foo/bar
+foox/bar
+fooxx/bar
+foobar
+fo/bar
+foo/x/bar
+a/b/bar
+x/bar
+bar
+
+=== question-does-not-cross-slash
+--- .gitignore
+a?b
+a?/b
+--- paths
+a/b
+axb
+ax/b
+a/b/b
+
+=== dot-patterns
+--- .gitignore
+.hidden
+/.env
+*.d.ts
+--- paths
+.hidden
+a/.hidden
+.hidden/
+.env
+a/.env
+x.d.ts
+a/x.d.ts
+.d.ts

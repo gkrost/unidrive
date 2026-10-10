@@ -81,3 +81,56 @@ jobs:
         working-directory: core
         shell: bash
         run: ./gradlew check --no-daemon
+
+  # The ignore matcher (org.krost.unidrive.sync.ignore) is checked against `git check-ignore` itself. The oracle
+  # is a pinned git built from its release tag, never the runner's git, which moves with the runner image; the
+  # other legs of this workflow skip the oracle test (CI set, UNIDRIVE_ORACLE_GIT not).
+  #  - 2.55.0 is the reference: zero differences required.
+  #  - 2.43.0 (the git of Ubuntu 24.04) is the drift detector: the same corpus on an older git, cases that pin
+  #    newer behaviour are skipped by their `min-git` header. A red leg here means git changed semantics.
+  ignore-oracle:
+    name: ignore-oracle (git ${{ matrix.git }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - git: 2.55.0
+            commit: e9019fcafe0040228b8631c30f97ae1adb61bcdc
+            informational: false
+          - git: 2.43.0
+            commit: 564d0252ca632e0264ed670534a51d18a689ef5d
+            informational: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pinned git
+        uses: ./.github/actions/pinned-git
+        with:
+          version: ${{ matrix.git }}
+          commit: ${{ matrix.commit }}
+
+      - name: Set up Gradle dependency cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Ignore matcher oracle
+        working-directory: core
+        run: ./gradlew :app:sync:test --tests 'org.krost.unidrive.sync.ignore.*' --no-daemon
+
+      - name: Oracle and benchmark report
+        if: always()
+        working-directory: core/app/sync/build/reports
+        run: |
+          {
+            echo "### Ignore matcher against git ${{ matrix.git }}"
+            echo '```'
+            cat ignore-oracle.txt ignore-benchmark.txt 2>/dev/null || echo "no report written"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

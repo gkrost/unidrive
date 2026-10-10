@@ -1,0 +1,122 @@
+=== escaped-leading-hash
+--- .gitignore
+\#notacomment
+\#
+--- paths
+#notacomment
+#
+a/#notacomment
+notacomment
+
+=== escaped-leading-bang
+--- .gitignore
+\!important
+--- paths
+!important
+important
+a/!important
+
+=== escaped-star-and-question
+--- .gitignore
+\*star
+what\?
+a\[b\]
+--- paths
+*star
+xstar
+what?
+whatx
+a[b]
+ab
+
+=== backslash-escapes-ordinary-char
+--- .gitignore
+\f\o\o
+--- paths
+foo
+\foo
+f\o\o
+
+=== trailing-spaces-are-ignored
+--- .gitignore
+foo{SP}{SP}
+bar/{SP}
+--- paths
+foo
+foo{SP}
+foo{SP}{SP}
+bar
+bar/
+
+=== escaped-trailing-space-is-kept
+--- .gitignore
+foo\{SP}
+qux\{SP}{SP}
+--- paths
+foo
+foo{SP}
+foo{SP}{SP}
+qux
+qux{SP}
+qux{SP}{SP}
+
+=== space-in-the-middle-is-literal
+--- .gitignore
+my file.txt
+a b/
+--- paths
+my file.txt
+my  file.txt
+my_file.txt
+a b/
+a b/c
+a b
+
+=== leading-space-is-literal
+--- .gitignore
+{SP}lead
+--- paths
+{SP}lead
+lead
+
+=== tab-is-not-trimmed
+--- .gitignore
+tabbed{TAB}
+--- paths
+tabbed
+tabbed{TAB}
+
+=== trailing-backslash-is-a-pattern-that-never-matches
+--- .gitignore
+foo\
+--- paths
+foo
+foo\
+
+=== crlf-line-endings
+--- .gitignore
+a.log{CR}
+b/{CR}
+!c.log{CR}
+--- paths
+a.log
+b/
+c.log
+a.log{CR}
+
+=== only-spaces-line
+--- .gitignore
+{SP}{SP}{SP}
+foo
+--- paths
+foo
+{SP}
+
+=== byte-order-mark-is-skipped
+--- .gitignore
+{u:FEFF}first
+second
+--- paths
+first
+second
+{u:FEFF}first

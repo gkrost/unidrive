@@ -1,0 +1,171 @@
+=== leading-doublestar-slash
+--- .gitignore
+**/foo
+--- paths
+foo
+foo/
+a/foo
+a/b/foo
+a/b/foo/
+foo/bar
+a/foo/bar
+afoo
+a/foobar
+
+=== leading-doublestar-slash-with-name-below
+--- .gitignore
+**/foo/bar
+--- paths
+foo/bar
+a/foo/bar
+a/b/foo/bar
+foo/x/bar
+a/foo/bar/baz
+bar
+
+=== trailing-slash-doublestar
+--- .gitignore
+abc/**
+--- paths
+abc
+abc/
+abc/x
+abc/x/
+abc/x/y
+x/abc/y
+abc/.hidden
+
+=== middle-doublestar
+--- .gitignore
+a/**/b
+--- paths
+a/b
+a/x/b
+a/x/y/b
+a/x/y/b/
+a/b/c
+ab
+x/a/b
+a/xb
+a/x/yb
+
+=== doublestar-alone
+--- .gitignore
+**
+--- paths
+a
+a/
+a/b
+.hidden
+
+=== doublestar-alone-with-negation
+--- .gitignore
+**
+!*/
+!*.txt
+--- paths
+a.txt
+b.bin
+d/
+d/c.txt
+d/c.bin
+d/e/
+d/e/f.txt
+d/e/f.bin
+
+=== doublestar-adjacent-to-text-is-plain-star
+--- .gitignore
+foo**/bar
+a**b
+**x
+y**
+--- paths
+foo/bar
+fooX/bar
+foo/x/bar
+afoo/bar
+ab
+axb
+a/b
+a/x/b
+x
+ax
+a/x
+y
+yx
+y/z
+x/yz
+
+=== triple-star
+--- .gitignore
+a/***/b
+***/c
+d/***
+--- paths
+a/b
+a/x/b
+a/x/y/b
+c
+x/c
+d/e
+d/e/f
+d
+
+=== doublestar-slash-at-end-of-pattern-with-dir-flag
+--- .gitignore
+a/**/
+--- paths
+a
+a/
+a/b
+a/b/
+a/b/c
+a/b/c/
+
+=== doublestar-between-two-slashes
+--- .gitignore
+a/**/**/b
+**/**/c
+--- paths
+a/b
+a/x/b
+a/x/y/b
+c
+x/c
+x/y/c
+
+=== doublestar-prefix-name
+--- .gitignore
+**/node_modules/
+**/target/*.jar
+--- paths
+node_modules
+node_modules/
+node_modules/pkg/index.js
+web/node_modules/
+web/app/node_modules/left-pad/index.js
+target/a.jar
+mod/target/a.jar
+mod/target/classes/a.jar
+mod/target/b.txt
+
+=== escaped-slash-after-doublestar
+--- .gitignore
+a/**\/b
+--- paths
+a/b
+a/x/b
+a/**/b
+
+=== doublestar-after-a-literal-prefix-is-a-plain-star
+## git before 2.52 let "foo**/bar" match "foobar" (the literal prefix was cut off before wildmatch, so the "**"
+## looked like the start of the pattern). 2.52 fixed it; this implementation follows the fixed behaviour.
+min-git: 2.52
+--- .gitignore
+foo**/bar
+a/b**/c
+--- paths
+foobar
+a/bc
+a/b/c
+a/bx/c
