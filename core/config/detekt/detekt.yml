@@ -33,6 +33,16 @@ complexity:
     functionThreshold: 8
     constructorThreshold: 10
 
+coroutines:
+  # Syntax-only, so it works without type resolution. The rules that would catch a
+  # swallowed CancellationException (SuspendFunSwallowedCancellation,
+  # SleepInsteadOfDelay) need it, and detekt 1.x's embedded compiler cannot read
+  # this project's Kotlin metadata: with --classpath they stay silent on real
+  # violations and report false RedundantSuspendModifier/UnreachableCode instead.
+  # Revisit with detekt 2.0, whose analysis tracks the current compiler.
+  GlobalCoroutineUsage:
+    active: true
+
 exceptions:
   SwallowedException:
     active: true
