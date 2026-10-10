@@ -25,11 +25,13 @@ import kotlinx.coroutines.withTimeout
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.StateDatabase
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -87,6 +89,13 @@ class HydrationImpl(
 
     /** Test seam to hold a startup cache scan in flight and verify cancellation between entries. */
     internal var cacheScanCheckpoint: () -> Unit = {}
+
+    /**
+     * Test seam (#729): one call for every row the replay asks its containment pass for the cache copy of. A
+     * replay that starts from the rows calls it once per uploaded row; one that starts from the cache calls it
+     * once per cache file.
+     */
+    internal var replayProbeCheckpoint: () -> Unit = {}
 
     /** Cancel and join all background work owned by this hydration layer before its state DB closes. */
     suspend fun shutdownUploads() {
@@ -783,12 +792,15 @@ class HydrationImpl(
         var queued = 0
         var deferred = 0
         var refused = 0
+        // #729: one containment pass for the whole replay. The folder's real path is taken once and every path
+        // it probes is remembered, so the rows that share an ancestor — and the rows whose cache copy is gone —
+        // do not pay for the same walk (and its internally thrown Windows probes) again.
+        val pass = CachePaths.Pass(mount.hydrationCacheDir())
         for (path in stateDb.pendingUploadPaths()) {
             // #678: the walk between records is blocking file-system work with no suspension
             // point, so a stop is only honoured if the loop itself checks for it.
             coroutineContext.ensureActive()
-            if (!replayable(path)) continue
-            val cachePath = mount.resolveCachePath(path)
+            val cachePath = cacheCopy(pass, path) ?: continue
             if (refusedEarlier(path, cachePath) != null) { refused++; continue } // #493: not replayed at every start
             if (failedReplayDelayMs > 0 && stateDb.getEntry(path)?.lastErrorAt != null) {
                 deferred++
@@ -813,15 +825,29 @@ class HydrationImpl(
         // recovery scanner happened to replay it (and never, if none came). The #493 rules are the
         // same as for pending rows: a failed row waits, and a refusal for exactly the content the
         // cache holds now is not retried at every start.
+        //
+        // #729: the candidates are the files the cache holds, not the uploaded rows. The row-driven
+        // scan named every alive uploaded file row — 137,534 on the live profile — and resolved and
+        // probed a cache path for each one, walking it component by component: on Windows every absent
+        // component threw internally (341,451 recorded exceptions, 67.7 % of the JFR window, 13–17
+        // minutes per start). A row whose cache copy is gone has nothing to replay, so one walk of the
+        // cache (~8,600 files) replaces the row walk, and the row behind a file carries the baseline.
         var dirty = 0
         var dirtyDeferred = 0
-        for (path in stateDb.uploadedMountRows()) {
+        for (file in cacheFileCandidates()) {
             coroutineContext.ensureActive() // #678: see the pending loop above
-            if (!replayable(path)) continue
+            // The row this cache file belongs to. A file whose on-disk spelling drifted from the row's path
+            // (a case-only change) still names it on a case-insensitive volume: getEntryCaseInsensitive walks
+            // the row index on lower-cased paths, and is reached only when the exact path missed.
+            val entry = stateDb.getEntry(file.path) ?: stateDb.getEntryCaseInsensitive(file.path) ?: continue
+            val path = entry.path
+            // What the row-driven scan selected: alive file rows with a real remote id (toSyncEntry surfaces
+            // the `local:` synthetic of a never-uploaded row as a null id, and a row stored without one reads
+            // null too). A folder row has no file in the cache — a directory at its path is not a cache copy —
+            // and a never-uploaded row is the pending loop's above.
+            if (entry.isFolder || entry.remoteId == null || !entry.isHydrated) continue
             if (uploadSlots.containsKey(path)) continue
-            val entry = stateDb.getEntry(path) ?: continue
-            if (entry.remoteId == null || !entry.isHydrated) continue
-            val cachePath = mount.resolveCachePath(path)
+            val cachePath = cacheCopy(pass, path) ?: continue
             val stamp = refusalStamp(cachePath) ?: continue
             val baselineMtime = entry.localMtime ?: continue
             val baselineSize = entry.localSize ?: continue
@@ -857,14 +883,41 @@ class HydrationImpl(
         return queued + dirty
     }
 
+    /**
+     * #729: the candidates of the dirty-overwrite scan — the files the cache holds now, ordered by path so a
+     * replay stays deterministic (the handles it hands out follow them). `listCacheFiles` walks the cache once
+     * and names each regular file's logical path, so the scan reaches the rows with a cache copy without
+     * resolving or probing a path per row. The same walk the cache-budget pass makes.
+     */
+    private suspend fun cacheFileCandidates(): List<CacheFile> {
+        val job = coroutineContext[Job]
+        return listCacheFiles { job?.ensureActive() }.sortedBy { it.path }
+    }
+
+    /**
+     * #526/#729: the cache copy of [path] through this replay's containment [pass], or null. Null covers every
+     * row the replay skips before any filesystem work: excluded (keep-local) and out-of-scope rows, rows whose
+     * local name the platform rejects (warned as before) and rows whose cache copy is gone.
+     */
+    private fun cacheCopy(pass: CachePaths.Pass, path: String): Path? {
+        if (mount.isExcludedPath(path) || mount.isOutOfScope(path)) return null
+        replayProbeCheckpoint()
+        val cachePath =
+            try {
+                pass.resolveInside(path)
+            } catch (_: SecurityException) {
+                log.warn("#526: not replaying pending upload with an invalid local name: {}", path)
+                return null
+            } catch (_: InvalidPathException) {
+                log.warn("#526: not replaying pending upload with an invalid local name: {}", path)
+                return null
+            }
+        return if (Files.exists(cachePath)) cachePath else null
+    }
+
+    // #526: the same check for the deferred rows, which run after the replay pass and resolve on their own.
     private fun replayable(path: String): Boolean =
-        !mount.isExcludedPath(path) &&
-            !mount.isOutOfScope(path) &&
-            runCatching { Files.exists(mount.resolveCachePath(path)) }
-                .getOrElse {
-                    log.warn("#526: not replaying pending upload with an invalid local name: {}", path)
-                    false
-                }
+        cacheCopy(CachePaths.Pass(mount.hydrationCacheDir()), path) != null
 
     // #493: <cache mtime ms>|<cache size> of the bytes an upload sends; null when the cache copy is gone.
     private fun refusalStamp(cachePath: Path): String? =

@@ -12,6 +12,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
+import org.junit.Assume
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -80,6 +81,125 @@ class HydrationUploadQueueTest {
 
         advanceUntilIdle()
         assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/f.txt"), "then it is replayed")
+    }
+
+    // #729: the dirty-overwrite scan starts from the files the cache holds, not from every uploaded file row.
+    // On the live profile it walked 137,534 rows and resolved a cache path for each one, component by component,
+    // with a pair of internally thrown JDK exceptions per absent component on Windows (341,451 recorded
+    // exceptions, 13–17 minutes per start). An empty cache has nothing to replay: no row is probed at all.
+    @Test
+    fun `an empty cache over a large row set probes no row and replays nothing`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        for (i in 1..2_000) env.stateDb.insertUploadedRow("/bulk/f$i.txt", mtime = 1_000L, size = 3L)
+        var probed = 0
+        env.hydration.replayProbeCheckpoint = { probed++ }
+
+        assertEquals(0, env.hydration.replayPendingUploads())
+        advanceUntilIdle()
+
+        assertEquals(0, probed, "no cache file exists, so no row's cache copy is asked for")
+    }
+
+    // #729: the rows the dirty scan takes up follow the cache files, not the uploaded rows: the two thousand
+    // rows without a cache copy are never looked up, and the one file that is a row's drifted cache copy is the
+    // one candidate the scan probes.
+    @Test
+    fun `the dirty scan asks for the cache copy of a cache file, not of every uploaded row`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertUploadedRow("/q/f.txt", mtime = 1_000L, size = 3L, remoteHash = "remote-version-1")
+        writeCache(env, "/q/f.txt", "xyz")
+        for (i in 1..2_000) env.stateDb.insertUploadedRow("/bulk/f$i.txt", mtime = 1_000L, size = 3L)
+        var probed = 0
+        env.hydration.replayProbeCheckpoint = { probed++ }
+
+        assertEquals(1, env.hydration.replayPendingUploads())
+        advanceUntilIdle()
+
+        assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/f.txt"))
+        assertEquals(1, probed, "one cache file, whatever the uploaded-row count")
+    }
+
+    // #729: the scan's row lookup follows the spelling the cache stores. On a case-insensitive volume a file
+    // stored under a different case than the row's path still names that row's copy: the index-backed COLLATE
+    // NOCASE lookup finds the row, and the body re-resolves the row's own path (so a case-sensitive volume,
+    // where that copy is genuinely absent, skips instead of uploading another file's bytes).
+    @Test
+    fun `a cache file whose name drifted in case still replays its row`() = runTest {
+        Assume.assumeTrue("a case-insensitive volume", ContainmentEnv.windows)
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        env.stateDb.insertUploadedRow("/q/F.txt", mtime = 1_000L, size = 3L)
+        val cache = env.syncEngine.resolveCachePath("/q/F.txt")
+        Files.createDirectories(cache.parent)
+        Files.writeString(cache.resolveSibling("f.txt"), "xyz")
+
+        assertEquals(1, env.hydration.replayPendingUploads())
+        advanceUntilIdle()
+
+        assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/F.txt"))
+    }
+
+    // #729: the row filter the row-driven scan applied in SQL (status EXISTS, a real remote id, a file row,
+    // hydrated) now lives in the scan's row lookup. Only an uploaded, hydrated file row with a drifted cache
+    // copy replays: a never-uploaded row is the pending loop's (its handle says so), a folder row has no file
+    // in the cache, and a cache file no row names is left alone.
+    @Test
+    fun `the dirty scan replays only an uploaded hydrated file row, never a pending or folder row`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.stateDb.insertUploadedRow("/q/dirty.txt", mtime = 1_000L, size = 3L, remoteHash = "remote-version-1")
+        writeCache(env, "/q/dirty.txt", "xyz")
+        writeCache(env, "/q/clean.txt", "abc")
+        val (mtime, size) = cacheStats(env, "/q/clean.txt")
+        env.stateDb.insertUploadedRow("/q/clean.txt", mtime = mtime, size = size)
+        env.stateDb.insertFolderEntry("/q/folder")
+        writeCache(env, "/q/folder", "a file where the row is a folder")
+        env.stateDb.insertCreatedRow("/q/pending.txt")
+        writeCache(env, "/q/pending.txt", "pending bytes")
+        env.stateDb.insertUnhydratedEntry("/q/unhydrated.txt", remoteSize = 0L)
+        writeCache(env, "/q/unhydrated.txt", "no local copy recorded")
+        writeCache(env, "/q/orphan.txt", "no row names this file")
+
+        assertEquals(2, env.hydration.replayPendingUploads(), "the drifted row and the pending row replay")
+        advanceUntilIdle()
+
+        assertEquals("xyz", env.syncEngine.remoteContentSeen("/q/dirty.txt"))
+        assertEquals("pending bytes", env.syncEngine.remoteContentSeen("/q/pending.txt"))
+        assertNull(env.syncEngine.remoteContentSeen("/q/clean.txt"), "the cache copy is the row's baseline")
+        assertNull(env.syncEngine.remoteContentSeen("/q/folder"), "a folder row has no file in the cache")
+        assertNull(env.syncEngine.remoteContentSeen("/q/unhydrated.txt"), "no local copy of record")
+        assertNull(env.syncEngine.remoteContentSeen("/q/orphan.txt"), "no row names the cache file")
+        assertEquals(
+            listOf("engine-dirty-1", "engine-replay-1"),
+            events.filterIsInstance<HydrationEvent.Completed>().map { it.handleId }.sorted(),
+            "the never-uploaded row is replayed as a pending upload, not as a dirty overwrite",
+        )
+        collector.cancel()
+    }
+
+    // #729: the row-driven scan skipped a row whose path is excluded (keep-local) or outside the sync scope
+    // before probing its cache copy; the cache-driven scan keeps both guards, so their cache files are
+    // candidates but never replay.
+    @Test
+    fun `the dirty scan skips an excluded and an out-of-scope cache copy, as the row-driven scan did`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            syncPaths = listOf("/_INBOX"),
+            excludePatterns = listOf("*.tmp"),
+        )
+        for (p in listOf("/_INBOX/in.txt", "/_INBOX/scratch.tmp", "/outside/out.txt")) {
+            env.stateDb.insertUploadedRow(p, mtime = 1_000L, size = 3L)
+            writeCache(env, p, "bytes-$p")
+        }
+
+        assertEquals(1, env.hydration.replayPendingUploads(), "only the in-scope, non-excluded cache copy is replayed")
+        advanceUntilIdle()
+
+        assertEquals("bytes-/_INBOX/in.txt", env.syncEngine.remoteContentSeen("/_INBOX/in.txt"))
+        assertNull(env.syncEngine.remoteContentSeen("/_INBOX/scratch.tmp"), "excluded (keep-local)")
+        assertNull(env.syncEngine.remoteContentSeen("/outside/out.txt"), "out of scope")
     }
 
     @Test
