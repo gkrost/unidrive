@@ -8,7 +8,6 @@ logback = "1.6.5"
 picocli = "4.7.7"
 ktor = "3.6.0"
 shadow = "9.6.1"
-ktlint-gradle = "14.2.0"
 # 1.23.x line: detekt 2.0 is a config-format rewrite and still alpha. Invoked
 # directly as detekt-cli on the toolchain JVM (see core/build.gradle.kts) — the
 # 1.x Gradle plugin analyzes in-process on the daemon JVM, which breaks on
@@ -43,4 +42,3 @@ ktor-client = ["ktor-client-core", "ktor-client-cio", "ktor-client-content-negot
 
 [plugins]
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
-ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint-gradle" }

@@ -1,0 +1,29 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ComplexCondition:IsoInstants.kt$IsoInstants$s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':'</ID>
+    <ID>ComplexCondition:IsoInstants.kt$IsoInstants$year &lt; 0 || month !in 1..12 || day &lt; 1 || hour !in 0..23 || minute !in 0..59 || second !in 0..59</ID>
+    <ID>CyclomaticComplexMethod:RemoteGather.kt$RemoteGather$fun updateRemoteEntries(remoteChanges: Map&lt;String, CloudItem&gt;): RemoteMerge</ID>
+    <ID>CyclomaticComplexMethod:RemoteGather.kt$RemoteGather$suspend fun gather( readOnly: Boolean = false, progress: EnumerationTracker? = null, ): Map&lt;String, CloudItem&gt;</ID>
+    <ID>LargeClass:StateDatabase.kt$StateDatabase</ID>
+    <ID>LargeClass:StateDatabaseTest.kt$StateDatabaseTest</ID>
+    <ID>LongMethod:RemoteGather.kt$RemoteGather$suspend fun gather( readOnly: Boolean = false, progress: EnumerationTracker? = null, ): Map&lt;String, CloudItem&gt;</ID>
+    <ID>LongMethod:StateDatabase.kt$StateDatabase$@Synchronized private fun createTables()</ID>
+    <ID>LongParameterList:MountWiring.kt$MountWiring$( val provider: CloudProvider, val db: StateDatabase, val guard: RemoteOperationGuard, val gather: RemoteGather, val enumeration: RemoteEnumeration, // The hydration-cache file of a logical path (the layout belongs to the host: the mirror's // Reconciler and the enumeration's reap read the same paths). val cachePathOf: (path: String) -&gt; Path, val options: Options, // UD-113: the audit log of mutations, or null when none is configured. val auditLog: AuditSink?, // Byte progress of an upload, (path, transferred, total), for the host's progress reporter. val onTransferProgress: (path: String, transferred: Long, total: Long) -&gt; Unit, // #301: whether a hydration upload of the path is queued or in flight. Late-bound in the CLI // (the hydration layer is built after the engine); the same lambda guards the enumeration's reap. val uploadInFlight: (path: String) -&gt; Boolean, // The host's logger, so the moved log lines keep their logger name. val log: Logger, )</ID>
+    <ID>NestedBlockDepth:StateDatabase.kt$StateDatabase.Companion$fun snapshotOf( source: Path, tempRoot: Path = Path.of(System.getProperty("java.io.tmpdir")), staleAfter: Duration = Duration.ofHours(24), usableSpace: (Path) -&gt; Long = { Files.getFileStore(it).usableSpace }, ): StateDatabase</ID>
+    <ID>NestedBlockDepth:StateDatabase.kt$StateDatabase.Companion$private fun readSchemaVersionOf(c: Connection): Int?</ID>
+    <ID>NestedBlockDepth:StateDatabaseTest.kt$StateDatabaseTest$private fun schemaVersionOf(dbPath: java.nio.file.Path): Int?</ID>
+    <ID>SwallowedException:CachePaths.kt$CachePaths$e: InvalidPathException</ID>
+    <ID>SwallowedException:CachePaths.kt$CachePaths$e: SecurityException</ID>
+    <ID>SwallowedException:Transfers.kt$Transfers$e: java.io.IOException</ID>
+    <ID>TooGenericExceptionCaught:RemoteEnumeration.kt$RemoteEnumeration$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:StateDatabase.kt$StateDatabase$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:StateDatabase.kt$StateDatabase$e: Throwable</ID>
+    <ID>TooGenericExceptionCaught:StateDatabase.kt$StateDatabase.Companion$e: Exception</ID>
+    <ID>TooManyFunctions:EnumerationTracker.kt$EnumerationTracker</ID>
+    <ID>TooManyFunctions:RemoteGather.kt$RemoteGather</ID>
+    <ID>TooManyFunctions:StateDatabase.kt$StateDatabase</ID>
+    <ID>UseRequire:SyncScope.kt$SyncScope$throw IllegalArgumentException("config.toml [providers.$profile] sync_path entry '$entry' $problem")</ID>
+  </CurrentIssues>
+</SmellBaseline>

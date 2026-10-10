@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scope-check.sh — pre-commit hook that enforces commit-scope discipline.
 #
-# Parses the commit subject's type + scope (e.g. "chore(ktlint)",
+# Parses the commit subject's type + scope (e.g. "chore(deps)",
 # "fix(UD-228)", "docs(backlog)") and asserts the staged file set matches
 # a per-type whitelist. Flags accidental bundling of unrelated changes
 # that pollute git blame / bisect and break ticket traceability.
@@ -90,12 +90,6 @@ filter_unexpected() {
 }
 
 case "$TYPE($SCOPE)" in
-  "chore(ktlint)")
-    UNEXPECTED="$(filter_unexpected "$STAGED" \
-      '*/config/ktlint/baseline.xml' \
-      'config/ktlint/baseline.xml')"
-    [[ -n "$UNEXPECTED" ]] && fail "ktlint baselines only" "$UNEXPECTED"
-    ;;
   "chore(deps)")
     UNEXPECTED="$(filter_unexpected "$STAGED" \
       'gradle/libs.versions.toml' \

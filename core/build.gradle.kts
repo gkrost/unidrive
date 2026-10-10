@@ -1,8 +1,6 @@
 plugins {
     kotlin("jvm") version libs.versions.kotlin.get() apply false
     kotlin("plugin.serialization") version libs.versions.kotlin.get() apply false
-    // UD-706: ktlint lint, warn-only. Applied to every Kotlin subproject below.
-    alias(libs.plugins.ktlint) apply false
     // Needed at root for the `jacocoMergedReport` task registered below —
     // JacocoReport requires the jacoco classpath to be resolvable on its owner
     // project.
@@ -62,17 +60,11 @@ allprojects {
     }
 }
 
-// UD-774: temporary disable. ktlint costs ~20–30 s per `./gradlew build` and
-// was the dominant per-iteration cost during the UD-240g/UD-240i sessions on
-// 2026-05-02. Flip back to `true` to restore the UD-706 / UD-706b setup.
-// Re-enable plan: run `scripts/dev/ktlint-sync.sh` after flip to absorb any
-// baseline drift, then `./gradlew build` to confirm green, then close UD-774.
-val ktlintEnabled = false
-
 // detekt runs as a plain process instead of a JavaExec task: Gradle 9 removed
-// JavaExec's ignoreExitValue, and this integration is report-only — findings
-// make detekt-cli exit 2 and must not fail the build, while a detekt crash
-// (exit 1) must. See the detekt block in `subprojects`.
+// JavaExec's ignoreExitValue, and the exit code needs reading — 2 means
+// findings beyond the module's baseline (a gate failure, with its own
+// message), anything else non-zero is a detekt crash. See the detekt block in
+// `subprojects`.
 abstract class DetektTask : DefaultTask() {
     @get:Inject
     abstract val execOperations: ExecOperations
@@ -87,6 +79,22 @@ abstract class DetektTask : DefaultTask() {
     @get:InputFile
     @get:PathSensitive(PathSensitivity.NONE)
     abstract val config: RegularFileProperty
+
+    // The module's accepted findings (<project>/config/detekt/baseline.xml).
+    // Empty when the module has none, so every finding counts as new.
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val baseline: ConfigurableFileCollection
+
+    // true: (re)write the baseline from the current findings instead of gating.
+    @get:Input
+    abstract val createBaseline: Property<Boolean>
+
+    @get:Internal
+    abstract val baselineFile: RegularFileProperty
+
+    @get:Internal
+    abstract val baselineTaskPath: Property<String>
 
     @get:OutputFile
     abstract val txtReport: RegularFileProperty
@@ -114,11 +122,24 @@ abstract class DetektTask : DefaultTask() {
                 "--report", "html:${htmlReport.get().asFile.absolutePath}",
                 "--input", sources.files.joinToString(",") { it.absolutePath },
             )
+            val file = baselineFile.get().asFile
+            if (createBaseline.get()) {
+                file.parentFile.mkdirs()
+                args("--create-baseline", "--baseline", file.absolutePath)
+            } else if (!baseline.isEmpty) {
+                args("--baseline", file.absolutePath)
+            }
         }
-        // detekt-cli exit codes: 0 clean, 2 findings (report-only — kept, not
-        // gating), 1 unexpected error, 3 invalid config — crashes, which fail.
-        if (result.exitValue != 0 && result.exitValue != 2) {
-            throw GradleException(
+        // detekt-cli exit codes: 0 clean, 2 findings, 1 unexpected error, 3 invalid
+        // config. Writing a baseline accepts the findings, so 2 is fine there.
+        when {
+            result.exitValue == 0 -> Unit
+            result.exitValue == 2 && createBaseline.get() -> Unit
+            result.exitValue == 2 -> throw GradleException(
+                "detekt found issues that are not in the baseline; see ${txtReport.get().asFile}. " +
+                    "Fix them, or accept them deliberately with `./gradlew ${baselineTaskPath.get()}`.",
+            )
+            else -> throw GradleException(
                 "detekt exited ${result.exitValue} (a detekt crash, not findings); see the task output above",
             )
         }
@@ -130,28 +151,13 @@ subprojects {
     configure<JacocoPluginExtension> {
         toolVersion = jacocoToolVersion
     }
-    // UD-706: ktlint lint + format tasks on every subproject (warn-only).
-    if (ktlintEnabled) {
-        apply(plugin = "org.jlleitschuh.gradle.ktlint")
-
-        extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension> {
-            android.set(false)
-            // UD-706b: strict — per-project baseline.xml (under <project>/config/ktlint/)
-            // freezes the current set of violations so `ktlintCheck` fails only on
-            // *new* violations. Gradual-improvement path: delete baseline entries
-            // once the underlying file is cleaned up.
-            ignoreFailures.set(false)
-            reporters {
-                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.PLAIN)
-                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.CHECKSTYLE)
-            }
-        }
-    }
-
-    // detekt: report-only. The existing findings are not yet triaged, so they are
-    // printed and written to build/reports/detekt/ on every `check` without failing
-    // it. Flipping to failing (or a baseline so only new findings fail) is an owner
-    // decision once they are burned down. Config deltas: config/detekt/detekt.yml.
+    // detekt: a ratchet. Each module's existing findings are accepted in
+    // <project>/config/detekt/baseline.xml; `check` fails on any finding not in it.
+    // Baseline ids are signatures (file name + declaration), not line numbers, so
+    // edits elsewhere in a file do not re-surface them. Burning one down: fix it
+    // and delete its line. Accepting a new one deliberately: `<project>:detektBaseline`
+    // rewrites the module's baseline from the current findings — review that diff.
+    // Reports land in build/reports/detekt/. Config deltas: config/detekt/detekt.yml.
     //
     // detekt-cli runs on the compile toolchain JVM instead of through the detekt
     // Gradle plugin: the plugin analyzes in-process on the Gradle daemon's JVM,
@@ -178,14 +184,16 @@ subprojects {
         // the task's own (empty) extension container.
         val toolchainService = the<org.gradle.jvm.toolchain.JavaToolchainService>()
 
-        val detekt = tasks.register<DetektTask>("detekt") {
-            group = "verification"
-            description = "Static analysis, report-only. Reports land in build/reports/detekt/."
+        val baselinePath = layout.projectDirectory.file("config/detekt/baseline.xml")
+        val baselineTask = "$path:detektBaseline"
+        fun DetektTask.common(reportName: String) {
             detektClasspath.from(detektCli)
             sources.from(kotlinSourceDirs)
             config.set(rootProject.file("config/detekt/detekt.yml"))
-            txtReport.set(layout.buildDirectory.file("reports/detekt/detekt.txt"))
-            htmlReport.set(layout.buildDirectory.file("reports/detekt/detekt.html"))
+            baselineFile.set(baselinePath)
+            baselineTaskPath.set(baselineTask)
+            txtReport.set(layout.buildDirectory.file("reports/detekt/$reportName.txt"))
+            htmlReport.set(layout.buildDirectory.file("reports/detekt/$reportName.html"))
             // The bytecode target is the one JDK every gate leg resolves
             // regardless of which JDK drives the Gradle daemon.
             javaLauncher.set(
@@ -193,6 +201,21 @@ subprojects {
                     languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(21)
                 },
             )
+        }
+
+        val detekt = tasks.register<DetektTask>("detekt") {
+            group = "verification"
+            description = "Static analysis; fails on findings not in config/detekt/baseline.xml."
+            common("detekt")
+            baseline.from(files(baselinePath).filter { it.exists() })
+            createBaseline.set(false)
+        }
+        tasks.register<DetektTask>("detektBaseline") {
+            group = "verification"
+            description = "Rewrites config/detekt/baseline.xml from the current detekt findings."
+            common("detekt-baseline")
+            createBaseline.set(true)
+            outputs.upToDateWhen { false }
         }
         tasks.named("check") { dependsOn(detekt) }
     }
