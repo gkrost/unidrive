@@ -121,11 +121,20 @@ internal class GitOracle private constructor(
             thread(isDaemon = true) {
                 proc.outputStream.use { out -> paths.forEach { out.write(it.toByteArray(Charsets.UTF_8)); out.write(0) } }
             }
+        var stdout = ByteArray(0)
+        val outReader = thread(isDaemon = true) { stdout = proc.inputStream.readBytes() }
         var stderr = ByteArray(0)
         val errReader = thread(isDaemon = true) { stderr = proc.errorStream.readBytes() }
-        val stdout = proc.inputStream.readBytes()
-        check(proc.waitFor(60, TimeUnit.SECONDS)) { "git check-ignore timed out" }
+        if (!proc.waitFor(60, TimeUnit.SECONDS)) {
+            proc.destroyForcibly()
+            proc.waitFor()
+            feeder.join()
+            outReader.join()
+            errReader.join()
+            error("git check-ignore timed out")
+        }
         feeder.join()
+        outReader.join()
         errReader.join()
         val code = proc.exitValue()
         check(code == 0 || code == 1) { "git check-ignore exited $code: ${String(stderr, Charsets.UTF_8)}" }
@@ -194,8 +203,17 @@ internal class GitOracle private constructor(
             val versionText =
                 try {
                     val p = ProcessBuilder(exe, "--version").redirectErrorStream(true).start()
-                    val out = p.inputStream.readBytes().toString(Charsets.UTF_8).trim()
-                    if (!p.waitFor(30, TimeUnit.SECONDS) || p.exitValue() != 0) null else out
+                    var out = ByteArray(0)
+                    val reader = thread(isDaemon = true) { out = p.inputStream.readBytes() }
+                    if (!p.waitFor(30, TimeUnit.SECONDS)) {
+                        p.destroyForcibly()
+                        p.waitFor()
+                        reader.join()
+                        null
+                    } else {
+                        reader.join()
+                        if (p.exitValue() != 0) null else out.toString(Charsets.UTF_8).trim()
+                    }
                 } catch (e: java.io.IOException) {
                     null.also { System.err.println("git not runnable ($exe): ${e.message}") }
                 }
@@ -215,8 +233,16 @@ internal class GitOracle private constructor(
             val init = ProcessBuilder(exe, "init", "-q", ".").directory(work.toFile()).redirectErrorStream(true)
             sanitise(init.environment())
             val p = init.start()
-            val out = p.inputStream.readBytes().toString(Charsets.UTF_8)
-            check(p.waitFor(60, TimeUnit.SECONDS) && p.exitValue() == 0) { "git init failed: $out" }
+            var out = ByteArray(0)
+            val reader = thread(isDaemon = true) { out = p.inputStream.readBytes() }
+            if (!p.waitFor(60, TimeUnit.SECONDS)) {
+                p.destroyForcibly()
+                p.waitFor()
+                reader.join()
+                error("git init timed out")
+            }
+            reader.join()
+            check(p.exitValue() == 0) { "git init failed: ${out.toString(Charsets.UTF_8)}" }
             return Located(GitOracle(exe, versionText, version, work), "")
         }
     }
