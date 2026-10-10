@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
@@ -243,9 +244,7 @@ class DaemonRuntime(
                 if (mountMode) {
                     // Upload and replay jobs outlive IPC handlers but not this daemon. Keep their
                     // scope separate so shutdown can cancel/join it without cancelling the serve scope.
-                    val hydrationUploadScope = kotlinx.coroutines.CoroutineScope(
-                        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
-                    )
+                    val hydrationUploadScope = hydrationUploadScope(profileName)
                     val hydrationImpl = HydrationImpl(
                         mount,
                         db!!,
@@ -693,6 +692,18 @@ class DaemonRuntime(
     }
     companion object {
         const val SHUTDOWN_DEADLINE_MS: Long = 10_000
+
+        /**
+         * The scope the mount's hydration uploads and replays run in. It carries the `profile` MDC key
+         * (kept across suspensions and thread hops by [MDCContext]), so their log lines in the shared
+         * unidrive.log read `[<profile>]` instead of `[*]` (#150).
+         */
+        internal fun hydrationUploadScope(profileName: String): kotlinx.coroutines.CoroutineScope =
+            kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() +
+                    kotlinx.coroutines.Dispatchers.IO +
+                    MDCContext(mapOf("profile" to profileName)),
+            )
 
         // Cross-repo IPC wire-protocol version, surfaced as the additive
         // protocol_version field in the daemon.status reply so co-clients
