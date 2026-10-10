@@ -139,19 +139,28 @@ class DoctorCommand : Runnable {
             // Read-only (mode=ro): no schema stamp or migration, so state.db stays byte-identical.
             val db = StateDatabase(stateDb, readOnly = true)
             try {
-                val opened = runCatching { db.initialize() }
-                if (opened.isSuccess) {
-                    results += checkCursorFreshness(db, now)
-                    results += checkHydrationDrift(db, syncRoot, full)
-                    results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
-                    results += checkEffectiveScope(db)
-                    results += checkQuotaFreshness(db, now)
-                    results += checkWriteUploadFailures(db)
-                } else {
+                val marker = results.size
+                val outcome =
+                    runCatching {
+                        db.initialize()
+                        results += checkCursorFreshness(db, now)
+                        results += checkHydrationDrift(db, syncRoot, full)
+                        results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
+                        results += checkEffectiveScope(db)
+                        results += checkQuotaFreshness(db, now)
+                        results += checkWriteUploadFailures(db)
+                    }
+                if (outcome.isFailure) {
+                    // A read-only open does not run the additive migrations createTables() applies on a
+                    // normal open, so a state.db stamped at the current version but missing a later
+                    // additive column passes initialize() and the first read throws. Report it as a
+                    // state-db error instead of aborting doctor with a stack trace.
+                    while (results.size > marker) results.removeAt(results.size - 1)
                     results += CheckResult(
                         "state-db",
                         Severity.ERR,
-                        "state.db could not be opened read-only: ${opened.exceptionOrNull()?.message}",
+                        "state.db could not be read read-only (an older schema or a corrupt file): " +
+                            "${outcome.exceptionOrNull()?.message}",
                         emptyList(),
                     )
                 }

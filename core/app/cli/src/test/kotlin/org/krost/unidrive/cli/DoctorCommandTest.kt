@@ -109,6 +109,21 @@ class DoctorCommandTest {
         assertTrue(before.contentEquals(Files.readAllBytes(dbPath)), "a refused open must not rewrite the file")
     }
 
+    @Test
+    fun `doctor_reports_a_state_db_whose_read_schema_is_incomplete_as_an_error_instead_of_crashing`() {
+        seedDb { db -> db.setSyncState("last_full_scan", Instant.parse("2026-05-17T08:00:00Z").toString()) }
+        // Passes the read-only open's schema-version check, but a read path is missing: a read-only open
+        // does not run the additive migrations createTables() applies on a normal open, so the checks
+        // must report this instead of aborting doctor with a stack trace.
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$dbPath").use {
+            it.createStatement().use { st -> st.execute("DROP VIEW alive_entries") }
+        }
+        val before = Files.readAllBytes(dbPath)
+        val checks = runDoctor()
+        assertEquals(DoctorCommand.Severity.ERR, result(checks, "state-db").severity)
+        assertTrue(before.contentEquals(Files.readAllBytes(dbPath)), "a read-only run must not rewrite the file")
+    }
+
     // ── Clean profile → exit 0 ────────────────────────────────────────────
 
     @Test
