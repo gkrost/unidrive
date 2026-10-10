@@ -158,14 +158,20 @@ class IgnoreMatcher(
                 isDir: Boolean,
                 needsNfc: Boolean,
             ): Query? {
+                // The root has no matchable entry, but malformed paths must not be silently
+                // rewritten into a different root-relative entry.
+                if (path.isEmpty() || path == "/") return null
+                require(!path.startsWith('/')) { "path must be relative to the matching root" }
                 var p = path
                 var dir = isDir
                 if (p.endsWith("/")) {
                     dir = true
-                    p = p.trimEnd('/')
+                    p = p.dropLast(1)
                 }
-                p = p.trimStart('/')
-                if (p.isEmpty()) return null
+                require(p.isNotEmpty() && '\\' !in p) { "path must use canonical '/'-separated components" }
+                require(p.split('/').all { it.isNotEmpty() && it != "." && it != ".." }) {
+                    "path must use canonical '/'-separated components"
+                }
                 val nfc = if (needsNfc) Normalizer.normalize(p, Normalizer.Form.NFC) else null
                 return Query(p, dir, p.count { it == '/' } + 1, nfc)
             }
