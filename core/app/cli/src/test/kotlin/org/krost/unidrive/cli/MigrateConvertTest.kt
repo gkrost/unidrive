@@ -34,6 +34,7 @@ class MigrateConvertTest {
         config: Path,
         profileDir: Path,
         syncRoot: Path,
+        cacheDir: Path? = null,
     ) = LegacyConversion.Setup(
         profileName = "p",
         providerType = "localfs",
@@ -42,6 +43,7 @@ class MigrateConvertTest {
         dbPath = profileDir.resolve("state.db"),
         configFile = config,
         engineVersion = "0.0.1",
+        cacheDir = cacheDir,
     )
 
     // ── setProfileMode ───────────────────────────────────────────────────────
@@ -237,6 +239,105 @@ class MigrateConvertTest {
 
         assertEquals(0, code)
         assertTrue(config.readText().contains("mode = \"mount\""), "the mode is published")
+    }
+
+    // ── #706: NULL cache_backed is what the mirror engine writes ─────────────
+
+    private fun putFile(
+        dir: Path,
+        path: String,
+        content: String,
+    ) {
+        val f = dir.resolve(path.trimStart('/'))
+        Files.createDirectories(f.parent)
+        f.writeText(content)
+    }
+
+    /** A hydrated file row the way the mirror engine leaves it: no cache_backed value. */
+    private fun mirrorRow(path: String) = hydratedRow(path, null)
+
+    @Test
+    fun `a profile populated only by the mirror engine converts to a mirror`() {
+        val (config, profileDir, syncRoot) = fixture()
+        val cache = Files.createTempDirectory("u5-cache")
+        val remote = Files.createTempDirectory("u5-remote")
+        putFile(remote, "/down.txt", "downloaded by the mirror")
+        putFile(remote, "/sub/nested.txt", "nested")
+        val db = StateDatabase(profileDir.resolve("state.db"))
+        db.initialize()
+        try {
+            val provider = org.krost.unidrive.localfs.LocalFsProvider(remote)
+            val engine =
+                org.krost.unidrive.sync.SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    cacheRoot = cache,
+                )
+            kotlinx.coroutines.runBlocking {
+                provider.authenticate()
+                engine.syncOnce() // downloads the remote files
+                putFile(syncRoot, "/up.txt", "uploaded by the mirror")
+                engine.syncOnce() // uploads the local file
+            }
+        } finally {
+            db.close()
+        }
+        val hydrated = dump(profileDir).filter { !it.isFolder && it.isHydrated }
+        assertEquals(listOf("/down.txt", "/sub/nested.txt", "/up.txt"), hydrated.map { it.path }, "the engine tracked every file")
+        assertTrue(hydrated.all { it.cacheBacked == null }, "the mirror engine never writes cache_backed: ${hydrated.map { it.cacheBacked }}")
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot, cache), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(0, code)
+        assertTrue(config.readText().contains("mode = \"mirror\""), "the mode is published")
+        assertEquals("downloaded by the mirror", Files.readString(syncRoot.resolve("down.txt")), "adopt keeps every file")
+    }
+
+    @Test
+    fun `a hybrid profile with a cache-only file is still refused`() {
+        val (config, profileDir, syncRoot) = fixture()
+        val cache = Files.createTempDirectory("u5-cache")
+        seed(profileDir, hydratedRow("/mount-written.txt", true), mirrorRow("/mirror.txt"))
+        putFile(cache, "/mount-written.txt", "bytes only in the cache")
+        putFile(syncRoot, "/mirror.txt", "a mirror row")
+        val configBefore = config.readText()
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot, cache), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(1, code)
+        assertEquals(configBefore, config.readText(), "config.toml is untouched")
+        assertNull(LegacyConversion.Journal.load(profileDir), "no journal is left behind")
+    }
+
+    @Test
+    fun `a NULL row whose cache copy exists but whose sync_root file is missing is refused`() {
+        val (config, profileDir, syncRoot) = fixture()
+        val cache = Files.createTempDirectory("u5-cache")
+        seed(profileDir, mirrorRow("/cache-only.txt"))
+        putFile(cache, "/cache-only.txt", "bytes only in the cache")
+        val configBefore = config.readText()
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot, cache), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(1, code)
+        assertEquals(configBefore, config.readText(), "config.toml is untouched")
+        assertNull(LegacyConversion.Journal.load(profileDir), "no journal is left behind")
+    }
+
+    @Test
+    fun `a NULL row with its sync_root file present passes even when a cache copy exists`() {
+        val (config, profileDir, syncRoot) = fixture()
+        val cache = Files.createTempDirectory("u5-cache")
+        seed(profileDir, mirrorRow("/both.txt"), mirrorRow("/root-only.txt"))
+        putFile(syncRoot, "/both.txt", "same bytes")
+        putFile(cache, "/both.txt", "same bytes")
+        putFile(syncRoot, "/root-only.txt", "root bytes")
+
+        val code = LegacyConversion.execute(setup(config, profileDir, syncRoot, cache), "mirror", "adopt", restart = false, verbose = false)
+
+        assertEquals(0, code)
+        assertTrue(config.readText().contains("mode = \"mirror\""), "the mode is published")
     }
 
     // ── resume and refusals ──────────────────────────────────────────────────

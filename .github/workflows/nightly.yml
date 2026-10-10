@@ -11,10 +11,12 @@ name: nightly-live-tests
 # On stock CI (no provider credentials) the real-account tests self-skip
 # (`UNIDRIVE_INTEGRATION_TESTS` unset + no token/credentials on disk), so this
 # job is green and serves as a continuous check that the nightly-tier task
-# itself stays wired correctly. To exercise the real providers, populate the
-# provider credentials and set `UNIDRIVE_INTEGRATION_TESTS=true` in this job's
-# environment (e.g. from repository secrets) — see the live tests' Gate 1/Gate 2
-# skip messages for the exact paths each provider reads.
+# itself stays wired correctly; the last step then marks the run as skipped
+# with a warning and a job-summary line, so green is not read as a live pass.
+# To exercise the real providers, populate the provider credentials and set
+# `UNIDRIVE_INTEGRATION_TESTS=true` in this job's environment (e.g. from
+# repository secrets) — see the live tests' Gate 1/Gate 2 skip messages for the
+# exact paths each provider reads.
 
 on:
   schedule:
@@ -50,3 +52,11 @@ jobs:
       - name: Run nightly live-test tier
         working-directory: core
         run: ./gradlew :app:sync-tracking:liveTestNightly --no-daemon --console=plain
+
+      # A green run without credentials proves only that the task is wired;
+      # say so on the run page instead of passing for a live result.
+      - name: Report a skipped live tier
+        if: ${{ env.UNIDRIVE_INTEGRATION_TESTS != 'true' }}
+        run: |
+          echo "::warning title=Live tier skipped::No provider credentials: the real-account tests skipped themselves. This run checks the task wiring only."
+          echo "**Live tier skipped: no provider credentials.** The real-account tests skipped themselves; this run checks the task wiring only." >> "$GITHUB_STEP_SUMMARY"

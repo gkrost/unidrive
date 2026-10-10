@@ -1,0 +1,7 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>TooManyFunctions:LocalFsProvider.kt$LocalFsProvider : CloudProvider</ID>
+  </CurrentIssues>
+</SmellBaseline>

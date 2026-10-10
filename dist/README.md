@@ -10,6 +10,11 @@ a wrapper script at `~/.local/bin/unidrive`, copies the systemd-user unit,
 and runs `systemctl --user daemon-reload`. It does **not** enable or start
 the service — that step is yours.
 
+An upgrade is safe over a running install: active `unidrive*.service` units are stopped before the jar is
+replaced and started again afterwards, and the jar is unlinked and copied to a fresh file rather than
+overwritten in place. A daemon or mount started by hand keeps running the previous jar; the installer lists
+it so you can restart it. It also warns when no Java 21+ runtime is found.
+
 ## Prerequisites
 
 - Java 21+ runtime (JRE is enough; JDK only required to build); Java 25+ recommended

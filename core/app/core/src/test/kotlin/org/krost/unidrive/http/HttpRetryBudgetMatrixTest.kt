@@ -39,7 +39,6 @@ class HttpRetryBudgetMatrixTest {
     // cap is actually implemented in HttpRetryBudget, a new test should pin
     // that contract separately.
     @Test
-    @Suppress("ktlint:standard:function-naming")
     fun `429 storm opens circuit honoring largest Retry-After observed`() =
         runTest {
             val clock = FakeClock(now = 1_000)
@@ -75,7 +74,6 @@ class HttpRetryBudgetMatrixTest {
     // uploadChunkWithRetries), not here. Renamed to match
     // the body's actual scope.
     @Test
-    @Suppress("ktlint:standard:function-naming")
     fun `isRetriableIoException distinguishes transient TCP failures from misconfig`() {
         // The budget classifies which IOExceptions are worth retrying via
         // isRetriableIoException on its companion. Transient TCP failures must be
