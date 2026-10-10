@@ -227,4 +227,24 @@ class MountCommandTest {
         // Accept any non-zero exit OR a successful destroy (return any int).
         assertTrue(exit != Int.MIN_VALUE, "supervisor must return a real exit code, got sentinel")
     }
+
+    @Test
+    fun `exit_message_does_not_claim_the_daemon_is_down_when_it_answers`() {
+        val msg = MountCommand.coDaemonExitMessage(1, "p1", MountCommand.DaemonStatus.ANSWERING)
+        assertFalse(msg.contains("not running"), msg)
+        assertTrue(msg.contains("code 1") && msg.contains("running and answering"), msg)
+    }
+
+    @Test
+    fun `exit_message_says_not_running_and_how_to_start_only_when_the_socket_is_missing`() {
+        val msg = MountCommand.coDaemonExitMessage(1, "p1", MountCommand.DaemonStatus.NOT_RUNNING)
+        assertTrue(msg.contains("is not running") && msg.contains("unidrive -p p1 daemon run"), msg)
+    }
+
+    @Test
+    fun `exit_message_for_a_socket_that_does_not_answer_names_starting_and_stale_not_down`() {
+        val msg = MountCommand.coDaemonExitMessage(1, "p1", MountCommand.DaemonStatus.SOCKET_NOT_ANSWERING)
+        assertFalse(msg.contains("is not running"), msg)
+        assertTrue(msg.contains("still be starting") && msg.contains("stale"), msg)
+    }
 }
