@@ -169,3 +169,30 @@ foobar
 a/bc
 a/b/c
 a/bx/c
+
+=== doublestar-before-an-escaped-slash-spans-directories
+## "**" as a whole component before an escaped slash is any run of bytes, slashes included: at least one directory
+## sits between, so "x/b" does not match. An escaped slash also starts a component for a following "**".
+--- .gitignore
+x/**\/b
+**\/c
+v\/**\/d
+--- paths
+x/b
+x/a/b
+x/a/y/b
+c
+a/c
+a/y/c
+v/d
+v/a/d
+v/a/y/d
+
+=== doublestar-before-an-escaped-letter-is-a-plain-star
+--- .gitignore
+x/**\b
+--- paths
+x/b
+x/ab
+x/a/b
+x/a/cb

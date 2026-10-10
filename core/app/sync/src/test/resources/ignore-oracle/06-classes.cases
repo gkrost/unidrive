@@ -125,3 +125,25 @@ a[x^]b
 a^b
 axb
 ayb
+
+=== bracket-reversed-range-is-its-first-endpoint
+--- .gitignore
+x[c-a]
+y[Z-A]
+--- paths
+xa
+xb
+xc
+xC
+yZ
+yz
+yA
+
+=== bracket-class-name-ends-at-the-first-close
+## "[:" with no ":]" before the next "]" is not a class: here the first bracket is the members "[", ":" and "x".
+--- .gitignore
+p[[:x]a[!:]]
+--- paths
+pxab]
+p[ab]
+pxa]

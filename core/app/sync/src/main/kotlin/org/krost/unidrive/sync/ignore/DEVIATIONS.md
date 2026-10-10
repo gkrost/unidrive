@@ -1,8 +1,10 @@
 # Ignore matcher: conformance with git, and the deviations
 
 `org.krost.unidrive.sync.ignore` implements the pattern rules of `.gitignore` as a library: `IgnoreRules` (one parsed
-rule file), `IgnoreMatcher` (layers, ancestor rule, `explain`) and a glob matcher for the patterns (written from the `gitignore` documentation and checked against git by the oracle below).
-Nothing in the engine calls it yet; the existing `Reconciler.matchesGlob` is untouched.
+rule file), `IgnoreMatcher` (layers, ancestor rule, `explain`) and `GlobPattern` (one compiled pattern). It is a
+clean-room implementation: written from the published `gitignore` documentation and glob(7), with `git check-ignore`
+used only as a black box (the oracle below). Nothing in the engine calls it yet; the existing `Reconciler.matchesGlob`
+is untouched.
 
 ## The oracle
 
@@ -55,15 +57,29 @@ These are not deviations; they are listed because a user will expect otherwise a
   and APFS fold more than that; git does not, so neither does this matcher.
 - **`foo**/bar`** is `foo*/bar` (a `**` only means "any directories" when it is a whole path component), and since
   git 2.52 `foobar` no longer matches it. Older git matched; the corpus case has `min-git: 2.52`.
-- `[[:upper:]]` with case folding on also matches lowercase letters; `\A` with folding on does not match `a`.
+- **Case folding is uneven** (observed, pinned by the corpus): with `ignoreCase` an unescaped letter matches either
+  case, but an escaped letter and a single bracket member are compared as written with the lower-cased name, so `\A`
+  and `[A]` match nothing at all (`\a` and `[a]` match both cases). A range also takes the other case (`[A-C]`
+  matches `b`), and `[[:upper:]]` / `[[:lower:]]` both match every ASCII letter.
+- A reversed range (`[z-a]`) is its first endpoint alone. An unterminated bracket or an unknown class name
+  (`[[:nosuchclass:]]`) makes the pattern match nothing. A `[:` with no `:]` before the next `]` is not a class but
+  plain members.
+- `**` as a whole component before an *escaped* slash (`a/**\/b`) spans directories but needs at least one
+  (`a/x/y/b` yes, `a/b` no); an escaped slash also starts a component for a following `**`. Before any other
+  character a `**` is a plain `*`.
 - A trailing backslash is a pattern that never matches. A lone `!` is a negated empty pattern that never matches.
 - Trailing spaces are removed unless escaped; tabs are not. A UTF-8 byte-order mark at the start of a file is
   skipped; a CR before the LF is dropped. `#` starts a comment only in column 0.
 - A path below an excluded directory stays excluded whatever a later `!` says: `explain` reports the **topmost**
   excluded ancestor's rule, like `check-ignore -v`.
 
-## One change that is not git, but is not observable
+## How it is matched (not observable, but pinned)
 
-`Wildmatch` returns "abort everything" when a `*` is followed by a literal that does not occur in the rest of the
-text. It prunes the exponential search of patterns like `*a*a*a*a*b` against a long name without a `b`; the result is
-the same, and `IgnoreMatcherTest` pins the run time.
+A pattern is compiled once into byte tokens. Literal names, `*.ext`, `name*`, `pre*post` and `dir/` + `**` are
+matched directly; a leading `**/` before a slash-free rest is matched against the last component only (the same
+result, cheaper). Everything else runs as a nondeterministic automaton over the name's bytes, so a pattern like
+`*a*a*a*a*b` against a long name without a `b` costs (name length x pattern length), never exponential time;
+`IgnoreMatcherTest` pins the run time and `IgnoreBenchmarkTest` the throughput.
+
+Layers: the matcher tries rule files deepest directory first (equal depth: the caller's order, earlier wins); the
+first file with a matching rule decides, and within it the last matching rule.

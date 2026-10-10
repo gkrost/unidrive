@@ -165,3 +165,26 @@ x/{u:1F4C1}/y
 --- paths
 {u:FB01}le
 file
+
+=== ascii-case-with-single-bracket-members-escapes-and-ranges
+## With core.ignorecase an escaped letter and a single bracket member are compared as written with the folded
+## name (so upper-case ones match nothing), while a range also takes the other case.
+--- .gitignore
+[A]r
+[a]s
+x[!a]
+r[A-C]
+q\ay
+--- paths
+Ar
+ar
+As
+as
+xA
+xa
+xb
+ra
+rB
+rz
+qay
+qAy
