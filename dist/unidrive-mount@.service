@@ -1,0 +1,25 @@
+# FUSE mount of profile %i. The mount point is $UNIDRIVE_MOUNTPOINT: ~/unidrive/<profile> by default,
+# override per profile in ~/.config/unidrive/mount-<profile>.env with a line
+#   UNIDRIVE_MOUNTPOINT=/home/me/Drive
+# No privilege or mount-namespace hardening here on purpose: mounting goes through the setuid
+# fusermount3, which NoNewPrivileges would block, and a private mount namespace would hide the mount.
+[Unit]
+Description=UniDrive FUSE mount of profile %i
+After=unidrive@%i.service network-online.target
+Wants=unidrive@%i.service network-online.target
+
+[Service]
+Type=simple
+Environment=UNIDRIVE_MOUNTPOINT=%h/unidrive/%i
+EnvironmentFile=-%h/.config/unidrive/mount-%i.env
+# A crashed mount leaves a dead FUSE endpoint behind; clear it before mounting again.
+ExecStartPre=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
+ExecStartPre=/usr/bin/mkdir -p ${UNIDRIVE_MOUNTPOINT}
+ExecStart=%h/.local/bin/unidrive -p %i mount ${UNIDRIVE_MOUNTPOINT}
+ExecStopPost=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

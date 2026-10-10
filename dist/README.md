@@ -34,6 +34,37 @@ journalctl --user -u unidrive.service -f
 The unit runs `unidrive autostart`, which starts `sync --watch` for a mirror profile or
 `daemon run` for a mount profile. It resolves the default profile each time the service starts.
 
+## Per-profile units
+
+Three user units are installed (none is enabled for you):
+
+| Unit | Runs |
+|---|---|
+| `unidrive.service` | `unidrive autostart` for the default profile |
+| `unidrive@<profile>.service` | `unidrive -p <profile> autostart` |
+| `unidrive-mount@<profile>.service` | `unidrive -p <profile> mount $UNIDRIVE_MOUNTPOINT` |
+
+```bash
+systemctl --user enable --now unidrive@work.service
+systemctl --user enable --now unidrive-mount@work.service
+```
+
+The mount unit starts after `unidrive@<profile>.service` and mounts at `~/unidrive/<profile>`. To mount
+elsewhere, put the path in `~/.config/unidrive/mount-<profile>.env`:
+
+```
+UNIDRIVE_MOUNTPOINT=/home/me/Drive
+```
+
+Before each start and after each stop it runs `fusermount3 -uz` on the mount point, so a crashed mount does
+not block the next one. The JVM exits 143 on a stop, which the units count as success.
+
+The sync units run with `NoNewPrivileges`, a seccomp-based restriction set, and the address families the
+daemon needs (Unix sockets, IPv4/IPv6, netlink). They deliberately leave the filesystem unrestricted: the
+sync root, hydration cache and mount point can be anywhere under your home or elsewhere. The mount unit
+carries no sandboxing at all, because mounting goes through the setuid `fusermount3`, which
+`NoNewPrivileges` blocks.
+
 ## Usage — released artefact
 
 ```bash
@@ -46,7 +77,7 @@ bash dist/install.sh ~/Downloads/unidrive-<ver>.jar
 bash dist/uninstall.sh
 ```
 
-Removes the binary, wrapper, JAR, and systemd unit. Keeps `~/.config/unidrive/`
+Removes the binary, wrapper, JAR, and systemd units (stopping and disabling any running instances). Keeps `~/.config/unidrive/`
 (profiles + OAuth tokens) and `~/.local/share/unidrive/` (logs) — delete them
 manually if you want a full wipe.
 

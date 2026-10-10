@@ -6,6 +6,8 @@
 #   ~/.local/lib/unidrive/unidrive-<ver>.jar       (fat shadowJar, CLI)
 #   ~/.local/bin/unidrive                          (wrapper -> CLI)
 #   ~/.config/systemd/user/unidrive.service        (user-mode systemd unit)
+#   ~/.config/systemd/user/unidrive@.service       (per-profile template)
+#   ~/.config/systemd/user/unidrive-mount@.service (per-profile FUSE mount template)
 #   ~/.local/share/unidrive/                       (log dir)
 #
 # Usage:
@@ -32,7 +34,7 @@ resolve_jar() {
     local found=""
     if [[ -d "${dir}" ]]; then
         # shellcheck disable=SC2012  # ls -1 is fine; filenames are project-controlled
-        found="$(ls -1 "${dir}"/${prefix}-*.jar 2>/dev/null \
+        found="$(ls -1 "${dir}"/"${prefix}"-*.jar 2>/dev/null \
             | sort -V \
             | tail -1)"
     fi
@@ -134,8 +136,10 @@ fi
 
 # Systemd user unit
 mkdir -p "${SYSTEMD_DIR}"
-cp "${SCRIPT_DIR}/unidrive.service" "${SYSTEMD_DIR}/unidrive.service"
-echo "  ${SYSTEMD_DIR}/unidrive.service"
+for unit in unidrive.service unidrive@.service unidrive-mount@.service; do
+    cp "${SCRIPT_DIR}/${unit}" "${SYSTEMD_DIR}/${unit}"
+    echo "  ${SYSTEMD_DIR}/${unit}"
+done
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
@@ -149,6 +153,8 @@ echo "Done. Usage:"
 echo "  unidrive --help                                  # CLI help"
 echo "  unidrive auth                                    # authenticate first"
 echo "  unidrive autostart                              # start the selected profile's mode"
-echo "  systemctl --user enable --now unidrive.service   # auto-start on login"
+echo "  systemctl --user enable --now unidrive.service   # auto-start on login (default profile)"
+echo "  systemctl --user enable --now unidrive@<profile>.service         # ... or one unit per profile"
+echo "  systemctl --user enable --now unidrive-mount@<profile>.service   # FUSE mount, see dist/README.md"
 echo "  systemctl --user status unidrive.service         # check daemon status"
 echo "  journalctl --user -u unidrive.service -f         # follow logs"
