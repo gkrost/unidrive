@@ -20,8 +20,10 @@ Three sequenced phases, each delivering value individually:
    concrete consumer: the Phase 2 co-daemon.
 2. **Phase 2 — Daemon-mount interim** (Rust co-daemon, new sibling
    repo `unidrive-mount-linux/`). Implements FUSE3, talks to the JVM
-   over the existing IPC socket, hands hydrated files to the kernel
-   via `FUSE_PASSTHROUGH`. Read + write-through. Shipped via
+   over the existing IPC socket. FUSE_PASSTHROUGH-ready binary;
+   runtime passthrough deferred per the security-model gap (see
+   Design constraints); kernel-floor refusal preserved. Read +
+   write-through. Shipped via
    `unidrive mount <path>` CLI subcommand.
 3. **Phase 3 — Linux UI tier extensions** (same Rust workspace,
    Dolphin / KDE integration crates). Context-menu "Hydrate / Free",
@@ -115,7 +117,7 @@ on demand.
 |---|---|
 | `bin/unidrive-mount.rs` | Entry point. Parses args (`--mount <path> --ipc <socket>`), runs kernel-version check, mounts. |
 | Kernel-floor check | Reads `/proc/sys/kernel/osrelease`. Refuses to start if < 6.9 with exit code 78 (`EX_CONFIG`) and a one-line stderr citing the required kernel + which feature is missing. |
-| `fuse3` filesystem impl | `getattr` / `readdir` / `open` / `read` / `write` / `release` / `fsync`. Read path uses `FUSE_PASSTHROUGH` for hydrated files — kernel reads directly from the backing FD, zero userspace round-trip. |
+| `fuse3` filesystem impl | `getattr` / `readdir` / `open` / `read` / `write` / `release` / `fsync`. FUSE_PASSTHROUGH-ready binary; runtime passthrough deferred per the security-model gap (see Design constraints); kernel-floor refusal preserved. Hydrated-file reads go through the userspace `read` handler (`pread` on the cache FD). |
 | `IpcClient` | Sync RPC against existing JVM IpcServer over UDS. Tokio + tokio-uds. Issues `close_handle` on every FUSE RELEASE so the JVM's open-set stays accurate. |
 | `LocalCache` | Backing storage for hydrated files at `~/.cache/unidrive/hydration/`. Layout mirrors remote paths. Owned by the JVM; Phase 2 reads cache entries by path returned from `open_read`/`open_write` replies. |
 | Tests | Six Rust integration tests (kernel floor, cold read, warm read, write-through, dehydrate-while-open, IPC reconnect) + a per-tier smoke set (~5 smoke tests, scope mirror of the existing 5+5 provider smokes). |
@@ -353,6 +355,28 @@ When the user runs `unidrive mount <path>`, the JVM CLI:
 2. Spawns it with `--mount <path> --ipc <existing-socket>`.
 3. Supervises until either the binary exits or the user hits Ctrl+C
    (which sends SIGTERM, the binary unmounts gracefully).
+
+## Design constraints
+
+- **Runtime `FUSE_PASSTHROUGH` is deferred.** Registering a backing file
+  with the kernel (the `FUSE_DEV_IOC_BACKING_OPEN` ioctl) requires
+  `CAP_SYS_ADMIN` on the FUSE daemon, which the unprivileged-mount design
+  cannot grant without a security-model change, and the `fuse3` crate
+  the mount binary uses does not expose the ioctl. Until then, hydrated
+  files are read through the userspace `read` handler: one extra IPC
+  round-trip per `open` plus a `pread` on the cache FD per `read(2)`.
+  Behaviour is identical; only the extra context switches differ.
+- **The kernel floor stays binding.** The binary refuses to start below
+  Linux 6.9 (exit code 78, `EX_CONFIG`), so adding real passthrough later
+  needs no runtime compatibility branch and there is no userspace-read
+  fallback shape alongside it.
+- **Re-evaluation triggers**, in any order: the `fuse3` crate gains
+  passthrough support; the security model splits into a privileged
+  helper that carries `CAP_SYS_ADMIN` plus an unprivileged main process;
+  or the design accepts a single binary with file capabilities set.
+- The data-flow, warm-read, error-handling and testing sections
+  describe the passthrough target shape; until a trigger fires, read
+  them with the userspace read path substituted.
 
 ## Deliberate non-goals
 
