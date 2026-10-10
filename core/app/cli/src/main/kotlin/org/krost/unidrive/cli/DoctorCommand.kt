@@ -136,15 +136,25 @@ class DoctorCommand : Runnable {
         // cost per-check on a 200k-entry profile.
         val stateDb = profileDir.resolve("state.db")
         if (Files.exists(stateDb)) {
-            val db = StateDatabase(stateDb)
+            // Read-only (mode=ro): no schema stamp or migration, so state.db stays byte-identical.
+            val db = StateDatabase(stateDb, readOnly = true)
             try {
-                db.initialize()
-                results += checkCursorFreshness(db, now)
-                results += checkHydrationDrift(db, syncRoot, full)
-                results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
-                results += checkEffectiveScope(db)
-                results += checkQuotaFreshness(db, now)
-                results += checkWriteUploadFailures(db)
+                val opened = runCatching { db.initialize() }
+                if (opened.isSuccess) {
+                    results += checkCursorFreshness(db, now)
+                    results += checkHydrationDrift(db, syncRoot, full)
+                    results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
+                    results += checkEffectiveScope(db)
+                    results += checkQuotaFreshness(db, now)
+                    results += checkWriteUploadFailures(db)
+                } else {
+                    results += CheckResult(
+                        "state-db",
+                        Severity.ERR,
+                        "state.db could not be opened read-only: ${opened.exceptionOrNull()?.message}",
+                        emptyList(),
+                    )
+                }
             } finally {
                 db.close()
             }
