@@ -1,0 +1,93 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ComplexCondition:DaemonRuntime.kt$DaemonRuntime$snap != null &amp;&amp; !snap.stale &amp;&amp; expired &amp;&amp; !quotaRefreshInFlight.get()</ID>
+    <ID>ComplexCondition:ProfileCommand.kt$ProfileAddCommand$answer == null || answer.isEmpty() || answer == "y" || answer == "yes"</ID>
+    <ID>CyclomaticComplexMethod:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
+    <ID>CyclomaticComplexMethod:LegacyInventory.kt$LegacyInventory$private fun classify( inputs: Inputs, lockFacts: LockFacts, state: State?, ): Report</ID>
+    <ID>CyclomaticComplexMethod:MigrateConvertCommand.kt$LegacyConversion$internal fun execute( setup: Setup, rawMode: String, rawDisposition: String?, restart: Boolean, verbose: Boolean, ): Int</ID>
+    <ID>CyclomaticComplexMethod:ProfileCommand.kt$ProfileAddCommand$override fun run()</ID>
+    <ID>CyclomaticComplexMethod:SyncCommand.kt$SyncCommand$override fun run()</ID>
+    <ID>FunctionOnlyReturningConstant:GlyphRenderer.kt$GlyphRenderer$fun orphanLabel(): String</ID>
+    <ID>FunctionOnlyReturningConstant:GlyphRenderer.kt$GlyphRenderer$fun trackingSetLabel(): String</ID>
+    <ID>InstanceOfCheckForException:DaemonRuntime.kt$DaemonRuntime$e !is IpcAuth.StartupRefused</ID>
+    <ID>InstanceOfCheckForException:QuotaCommand.kt$QuotaCommand$e is IpcAuthException</ID>
+    <ID>InstanceOfCheckForException:RefreshRpcHandler.kt$RefreshRpcHandler$e is IllegalStateException</ID>
+    <ID>LongMethod:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
+    <ID>LongMethod:GetCommand.kt$GetCommand$override fun run()</ID>
+    <ID>LongMethod:LegacyInventory.kt$LegacyInventory$private fun classify( inputs: Inputs, lockFacts: LockFacts, state: State?, ): Report</ID>
+    <ID>LongMethod:MigrateConvertCommand.kt$LegacyConversion$internal fun execute( setup: Setup, rawMode: String, rawDisposition: String?, restart: Boolean, verbose: Boolean, ): Int</ID>
+    <ID>LongMethod:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
+    <ID>LongMethod:SyncCommand.kt$SyncCommand$override fun run()</ID>
+    <ID>LongParameterList:DaemonRuntime.kt$DaemonRuntime$( private val profileName: String, private val lockFile: Path, private val dbPath: Path, private val syncRoot: Path, private val socketPath: Path, private val providerFactory: () -&gt; CloudProvider, private val syncPaths: List&lt;String&gt; = emptyList(), private val excludePatterns: List&lt;String&gt; = emptyList(), // &gt; 0 enables the in-process auto-poll (mount-view-refresh-design.md §5): // one periodic enumerate on serveScope, serialised by the sync.enumerate // in-flight guard. 0 = off. `daemon run` passes the profile's daemon_poll_seconds // (default 60 s, #463) or --poll-interval; 0 stays the default here so tests that // construct a runtime do not poll. private val pollIntervalMs: Long = 0, // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited. private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES, // #603 (U4): the profile's hosting mode, resolved and gated by `daemon run` before this runtime is // constructed. A mount daemon serves the hydration verbs, sync.enumerate and the poller, and routes // refresh.run to the always-enumerate path; a mirror daemon refuses the mount verbs (wrong_mode) and // keeps refresh.run's legacy reconcile. Reported in daemon.status (mode, capabilities) and the banner. private val profileMode: ProfileMode, // The profile's config folder (it holds credentials.json and the lock): the IPC token files are // written here at every start, before the socket listens (docs/dev/specs/ipc-authentication.md). private val ipcTokenDir: Path = lockFile.parent, // #655: TTL of the quota snapshot in daemon.status (`quota`), in ms; 0 = the quota field // renders from the cache only and never refreshes. `daemon run` passes the profile's // quota_refresh_minutes (default 15 min). private val quotaRefreshMs: Long = 15 * 60_000L, // #655: whether the provider's quota() reports the account's storage plan (ProviderMetadata // hasQuota). False — e.g. localfs — keeps the `quota` field ABSENT from daemon.status. private val providerHasQuota: Boolean = true, // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit). private val exitProcess: (Int) -&gt; Unit = { code -&gt; System.exit(code) }, // #678: where the startup replay and the cache sweep run their blocking per-record walks. // Dispatchers.IO in production; a seam for tests, which pin that a stop does not wait for them. private val startupIoDispatcher: CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO, private val afterProfileLockAcquired: () -&gt; Unit = {}, )</ID>
+    <ID>LongParameterList:EnumeratePoller.kt$EnumeratePoller$( private val handler: EnumerateRpcHandler, private val intervalMs: Long, private val scope: CoroutineScope, // ±10% jitter on each sleep (thundering-herd avoidance across profiles). // Injectable for deterministic virtual-time tests. private val jitter: (Long) -&gt; Long = { base -&gt; val span = (base / 10).coerceAtLeast(1) base - span + Random.nextLong(2 * span + 1) }, private val backoffMultiplier: Long = DEFAULT_BACKOFF_MULTIPLIER, private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS, private val clock: () -&gt; Long = System::currentTimeMillis, private val onNextAttempt: (epochMs: Long?) -&gt; Unit = {}, // Consecutive enumerate failures already on record when the daemon starts // (SyncEngine.ENUMERATE_FAILURE_STREAK_KEY in sync_state): the first sleep // is escalated as if those failures had just happened, so a restart into a // known-bad remote doesn't re-run the doomed cycle a fresh process would // otherwise pay for immediately. The escalated first sleep is reported // through [onNextAttempt] like any post-failure one. private val consecutiveFailuresAtStart: Int = 0, // #463: delay of the first poll after start when no failure streak is on record; 0 = at once. // A value &gt; 0 is jittered like every later sleep. private val firstPollDelayMs: Long = 0, // #463: true while something else works the state database the way a poll would (a refresh); // the tick is then skipped like one that met the enumerate guard. private val isBusy: () -&gt; Boolean = { false }, )</ID>
+    <ID>LongParameterList:LegacyInventory.kt$LegacyInventory.Row$( val remoteId: String, val path: String, val isFolder: Boolean, val isHydrated: Boolean, val status: String, val remoteHash: String?, val localHash: String?, val cacheBacked: Boolean?, val uploadRefused: String?, val lastErrorAt: String?, val downloadQuarantined: Boolean, )</ID>
+    <ID>NestedBlockDepth:CoroutineDebug.kt$CoroutineDebug$fun dumpCoroutines(dir: Path)</ID>
+    <ID>NestedBlockDepth:DaemonAutospawn.kt$DaemonAutospawn$fun daemonAnswers( profileName: String, socketPath: Path, configDir: Path, replyTimeoutMs: Long = IpcAuthClient.HANDSHAKE_TIMEOUT_MS, ): Boolean</ID>
+    <ID>NestedBlockDepth:DaemonCommand.kt$DaemonStatusCommand$override fun run()</ID>
+    <ID>NestedBlockDepth:DaemonCommand.kt$internal fun requestDaemonShutdown(endpoint: IpcEndpoint, timeoutMs: Long = 3_000): Boolean</ID>
+    <ID>NestedBlockDepth:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
+    <ID>NestedBlockDepth:DoctorCommand.kt$DoctorCommand$internal fun checkHydrationCache( cacheDir: Path, budgetBytes: Long, ): CheckResult</ID>
+    <ID>NestedBlockDepth:DoctorCommand.kt$DoctorCommand$internal fun checkLocalOrphans( db: StateDatabase, syncRoot: Path, full: Boolean, excludePatterns: List&lt;String&gt; = emptyList(), ): CheckResult</ID>
+    <ID>NestedBlockDepth:LegacyInventory.kt$LegacyInventory$private fun readRows(c: Connection): List&lt;Row&gt;</ID>
+    <ID>NestedBlockDepth:LegacyInventory.kt$LegacyInventory$private fun readState(inputs: Inputs): State?</ID>
+    <ID>NestedBlockDepth:MigrateConvertCommand.kt$LegacyConversion$internal fun execute( setup: Setup, rawMode: String, rawDisposition: String?, restart: Boolean, verbose: Boolean, ): Int</ID>
+    <ID>NestedBlockDepth:QuotaCommand.kt$QuotaCommand$private fun queryDaemonStatus( socketPath: java.nio.file.Path, profileName: String, ): String?</ID>
+    <ID>NestedBlockDepth:RefreshCommand.kt$RefreshCommand$override fun run()</ID>
+    <ID>NestedBlockDepth:RelocateCommand.kt$RelocateCommand$internal suspend fun deleteSourceRecursive( provider: CloudProvider, prefix: String, ): Int</ID>
+    <ID>NestedBlockDepth:StatusCommand.kt$StatusCommand$private fun renderTable( groups: List&lt;ProviderGroup&gt;, ansi: Boolean, )</ID>
+    <ID>NestedBlockDepth:StatusCommand.kt$internal fun discoverProfilesFromRaw( raw: RawSyncConfig, baseDir: Path, ): List&lt;ProfileInfo&gt;</ID>
+    <ID>NestedBlockDepth:StatusCommand.kt$internal fun readTrackingDbCounts(dbPath: Path): TrackingDbCounts?</ID>
+    <ID>NestedBlockDepth:SweepCommand.kt$SweepCommand$private fun isAllNullSampled( file: Path, size: Long, ): Boolean</ID>
+    <ID>NestedBlockDepth:VaultCommand.kt$VaultEncryptCommand$override fun run()</ID>
+    <ID>SpreadOperator:AutostartCommand.kt$AutostartCommand$( *autostartArguments(mode, profile.name, parent.configDir, parent.verbose).toTypedArray(), )</ID>
+    <ID>SpreadOperator:Main.kt$(*args)</ID>
+    <ID>SwallowedException:LsCommand.kt$LsCommand$e: java.io.IOException</ID>
+    <ID>SwallowedException:Main.kt$Main$e: javax.crypto.AEADBadTagException</ID>
+    <ID>SwallowedException:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
+    <ID>SwallowedException:RelocateCommandTest.kt$RelocateCommandTest$e: RuntimeException</ID>
+    <ID>SwallowedException:WindowsArgv.kt$WindowsArgv$e: Throwable</ID>
+    <ID>ThrowsCount:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
+    <ID>ThrowsCount:Main.kt$Main$private fun loadVaultData(): Map&lt;String, Map&lt;String, String&gt;&gt;</ID>
+    <ID>ThrowsCount:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
+    <ID>TooGenericExceptionCaught:CliExtensionLoader.kt$CliExtensionLoader$t: Throwable</ID>
+    <ID>TooGenericExceptionCaught:CoroutineDebug.kt$CoroutineDebug$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DaemonAutospawn.kt$DaemonAutospawn$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DaemonRuntime.kt$DaemonRuntime$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DoctorCommand.kt$DoctorCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:EnumeratePoller.kt$EnumeratePoller$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:EnumerateRpcHandler.kt$EnumerateRpcHandler$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:GetCommand.kt$GetCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:LegacyInventory.kt$LegacyInventory$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:Main.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:QuotaCommand.kt$QuotaCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$t: Throwable</ID>
+    <ID>TooGenericExceptionCaught:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:ShareCommand.kt$ShareCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:StoragePermissions.kt$StoragePermissions$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SyncCommand.kt$SyncCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SyncCommand.kt$SyncCommand$e: Throwable</ID>
+    <ID>TooGenericExceptionCaught:VerifyCommand.kt$VerifyCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:WindowsArgv.kt$WindowsArgv$e: Throwable</ID>
+    <ID>TooGenericExceptionThrown:CliExtensionLoaderTest.kt$CliExtensionLoaderTest.&lt;no name provided&gt;$throw RuntimeException("intentional")</ID>
+    <ID>TooGenericExceptionThrown:RelocateCommandTest.kt$RelocateCommandTest$throw RuntimeException("boom")</ID>
+    <ID>TooManyFunctions:CliProgressReporter.kt$CliProgressReporter : ProgressReporter</ID>
+    <ID>TooManyFunctions:GlyphRenderer.kt$GlyphRenderer</ID>
+    <ID>TooManyFunctions:LegacyInventory.kt$LegacyInventory</ID>
+    <ID>TooManyFunctions:Main.kt$Main : Runnable</ID>
+    <ID>TooManyFunctions:StatusCommand.kt$StatusCommand : Runnable</ID>
+    <ID>UnusedPrivateClass:MigrateConvertCommand.kt$LegacyConversion$Refusal</ID>
+    <ID>UnusedPrivateProperty:IpcContractCorpusTest.kt$IpcContractCorpusTest$attempt</ID>
+    <ID>UseCheckOrError:CliExtensionRegistrarImpl.kt$CliExtensionRegistrarImpl$throw IllegalStateException( "Extension '$extensionId': unknown parent command '$parentCommandName'", )</ID>
+    <ID>UseCheckOrError:Main.kt$Main$throw IllegalStateException("Profile '${profile.name}' has no provider configuration")</ID>
+    <ID>UseCheckOrError:Main.kt$Main$throw IllegalStateException("unreachable")</ID>
+    <ID>UseCheckOrError:RelocateCommand.kt$RelocateCommand$throw IllegalStateException("Insufficient target quota")</ID>
+    <ID>UseCheckOrError:RelocateCommand.kt$RelocateCommand$throw IllegalStateException("Run 'unidrive -p $fromProvider auth' first")</ID>
+    <ID>UseCheckOrError:RelocateCommand.kt$RelocateCommand$throw IllegalStateException("Run 'unidrive -p $toProvider auth' first")</ID>
+    <ID>UseCheckOrError:VaultCommand.kt$throw IllegalStateException("unreachable")</ID>
+    <ID>VariableNaming:Main.kt$Main$/** Exit code of a hosting-contract refusal (#603): config-shaped, like [MountCommand.EX_CONFIG]. */ val MODE_REFUSAL_EXIT: Int = 78</ID>
+    <ID>VariableNaming:StatusAuditTest.kt$StatusAuditTest$// Byte sizes picked to match the 2026-04-19 MCP probe numbers quoted in the // UD-316 ticket. UD-238 relabelled the formatter from GB to GiB (the math was // always binary); numbers are unchanged, only the suffix flips. private val GiB = 1024L * 1024 * 1024</ID>
+  </CurrentIssues>
+</SmellBaseline>

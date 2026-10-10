@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:TrackingReconciler.kt$TrackingReconciler$fun reconcile( path: String, local: LocalObservation, remote: RemoteObservation, track: TrackingRecord?, ): ReconcileAction</ID>
+    <ID>NestedBlockDepth:SqliteTrackingSetSchemaTest.kt$SqliteTrackingSetSchemaTest$private fun schemaVersionOf(dbPath: Path): Int?</ID>
+    <ID>NestedBlockDepth:TrackingEngine.kt$TrackingEngine$private suspend fun reapEmptyDirs(deletedFilePaths: List&lt;String&gt;): List&lt;String&gt;</ID>
+    <ID>NestedBlockDepth:TrackingEngine.kt$TrackingEngine$private suspend fun walkDelta( cursor: String?, incremental: Boolean, ): RemoteEnumResult</ID>
+    <ID>TooGenericExceptionCaught:TrackingEngine.kt$TrackingEngine$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TrackingSet.kt$SqliteTrackingSet$e: Throwable</ID>
+    <ID>TooManyFunctions:TrackingEngine.kt$TrackingEngine</ID>
+    <ID>TooManyFunctions:TrackingSet.kt$SqliteTrackingSet : TrackingSet</ID>
+    <ID>TooManyFunctions:TrackingSet.kt$TrackingSet</ID>
+  </CurrentIssues>
+</SmellBaseline>

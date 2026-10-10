@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:GraphApiService.kt$GraphApiService$suspend fun downloadFile( itemId: String, destPath: Path, ): Long</ID>
+    <ID>LongMethod:GraphApiService.kt$GraphApiService$suspend fun downloadFile( itemId: String, destPath: Path, ): Long</ID>
+    <ID>LongParameterList:GraphApiService.kt$GraphApiService$( localPath: Path, remotePath: String, encoded: String, fileSize: Long, onProgress: ((Long, Long) -&gt; Unit)?, fileSystemInfo: FileSystemInfo?, conflictBehavior: String = "replace", ifMatchETag: String? = null, )</ID>
+    <ID>NestedBlockDepth:GraphApiService.kt$GraphApiService$suspend fun downloadFile( itemId: String, destPath: Path, ): Long</ID>
+    <ID>RethrowCaughtException:CancellationPropagationTest.kt$CancellationPropagationTest$throw e</ID>
+    <ID>SwallowedException:CancellationPropagationTest.kt$CancellationPropagationTest$e: CancellationException</ID>
+    <ID>SwallowedException:CancellationPropagationTest.kt$CancellationPropagationTest$e: Exception</ID>
+    <ID>SwallowedException:DeltaDiagnosticTest.kt$DeltaDiagnosticTest$e: Exception</ID>
+    <ID>SwallowedException:OneDriveDeltaIntegrationTest.kt$OneDriveDeltaIntegrationTest$e: Exception</ID>
+    <ID>SwallowedException:OneDriveIntegrationTest.kt$OneDriveIntegrationTest$e: Exception</ID>
+    <ID>ThrowsCount:GraphApiService.kt$GraphApiService$private suspend fun resolveUploadSession( localPath: Path, remotePath: String, encoded: String, fileSize: Long, fileSystemInfo: FileSystemInfo? = null, conflictBehavior: String = "replace", ifMatchETag: String? = null, ): Pair&lt;String, Long&gt;</ID>
+    <ID>ThrowsCount:GraphApiService.kt$GraphApiService$private suspend fun uploadChunkWithRetry( uploadUrl: String, bytes: ByteArray, offset: Long, endByte: Long, fileSize: Long, ): HttpResponse</ID>
+    <ID>ThrowsCount:GraphApiService.kt$GraphApiService$private suspend fun uploadLargeFileOnce( localPath: Path, remotePath: String, encoded: String, fileSize: Long, onProgress: ((Long, Long) -&gt; Unit)?, fileSystemInfo: FileSystemInfo?, conflictBehavior: String = "replace", ifMatchETag: String? = null, ): DriveItem</ID>
+    <ID>ThrowsCount:GraphApiService.kt$GraphApiService$suspend fun downloadFile( itemId: String, destPath: Path, ): Long</ID>
+    <ID>ThrowsCount:GraphApiService.kt$GraphApiService$suspend fun getDelta( link: String? = null, fromLatest: Boolean = false, // A preview must not reset the delta-cursor age clock that recordDeltaSeen maintains. readOnly: Boolean = false, ): DeltaResult</ID>
+    <ID>ThrowsCount:OAuthService.kt$OAuthService$suspend fun getDeviceCode(): DeviceCodeResponse</ID>
+    <ID>ThrowsCount:OAuthService.kt$OAuthService$suspend fun pollForToken( deviceCode: String, interval: Long, ): Token</ID>
+    <ID>ThrowsCount:TokenManager.kt$TokenManager$suspend fun getValidToken(forceRefresh: Boolean = false): Token</ID>
+    <ID>TooGenericExceptionCaught:GraphApiService.kt$GraphApiService$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:OAuthService.kt$OAuthService$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:OneDriveProviderFactory.kt$OneDriveProviderFactory$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:TokenManager.kt$TokenManager$e: Exception</ID>
+    <ID>TooManyFunctions:GraphApiService.kt$GraphApiService : AutoCloseable</ID>
+    <ID>TooManyFunctions:OneDriveProvider.kt$OneDriveProvider : CloudProvider</ID>
+    <ID>UseCheckOrError:CancellationPropagationTest.kt$CancellationPropagationTest$throw IllegalStateException("sibling-1 failed — cancelling scope")</ID>
+  </CurrentIssues>
+</SmellBaseline>

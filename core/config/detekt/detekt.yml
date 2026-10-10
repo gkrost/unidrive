@@ -1,6 +1,8 @@
 # Deltas from detekt's default config (buildUponDefaultConfig = true).
 # Detection only: nothing here may reformat code. Rules whose sole remedy is
 # restyling stay explicitly off, so a detekt upgrade cannot switch them on.
+# Gate: findings accepted in a module's config/detekt/baseline.xml do not count;
+# any other finding fails `check` (see the detekt block in core/build.gradle.kts).
 build:
   maxIssues: 0
 
