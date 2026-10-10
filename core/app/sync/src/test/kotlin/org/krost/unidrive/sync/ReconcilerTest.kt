@@ -97,6 +97,15 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `a locally deleted folder whose remote modified time moved is a conflict not a remote delete`() {
+        db.upsertEntry(folderEntry("/docs"))
+        val remoteChanges = mapOf("/docs" to folderItem("/docs", "2026-03-28T12:05:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, mapOf("/docs" to ChangeState.DELETED))
+        assertTrue(actions.none { it is SyncAction.DeleteRemote }, "a concurrent remote change must not be reaped; got $actions")
+        assertTrue(actions.any { it is SyncAction.Conflict }, "the delete-vs-modify conflict must be raised; got $actions")
+    }
+
+    @Test
     fun `remote new file downloads content`() {
         // UD-222: remote-new non-folder always emits DownloadContent (Pass 2 concurrent).
         val remoteChanges = mapOf("/new.txt" to cloudItem("/new.txt"))

@@ -57,16 +57,19 @@ class Reconciler(
         recorded: String?,
     ): Boolean = remote != null && recorded != null && remote != recorded
 
-    // A folder carries no content: its modified time moves whenever a child is added or removed (the
-    // uploads of a first sync touch the remote folder after its row was recorded), so it is not a
-    // change worth a metadata-only update on the next sync (#694). A file turning into a folder or back is.
+    // A folder can carry a newer modified time with no content change: its mtime moves whenever a child
+    // is added or removed (the uploads of a first sync touch the remote folder after its row was
+    // recorded). The no-op metadata update that would follow is suppressed in resolveAction, not here:
+    // the same MODIFIED classification must still raise a delete-vs-modify conflict instead of letting
+    // a local folder delete propagate as a recursive DeleteRemote (#694). A file turning into a folder,
+    // or the reverse, is a change either way.
     private fun remoteMetadataChanged(
         remoteItem: CloudItem,
         entry: SyncEntry,
     ): Boolean =
         remoteItem.isFolder != entry.isFolder ||
             remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
-            (!remoteItem.isFolder && remoteItem.modified != entry.remoteModified)
+            remoteItem.modified != entry.remoteModified
 
     var lastUnhydratedFolderDeletes: List<String> = emptyList()
         private set
@@ -843,7 +846,10 @@ class Reconciler(
                 }
             localState == ChangeState.UNCHANGED && remoteState == ChangeState.MODIFIED && remoteItem != null ->
                 if (remoteItem.isFolder) {
-                    SyncAction.UpdatePlaceholder(path, remoteItem, wasHydrated = false)
+                    // #694: a folder's modified time moves with its children (the first sync's uploads
+                    // touch the remote folder after its row was recorded). There is nothing to apply
+                    // and no content to fetch, so this is a no-op rather than a metadata-only update.
+                    null
                 } else {
                     SyncAction.DownloadContent(path, remoteItem)
                 }
