@@ -314,6 +314,9 @@ data class RawProvider(
     // #603 (U4): the profile's hosting mode, "mirror" | "mount" — chosen at creation, fixed afterwards.
     // Absent = a modeless profile, which every command refuses (no legacy support; see ProfileMode).
     val mode: String? = null,
+    // Free display text for front-ends (stored as typed). Never an identity: the profile name stays the
+    // config key, state directory, socket and sync-root id, and changing the label renames nothing.
+    val label: String? = null,
     val sync_root: String? = null,
     val root_path: String? = null, // localfs alternative
     // Sync settings
