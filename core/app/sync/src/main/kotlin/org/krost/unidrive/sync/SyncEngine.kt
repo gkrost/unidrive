@@ -1225,6 +1225,9 @@ open class SyncEngine(
         // (mkdir/move/delete/conflict). Combined with `transferFailures`
         // below for the headline `failed` count in onSyncComplete.
         val passOneFailures = AtomicInteger(0)
+        // Pass 1 actions that were applied (mkdir, delete, move, ...), by label, for the sync summary;
+        // transfers are reported through the downloaded/uploaded counts.
+        val appliedCounts = mutableMapOf<String, Int>()
         // #419: paths this pass has already deleted on the remote, so the empty-directory
         // reaper below leaves them alone instead of re-probing a folder it just trashed.
         val remoteDeletedPaths = mutableSetOf<String>()
@@ -1276,6 +1279,7 @@ open class SyncEngine(
                         // failed run signals an outage (trips the hard cap below),
                         // any success resets the streak. Mirrors the single-action
                         // path's reset-on-success / increment-on-failure semantic.
+                        if (run.size > failures) appliedCounts.merge("mkdir-remote", run.size - failures, Int::plus)
                         if (failures >= run.size) {
                             consecutiveFailures += failures
                             if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
@@ -1297,7 +1301,9 @@ open class SyncEngine(
                         continue
                     }
                     val action = head
+                    val label = actionLabel(action)
                     try {
+                        var applied = true
                         when (action) {
                             is SyncAction.CreatePlaceholder -> {
                                 applyCreatePlaceholder(action)
@@ -1314,6 +1320,8 @@ open class SyncEngine(
                                 if (!deleteBlockedByFailedMove(action, failedMoveSources)) {
                                     applyDeleteRemote(action)
                                     remoteDeletedPaths += action.path
+                                } else {
+                                    applied = false
                                 }
                             is SyncAction.Conflict -> {
                                 applyConflict(action)
@@ -1322,6 +1330,7 @@ open class SyncEngine(
                             is SyncAction.RemoveEntry -> applyRemoveEntry(action)
                             else -> {}
                         }
+                        if (applied) appliedCounts.merge(label, 1, Int::plus)
                         consecutiveFailures = 0
                     } catch (e: AuthenticationException) {
                         // UD-253: include exception class + full stack for auth failures.
@@ -1613,6 +1622,7 @@ open class SyncEngine(
             uploaded.get(),
             conflicts.get(),
             duration,
+            actionCounts = appliedCounts,
             failed = passOneFailures.get() + transferFailures.get(),
         )
     }

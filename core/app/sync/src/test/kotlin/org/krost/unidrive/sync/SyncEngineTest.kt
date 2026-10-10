@@ -918,6 +918,8 @@ class SyncEngineTest {
         // UD-745: capture failed count for tests asserting summary semantics.
         var lastFailed: Int = 0
             private set
+        var lastActionCounts: Map<String, Int> = emptyMap()
+            private set
 
         override fun onSyncComplete(
             downloaded: Int,
@@ -928,6 +930,7 @@ class SyncEngineTest {
             failed: Int,
         ) {
             lastFailed = failed
+            lastActionCounts = actionCounts
         }
 
         override fun onWarning(message: String) {
@@ -1180,6 +1183,41 @@ class SyncEngineTest {
                 provider.deletedPaths.contains(filePath),
                 "bidirectional locally-deleted hydrated row must propagate as DeleteRemote; deleted=${provider.deletedPaths}",
             )
+        }
+
+    @Test
+    fun `sync_summary_counts_the_deletes_that_were_applied`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/gone.txt",
+                    remoteId = "id-gone",
+                    remoteHash = "hash-x",
+                    remoteSize = 50,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 50,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = false)
+            assertEquals(1, reporter.lastActionCounts["del-remote"], "counts=${reporter.lastActionCounts}")
+        }
+
+    @Test
+    fun `sync_summary_does_not_count_a_delete_that_was_not_applied`() =
+        runTest {
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = false)
+            assertEquals(null, reporter.lastActionCounts["del-remote"], "counts=${reporter.lastActionCounts}")
         }
 
     @Test
