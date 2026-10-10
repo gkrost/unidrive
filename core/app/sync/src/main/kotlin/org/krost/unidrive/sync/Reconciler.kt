@@ -57,6 +57,17 @@ class Reconciler(
         recorded: String?,
     ): Boolean = remote != null && recorded != null && remote != recorded
 
+    // A folder carries no content: its modified time moves whenever a child is added or removed (the
+    // uploads of a first sync touch the remote folder after its row was recorded), so it is not a
+    // change worth a metadata-only update on the next sync (#694). A file turning into a folder or back is.
+    private fun remoteMetadataChanged(
+        remoteItem: CloudItem,
+        entry: SyncEntry,
+    ): Boolean =
+        remoteItem.isFolder != entry.isFolder ||
+            remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
+            (!remoteItem.isFolder && remoteItem.modified != entry.remoteModified)
+
     var lastUnhydratedFolderDeletes: List<String> = emptyList()
         private set
 
@@ -211,8 +222,7 @@ class Reconciler(
                     // branch can adopt-or-download instead of falling through to the
                     // unhandled (NEW, MODIFIED) case and silently dropping the action.
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
-                        remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
+                    remoteMetadataChanged(remoteItem, entry) -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
 
@@ -457,8 +467,7 @@ class Reconciler(
                     remoteItem.deleted -> ChangeState.DELETED
                     entry == null -> ChangeState.NEW
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
-                        remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
+                    remoteMetadataChanged(remoteItem, entry) -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
 
