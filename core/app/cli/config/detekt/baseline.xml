@@ -45,11 +45,15 @@
     <ID>SpreadOperator:Main.kt$(*args)</ID>
     <ID>SwallowedException:LsCommand.kt$LsCommand$e: java.io.IOException</ID>
     <ID>SwallowedException:Main.kt$Main$e: javax.crypto.AEADBadTagException</ID>
+    <ID>SwallowedException:ProfileSettings.kt$ProfileSetCommand$e: IOException</ID>
+    <ID>SwallowedException:ProfileSettings.kt$ProfileSettings$e: IllegalArgumentException</ID>
     <ID>SwallowedException:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
     <ID>SwallowedException:RelocateCommandTest.kt$RelocateCommandTest$e: RuntimeException</ID>
     <ID>SwallowedException:WindowsArgv.kt$WindowsArgv$e: Throwable</ID>
     <ID>ThrowsCount:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
     <ID>ThrowsCount:Main.kt$Main$private fun loadVaultData(): Map&lt;String, Map&lt;String, String&gt;&gt;</ID>
+    <ID>ThrowsCount:ProfileSettings.kt$ProfileSetCommand$private fun applyChange(): JsonObject</ID>
+    <ID>ThrowsCount:ProfileSettings.kt$ProfileSettings$private fun syncPathToml( profile: String, raw: String, ): String</ID>
     <ID>ThrowsCount:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
     <ID>TooGenericExceptionCaught:CliExtensionLoader.kt$CliExtensionLoader$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:CoroutineDebug.kt$CoroutineDebug$e: Exception</ID>
@@ -61,6 +65,7 @@
     <ID>TooGenericExceptionCaught:GetCommand.kt$GetCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:LegacyInventory.kt$LegacyInventory$e: Exception</ID>
     <ID>TooGenericExceptionCaught:Main.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:ProfileCommand.kt$ProfileListCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:QuotaCommand.kt$QuotaCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$e: Exception</ID>
     <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$t: Throwable</ID>
