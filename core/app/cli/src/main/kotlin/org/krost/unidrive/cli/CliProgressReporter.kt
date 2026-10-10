@@ -241,12 +241,13 @@ class CliProgressReporter(
         lastConflicts = conflicts
         // UD-204: Locale.ROOT so "1.5s" stays stable across locales.
         val secs = String.format(Locale.ROOT, "%.1f", durationMs / 1000.0)
+        // Everything that is not a transfer or a conflict (mkdir, del-remote, move, ...) has no headline count.
+        val extras =
+            actionCounts
+                .filterKeys { it !in setOf("down", "up", "CONFLICT") }
+                .filter { it.value > 0 }
         if (dryRun) {
             val parts = mutableListOf("download $downloaded", "upload $uploaded")
-            val extras =
-                actionCounts
-                    .filterKeys { it !in setOf("down", "up", "CONFLICT") }
-                    .filter { it.value > 0 }
             for ((label, count) in extras) {
                 parts.add("$count $label")
             }
@@ -258,8 +259,9 @@ class CliProgressReporter(
             // the sync completed cleanly. Suppressed at zero for clean-run
             // brevity.
             val failedSegment = if (failed > 0) ", $failed failed" else ""
+            val extrasSegment = extras.entries.joinToString("") { ", ${it.value} ${it.key}" }
             println(
-                "Sync complete: $downloaded downloaded, $uploaded uploaded, $conflicts conflicts$failedSegment (${secs}s)",
+                "Sync complete: $downloaded downloaded, $uploaded uploaded, $conflicts conflicts$extrasSegment$failedSegment (${secs}s)",
             )
         }
     }
