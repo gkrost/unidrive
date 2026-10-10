@@ -5,7 +5,7 @@
 # Removes:
 #   ~/.local/bin/unidrive
 #   ~/.local/lib/unidrive/               (JARs)
-#   ~/.config/systemd/user/unidrive.service
+#   ~/.config/systemd/user/unidrive.service, unidrive@.service, unidrive-mount@.service
 #
 # Keeps (remove manually if you want a full wipe):
 #   ~/.config/unidrive/        (config + OAuth tokens)
@@ -15,20 +15,26 @@ set -euo pipefail
 
 echo "Uninstalling UniDrive..."
 
-# Stop and disable service if systemctl is around
+# Stop and disable every unidrive unit (single, per-profile and mount instances) if systemctl is around
 if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user is-active --quiet unidrive.service 2>/dev/null; then
-        systemctl --user stop unidrive.service
-        echo "  Stopped unidrive.service"
-    fi
-    if systemctl --user is-enabled --quiet unidrive.service 2>/dev/null; then
-        systemctl --user disable unidrive.service
-        echo "  Disabled unidrive.service"
-    fi
+    while read -r unit _; do
+        if [[ "${unit}" == unidrive*.service ]]; then
+            systemctl --user stop "${unit}"
+            echo "  Stopped ${unit}"
+        fi
+    done < <(systemctl --user list-units --state=active --no-legend --plain 'unidrive*.service' 2>/dev/null || true)
+    while read -r unit _; do
+        if [[ "${unit}" == unidrive*.service ]]; then
+            systemctl --user disable "${unit}"
+            echo "  Disabled ${unit}"
+        fi
+    done < <(systemctl --user list-unit-files --state=enabled --no-legend --plain 'unidrive*.service' 2>/dev/null || true)
 fi
 
 # Remove files
-rm -f "${HOME}/.config/systemd/user/unidrive.service"
+rm -f "${HOME}/.config/systemd/user/unidrive.service" \
+    "${HOME}/.config/systemd/user/unidrive@.service" \
+    "${HOME}/.config/systemd/user/unidrive-mount@.service"
 rm -f "${HOME}/.local/bin/unidrive"
 rm -rf "${HOME}/.local/lib/unidrive"
 
@@ -40,7 +46,7 @@ echo ""
 echo "Removed:"
 echo "  ~/.local/bin/unidrive"
 echo "  ~/.local/lib/unidrive/"
-echo "  ~/.config/systemd/user/unidrive.service"
+echo "  ~/.config/systemd/user/unidrive.service, unidrive@.service, unidrive-mount@.service"
 echo ""
 echo "Kept (remove manually if desired):"
 echo "  ~/.config/unidrive/        (config + tokens)"
