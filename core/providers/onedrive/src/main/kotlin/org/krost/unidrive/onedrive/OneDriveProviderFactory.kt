@@ -150,8 +150,17 @@ open class OneDriveProviderFactory : ProviderFactory {
                 deviceCode = deviceCode.deviceCode,
                 expiresAtMillis = System.currentTimeMillis() + deviceCode.expiresIn * 1000L,
                 oauthService = oauth,
+                profileDir = profileDir,
             )
         val handle = OneDriveDeviceFlowRegistry.put(state)
+        try {
+            pendingFlowStore(profileDir).save(PendingDeviceFlow(handle, state.deviceCode, state.expiresAtMillis))
+        } catch (e: java.io.IOException) {
+            // The flow could not be kept for a later process; do not hand out a handle that cannot be completed.
+            OneDriveDeviceFlowRegistry.remove(handle)
+            oauth.close()
+            throw e
+        }
 
         return BeginAuthResult.of(
             continuationHandle = handle,
@@ -179,12 +188,13 @@ open class OneDriveProviderFactory : ProviderFactory {
     ): CompleteAuthResult {
         val state =
             OneDriveDeviceFlowRegistry.get(continuationHandle)
+                ?: restorePendingFlow(profileDir, continuationHandle)
                 ?: return CompleteAuthResult.Failure(
                     "Unknown or expired continuation_handle. Call auth_begin again.",
                 )
 
         if (System.currentTimeMillis() > state.expiresAtMillis) {
-            OneDriveDeviceFlowRegistry.remove(continuationHandle)
+            finishFlow(profileDir, continuationHandle)
             state.oauthService.close()
             return CompleteAuthResult.Failure("Device code expired. Call auth_begin again.")
         }
@@ -199,9 +209,10 @@ open class OneDriveProviderFactory : ProviderFactory {
             try {
                 oauth.pollOnceForToken(state.deviceCode)
             } catch (e: Exception) {
-                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                finishFlow(profileDir, continuationHandle)
                 oauth.close()
-                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
+                // Only the type: a decode error quotes the response it choked on, and that is a token response.
+                return CompleteAuthResult.Failure("The token response could not be read (${e.javaClass.simpleName}). Call auth_begin again.")
             }
 
         return when (outcome) {
@@ -211,16 +222,16 @@ open class OneDriveProviderFactory : ProviderFactory {
                 try {
                     oauth.saveToken(outcome.token)
                 } catch (e: Exception) {
-                    OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                    finishFlow(profileDir, continuationHandle)
                     oauth.close()
-                    return CompleteAuthResult.Failure("Token received but save failed: ${e.message}")
+                    return CompleteAuthResult.Failure("Token received but save failed: ${e.javaClass.simpleName}")
                 }
-                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                finishFlow(profileDir, continuationHandle)
                 oauth.close()
                 CompleteAuthResult.Success
             }
             is OAuthService.DevicePollOutcome.Failed -> {
-                OneDriveDeviceFlowRegistry.remove(continuationHandle)
+                finishFlow(profileDir, continuationHandle)
                 oauth.close()
                 CompleteAuthResult.Failure(outcome.message)
             }
@@ -228,7 +239,48 @@ open class OneDriveProviderFactory : ProviderFactory {
     }
 
     override suspend fun cancelInteractiveAuth(continuationHandle: String) {
-        OneDriveDeviceFlowRegistry.remove(continuationHandle)?.oauthService?.close()
+        val state = OneDriveDeviceFlowRegistry.remove(continuationHandle) ?: return
+        state.oauthService.close()
+        state.profileDir?.let { dir ->
+            try {
+                val store = pendingFlowStore(dir)
+                if (store.load()?.handle == continuationHandle) store.delete()
+            } catch (_: java.io.IOException) {
+                // The device code expires on its own; a leftover file is rejected as expired.
+            }
+        }
+    }
+
+    private fun pendingFlowStore(profileDir: Path) =
+        org.krost.unidrive.auth.CredentialStore(profileDir, PENDING_DEVICE_FLOW_FILE, PendingDeviceFlow.serializer())
+
+    /**
+     * The flow [handle] began in an earlier process (`auth begin` of the CLI), rebuilt from the
+     * profile folder; null when there is none for that handle.
+     */
+    private fun restorePendingFlow(
+        profileDir: Path,
+        handle: String,
+    ): OneDriveDeviceFlowState? {
+        val pending = pendingFlowStore(profileDir).load() ?: return null
+        if (pending.handle != handle) return null
+        val state =
+            OneDriveDeviceFlowState(pending.deviceCode, pending.expiresAtMillis, newOAuthServiceForBegin(profileDir), profileDir)
+        OneDriveDeviceFlowRegistry.putWithHandle(handle, state)
+        return state
+    }
+
+    /** A terminal outcome: forget the flow in memory and on disk. */
+    private fun finishFlow(
+        profileDir: Path,
+        handle: String,
+    ) {
+        OneDriveDeviceFlowRegistry.remove(handle)
+        try {
+            pendingFlowStore(profileDir).delete()
+        } catch (_: java.io.IOException) {
+            // The device code expires on its own; a leftover file is rejected as expired.
+        }
     }
 
     /** UD-014 test seam: subclassed in OneDriveInteractiveAuthContractTest

@@ -8,7 +8,12 @@ import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
 
-@Command(name = "auth", description = ["Authenticate with a cloud provider"], mixinStandardHelpOptions = true)
+@Command(
+    name = "auth",
+    description = ["Authenticate with a cloud provider"],
+    mixinStandardHelpOptions = true,
+    subcommands = [AuthBeginCommand::class, AuthCompleteCommand::class, AuthLoginCommand::class],
+)
 class AuthCommand : Runnable {
     @ParentCommand
     lateinit var parent: Main
