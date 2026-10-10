@@ -65,6 +65,59 @@ class ReconcilerTest {
         lastSynced = Instant.now(),
     )
 
+    private fun folderEntry(path: String) = dbEntry(path).copy(remoteHash = null, remoteSize = 0, isFolder = true, isHydrated = true)
+
+    private fun folderItem(
+        path: String,
+        modified: String,
+    ) = cloudItem(path, size = 0, isFolder = true, hash = null).copy(modified = Instant.parse(modified))
+
+    @Test
+    fun `folder_whose_only_change_is_its_modified_time_plans_nothing`() {
+        db.upsertEntry(folderEntry("/docs"))
+        val remoteChanges = mapOf("/docs" to folderItem("/docs", "2026-03-28T12:05:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertTrue(actions.isEmpty(), "a folder's mtime moves with its children; got $actions")
+    }
+
+    @Test
+    fun `file_with_a_newer_modified_time_still_downloads`() {
+        db.upsertEntry(dbEntry("/f.txt"))
+        val remoteChanges = mapOf("/f.txt" to cloudItem("/f.txt").copy(modified = Instant.parse("2026-03-28T12:05:00Z")))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertTrue(actions.any { it is SyncAction.DownloadContent }, "got $actions")
+    }
+
+    @Test
+    fun `remote_folder_replacing_a_tracked_file_is_still_a_change`() {
+        db.upsertEntry(dbEntry("/x"))
+        val remoteChanges = mapOf("/x" to folderItem("/x", "2026-03-28T12:00:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertTrue(actions.isNotEmpty(), "a file turning into a folder must not be swallowed")
+    }
+
+    @Test
+    fun `a_synced_file_the_remote_replaced_with_a_folder_is_planned_in_the_main_pass`() {
+        // Hydrated, so the unhydrated-row recovery loop does not plan anything for /x on its own:
+        // the type change itself must produce the action.
+        db.upsertEntry(dbEntry("/x", isHydrated = true))
+        val remoteChanges = mapOf("/x" to folderItem("/x", "2026-03-28T12:05:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertTrue(
+            actions.any { it.path == "/x" && it is SyncAction.UpdatePlaceholder },
+            "a file turning into a folder must not be swallowed with the folder-mtime no-op; got $actions",
+        )
+    }
+
+    @Test
+    fun `a locally deleted folder whose remote modified time moved is a conflict not a remote delete`() {
+        db.upsertEntry(folderEntry("/docs"))
+        val remoteChanges = mapOf("/docs" to folderItem("/docs", "2026-03-28T12:05:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, mapOf("/docs" to ChangeState.DELETED))
+        assertTrue(actions.none { it is SyncAction.DeleteRemote }, "a concurrent remote change must not be reaped; got $actions")
+        assertTrue(actions.any { it is SyncAction.Conflict }, "the delete-vs-modify conflict must be raised; got $actions")
+    }
+
     @Test
     fun `remote new file downloads content`() {
         // UD-222: remote-new non-folder always emits DownloadContent (Pass 2 concurrent).

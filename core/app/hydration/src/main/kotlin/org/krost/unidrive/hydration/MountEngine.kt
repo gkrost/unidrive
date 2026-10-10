@@ -88,6 +88,19 @@ class MountEngine private constructor(
     // The host's logger: the moved log lines keep their logger name.
     private val log: Logger = wiring.log
 
+    /**
+     * #658: epoch ms of the last provider round trip this engine actually made — a completed download
+     * or upload, never a warm-cache serve or a local-only write. `daemon.status` reports it as
+     * `provider_health.last_contact_ms`, so an outage keeps the last real contact.
+     */
+    @Volatile
+    var lastProviderContactAtMs: Long? = null
+        private set
+
+    private fun recordProviderContact() {
+        lastProviderContactAtMs = System.currentTimeMillis()
+    }
+
     /** See [RemoteOperationGuard.isOutOfScope]. */
     fun isOutOfScope(path: String): Boolean = guard.isOutOfScope(path)
 
@@ -249,6 +262,7 @@ class MountEngine private constructor(
             db.upsertEntry(
                 withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
             )
+            recordProviderContact()
             return cachePath
         } finally {
             runCatching { Files.deleteIfExists(staged) }
@@ -430,6 +444,8 @@ class MountEngine private constructor(
                     throw e
                 }
         val auditResult = if (unchanged != null) "skipped:unchanged" else "success"
+        // #658: only a real transfer is a provider round trip; the skipped-unchanged path made no upload.
+        if (unchanged == null) recordProviderContact()
         // Defer the absence sweep's deletion verdict while the delta feed catches up
         // to this just-written remote item (see markRecentlyUploaded). Keyed by the
         // REMOTE path so the absence sweep (remote namespace) matches. Nothing was written when the upload was skipped.

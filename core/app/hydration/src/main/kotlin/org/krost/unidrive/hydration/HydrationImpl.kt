@@ -20,12 +20,14 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
+import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.StateDatabase
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -39,6 +41,9 @@ import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+// One class for the mount hydration front-end: the upload queue, the open set, the cache budget and
+// the #658 health view. Accepted as a LargeClass in-source rather than split.
+@Suppress("LargeClass")
 class HydrationImpl(
     // #560 U3: the mount operations (hydrate, upload, remote create/delete/rename) run on the mount
     // front-end; this class owns the upload queue, the open set and the cache budget on top of it.
@@ -181,8 +186,21 @@ class HydrationImpl(
         // launch; pruned by cancelUpload (completed jobs report false on
         // cancel). Dies with the slot when pending drops to zero.
         val jobs: ConcurrentLinkedQueue<Job> = ConcurrentLinkedQueue(),
+        // #658: when the slot's first outstanding upload was submitted (epoch ms): how long a dirty
+        // overwrite, which has no never-uploaded row to carry the stamp, has been waiting.
+        val enqueuedAtMs: Long = System.currentTimeMillis(),
     )
     private val uploadSlots = ConcurrentHashMap<String, UploadSlot>()
+
+    // #658: transfer attempts that hold a transfer permit right now (the rest of the slots wait for
+    // their path's turn, the daemon-wide budget, or a retry backoff).
+    private val uploadsInFlight = AtomicInteger(0)
+
+    // #658: the last measured size of the cache directory (epoch ms of the measurement), null = never
+    // measured. Written by every pass that walks the cache; read by [cacheHealth].
+    @Volatile private var cacheMeasuredBytes: Long? = null
+    @Volatile private var cacheMeasuredAtMs: Long = 0L
+    private val cacheMeasuring = AtomicBoolean(false)
 
     // Waiting-slot budget for the upload queue. Acquired by the submitting
     // caller (open_write / replay) and released only when the job actually
@@ -229,6 +247,18 @@ class HydrationImpl(
         const val DEFAULT_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
         const val CACHE_ACCESS_GRACE_MS: Long = 60_000
         const val EVICTION_DELAY_MS: Long = 5_000
+
+        /** #658: a status request re-walks the cache directory when the last measurement is older than this. */
+        const val CACHE_MEASUREMENT_TTL_MS: Long = 10_000
+
+        /** #658: a status request re-reads the upload queue from state.db when the last reading is older than this. */
+        const val UPLOAD_SNAPSHOT_TTL_MS: Long = 1_000
+
+        /** #658: how long a status request waits for the very first reading (it has nothing to serve until then). */
+        const val UPLOAD_SNAPSHOT_WAIT_MS: Long = 1_000
+
+        /** #658: how long a status request waits for a re-reading when it has a previous reading to serve. */
+        const val UPLOAD_SNAPSHOT_REFRESH_WAIT_MS: Long = 100
 
         /** #493: default delay of the replay of rows whose last upload attempt failed (see [failedReplayDelayMs]). */
         const val DEFAULT_FAILED_REPLAY_DELAY_MS: Long = 10L * 60 * 1000
@@ -679,8 +709,10 @@ class HydrationImpl(
         if (uploadStallTimeoutMs <= 0) {
             mount.withTransferPermit {
                 onPermitAcquired()
-                _events.emit(HydrationEvent.Hydrating(path))
-                mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
+                holdingPermit {
+                    _events.emit(HydrationEvent.Hydrating(path))
+                    mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
+                }
             }
             return
         }
@@ -707,12 +739,24 @@ class HydrationImpl(
             try {
                 mount.withTransferPermit {
                     onPermitAcquired()
-                    _events.emit(HydrationEvent.Hydrating(path))
-                    mount.uploadMountWriteFromCache(path, cachePath, baseEtag, kicked)
+                    holdingPermit {
+                        _events.emit(HydrationEvent.Hydrating(path))
+                        mount.uploadMountWriteFromCache(path, cachePath, baseEtag, kicked)
+                    }
                 }
             } finally {
                 watcher.cancel()
             }
+        }
+    }
+
+    // #658: [block] runs inside a transfer permit; it counts as one upload in flight.
+    private suspend fun <T> holdingPermit(block: suspend () -> T): T {
+        uploadsInFlight.incrementAndGet()
+        try {
+            return block()
+        } finally {
+            uploadsInFlight.decrementAndGet()
         }
     }
 
@@ -1024,6 +1068,7 @@ class HydrationImpl(
             val job = coroutineContext[Job]
             val files = listCacheFiles { job?.ensureActive() }
             val before = files.sumOf { it.size }
+            recordCacheSize(before)
             if (cacheMaxBytes <= 0 || before <= cacheMaxBytes) return@withLock CacheEvictionReport(cacheMaxBytes, before, before, 0)
             var total = before
             var evicted = 0
@@ -1052,8 +1097,159 @@ class HydrationImpl(
                 if (total <= cacheMaxBytes) break
                 evict(f)
             }
+            recordCacheSize(total)
             CacheEvictionReport(cacheMaxBytes, before, total, evicted)
         }
+
+    // ── #658 health numbers for daemon.status ───────────────────────────────────────────────────
+
+    /**
+     * The upload queue as `daemon.status.uploads` reports it.
+     *  - [pending]: paths whose bytes are not in the cloud yet and that an upload will take: the
+     *    never-uploaded (`local:`) rows plus every path holding an upload slot (a dirty overwrite of an
+     *    uploaded row has none of the former). Queued, in flight and failed-awaiting-replay all count,
+     *    and so do the start-up replay's own uploads. Keep-local (excluded) and out-of-scope paths do
+     *    not: no upload will ever take them.
+     *  - [inFlight]: transfer attempts holding a transfer permit right now (a subset of [pending]).
+     *  - [failed]: pending never-uploaded rows with a failed attempt on record (a subset of [pending]).
+     *  - [oldestPendingAgeMs]: how long the oldest pending path has waited, null when nothing is pending.
+     *    A never-uploaded row waits since it was written; a dirty overwrite since its upload was submitted.
+     */
+    data class UploadHealth(
+        val pending: Int,
+        val inFlight: Int,
+        val failed: Int,
+        val oldestPendingAgeMs: Long?,
+    )
+
+    /** One read of the rows and slots; [oldestSinceMs] is the stamp [UploadHealth.oldestPendingAgeMs] is measured from. */
+    private class UploadSnapshot(
+        val pending: Int,
+        val inFlight: Int,
+        val failed: Int,
+        val oldestSinceMs: Long?,
+        val takenAtMs: Long,
+    ) {
+        fun health(nowMs: Long) =
+            UploadHealth(pending, inFlight, failed, oldestSinceMs?.let { (nowMs - it).coerceAtLeast(0) })
+    }
+
+    private fun takeUploadSnapshot(): UploadSnapshot {
+        val pendingPaths = HashSet<String>()
+        var failed = 0
+        var oldestSinceMs: Long? = null
+
+        fun since(atMs: Long) {
+            oldestSinceMs = oldestSinceMs?.let { minOf(it, atMs) } ?: atMs
+        }
+        for (row in stateDb.pendingUploadRows()) {
+            if (mount.isExcludedPath(row.path) || mount.isOutOfScope(row.path)) continue
+            pendingPaths += PathNormalizer.nfc(row.path)
+            if (row.lastErrorAt != null) failed++
+            since(row.lastSynced.toEpochMilli())
+        }
+        // Slots without such a row: dirty overwrites. A slot of a row counted above adds nothing.
+        for ((path, slot) in uploadSlots) {
+            if (mount.isExcludedPath(path) || mount.isOutOfScope(path)) continue
+            if (pendingPaths.add(PathNormalizer.nfc(path))) since(slot.enqueuedAtMs)
+        }
+        return UploadSnapshot(pendingPaths.size, uploadsInFlight.get(), failed, oldestSinceMs, System.currentTimeMillis())
+    }
+
+    /**
+     * Reads state.db now and blocks while another thread holds it (an enumeration saving its result
+     * does, for as long as the save takes). The daemon's status request uses [uploadHealthSnapshot]
+     * instead.
+     *
+     * @param nowMs the clock the age is measured on (a seam for tests).
+     */
+    fun uploadHealth(nowMs: Long = System.currentTimeMillis()): UploadHealth = takeUploadSnapshot().health(nowMs)
+
+    private val uploadSnapshot = java.util.concurrent.atomic.AtomicReference<UploadSnapshot?>(null)
+    private val uploadSnapshotRefresh = java.util.concurrent.atomic.AtomicReference<Job?>(null)
+
+    // Single flight: the running refresh, or a new one on the IO dispatcher.
+    private fun refreshUploadSnapshot(): Job {
+        while (true) {
+            val running = uploadSnapshotRefresh.get()
+            if (running != null && running.isActive) return running
+            val job = recoveryUploadScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    uploadSnapshot.set(withContext(Dispatchers.IO) { takeUploadSnapshot() })
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.warn("upload health unavailable: {}", e.message)
+                }
+            }
+            if (uploadSnapshotRefresh.compareAndSet(running, job)) {
+                job.start()
+                return job
+            }
+            job.cancel()
+        }
+    }
+
+    /**
+     * The upload queue for `daemon.status`, without ever waiting on state.db for long: a status reply
+     * must not stall behind an enumeration's save (which holds the database for as long as it takes).
+     * Reads at most once per [UPLOAD_SNAPSHOT_TTL_MS]; the first reading is waited for up to [waitMs], a
+     * later one only briefly ([UPLOAD_SNAPSHOT_REFRESH_WAIT_MS]), after which the previous reading is
+     * served with its age carried forward to [nowMs]. Null while there has
+     * never been a reading: unknown, not "nothing pending".
+     */
+    suspend fun uploadHealthSnapshot(
+        nowMs: Long = System.currentTimeMillis(),
+        waitMs: Long = UPLOAD_SNAPSHOT_WAIT_MS,
+    ): UploadHealth? {
+        val last = uploadSnapshot.get()
+        if (last == null || System.currentTimeMillis() - last.takenAtMs >= UPLOAD_SNAPSHOT_TTL_MS) {
+            // With a previous reading to serve there is little to wait for; without one, wait the full time.
+            kotlinx.coroutines.withTimeoutOrNull(if (last == null) waitMs else minOf(waitMs, UPLOAD_SNAPSHOT_REFRESH_WAIT_MS)) {
+                refreshUploadSnapshot().join()
+            }
+        }
+        return uploadSnapshot.get()?.health(nowMs)
+    }
+
+    /**
+     * The cache as `daemon.status.cache` reports it: [bytes] is the size the last walk of the cache
+     * directory found (every regular file, protected or not: what [evictCache] counts), null until one
+     * has run; [budgetBytes] is the configured budget, null when there is none (unlimited).
+     */
+    data class CacheHealth(
+        val bytes: Long?,
+        val budgetBytes: Long?,
+    )
+
+    /** What is known now, without touching the file system. See [requestCacheMeasurement]. */
+    fun cacheHealth(): CacheHealth = CacheHealth(cacheMeasuredBytes, cacheMaxBytes.takeIf { it > 0 })
+
+    private fun recordCacheSize(bytes: Long) {
+        cacheMeasuredBytes = bytes
+        cacheMeasuredAtMs = System.currentTimeMillis()
+    }
+
+    /**
+     * Walks the cache directory off the caller's thread to refresh [cacheHealth], unless a walk is
+     * already running or the last measurement is younger than [staleAfterMs]. Fire and forget: a
+     * status request calls this and answers with what it has, so a large cache never delays a reply.
+     */
+    fun requestCacheMeasurement(staleAfterMs: Long = CACHE_MEASUREMENT_TTL_MS) {
+        if (System.currentTimeMillis() - cacheMeasuredAtMs < staleAfterMs) return
+        if (!cacheMeasuring.compareAndSet(false, true)) return
+        recoveryUploadScope.launch {
+            try {
+                recordCacheSize(withContext(Dispatchers.IO) { listCacheFiles().sumOf { it.size } })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.debug("cache measurement failed: {}", e.message)
+            } finally {
+                cacheMeasuring.set(false)
+            }
+        }
+    }
 
     // #301: whether a background upload of [path] is queued or in flight. The
     // engine's enumerate-reap consults this (via the engine's uploadInFlight hook,

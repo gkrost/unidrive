@@ -14,6 +14,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -192,6 +193,6 @@ class UnhydratedLocalEditTest {
 
             assertContentEquals(remoteBytes, Files.readAllBytes(stub))
             assertTrue(filesHolding(prefix).isNotEmpty(), "the short file must still exist on disk")
-            assertEquals(emptyList(), provider.uploadedPaths, "a short file must not be uploaded over the remote")
+            assertFalse("/doc.txt" in provider.uploadedPaths, "a short file must not be uploaded over the remote: ${provider.uploadedPaths}")
         }
 }

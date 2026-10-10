@@ -293,24 +293,7 @@ open class PlaceholderManager(
         expectedSize: Long,
     ): Boolean {
         if (!Files.isRegularFile(path) || expectedSize == 0L) return false
-        val os = System.getProperty("os.name", "").lowercase()
-        if (os.contains("win")) return false
-        return try {
-            val proc =
-                ProcessBuilder("stat", "--format=%b", path.toAbsolutePath().toString())
-                    .redirectErrorStream(true)
-                    .start()
-            val output =
-                proc.inputStream
-                    .bufferedReader()
-                    .readLine()
-                    ?.trim() ?: return false
-            proc.waitFor()
-            val blocks = output.toLongOrNull() ?: return false
-            blocks * 512 < expectedSize
-        } catch (_: Exception) {
-            false
-        }
+        return SparseProbe.isStub(path, expectedSize)
     }
 
     protected fun cleanEmptyParents(dir: Path) {

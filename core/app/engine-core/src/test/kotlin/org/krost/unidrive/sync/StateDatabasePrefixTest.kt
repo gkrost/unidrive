@@ -80,6 +80,21 @@ class StateDatabasePrefixTest {
     }
 
     @Test
+    fun `listDirectChildren does not leak siblings that share the parent's path prefix`() {
+        // The path range that makes the listing an index seek (#727) must stay exactly "starts with the
+        // parent path plus a slash": '/a.txt' and '/a0' share the '/a' characters but are siblings of
+        // '/a', and '/a0/deep.txt' and '/ab/other.txt' are other subtrees. Only one-level rows under
+        // '/a/' belong to the listing.
+        db.upsertEntry(entry("/a", folder = true))
+        db.upsertEntry(entry("/a/child.txt"))
+        db.upsertEntry(entry("/a.txt"))
+        db.upsertEntry(entry("/a0", folder = true))
+        db.upsertEntry(entry("/a0/deep.txt"))
+        db.upsertEntry(entry("/ab/other.txt"))
+        assertEquals(listOf("/a/child.txt"), paths(db.listDirectChildren("/a")))
+    }
+
+    @Test
     fun `a case-only folder rename keeps the whole subtree`() {
         db.upsertEntry(entry("/Docs", folder = true))
         db.upsertEntry(entry("/Docs/a.txt"))
