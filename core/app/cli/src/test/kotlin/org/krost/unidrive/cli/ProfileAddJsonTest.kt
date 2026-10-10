@@ -97,6 +97,19 @@ class ProfileAddJsonTest {
     }
 
     @Test
+    fun `a label with control characters is written escaped and reads back unchanged`() {
+        val label = "a\u0001b\u007fc\td"
+
+        val code = run("profile", "add", "--type", "localfs", "--name", "docs", "--mode", "mount", "--label", label, "--option", "root_path=/data/docs", "--json")
+
+        assertEquals(0, code, err.toString())
+        val text = Files.readString(configFile)
+        assertTrue(text.none { (it < ' ' && it != '\n' && it != '\r') || it == '\u007f' }, "raw control characters in config.toml")
+        assertTrue("label = \"a\\u0001b\\u007Fc\\td\"" in text, "label line was: ${text.lines().first { it.startsWith("label") }}")
+        assertEquals("localfs", SyncConfig.parseRaw(text).providers.getValue("docs").type)
+    }
+
+    @Test
     fun `adds a mount profile with no console and no prompt`() {
         assertNull0(System.console())
 

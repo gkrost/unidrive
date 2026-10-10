@@ -279,6 +279,17 @@ class AuthLifecycleTest {
         assertFalse("SHHH" in everything())
     }
 
+    @Test
+    fun `an unexpected failure is still one JSON refusal with the exception type only`() {
+        LifecycleHooks.factoryFor = { throw IllegalStateException("client_secret=SHHH") }
+
+        assertEquals(1, run("auth", "begin", "--json"))
+
+        assertEquals("internal_error", errorToken())
+        assertTrue("IllegalStateException" in json().getValue("message").jsonPrimitive.content)
+        assertFalse("SHHH" in everything())
+    }
+
     // -- auth login ------------------------------------------------------------------
 
     private class LoginCall(

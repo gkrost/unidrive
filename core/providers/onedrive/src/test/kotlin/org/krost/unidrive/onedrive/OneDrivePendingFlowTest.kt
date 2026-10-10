@@ -109,6 +109,19 @@ class OneDrivePendingFlowTest {
     }
 
     @Test
+    fun `a malformed token response never leaks its text into the failure`() {
+        val handle = beginInFirstProcess()
+        // A decode error quotes the input it choked on; the input here is a token response.
+        val body = """{"access_token":"AT-SECRET-MARKER","refresh_token":RT-SECRET-MARKER,"""
+
+        val result = runBlocking { factory(json(body)).completeInteractiveAuth(profileDir, handle) }
+
+        val failure = assertIs<CompleteAuthResult.Failure>(result)
+        assertFalse("SECRET-MARKER" in failure.message, "failure message was: ${failure.message}")
+        assertFalse(Files.exists(pendingFile))
+    }
+
+    @Test
     fun `an expired pending flow fails and is deleted`() {
         val handle = beginInFirstProcess()
         Files.writeString(pendingFile, """{"handle":"$handle","deviceCode":"DC-abc-123","expiresAtMillis":1000}""")

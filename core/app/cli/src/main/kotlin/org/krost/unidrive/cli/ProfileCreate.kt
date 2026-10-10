@@ -13,9 +13,10 @@ import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isValidProfileName
 import org.krost.unidrive.sync.setDefaultProfile
 import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
+import java.nio.file.StandardCopyOption
 
 /** What `profile add --type ...` was asked to create. */
 internal class NewProfile(
@@ -209,22 +210,35 @@ internal object ProfileCreator {
         label: String?,
         makeDefault: String?,
     ) {
-        if (!Files.exists(configPath)) {
-            Files.createDirectories(configPath.parent)
-            Files.writeString(configPath, "[general]\n\n")
-        } else if (makeDefault != null) {
-            // setDefaultProfile rewrites the [general] section; a config that exists without one is a
-            // supported shape, so anchor it before appending rather than letting the rewrite throw.
-            val existing = Files.readString(configPath)
-            if (existing.lineSequence().none { it.trim() == "[general]" }) {
-                Files.writeString(configPath, "[general]\n\n$existing")
-            }
-        }
+        val existing = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n\n"
+        // setDefaultProfile rewrites the [general] section; a config that exists without one is a
+        // supported shape, so anchor it before appending rather than letting the rewrite throw.
+        val anchored =
+            if (makeDefault != null && existing.lineSequence().none { it.trim() == "[general]" }) "[general]\n\n$existing" else existing
         val section =
             if (label != null) toml.trimEnd('\n') + "\nlabel = \"${escapeTomlValue(label)}\"\n" else toml
-        Files.writeString(configPath, section, StandardOpenOption.APPEND)
-        if (makeDefault != null) {
-            Files.writeString(configPath, setDefaultProfile(Files.readString(configPath), makeDefault))
+        var text = anchored + section
+        if (makeDefault != null) text = setDefaultProfile(text, makeDefault)
+        // One atomic replace: a kill between an append and a default-profile rewrite must not leave a
+        // truncated config.toml (every profile gone) or a profile without the default that was asked for.
+        Files.createDirectories(configPath.parent)
+        replaceConfigAtomically(configPath, text)
+    }
+
+    private fun replaceConfigAtomically(
+        target: Path,
+        text: String,
+    ) {
+        val tmp = target.resolveSibling(target.fileName.toString() + ".tmp")
+        try {
+            Files.writeString(tmp, text)
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            Files.deleteIfExists(tmp)
         }
     }
 }

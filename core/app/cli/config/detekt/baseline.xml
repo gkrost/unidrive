@@ -66,6 +66,7 @@
     <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthBeginCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthCompleteCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthLoginCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:AuthLifecycle.kt$e: Exception</ID>
     <ID>TooGenericExceptionCaught:CliExtensionLoader.kt$CliExtensionLoader$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:CoroutineDebug.kt$CoroutineDebug$e: Exception</ID>
     <ID>TooGenericExceptionCaught:DaemonAutospawn.kt$DaemonAutospawn$e: Exception</ID>

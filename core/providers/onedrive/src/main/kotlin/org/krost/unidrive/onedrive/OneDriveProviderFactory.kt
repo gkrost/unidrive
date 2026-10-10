@@ -211,7 +211,8 @@ open class OneDriveProviderFactory : ProviderFactory {
             } catch (e: Exception) {
                 finishFlow(profileDir, continuationHandle)
                 oauth.close()
-                return CompleteAuthResult.Failure(e.message ?: e.javaClass.simpleName)
+                // Only the type: a decode error quotes the response it choked on, and that is a token response.
+                return CompleteAuthResult.Failure("The token response could not be read (${e.javaClass.simpleName}). Call auth_begin again.")
             }
 
         return when (outcome) {
@@ -223,7 +224,7 @@ open class OneDriveProviderFactory : ProviderFactory {
                 } catch (e: Exception) {
                     finishFlow(profileDir, continuationHandle)
                     oauth.close()
-                    return CompleteAuthResult.Failure("Token received but save failed: ${e.message}")
+                    return CompleteAuthResult.Failure("Token received but save failed: ${e.javaClass.simpleName}")
                 }
                 finishFlow(profileDir, continuationHandle)
                 oauth.close()
