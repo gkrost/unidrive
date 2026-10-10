@@ -28,7 +28,7 @@ import kotlin.test.assertTrue
 // #560 U2b: the remote gather and the mount's enumeration run on their own, with
 // explicit collaborators and no SyncEngine. The behaviour itself is pinned through
 // SyncEngine by EnumerateRemoteIntoStateTest, EnumerateCorroborationGuardTest,
-// RemoteGatherCollisionTest and MountOperationsParityTest in :app:sync.
+// RemoteGatherCollisionTest and EnumerationParityTest in :app:sync.
 class RemoteEnumerationTest {
     private lateinit var tmp: Path
     private lateinit var db: StateDatabase

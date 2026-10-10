@@ -50,7 +50,7 @@ class SyncEngineWarnContextTest {
     @Test
     fun `WARN on upload failure carries exception class and message, the throwable moves to DEBUG`() =
         runTest {
-            val provider = SyncEngineTest.FakeCloudProvider()
+            val provider = FakeCloudProvider()
             // FakeCloudProvider throws ProviderException("Network timeout on upload")
             // for the first N upload calls. Three is enough to also exercise the
             // "consecutive failures" branch that rethrows.

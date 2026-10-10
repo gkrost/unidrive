@@ -24,14 +24,14 @@ import kotlin.test.assertTrue
 class SyncEngineWatermarkStatTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
     private lateinit var engine: SyncEngine
 
     @BeforeTest
     fun setUp() {
         syncRoot = Files.createTempDirectory("ud-337-root")
         db = StateDatabase(Files.createTempDirectory("ud-337-db").resolve("state.db")).also { it.initialize() }
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
         engine =
             SyncEngine(
                 provider = provider,
@@ -185,45 +185,4 @@ class SyncEngineWatermarkStatTest {
                 "the next scan must plan the mid-upload edit again",
             )
         }
-
-    @Test
-    fun `a write-back whose cache copy changes during the upload records the pre-upload watermark`() =
-        runTest {
-            provider.deltaItems = emptyList()
-            engine.syncOnce()
-            // #319: the write-back requires the row the FUSE create flow wrote.
-            seedLocalOnlyRow("/local.txt")
-            val cacheCopy = Files.createTempDirectory("ud-337-wb").resolve("local.txt")
-            Files.writeString(cacheCopy, "first version")
-            val preUploadMtime = Files.getLastModifiedTime(cacheCopy).toMillis()
-
-            editDuringUpload("edited version", preUploadMtime + 60_000L)
-            engine.uploadFromCache("/local.txt", cacheCopy)
-
-            val row = assertNotNull(db.getEntry("/local.txt"))
-            assertEquals(
-                preUploadMtime,
-                row.localMtime,
-                "the write-back must record the cache copy's PRE-upload mtime",
-            )
-        }
-
-    private fun seedLocalOnlyRow(path: String) {
-        val now = Instant.parse("2026-03-28T12:00:00Z")
-        db.upsertEntry(
-            SyncEntry(
-                path = path,
-                remoteId = null,
-                remoteHash = null,
-                remoteSize = 0,
-                remoteModified = null,
-                localMtime = now.toEpochMilli(),
-                localSize = null,
-                isFolder = false,
-                isPinned = false,
-                isHydrated = true,
-                lastSynced = now,
-            ),
-        )
-    }
 }

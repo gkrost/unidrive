@@ -1,7 +1,11 @@
-package org.krost.unidrive.sync
+package org.krost.unidrive.hydration
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.*
+import org.krost.unidrive.sync.FakeCloudProvider
+import org.krost.unidrive.sync.ProgressReporter
+import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.ConflictPolicy
 import org.krost.unidrive.sync.model.SyncEntry
 import java.nio.file.Files
@@ -22,7 +26,7 @@ class UploadFromCacheUnchangedContentTest {
     private lateinit var syncRoot: Path
     private lateinit var cacheRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     private val recordedModified = Instant.parse("2026-10-03T18:40:29Z")
 
@@ -32,7 +36,7 @@ class UploadFromCacheUnchangedContentTest {
         cacheRoot = Files.createTempDirectory("ud-583-cache")
         db = StateDatabase(Files.createTempDirectory("ud-583-db").resolve("state.db"))
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest

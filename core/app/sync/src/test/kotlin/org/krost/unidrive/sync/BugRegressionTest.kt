@@ -18,7 +18,7 @@ import kotlin.test.*
 class BugRegressionTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -26,7 +26,7 @@ class BugRegressionTest {
         val dbPath = Files.createTempDirectory("unidrive-bug-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest

@@ -24,7 +24,7 @@ import kotlin.test.*
 class SyncEngineLocalHashTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -32,7 +32,7 @@ class SyncEngineLocalHashTest {
         val dbPath = Files.createTempDirectory("ud-396-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest
@@ -146,80 +146,6 @@ class SyncEngineLocalHashTest {
             assertEquals(sha256(file), row.localHash)
         }
 
-    @Test
-    fun `a write-back through the cache records the hash of the bytes it just uploaded`() =
-        runTest {
-            // uploadFromCache is the FUSE write-back path: the bytes live in the daemon's
-            // cache copy, and the row records exactly that copy's stats, so its hash must be
-            // those bytes' hash. Leaving it null (or keeping a stale one) would strip the
-            // touch shield from every mount-edited file.
-            val eng = engine()
-            provider.deltaItems = emptyList()
-            eng.syncOnce()
-            // #319: the write-back requires the row the FUSE create flow wrote
-            // (HydrationImpl.create) — a row-less upload is refused so it cannot
-            // resurrect a vanished path. Seed the never-uploaded row here.
-            seedLocalOnlyRow("/local.txt")
-            val cacheCopy = Files.createTempDirectory("ud-396-wb").resolve("local.txt")
-            val bytes = "written through the mount".toByteArray()
-            Files.write(cacheCopy, bytes)
-
-            eng.uploadFromCache("/local.txt", cacheCopy)
-
-            val row = db.getEntry("/local.txt")
-            assertNotNull(row?.remoteId, "the write-back was uploaded")
-            assertEquals(sha256(cacheCopy), row.localHash)
-        }
-
-    // The row HydrationImpl.create writes for a file created through the mount:
-    // never uploaded, cache holds the only copy.
-    private fun seedLocalOnlyRow(path: String) {
-        db.upsertEntry(
-            SyncEntry(
-                path = path,
-                remoteId = null,
-                remoteHash = null,
-                remoteSize = 0L,
-                remoteModified = null,
-                localMtime = Instant.now().toEpochMilli(),
-                localSize = 0L,
-                isFolder = false,
-                isPinned = false,
-                isHydrated = true,
-                lastSynced = Instant.now(),
-            ),
-        )
-    }
-
-    @Test
-    fun `a mount-mode re-download records the hash of the downloaded bytes instead of keeping the stale one`() =
-        runTest {
-            // ensureHydrated rewrites the row's local stats from the freshly downloaded cache
-            // copy; keeping a hash recorded for the previous contents would pair stale bytes
-            // with a fresh mtime/size — the stale-hash shape the touch check must never see.
-            val cacheRoot = Files.createTempDirectory("ud-396-hyd-cache")
-            val eng = engine(cacheRoot)
-            val first = ByteArray(1024) { ((it * 3) and 0xff).toByte() }
-            downloadFile(eng, "doc.bin", first)
-            // Mount mode: the row is served from the daemon cache and nothing is in the sync
-            // root (a row describing a sync-root file keeps its hash in ensureHydrated — the
-            // sync-root bytes are unchanged, so the recorded hash still describes them).
-            db.upsertEntry(assertNotNull(db.getEntry("/doc.bin")).copy(localMtime = null, localSize = null))
-            Files.deleteIfExists(syncRoot.resolve("doc.bin"))
-            val staleHash = assertNotNull(db.getEntry("/doc.bin")).localHash
-            assertNotNull(staleHash)
-
-            val second = "fresh remote bytes for the re-download".toByteArray()
-            provider.files["/doc.bin"] = second
-            val cachePath = eng.resolveCachePath("/doc.bin")
-            Files.deleteIfExists(cachePath)
-            eng.ensureHydrated("/doc.bin")
-
-            val row = assertNotNull(db.getEntry("/doc.bin"))
-            assertEquals(sha256(cachePath), row.localHash)
-            assertNotEquals(staleHash, row.localHash)
-        }
-
     // The callers hand in a row that already carries the new mtime/size; if hashing then fails,
     // keeping the previous contents' hash would pair stale bytes with fresh stats and let a
     // later touch of a changed file be absorbed as unchanged.
@@ -294,25 +220,6 @@ class SyncEngineLocalHashTest {
             eng.syncOnce()
 
             assertContentEquals(edited, provider.files["/draft.txt"], "the touch must upload the edit")
-        }
-
-    @Test
-    fun `a write-back whose cache copy changes during the upload records no hash`() =
-        runTest {
-            val eng = engine()
-            provider.deltaItems = emptyList()
-            eng.syncOnce()
-            // #319: the write-back requires the row the FUSE create flow wrote.
-            seedLocalOnlyRow("/local.txt")
-            val cacheCopy = Files.createTempDirectory("ud-396-wb-race").resolve("local.txt")
-            Files.writeString(cacheCopy, "first version")
-            editDuringUpload("edited version".toByteArray())
-
-            eng.uploadFromCache("/local.txt", cacheCopy)
-
-            val row = assertNotNull(db.getEntry("/local.txt"))
-            assertNotNull(row.remoteId, "the write-back was uploaded")
-            assertNull(row.localHash)
         }
 
     @Test

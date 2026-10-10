@@ -22,6 +22,8 @@ dependencies {
     // #560 U3: the tests build hydration on a SyncEngine (the host of the shared core today) through
     // HydrationImpl's compatibility constructor. Test scope only.
     testImplementation(project(":app:sync"))
+    // The engine test fakes (FakeCloudProvider) the mount-operation tests share with :app:sync.
+    testImplementation(testFixtures(project(":app:sync")))
 }
 
 tasks.test {

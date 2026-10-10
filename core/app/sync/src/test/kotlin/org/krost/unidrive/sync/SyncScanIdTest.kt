@@ -32,7 +32,7 @@ class SyncScanIdTest {
         db.initialize()
         engine =
             SyncEngine(
-                provider = SyncEngineTest.FakeCloudProvider(),
+                provider = FakeCloudProvider(),
                 db = db,
                 syncRoot = syncRoot,
                 conflictPolicy = ConflictPolicy.KEEP_BOTH,
@@ -58,7 +58,7 @@ class SyncScanIdTest {
     @Test
     fun `syncOnce clears scan MDC on exception`() =
         runTest {
-            val failingProvider = SyncEngineTest.FakeCloudProvider()
+            val failingProvider = FakeCloudProvider()
             failingProvider.deltaFailCount = 999 // fail every call
             val failingEngine =
                 SyncEngine(
@@ -138,7 +138,7 @@ class SyncScanIdTest {
                 }
             val e =
                 SyncEngine(
-                    provider = SyncEngineTest.FakeCloudProvider(),
+                    provider = FakeCloudProvider(),
                     db = db,
                     syncRoot = syncRoot,
                     conflictPolicy = ConflictPolicy.KEEP_BOTH,

@@ -28,7 +28,7 @@ import kotlin.test.*
 class OneDriveAccessRevokedTombstoneTest {
     private lateinit var syncRoot: Path
     private lateinit var db: StateDatabase
-    private lateinit var provider: SyncEngineTest.FakeCloudProvider
+    private lateinit var provider: FakeCloudProvider
 
     @BeforeTest
     fun setUp() {
@@ -36,7 +36,7 @@ class OneDriveAccessRevokedTombstoneTest {
         val dbPath = Files.createTempDirectory("ud-183-db").resolve("state.db")
         db = StateDatabase(dbPath)
         db.initialize()
-        provider = SyncEngineTest.FakeCloudProvider()
+        provider = FakeCloudProvider()
     }
 
     @AfterTest
