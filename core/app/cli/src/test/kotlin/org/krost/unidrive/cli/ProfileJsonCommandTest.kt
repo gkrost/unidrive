@@ -334,9 +334,9 @@ class ProfileJsonCommandTest {
     fun `the commands leave only config toml behind and start no daemon`() {
         writeConfig(twoProfiles)
 
-        run("profile", "list", "--json")
-        run("profile", "set", "work", "label", "x", "--json")
-        run("profile", "set", "nope", "label", "x", "--json")
+        assertEquals(0, run("profile", "list", "--json"), "list succeeds")
+        assertEquals(0, run("profile", "set", "work", "label", "x", "--json"), "set on an existing profile succeeds")
+        assertEquals(1, run("profile", "set", "nope", "label", "x", "--json"), "set on a missing profile is refused")
 
         val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.toList() }
         assertEquals(listOf("config.toml"), names, "no profile folder, socket, token file or temp file appears")
