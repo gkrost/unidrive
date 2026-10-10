@@ -67,21 +67,11 @@ class EnumeratePoller(
     private val reachable = Channel<Unit>(Channel.CONFLATED)
 
     /**
-     * #658: when something last proved that the provider answers (epoch ms of the last
-     * [providerReachable]), null until then. A failure never moves it: it is the last success, which
-     * `daemon.status` reports as the provider's last contact next to the enumeration's own.
-     */
-    @Volatile
-    var lastReachableAtMs: Long? = null
-        private set
-
-    /**
      * #463: something proved that the provider answers (a download or upload through the daemon
      * succeeded). Cuts a back-off short; no effect outside one. Never starts more than one poll per
      * plain interval.
      */
     fun providerReachable() {
-        lastReachableAtMs = clock()
         reachable.trySend(Unit)
     }
 

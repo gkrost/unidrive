@@ -481,7 +481,7 @@ class DaemonRuntime(
                         (uploads?.let { ",\"uploads\":${it.toJson()}" } ?: "") + ",\"cache\":${h.cacheHealth().toJson()}"
                     } ?: ""
                     val providerHealth = providerHealthJson(
-                        lastProviderContactMs(enumerationStatus.lastSuccessAtMs, pollerRef?.lastReachableAtMs),
+                        lastProviderContactMs(enumerationStatus.lastSuccessAtMs, mount.lastProviderContactAtMs),
                     )
                     // mode + capabilities (#603 U4): what this daemon serves, so a client can check the
                     // hosting contract before it sends a verb the profile refuses (additive, read-only).

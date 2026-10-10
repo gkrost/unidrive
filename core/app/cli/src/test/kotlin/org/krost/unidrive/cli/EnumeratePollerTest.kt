@@ -501,28 +501,6 @@ class EnumeratePollerTest {
         scope.cancel()
     }
 
-    // #658: the last time something proved that the provider answers; a failed enumeration does not move it.
-    @Test
-    fun `providerReachable stamps the last contact and a later failure leaves it`() = runTest {
-        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
-        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = false, error = "provider boom"))
-        val handler = EnumerateRpcHandler(engine, scope, emit = {})
-        var now = 5_000L
-        val poller = EnumeratePoller(handler = handler, intervalMs = intervalMs, scope = scope, jitter = { it }, clock = { now }, firstPollDelayMs = intervalMs)
-        assertEquals(null, poller.lastReachableAtMs, "nothing proved yet: unknown")
-
-        poller.providerReachable()
-        assertEquals(5_000L, poller.lastReachableAtMs)
-
-        poller.start()
-        now = 9_000L
-        advanceTimeBy(stepOneInterval())
-        runCurrent()
-        assertEquals(1, engine.enumerateCount.get(), "the outage is being polled")
-        assertEquals(5_000L, poller.lastReachableAtMs, "a failure is not a contact")
-        scope.cancel()
-    }
-
     @Test
     fun `the last provider contact is the later of the enumeration and the transfer, and unknown only when both are`() {
         assertEquals(null, lastProviderContactMs(null, null))

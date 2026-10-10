@@ -580,6 +580,9 @@ internal class HydrationTestEnv(
         /** Resolves a path to its cache location. */
         fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
 
+        /** #658: the mount's last real provider round trip (a warm-cache serve does not move it). */
+        fun lastProviderContactAtMs(): Long? = syncEngine.mount.lastProviderContactAtMs
+
         /** Folders the provider was asked to create (scope-guard assertions). */
         fun createdFolders(): List<String> = fakeProvider.createdFolders
 
@@ -1282,6 +1285,22 @@ class HydrationImplTest {
 
         assertEquals(HydrateResult.Ok, r)
         assertEquals(true, env.stateDb.isHydrated("/foo.txt"))
+    }
+
+    @Test
+    fun `a warm hydrate does not move the provider contact but a real download does`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/foo.txt", "hello")
+        assertNull(env.syncEngine.lastProviderContactAtMs(), "no round trip yet: unknown, never a default")
+
+        assertEquals(HydrateResult.Ok, env.hydration.hydrate("/foo.txt"))
+        val afterDownload = assertNotNull(env.syncEngine.lastProviderContactAtMs(), "a real download is a provider contact")
+
+        // The row is hydrated now; a second hydrate serves the warm cache with no provider call, so
+        // daemon.status must not report a fresh contact (an outage would otherwise look healthy).
+        assertEquals(HydrateResult.Ok, env.hydration.hydrate("/foo.txt"))
+        assertEquals(afterDownload, env.syncEngine.lastProviderContactAtMs(), "a warm-cache serve is not a round trip")
     }
 
     @Test
