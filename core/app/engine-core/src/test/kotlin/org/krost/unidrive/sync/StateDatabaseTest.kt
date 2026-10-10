@@ -574,17 +574,17 @@ class StateDatabaseTest {
         }
     }
 
-    /** The plan SQLite reports for [sql] with one bound [param], read through a connection of its own. */
+    /** The plan SQLite reports for [sql] with [params] bound in order, read through a connection of its own. */
     private fun queryPlan(
         database: StateDatabase,
         sql: String,
-        param: String,
+        vararg params: String,
     ): String {
         val dbPath = database.javaClass.getDeclaredField("dbPath")
             .apply { isAccessible = true }.get(database) as java.nio.file.Path
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
             conn.prepareStatement("EXPLAIN QUERY PLAN $sql").use { stmt ->
-                stmt.setString(1, param)
+                params.forEachIndexed { i, p -> stmt.setString(i + 1, p) }
                 val rs = stmt.executeQuery()
                 val plan = StringBuilder()
                 while (rs.next()) plan.append(rs.getString("detail")).append("\n")
@@ -608,6 +608,26 @@ class StateDatabaseTest {
             "expected an index search on the effective remote path; got plan:\n$plan",
         )
         assertEquals("/p/file3.txt", db.getEntryByRemotePath("/p/file3.txt")?.path)
+    }
+
+    @Test
+    fun `EXPLAIN QUERY PLAN for direct children of a path is an index seek`() {
+        // #727: the listing filtered on substr(path, 1, length(?))=?, which is not sargable, so every folder
+        // listing read every alive row while holding the instance monitor — a scan of the 145k-row live
+        // table for a handful of children, with hydration list replies queued behind it for seconds. The
+        // path range must resolve to a seek on the alive-path index. No ANALYZE here, for the reason given
+        // in the parent_uuid plan test above.
+        db.upsertEntry(entry("/p", isFolder = true))
+        db.upsertEntry(entry("/p/a.txt"))
+        db.upsertEntry(entry("/p/deep/b.txt"))
+        db.upsertEntry(entry("/other.txt"))
+
+        val plan = queryPlan(db, StateDatabase.DIRECT_CHILDREN_BY_PATH, "/p/", "/p0", "/p/")
+
+        assertTrue(
+            "SEARCH" in plan && "idx_sync_entries_path_alive" in plan && "SCAN" !in plan,
+            "expected an index seek for the direct children of a path; got plan:\n$plan",
+        )
     }
 
     @Test

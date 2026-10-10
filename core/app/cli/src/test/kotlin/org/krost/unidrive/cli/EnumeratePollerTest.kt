@@ -500,4 +500,13 @@ class EnumeratePollerTest {
         assertEquals(0, engine.enumerateCount.get(), "--poll-interval 0 → no poll loop")
         scope.cancel()
     }
+
+    @Test
+    fun `the last provider contact is the later of the enumeration and the transfer, and unknown only when both are`() {
+        assertEquals(null, lastProviderContactMs(null, null))
+        assertEquals(10L, lastProviderContactMs(10L, null))
+        assertEquals(20L, lastProviderContactMs(null, 20L))
+        assertEquals(30L, lastProviderContactMs(30L, 20L))
+        assertEquals(30L, lastProviderContactMs(10L, 30L))
+    }
 }

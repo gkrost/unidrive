@@ -87,6 +87,17 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
+# Processes still running the previous jar from this install, not started by a unit. Captured while the
+# active units are stopped: a service daemon restarted further down must not be mistaken for one of
+# these. A hand-started JVM is safe (it holds the old jar's inode) but keeps the old code until restarted.
+STALE_PIDS=()
+for cmdline in /proc/[0-9]*/cmdline; do
+    pid="${cmdline#/proc/}"; pid="${pid%/cmdline}"
+    if [[ "${pid}" != "$$" ]] && { tr '\0' ' ' < "${cmdline}"; } 2>/dev/null | grep -qF -- "-jar ${INSTALL_LIB}/unidrive"; then
+        STALE_PIDS+=("${pid}")
+    fi
+done
+
 echo "Installing UniDrive..."
 
 # JAR
@@ -166,15 +177,6 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-# Anything still running from this install was not started by a service. It is safe (it holds the old jar's
-# inode) but keeps the old code until restarted.
-STALE_PIDS=()
-for cmdline in /proc/[0-9]*/cmdline; do
-    pid="${cmdline#/proc/}"; pid="${pid%/cmdline}"
-    if [[ "${pid}" != "$$" ]] && { tr '\0' ' ' < "${cmdline}"; } 2>/dev/null | grep -qF -- "-jar ${INSTALL_LIB}/unidrive"; then
-        STALE_PIDS+=("${pid}")
-    fi
-done
 if [[ ${#STALE_PIDS[@]} -gt 0 ]]; then
     echo ""
     echo "NOTE: still running the previous jar (pid ${STALE_PIDS[*]}); restart it to pick up the new code:"

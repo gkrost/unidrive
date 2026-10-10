@@ -53,6 +53,8 @@
     <ID>SwallowedException:Main.kt$Main$e: javax.crypto.AEADBadTagException</ID>
     <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: Exception</ID>
     <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: IOException</ID>
+    <ID>SwallowedException:ProfileSettings.kt$ProfileSetCommand$e: IOException</ID>
+    <ID>SwallowedException:ProfileSettings.kt$ProfileSettings$e: IllegalArgumentException</ID>
     <ID>SwallowedException:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
     <ID>SwallowedException:RelocateCommandTest.kt$RelocateCommandTest$e: RuntimeException</ID>
     <ID>SwallowedException:WindowsArgv.kt$WindowsArgv$e: Throwable</ID>
@@ -62,6 +64,8 @@
     <ID>ThrowsCount:Main.kt$Main$private fun loadVaultData(): Map&lt;String, Map&lt;String, String&gt;&gt;</ID>
     <ID>ThrowsCount:ProfileCreate.kt$ProfileCreator$fun create( configDir: Path, req: NewProfile, ): JsonObject</ID>
     <ID>ThrowsCount:ProfileCreate.kt$ProfileCreator$private fun credentialsFromOptions( prompts: List&lt;org.krost.unidrive.PromptSpec&gt;, options: List&lt;String&gt;, ): Map&lt;String, String&gt;</ID>
+    <ID>ThrowsCount:ProfileSettings.kt$ProfileSetCommand$private fun applyChange(): JsonObject</ID>
+    <ID>ThrowsCount:ProfileSettings.kt$ProfileSettings$private fun syncPathToml( profile: String, raw: String, ): String</ID>
     <ID>ThrowsCount:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
     <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthBeginCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthCompleteCommand$e: Exception</ID>
@@ -78,6 +82,7 @@
     <ID>TooGenericExceptionCaught:LegacyInventory.kt$LegacyInventory$e: Exception</ID>
     <ID>TooGenericExceptionCaught:Main.kt$e: Exception</ID>
     <ID>TooGenericExceptionCaught:ProfileCreate.kt$ProfileCreator$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:ProfileCommand.kt$ProfileListCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:QuotaCommand.kt$QuotaCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$e: Exception</ID>
     <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$t: Throwable</ID>

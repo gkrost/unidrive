@@ -142,7 +142,7 @@ This spec introduces `unidrive daemon` — a per-profile, long-lived JVM that ow
 - **`DaemonStatusCommand` (new)** — reads `~/.config/unidrive/<profile>/.lock.pid`. If absent, prints "no daemon running for profile '<X>'" to stderr and exits 1. If present, prints `pid <N>, mode <X>` immediately from the file, THEN attempts to RPC the daemon for the richer fields (uptime, refresh-in-flight, clients connected). If the RPC fails (daemon mid-shutdown, socket gone), still prints the file-derived data plus a "daemon socket unreachable" note. Read-only; never acquires the lock.
 - **`DaemonStopCommand` (new)** — reads `.lock.pid`. If absent, prints "no daemon running" + exit 0 (idempotent stop). If present and mode is `daemon`, sends `SIGTERM` to the PID, waits up to 12s (10s grace + 2s buffer), reports outcome. Does not acquire the lock itself. If mode is not `daemon` (e.g. `sync`), refuses with a clear error.
 - **`RefreshCommand` (existing, refactored)** — becomes a thin client. Connects to the daemon socket; issues `sync.subscribe` first; then issues `refresh.run`; subscribes to progress events; prints them to stdout; exits when the daemon emits the `refresh.done` terminal event. If `Connection refused`, prints a clear error pointing at `unidrive daemon run`. The pre-existing standalone-JVM refresh path (calling `SyncCommand.run()` with `skipTransfers=true`) is removed from `RefreshCommand`; that code body moves into the daemon's `RefreshRpcHandler`.
-- **`MountCommand` (existing, modified)** — removes the `parent.acquireProfileLockForMount()` call. Still constructs the socket path via `IpcServer.defaultSocketPath(profile.name)`. Still supervises the Rust co-daemon subprocess. On co-daemon exit with `Connection refused` stderr, prints a clear error pointing at `unidrive daemon run`. Otherwise unchanged.
+- **`MountCommand` (existing, modified)** — removes the `parent.acquireProfileLockForMount()` call. Still constructs the socket path via `IpcServer.defaultSocketPath(profile.name)`. Still supervises the Rust co-daemon subprocess. On a non-zero co-daemon exit, runs one authenticated `daemon.status` round-trip and words the hint from the result (running-and-answering / socket-present-but-silent / not-running; #202). Otherwise unchanged.
 - **`ProcessLock.Mode` (existing, modified at `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ProcessLock.kt`)** — `enum class Mode { SYNC, DAEMON }`. The `MOUNT` value is removed. The unknown-mode forward-compat path (already implemented at the `readHolderInfo()` reader per spec mount-sync-mode-mutex-design.md §3.1) handles any pre-existing `.lock.pid` files containing `mount` token gracefully: `HolderInfo(mode=null, rawMode="mount")`. The contention error names it verbatim ("Profile 'X' is held by an unidrive process running in unknown mode 'mount' — this binary may be older than the holder"), which is honest if a downgrade ever happens.
 - **`Main.acquireProfileLock()` (existing, modified)** — keeps Mode.SYNC acquisition. The mount-holder branch becomes a daemon-holder branch (renders "currently in use by `unidrive daemon`"). The unknown-mode branch handles legacy `mount` token gracefully.
 - **`Main.acquireProfileLockForMount()` (existing, REMOVED)** — no longer needed. Mount does not acquire the profile lock at all.
@@ -172,15 +172,30 @@ operator:  mkdir /tmp/onedrive/new_folder                 # works → folder cre
 operator:  echo hello > /tmp/onedrive/new_file.txt        # works → uploaded
 ```
 
-**Daemon-not-running error path:**
+**Co-daemon exit error path** (#202): the co-daemon's inherited stderr already says why it stopped.
+After a non-zero co-daemon exit the engine runs one authenticated `daemon.status` round-trip and words
+its hint from the result, so it claims the daemon is down only when the status check says so:
 
 ```
 operator:  unidrive mount posteo_onedrive /tmp/onedrive
 co-daemon: [Rust] failed to connect IPC at /run/user/1000/unidrive-posteo_onedrive.sock:
               io: Connection refused (os error 111)
-mount:     unidrive mount: daemon for profile 'posteo_onedrive' is not running.
-mount:     Start it first: `unidrive daemon run posteo_onedrive` (in another terminal).
-exit 1.
+
+# the daemon is running and answering → the cause is the co-daemon's own
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           is running and answering, so the cause is the co-daemon's own (see its output above; run
+           again with RUST_LOG=debug for more).
+
+# the socket file is present but silent → it may still be starting, or the socket is stale
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           has a socket but did not answer: it may still be starting (run the mount again in a
+           moment) or a killed daemon left a stale socket (check `unidrive -p posteo_onedrive
+           daemon status`).
+
+# no socket file at all → the only case that claims the daemon is down
+mount:     unidrive mount: co-daemon exited with code 1. The daemon for profile 'posteo_onedrive'
+           is not running. Start it with: `unidrive -p posteo_onedrive daemon run`.
+exit <the co-daemon's exit code, unchanged>.
 ```
 
 ## 4. Wire contract
@@ -314,6 +329,29 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 The reply also carries `poll_interval_ms` (additive, #463): the effective interval of the remote poll in ms, `0` when it is off. The poll's schedule after a failure is `enumeration.next_attempt_at_ms`.
 
 A running enumeration is answered from memory, never from state.db, so a status request does not wait for the batch that saves the result.
+
+**The `uploads`, `cache` and `provider_health` objects** (additive, #658; the protocol version does not change). They are the engine's own account of "is everything uploaded?", which a front-end cannot work out from its own journal: the engine knows its start-up replays, its keep-local rows and its stuck uploads. A value the daemon does not have is `null`, or the whole object is absent, never `0` and never a "healthy" default.
+
+```json
+{
+  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000},
+  "cache": {"bytes": 1288490188, "budget_bytes": 21474836480},
+  "provider_health": {"last_contact_ms": 1700000000000}
+}
+```
+
+| field | meaning |
+|---|---|
+| `uploads` | mount profiles only; absent on a mirror profile (no hydration layer) and until the upload queue has been read once after the start |
+| `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local (`exclude_patterns`) rows and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
+| `uploads.in_flight` | transfer attempts that hold a transfer permit right now (a subset of `pending`); a path waiting for its turn, for the transfer budget or in a retry backoff is pending but not in flight |
+| `uploads.failed` | never-uploaded rows with a failed attempt on record (a subset of `pending`); a daemon restart replays them |
+| `uploads.oldest_pending_age_ms` | how long the oldest pending path has been waiting (ms), `null` when nothing is pending. A never-uploaded row waits since it was written, a dirty overwrite since its upload was submitted, so a stalled upload's age keeps growing from one status reply to the next |
+| `cache.bytes` | size of the profile's hydration cache directory (every regular file, protected or not: what the budget eviction counts) at the last walk; `null` until the first walk. A walk runs after the start and at most once per 10 s on a status request, never inside it |
+| `cache.budget_bytes` | `hydration_cache_max_bytes`; `null` when the profile has no budget (unlimited). `bytes` above the budget is possible: copies that are open, uploading, failed or modified are never evicted |
+| `provider_health.last_contact_ms` | epoch ms of the last time the provider answered: the later of the last completed enumeration (`enumeration.last_success_at_ms`) and the last mount-profile download or upload through the daemon that succeeded (a warm-cache serve is not a round trip). A mirror profile has no hydration layer, so only its enumerations stamp it. `null` until the first success since the daemon started. A failure or an outage never moves it, so a client words an outage as "last contact N minutes ago" |
+
+`uploads` is read from state.db at most once per second, and a status request waits for that read for 100 ms at most (1 s for the very first one): an enumeration's save holds the database for as long as it takes, and the reply serves the previous reading (its `oldest_pending_age_ms` carried forward to now) instead of stalling behind it.
 
 ### 4.4 `sync.subscribe` (existing, unchanged semantics)
 
@@ -450,10 +488,11 @@ unidrive daemon stop posteo_onedrive
 # Expected: daemon exits cleanly in <10s, mount terminal A's mount exits (co-daemon
 # notices socket gone, FUSE unmounts).
 
-# 7. Daemon-not-running error path (terminal D)
+# 7. Co-daemon exit error path (terminal D)
 unidrive mount posteo_onedrive /tmp/onedrive-smoke
-# Expected: exit 1, stderr "daemon for profile 'posteo_onedrive' is not running.
-# Start it first: unidrive daemon run posteo_onedrive"
+# Expected: exit <co-daemon exit code>, stderr "unidrive mount: co-daemon exited with code <N>.
+# The daemon for profile 'posteo_onedrive' is not running. Start it with:
+# `unidrive -p posteo_onedrive daemon run`." (no socket exists; see §3.4 for the other two wordings)
 ```
 
 If any step diverges from the expected output, file the divergence as a finding before merge.

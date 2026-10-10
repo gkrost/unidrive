@@ -860,18 +860,20 @@ class StateDatabase(
      * with no further slashes. Path-based, not parent_uuid-based: the
      * hydration SPI's caller (FUSE co-daemon) addresses everything by path
      * and folder rows aren't always populated when leaf rows are.
+     *
+     * The path range is the index seek (#727): the old `substr(path, 1, length(?)) = ?` prefix test is not
+     * sargable, so a folder listing read every alive row (145k for a six-row answer) while holding the
+     * instance monitor, and hydration `list` replies waited seconds behind it. The child test below still
+     * counts characters in SQL, never Kotlin's UTF-16 units (#489), and the range comparison is BINARY, so
+     * it stays exact about case (#490) and non-BMP names.
      */
     @Synchronized
     fun listDirectChildren(parentPathRaw: String): List<SyncEntry> {
         val parentPath = PathNormalizer.nfc(parentPathRaw)
         val base = if (parentPath.isEmpty()) "/" else "$parentPath/"
-        // #489: the child test slices in SQL, with SQL's own length(): SQLite's substr and length count characters,
-        // Kotlin's String.length counts UTF-16 units, and mixing the two let grandchildren through below non-BMP names.
-        conn.prepareStatement(
-            "SELECT * FROM alive_entries WHERE $UNDER_PREFIX " +
-                "AND instr(substr(path, length(?) + 1), '/') = 0",
-        ).use { stmt ->
-            stmt.bindPrefix(1, base)
+        conn.prepareStatement(DIRECT_CHILDREN_BY_PATH).use { stmt ->
+            stmt.setString(1, base)
+            stmt.setString(2, prefixUpperBound(base))
             stmt.setString(3, base)
             val rs = stmt.executeQuery()
             val entries = mutableListOf<SyncEntry>()
@@ -879,6 +881,15 @@ class StateDatabase(
             return entries
         }
     }
+
+    /**
+     * The exclusive upper bound of the paths under [prefix], which must end with '/': the trailing '/' advanced
+     * to '0', the next byte in BINARY collation. `path >= prefix AND path < prefixUpperBound(prefix)` is exactly
+     * "path starts with prefix" (every string in the range shares the prefix; anything without it sorts at or
+     * above the bound), and unlike `substr(path, 1, length(?)) = ?` it can seek `idx_sync_entries_path_alive`
+     * instead of scanning every alive row (#727, #489).
+     */
+    private fun prefixUpperBound(prefix: String): String = prefix.dropLast(1) + "0"
 
     @Synchronized
     fun getEntriesByPrefix(prefixRaw: String): List<SyncEntry> {
@@ -958,7 +969,7 @@ class StateDatabase(
         // matched nothing. Under BINARY collation every path that starts with "<folder>/" sorts in
         // ["<folder>/", "<folder>0") — '0' is the character after '/' — and the range can use the
         // alive-path index.
-        val upperBound = prefix.dropLast(1) + "0"
+        val upperBound = prefixUpperBound(prefix)
         conn.prepareStatement(
             "UPDATE sync_entries SET status = 'DELETED' WHERE status = 'EXISTS' AND path >= ? AND path < ?",
         ).use { stmt ->
@@ -1166,6 +1177,38 @@ class StateDatabase(
         conn.createStatement().use { stmt ->
             val rs = stmt.executeQuery("SELECT path FROM sync_entries WHERE $PENDING_UPLOAD_ROWS ORDER BY path")
             while (rs.next()) out += rs.getString(1)
+        }
+        return out
+    }
+
+    /**
+     * One row awaiting upload, as [pendingUploadRows] reports it: when it was written ([lastSynced]) and
+     * when an upload of it last failed ([lastErrorAt], null = no attempt has failed since).
+     */
+    data class PendingUploadRow(
+        val path: String,
+        val lastSynced: Instant,
+        val lastErrorAt: Instant?,
+    )
+
+    /**
+     * The rows [pendingUploadPaths] names, with the two stamps the daemon's upload health (#658) reads: how
+     * long a row has been waiting (a `local:` row is written once, so `last_synced` is when its content
+     * first existed only on this machine) and whether an attempt failed. Unordered; the caller aggregates.
+     */
+    @Synchronized
+    fun pendingUploadRows(): List<PendingUploadRow> {
+        val out = mutableListOf<PendingUploadRow>()
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT path, last_synced, last_error_at FROM sync_entries WHERE $PENDING_UPLOAD_ROWS")
+            while (rs.next()) {
+                out +=
+                    PendingUploadRow(
+                        path = rs.getString(1),
+                        lastSynced = IsoInstants.parse(rs.getString(2)),
+                        lastErrorAt = rs.getString(3)?.let { IsoInstants.parse(it) },
+                    )
+            }
         }
         return out
     }
@@ -1736,6 +1779,15 @@ class StateDatabase(
 
         /** `path` starts with the bound prefix, exactly (see [bindPrefix]): two parameters, both the prefix. */
         private const val UNDER_PREFIX = "substr(path, 1, length(?)) = ?"
+
+        /**
+         * The direct children of a path. The range is the sargable form of the prefix test (see
+         * [prefixUpperBound]); the second half then cuts the range to one level, with SQL's own character
+         * counting (#489). Three parameters: base prefix, exclusive upper bound, base prefix.
+         */
+        internal const val DIRECT_CHILDREN_BY_PATH =
+            "SELECT * FROM alive_entries WHERE path >= ? AND path < ? " +
+                "AND instr(substr(path, length(?) + 1), '/') = 0"
 
         /**
          * The lookup by effective remote path. Its expression and the `alive_entries` predicate are those of

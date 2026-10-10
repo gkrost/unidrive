@@ -1,5 +1,9 @@
 package org.krost.unidrive.cli
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.krost.unidrive.ProviderMetadata
 import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.SyncConfig
@@ -24,6 +28,7 @@ import java.util.concurrent.Callable
         ProfileAddCommand::class,
         ProfileListCommand::class,
         ProfileRemoveCommand::class,
+        ProfileSetCommand::class,
     ],
 )
 class ProfileCommand : Runnable {
@@ -31,7 +36,7 @@ class ProfileCommand : Runnable {
     lateinit var parent: Main
 
     override fun run() {
-        println("Usage: unidrive profile <add|list|remove>")
+        println("Usage: unidrive profile <add|list|set|remove>")
     }
 }
 
@@ -328,50 +333,109 @@ internal fun isOfficialInternxtClientFolder(fileName: String): Boolean =
 // ── profile list ─────────────────────────────────────────────────────────────
 
 @Command(name = "list", description = ["List configured profiles"], mixinStandardHelpOptions = true)
-class ProfileListCommand : Runnable {
+class ProfileListCommand : Callable<Int> {
     @ParentCommand
     lateinit var profileCmd: ProfileCommand
 
-    override fun run() {
+    @Option(
+        names = ["--json"],
+        description = [
+            "Print the profiles as one JSON object: {\"default_profile\":...,\"profiles\":[{name, type, mode, label, " +
+                "sync_root, sync_path, hydration_cache_max_bytes, daemon_poll_seconds, auth}]}. Read-only; " +
+                "unknown values are null, never a made-up default.",
+        ],
+    )
+    var json: Boolean = false
+
+    override fun call(): Int {
         val main = profileCmd.parent
         val configPath = main.configBaseDir().resolve("config.toml")
         val raw =
-            if (Files.exists(configPath)) {
-                SyncConfig.parseRaw(Files.readString(configPath), configPath.toString())
-            } else {
-                SyncConfig.parseRaw("[general]\n")
+            try {
+                if (Files.exists(configPath)) {
+                    SyncConfig.parseRaw(Files.readString(configPath), configPath.toString())
+                } else {
+                    SyncConfig.parseRaw("[general]\n")
+                }
+            } catch (e: Exception) {
+                if (!json) throw e
+                // The parser's message can quote the offending config line, which may hold a credential.
+                printJson(errorJson(ProfileCommandError("config_invalid", "config.toml could not be parsed")))
+                return 1
             }
+        if (json) {
+            printJson(profilesJson(main, raw))
+            return 0
+        }
 
         if (raw.providers.isEmpty()) {
             println("No profiles configured.")
             println("Add one with: unidrive profile add")
-            return
+            return 0
         }
 
         println("%-20s %-10s %-30s %s".format("PROFILE", "TYPE", "SYNC ROOT", "AUTH"))
         println(GlyphRenderer.boxHorizontal().repeat(75))
-        val baseDir = main.configBaseDir()
         val dash = GlyphRenderer.dash()
         for ((name, rp) in raw.providers.toSortedMap()) {
             val type = rp.type ?: name
             val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
-            val authed = isProfileAuthenticated(type, name, rp, baseDir)
-            // Credentials on disk aren't proof they still work: an expired
-            // Internxt JWT is still a credentials.json.
-            val usable =
-                authed &&
-                    !credentialNeedsReauth(
-                        main.checkCredentialHealth(ProfileInfo(name, type, Path.of(syncRoot), rp), baseDir.resolve(name)),
-                    )
             val authLabel =
-                when {
-                    usable -> AnsiHelper.green(GlyphRenderer.tick())
-                    authed -> AnsiHelper.yellow("${GlyphRenderer.warn()} expired")
+                when (authState(main, name, rp)) {
+                    "ok" -> AnsiHelper.green(GlyphRenderer.tick())
+                    "expired" -> AnsiHelper.yellow("${GlyphRenderer.warn()} expired")
                     else -> AnsiHelper.dim(dash)
                 }
             println("%-20s %-10s %-30s %s".format(name, type, syncRoot, authLabel))
         }
+        return 0
     }
+
+    /**
+     * `ok` (credentials present and usable), `expired` (present but they need a re-auth: an expired
+     * Internxt JWT is still a credentials.json) or `none` (no credentials on disk).
+     */
+    private fun authState(
+        main: Main,
+        name: String,
+        rp: org.krost.unidrive.sync.RawProvider,
+        useVault: Boolean = true,
+    ): String {
+        val baseDir = main.configBaseDir()
+        val type = rp.type ?: name
+        if (!isProfileAuthenticated(type, name, rp, baseDir)) return "none"
+        val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
+        // A sync_root that is not a path on this system must not abort the whole listing (and with it
+        // the JSON): the credential check looks at the profile folder, the root only fills the record.
+        val rootPath = runCatching { Path.of(syncRoot) }.getOrElse { baseDir.resolve(name) }
+        val health = main.checkCredentialHealth(ProfileInfo(name, type, rootPath, rp), baseDir.resolve(name), useVault)
+        return if (credentialNeedsReauth(health)) "expired" else "ok"
+    }
+
+    private fun profilesJson(
+        main: Main,
+        raw: org.krost.unidrive.sync.RawSyncConfig,
+    ): JsonObject =
+        buildJsonObject {
+            put("default_profile", raw.general.default_profile?.takeIf { it.isNotBlank() })
+            put(
+                "profiles",
+                JsonArray(
+                    raw.providers.toSortedMap().map { (name, rp) ->
+                        val type = rp.type ?: name
+                        buildJsonObject {
+                            put("name", name)
+                            put("type", type)
+                            // Absent stays absent: a modeless profile is reported as such, never defaulted.
+                            put("mode", rp.mode)
+                            put("sync_root", rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString())
+                            for (spec in ProfileSettings.SPECS) put(spec.key, spec.read(rp))
+                            put("auth", authState(main, name, rp, useVault = false))
+                        }
+                    },
+                ),
+            )
+        }
 }
 
 // ── profile remove ───────────────────────────────────────────────────────────
