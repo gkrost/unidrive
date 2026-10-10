@@ -270,9 +270,31 @@ class MountEngine private constructor(
      * version the row knows. The caller still owes the open-handle and queued-upload checks, which
      * only the hydration layer can see.
      */
-    fun cacheDisposition(path: String): CacheDisposition {
-        val entry = db.getEntry(path) ?: return CacheDisposition.PROTECTED
-        if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) return CacheDisposition.PROTECTED
+    fun cacheDisposition(path: String): CacheDisposition = dispositionOf(path, db.getEntry(path))
+
+    /**
+     * #728: [cacheDisposition] for a row the caller already loaded in a batch (`StateDatabase.getEntriesByPaths`).
+     * The eviction pass asks about a whole LRU slice with ONE query instead of one per cache file; the
+     * per-file checks (existence, size, mtime and, only for a copy no baseline vouches for, the content
+     * hash) stay here and run with no database monitor held.
+     *
+     * [entry] is the row as the caller last read it and may be stale: this answers "is this copy worth
+     * asking about" only. [evictCacheCopy] re-runs the same classification against the row and the bytes
+     * it is about to delete, under the path's hydration lock, so nothing is ever deleted on stale data.
+     */
+    fun cacheDisposition(
+        path: String,
+        entry: SyncEntry?,
+    ): CacheDisposition = dispositionOf(path, entry)
+
+    private fun dispositionOf(
+        path: String,
+        entry: SyncEntry?,
+    ): CacheDisposition {
+        if (entry == null) return CacheDisposition.PROTECTED
+        if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) {
+            return CacheDisposition.PROTECTED
+        }
         val cache = rowCachePath(path) ?: return CacheDisposition.PROTECTED
         return try {
             if (!Files.isRegularFile(cache)) return CacheDisposition.PROTECTED
@@ -317,8 +339,10 @@ class MountEngine private constructor(
         onUnhydrated: (String) -> Unit = {},
     ): Long? =
         hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock {
-            if (cacheDisposition(path) == CacheDisposition.PROTECTED) return@withLock null
+            // #728: one row read decides both the classification and the baseline question below: this
+            // is the re-check that counts, so it must not ask the database twice per evicted file.
             val entry = db.getEntry(path) ?: return@withLock null
+            if (dispositionOf(path, entry) == CacheDisposition.PROTECTED) return@withLock null
             val cache = rowCachePath(path) ?: return@withLock null
             val size = runCatching { Files.size(cache) }.getOrNull() ?: return@withLock null
             val mtime = runCatching { Files.getLastModifiedTime(cache).toMillis() }.getOrNull() ?: return@withLock null

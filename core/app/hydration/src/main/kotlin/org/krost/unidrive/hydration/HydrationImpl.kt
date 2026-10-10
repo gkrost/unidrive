@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class HydrationImpl(
     // #560 U3: the mount operations (hydrate, upload, remote create/delete/rename) run on the mount
@@ -75,6 +76,9 @@ class HydrationImpl(
     // #450: after a close or an upload completion the eviction pass runs once this much later, one
     // pass for any number of triggers (it walks the whole cache directory). 0 = immediately.
     private val evictionDelayMs: Long = EVICTION_DELAY_MS,
+    // #728: at most one triggered walk per this interval (see [EVICTION_MIN_INTERVAL_MS]). 0 = a
+    // trigger walks whenever the pass is due (tests of the accounting alone).
+    private val evictionMinIntervalMs: Long = EVICTION_MIN_INTERVAL_MS,
     // #493: a row whose last upload attempt failed is replayed this much after the start instead of at once, so work
     // that can succeed (and the client's fresh writes) goes first. 0 = replay at once, as before.
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
@@ -82,6 +86,12 @@ class HydrationImpl(
 
     /** Test seam to hold a startup cache scan in flight and verify cancellation between entries. */
     internal var cacheScanCheckpoint: () -> Unit = {}
+
+    /** Test seam (#728): how many full walks of the cache directory this instance made. */
+    internal val cacheWalkCount = AtomicInteger(0)
+
+    /** Test seam (#728): fired with the size of each row batch one eviction pass asks the database about. */
+    internal var onDispositionBatch: (Int) -> Unit = {}
 
     /** Cancel and join all background work owned by this hydration layer before its state DB closes. */
     suspend fun shutdownUploads() {
@@ -105,6 +115,7 @@ class HydrationImpl(
         cacheMaxBytes: Long = DEFAULT_CACHE_MAX_BYTES,
         cacheAccessGraceMs: Long = CACHE_ACCESS_GRACE_MS,
         evictionDelayMs: Long = EVICTION_DELAY_MS,
+        evictionMinIntervalMs: Long = EVICTION_MIN_INTERVAL_MS,
         failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
     ) : this(
         MountEngine.over(syncEngine),
@@ -118,6 +129,7 @@ class HydrationImpl(
         cacheMaxBytes,
         cacheAccessGraceMs,
         evictionDelayMs,
+        evictionMinIntervalMs,
         failedReplayDelayMs,
     )
 
@@ -190,6 +202,18 @@ class HydrationImpl(
     private val evictionMutex = Mutex()
     private val evictionRequested = AtomicBoolean(false)
 
+    // #728: the size of the hydration cache as the sites that change it account it ([accountCacheFile],
+    // [forgetCacheFile]), for the cheap "is a walk even worth it" test a trigger makes. Deliberately
+    // approximate: every walk replaces the sizes it observed and drops what it did not find
+    // ([reconcileAccounting]), and [EVICTION_RECONCILE_INTERVAL_MS] bounds how long a drift can persist.
+    private val accountedBytes = ConcurrentHashMap<String, Long>()
+    private val cacheBytes = AtomicLong(0)
+
+    // #728: epoch ms of the last walk of the cache directory (0 = none yet). One walk per
+    // [evictionMinIntervalMs] and never two at once ([evictionMutex]); a trigger inside the interval is
+    // dropped, not queued — triggers keep coming while the mount is used.
+    private val lastWalkAtMs = AtomicLong(0L)
+
     companion object {
         // Wire token for "an upload of the path is still in flight, retry"; the same literal
         // dehydrate's Busy reply puts on the wire.
@@ -220,6 +244,27 @@ class HydrationImpl(
         const val DEFAULT_CACHE_MAX_BYTES: Long = 20L * 1024 * 1024 * 1024
         const val CACHE_ACCESS_GRACE_MS: Long = 60_000
         const val EVICTION_DELAY_MS: Long = 5_000
+
+        /**
+         * #728: a triggered pass walks the cache at most once per this interval. The walk stats every
+         * cache file (8.6k files and 20 GiB on the live profile, a third of the daemon's filesystem
+         * samples), while the triggers — every handle close, every completed upload — used to overlap
+         * walk after walk all day. The budget bounds disk usage, not latency, so a minute of overshoot
+         * (bounded by one minute of mount writes) buys the difference.
+         */
+        const val EVICTION_MIN_INTERVAL_MS: Long = 60_000
+
+        /**
+         * #728: the accounting drift safety net. The running byte counter is maintained by the sites
+         * that change the cache, and every walk reconciles it with what it found; this is the longest a
+         * drift can survive before a triggered pass walks anyway. Drift comes from a cache copy deleted
+         * outside this layer (the enumeration's reap), a crash between a delete and its accounting, or a
+         * write the accounting did not observe.
+         */
+        const val EVICTION_RECONCILE_INTERVAL_MS: Long = 10L * 60_000
+
+        /** #728: cache files one `alive_entries` query classifies in an eviction pass. */
+        const val EVICTION_DISPOSITION_BATCH: Int = 128
 
         /** #493: default delay of the replay of rows whose last upload attempt failed (see [failedReplayDelayMs]). */
         const val DEFAULT_FAILED_REPLAY_DELAY_MS: Long = 10L * 60 * 1000
@@ -265,6 +310,7 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrating(path))
             val p = mount.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(p)
+            accountCacheFile(path, bytes)
             // Re-read the row after hydration: ensureHydrated persists the freshly
             // downloaded size as remoteSize (and a concurrent enumeration may also have
             // refreshed it), so comparing the cache against the pre-hydration snapshot
@@ -849,7 +895,10 @@ class HydrationImpl(
     }
 
     override suspend fun closeHandle(connectionId: String, handleId: String) {
-        openSets[connectionId]?.remove(handleId)
+        // #728: the client wrote through this handle, not through the engine: its bytes only become
+        // visible here, and the trigger below must see them (a close of a read handle accounts the same
+        // size again, a no-op).
+        openSets[connectionId]?.remove(handleId)?.let { accountCacheFileOnDisk(it) }
         requestEviction()
     }
 
@@ -872,13 +921,34 @@ class HydrationImpl(
                 if (evictionDelayMs > 0) delay(evictionDelayMs)
                 // Re-arm before the walk: a trigger that arrives during it must schedule another pass.
                 evictionRequested.set(false)
-                evictCache()
+                evictCacheIfDue()
             } catch (_: Exception) {
                 // Best effort: a failed pass leaves the cache over budget until the next trigger.
             } finally {
                 evictionRequested.set(false)
             }
         }
+    }
+
+    /**
+     * #728: the pass a trigger asks for. It walks only when the accounted cache crossed [cacheMaxBytes],
+     * or when the last walk is older than [EVICTION_RECONCILE_INTERVAL_MS] (the drift safety net), and at
+     * most once per [evictionMinIntervalMs] — a trigger inside that window is dropped, not queued.
+     * [evictCache] itself always walks: the start sweep and the budget tests want the truth.
+     */
+    private suspend fun evictCacheIfDue(): CacheEvictionReport? =
+        evictionMutex.withLock {
+            val sinceLastWalk = msSinceLastWalk()
+            if (sinceLastWalk < evictionMinIntervalMs) return@withLock null
+            if (cacheBytes.get() <= cacheMaxBytes && sinceLastWalk < EVICTION_RECONCILE_INTERVAL_MS) return@withLock null
+            walkAndEvictLocked()
+        }
+
+    // Milliseconds since the last walk, or Long.MAX_VALUE when this instance has not walked yet (its
+    // accounting cannot vouch for anything: the first trigger reconciles).
+    private fun msSinceLastWalk(): Long {
+        val last = lastWalkAtMs.get()
+        return if (last == 0L) Long.MAX_VALUE else System.currentTimeMillis() - last
     }
 
     /**
@@ -920,6 +990,7 @@ class HydrationImpl(
     private class CacheFile(val path: String, val file: Path, val size: Long, val lastUsed: Long)
 
     private fun listCacheFiles(checkCancelled: () -> Unit = {}): List<CacheFile> {
+        cacheWalkCount.incrementAndGet()
         val dir = mount.hydrationCacheDir()
         if (!Files.isDirectory(dir)) return emptyList()
         val result = mutableListOf<CacheFile>()
@@ -929,9 +1000,12 @@ class HydrationImpl(
                 while (paths.hasNext()) {
                     checkCancelled()
                     val f = paths.next()
-                    if (!Files.isRegularFile(f)) continue
                     try {
+                        // #728: one stat per entry. The attributes answer the regular-file test, the size
+                        // and both timestamps; the separate isRegularFile() call this used to make doubled
+                        // the walk's filesystem calls (a third of the daemon's filesystem samples).
                         val attrs = Files.readAttributes(f, java.nio.file.attribute.BasicFileAttributes::class.java)
+                        if (!attrs.isRegularFile) continue
                         val path = "/" + dir.relativize(f).toString().replace('\\', '/')
                         val fileTime = maxOf(attrs.lastModifiedTime().toMillis(), attrs.lastAccessTime().toMillis())
                         result += CacheFile(path, f, attrs.size(), lastAccess[path] ?: fileTime)
@@ -950,6 +1024,45 @@ class HydrationImpl(
         return result
     }
 
+    // #728: the running size of the cache, keyed by path so repeated accounting of the same file (a warm
+    // open, a close without a write) is a no-op instead of a double count. Every walk replaces the sizes
+    // it observed ([reconcileAccounting]).
+    private fun accountCacheFile(path: String, size: Long) {
+        accountedBytes.compute(path) { _, previous ->
+            if (previous == null || previous != size) cacheBytes.addAndGet(size - (previous ?: 0L))
+            size
+        }
+    }
+
+    private fun forgetCacheFile(path: String) {
+        accountedBytes.compute(path) { _, previous ->
+            if (previous != null) cacheBytes.addAndGet(-previous)
+            null
+        }
+    }
+
+    // The cache file of [path] as it is on disk right now, accounted. A missing or unresolvable file
+    // leaves the accounting alone: a delete site owns that, and the next walk reconciles.
+    private fun accountCacheFileOnDisk(path: String) {
+        val size = runCatching { Files.size(mount.resolveCachePath(path)) }.getOrNull() ?: return
+        accountCacheFile(path, size)
+    }
+
+    // Everything below a folder's cache path goes with the folder (rmdir evicts the tree).
+    private fun forgetCachePrefix(path: String) {
+        val prefix = if (path.isEmpty() || path == "/") "/" else "$path/"
+        for (key in accountedBytes.keys) {
+            if (key == path || key.startsWith(prefix)) forgetCacheFile(key)
+        }
+    }
+
+    // A rename moves the same bytes to the new path.
+    private fun moveCacheAccounting(oldPath: String, newPath: String) {
+        val bytes = accountedBytes.remove(oldPath) ?: return
+        cacheBytes.addAndGet(-bytes)
+        accountCacheFile(newPath, bytes)
+    }
+
     // The checks only this layer can make: an open handle, a queued or in-flight upload (#301, #318),
     // and the access grace window.
     private fun inUse(path: String): Boolean =
@@ -965,42 +1078,89 @@ class HydrationImpl(
      * (also re-checked by the engine's own lock at deletion), not accessed within the grace window.
      * Files without a row (an upload target that was renamed away, #319), unfinished creates, failed
      * uploads and modified copies are never touched, so the cache can stay over budget.
+     *
+     * #728: unconditional here — the start sweep and a caller that wants the truth go through it; the
+     * triggered path is [evictCacheIfDue]. Candidates are classified in LRU order in batches of
+     * [EVICTION_DISPOSITION_BATCH], one `alive_entries` query per batch ([StateDatabase.getEntriesByPaths])
+     * instead of one per cache file, and the pass stops as soon as the budget is met: a cache that is a
+     * little over budget never asks about the files it does not need. Every walk ends by reconciling the
+     * accounting with what it found.
      */
-    suspend fun evictCache(): CacheEvictionReport =
-        evictionMutex.withLock {
-            val job = coroutineContext[Job]
-            val files = listCacheFiles { job?.ensureActive() }
-            val before = files.sumOf { it.size }
-            if (cacheMaxBytes <= 0 || before <= cacheMaxBytes) return@withLock CacheEvictionReport(cacheMaxBytes, before, before, 0)
-            var total = before
-            var evicted = 0
-            val disposable = mutableListOf<CacheFile>()
+    suspend fun evictCache(): CacheEvictionReport = evictionMutex.withLock { walkAndEvictLocked() }
 
-            suspend fun evict(f: CacheFile) {
-                if (inUse(f.path)) return
-                val freed = mount.evictCacheCopy(f.path) { _events.tryEmit(HydrationEvent.Dehydrated(it)) }
-                if (freed != null) {
-                    total -= freed
-                    evicted++
-                }
+    private suspend fun walkAndEvictLocked(): CacheEvictionReport {
+        val job = coroutineContext[Job]
+        val files = listCacheFiles { job?.ensureActive() }
+        val before = files.sumOf { it.size }
+        var total = before
+        val evicted = HashSet<String>()
+        if (cacheMaxBytes > 0 && before > cacheMaxBytes) {
+            val candidates = files.sortedBy { it.lastUsed }
+            var index = 0
+            while (total > cacheMaxBytes && index < candidates.size) {
+                coroutineContext.ensureActive()
+                val upTo = minOf(index + EVICTION_DISPOSITION_BATCH, candidates.size)
+                val batch = candidates.subList(index, upTo).filterNot { inUse(it.path) }
+                index = upTo
+                if (batch.isEmpty()) continue
+                val batchPaths = batch.map { it.path }
+                onDispositionBatch(batchPaths.size)
+                val rows = stateDb.getEntriesByPaths(batchPaths)
+                total -= evictDisposable(batch, rows, total - cacheMaxBytes, evicted)
             }
-
-            for (f in files.sortedBy { it.lastUsed }) {
-                job?.ensureActive()
-                if (total <= cacheMaxBytes) break
-                if (inUse(f.path)) continue
-                when (mount.cacheDisposition(f.path)) {
-                    CacheDisposition.DISPOSABLE -> disposable += f
-                    CacheDisposition.PROTECTED -> {}
-                }
-            }
-            for (f in disposable) {
-                job?.ensureActive()
-                if (total <= cacheMaxBytes) break
-                evict(f)
-            }
-            CacheEvictionReport(cacheMaxBytes, before, total, evicted)
         }
+        lastWalkAtMs.set(System.currentTimeMillis())
+        reconcileAccounting(files, evicted)
+        return CacheEvictionReport(cacheMaxBytes, before, total, evicted.size)
+    }
+
+    // Evicts the disposable copies of one classified batch in order until at least [needed] bytes are
+    // freed, and returns what was freed. The row checks live here, the per-path re-check inside
+    // [MountEngine.evictCacheCopy] still owns the delete: the row the batch read may be stale, so the
+    // engine re-classifies the row and the bytes under the path's hydration lock.
+    private suspend fun evictDisposable(
+        batch: List<CacheFile>,
+        rows: Map<String, org.krost.unidrive.sync.model.SyncEntry>,
+        needed: Long,
+        evicted: MutableSet<String>,
+    ): Long {
+        var freed = 0L
+        for (f in batch) {
+            coroutineContext.ensureActive()
+            if (freed >= needed) break
+            // Re-checked here as before: the pass runs for a while, so a client may have opened or started
+            // editing the copy meanwhile.
+            if (inUse(f.path)) continue
+            if (mount.cacheDisposition(f.path, rows[f.path]) != CacheDisposition.DISPOSABLE) continue
+            val bytes = mount.evictCacheCopy(f.path) { _events.tryEmit(HydrationEvent.Dehydrated(it)) }
+            if (bytes == null) continue
+            freed += bytes
+            evicted += f.path
+        }
+        return freed
+    }
+
+    // #728: after a walk the accounting is what the walk found — the size of every cache file it saw,
+    // minus the copies this pass evicted — plus whatever a hydration accounted while the walk ran. A path
+    // the walk did not see is gone (the enumeration's reap deletes cache copies outside this layer, a
+    // crash can leave a delete half done, a user can clear the folder): the file itself decides, and the
+    // next walk drops it. Drift is thus repaired at every walk, and [EVICTION_RECONCILE_INTERVAL_MS]
+    // bounds how long it can persist.
+    private fun reconcileAccounting(
+        walked: List<CacheFile>,
+        evicted: Set<String>,
+    ) {
+        val seen = HashSet<String>(walked.size * 2)
+        for (f in walked) {
+            seen += f.path
+            if (f.path in evicted) forgetCacheFile(f.path) else accountCacheFile(f.path, f.size)
+        }
+        for (path in accountedBytes.keys) {
+            if (path in seen) continue
+            val stillThere = runCatching { Files.exists(mount.resolveCachePath(path)) }.getOrDefault(false)
+            if (!stillThere) forgetCacheFile(path)
+        }
+    }
 
     // #301: whether a background upload of [path] is queued or in flight. The
     // engine's enumerate-reap consults this (via the engine's uploadInFlight hook,
@@ -1015,6 +1175,7 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrating(path))
             val cachePath = mount.ensureHydrated(path)
             val bytes = java.nio.file.Files.size(cachePath)
+            accountCacheFile(path, bytes)
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             HydrateResult.Ok
         } catch (e: Exception) {
@@ -1048,6 +1209,7 @@ class HydrationImpl(
         return try {
             val cachePath = mount.resolveCachePath(path)
             java.nio.file.Files.deleteIfExists(cachePath)
+            forgetCacheFile(path)
             stateDb.markUnhydrated(path)
             _events.emit(HydrationEvent.Dehydrated(path))
             DehydrateResult.Ok
@@ -1209,9 +1371,7 @@ class HydrationImpl(
                 }
             }
             return runCatching {
-                runCatching {
-                    java.nio.file.Files.deleteIfExists(mount.resolveCachePath(normalised))
-                }
+                evictCacheFile(normalised)
                 // WB-3 (#87): the staged encrypted copy of a failed upload is the only other copy of
                 // the content — the user deleted the file, so it goes too, instead of staying in the
                 // resume directory for days.
@@ -1293,6 +1453,8 @@ class HydrationImpl(
         try {
             Files.createDirectories(newCache.parent)
             Files.move(oldCache, newCache, StandardCopyOption.REPLACE_EXISTING)
+            // #728: the same bytes under the new path.
+            moveCacheAccounting(oldNorm, newNorm)
         } catch (_: NoSuchFileException) {
             // Cache file absent — nothing to move; the state.db repath suffices.
         }
@@ -1302,8 +1464,12 @@ class HydrationImpl(
     // Idempotent: a missing cache file (never hydrated) is a no-op, and any
     // IO failure is swallowed — the cloud delete already committed, so a stale
     // cache byte is a disk-space concern, never a reason to fail the unlink.
+    // #728: the accounting follows the delete (the copy really gone).
     private fun evictCacheFile(path: String) {
-        runCatching { Files.deleteIfExists(mount.resolveCachePath(path)) }
+        val cachePath = runCatching { mount.resolveCachePath(path) }.getOrNull() ?: return
+        runCatching { Files.deleteIfExists(cachePath) }
+        if (Files.exists(cachePath)) return
+        forgetCacheFile(path)
     }
 
     // Recursively evict a folder's hydration-cache subtree after a successful
@@ -1321,6 +1487,9 @@ class HydrationImpl(
                 }
             }
         }
+        // #728: the whole subtree left the accounting with the folder. (A partial failure over-counts
+        // until the next walk, which finds the leftovers and reconciles them.)
+        forgetCachePrefix(path)
     }
 
     private fun prepareEmptyCache(path: String): java.nio.file.Path {
@@ -1352,6 +1521,8 @@ class HydrationImpl(
         touch(normalised)
         return try {
             val cachePath = prepareEmptyCache(normalised)
+            // #728: a truncate of a cached copy frees its bytes; the accounting follows the file.
+            accountCacheFileOnDisk(normalised)
             // When a live handle id is provided (O_TRUNC open), register it in
             // the connection's open-set so dehydrate/busy-checks see the file as
             // open.  One-shot callers (setattr bare-truncate) pass null → no
@@ -1393,6 +1564,7 @@ class HydrationImpl(
 
             try {
                 val cachePath = prepareEmptyCache(normalised)
+                accountCacheFileOnDisk(normalised)
                 val now = java.time.Instant.now()
                 stateDb.upsertEntry(
                     org.krost.unidrive.sync.model.SyncEntry(
@@ -1650,7 +1822,7 @@ class HydrationImpl(
         // and evict its cache copy. Cache eviction failure is non-fatal (the row
         // is the truth); the row delete is not.
         return try {
-            runCatching { Files.deleteIfExists(mount.resolveCachePath(destNorm)) }
+            evictCacheFile(destNorm)
             stateDb.deleteEntry(destNorm)
             null
         } catch (e: Exception) {
@@ -1659,7 +1831,9 @@ class HydrationImpl(
     }
 
     override fun onConnectionClosed(connectionId: String) {
-        openSets.remove(connectionId)
+        // #728: a client that wrote through the mount and died without closing its handles never
+        // reaches closeHandle: pick the sizes up here, while the paths are still known.
+        openSets.remove(connectionId)?.values?.forEach { accountCacheFileOnDisk(it) }
     }
 
     // One classification for a failed download, shared by the open_read path and the hydrate verb:
