@@ -353,7 +353,10 @@ class ProfileListCommand : Callable<Int> {
         val type = rp.type ?: name
         if (!isProfileAuthenticated(type, name, rp, baseDir)) return "none"
         val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
-        val health = main.checkCredentialHealth(ProfileInfo(name, type, Path.of(syncRoot), rp), baseDir.resolve(name), useVault)
+        // A sync_root that is not a path on this system must not abort the whole listing (and with it
+        // the JSON): the credential check looks at the profile folder, the root only fills the record.
+        val rootPath = runCatching { Path.of(syncRoot) }.getOrElse { baseDir.resolve(name) }
+        val health = main.checkCredentialHealth(ProfileInfo(name, type, rootPath, rp), baseDir.resolve(name), useVault)
         return if (credentialNeedsReauth(health)) "expired" else "ok"
     }
 

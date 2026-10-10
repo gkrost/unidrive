@@ -18,14 +18,25 @@ import java.nio.file.Path
 /** Validate profile name: TOML bare key (letters, digits, hyphens, underscores). */
 fun isValidProfileName(name: String): Boolean = name.isNotBlank() && name.matches(Regex("[a-zA-Z0-9_-]+"))
 
-/** Escape characters that are special inside TOML basic strings. */
+/**
+ * Escape characters that are special inside TOML basic strings. Every other control character
+ * (U+0000..U+001F, U+007F) is written as `\uXXXX`: the TOML spec forbids them raw, and a strict
+ * reader of the same config.toml would reject the whole file over one label.
+ */
 fun escapeTomlValue(value: String): String =
-    value
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
+    buildString(value.length + 8) {
+        for (c in value) {
+            when {
+                c == '\\' -> append("\\\\")
+                c == '"' -> append("\\\"")
+                c == '\n' -> append("\\n")
+                c == '\r' -> append("\\r")
+                c == '\t' -> append("\\t")
+                c < ' ' || c == '\u007f' -> append("\\u").append("%04X".format(c.code))
+                else -> append(c)
+            }
+        }
+    }
 
 /**
  * #646: set `[general] default_profile` in config text. The value is inserted directly under

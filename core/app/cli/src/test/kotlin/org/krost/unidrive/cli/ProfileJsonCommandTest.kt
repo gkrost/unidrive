@@ -162,7 +162,33 @@ class ProfileJsonCommandTest {
         assertTrue("PROFILE" in stdout() && "work" in stdout() && "old" in stdout(), stdout())
     }
 
+    @Test
+    fun `list --json still prints the JSON when one sync_root is not a path on this system`() {
+        // A NUL is not a path character on any platform (TOML escape; the file itself stays text).
+        writeConfig("[providers.bad]\ntype = \"localfs\"\nmode = \"mirror\"\nroot_path = \"/tmp/bad\"\nsync_root = \"a\\u0000b\"\n")
+
+        assertEquals(0, run("profile", "list", "--json"), stderr())
+
+        val profile = json().getValue("profiles").jsonArray.single().jsonObject
+        assertEquals("bad", profile.getValue("name").jsonPrimitive.content)
+        assertTrue(profile.getValue("auth").jsonPrimitive.content in setOf("ok", "expired", "none"))
+    }
+
     // -- profile set ---------------------------------------------------------------
+
+    @Test
+    fun `set label with control characters keeps config toml valid and reads back unchanged`() {
+        writeConfig(twoProfiles)
+        val label = "a\u0001b\u007fc\td"
+
+        assertEquals(0, run("profile", "set", "work", "label", label, "--json"), stderr())
+
+        assertEquals(label, json().getValue("value").jsonPrimitive.content)
+        assertTrue(config().none { (it < ' ' && it != '\n' && it != '\r') || it == '\u007f' }, "raw control characters in config.toml")
+        run("profile", "list", "--json")
+        val work = json().getValue("profiles").jsonArray.first { it.jsonObject["name"]!!.jsonPrimitive.content == "work" }
+        assertEquals(label, work.jsonObject.getValue("label").jsonPrimitive.content)
+    }
 
     @Test
     fun `set label writes the label, keeps the id and the folders, and needs no restart`() {
