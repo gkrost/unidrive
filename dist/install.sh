@@ -32,7 +32,7 @@ resolve_jar() {
     local found=""
     if [[ -d "${dir}" ]]; then
         # shellcheck disable=SC2012  # ls -1 is fine; filenames are project-controlled
-        found="$(ls -1 "${dir}"/${prefix}-*.jar 2>/dev/null \
+        found="$(ls -1 "${dir}"/"${prefix}"-*.jar 2>/dev/null \
             | sort -V \
             | tail -1)"
     fi
@@ -60,13 +60,31 @@ fi
 
 CLI_BASENAME="$(basename "${CLI_JAR}")"
 
-# Stop an active service before replacing the jar it may be running. Preserve
-# whether it was active so an upgrade restarts the newly mode-aware launcher;
-# a deliberately stopped service stays stopped.
-SERVICE_WAS_ACTIVE=0
-if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet unidrive.service 2>/dev/null; then
-    systemctl --user stop unidrive.service
-    SERVICE_WAS_ACTIVE=1
+# Java is checked by the launcher on every run; warn here too so a missing runtime shows at install time.
+java_ok=0
+for cand in "${UNIDRIVE_JAVA:-}" "$(command -v java || true)" /usr/lib/jvm/*/bin/java; do
+    if [[ -n "${cand}" && -x "${cand}" ]]; then
+        major="$("${cand}" -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)"
+        if [[ -n "${major}" && "${major}" -ge 21 ]]; then java_ok=1; break; fi
+    fi
+done
+if [[ "${java_ok}" == "0" ]]; then
+    echo "WARNING: no Java 21+ runtime found; unidrive will not start until one is installed" >&2
+    echo "         (Debian/Ubuntu: sudo apt install openjdk-25-jre-headless) or UNIDRIVE_JAVA is set." >&2
+fi
+
+# Stop every active unidrive service (daemon, per-profile, mount units) before replacing the jar they
+# run, and restart exactly those afterwards; a deliberately stopped service stays stopped. One stop and
+# one start call each so systemd applies the units' own ordering.
+ACTIVE_UNITS=()
+if command -v systemctl >/dev/null 2>&1; then
+    while read -r unit _; do
+        if [[ "${unit}" == unidrive*.service ]]; then ACTIVE_UNITS+=("${unit}"); fi
+    done < <(systemctl --user list-units --state=active --no-legend --plain 'unidrive*.service' 2>/dev/null || true)
+    if [[ ${#ACTIVE_UNITS[@]} -gt 0 ]]; then
+        echo "Stopping: ${ACTIVE_UNITS[*]}"
+        systemctl --user stop "${ACTIVE_UNITS[@]}"
+    fi
 fi
 
 echo "Installing UniDrive..."
@@ -79,6 +97,9 @@ mkdir -p "${INSTALL_LIB}"
 find "${INSTALL_LIB}" -maxdepth 1 -type f -name 'unidrive*.jar' \
     ! -name "${CLI_BASENAME}" -print -delete 2>/dev/null \
   | sed 's|^|  pruned stale jar: |'
+# Unlink, then copy to a fresh inode: a JVM that still holds the old jar open (a daemon or mount not
+# started by a service) keeps reading the old, intact file instead of a truncated one.
+rm -f "${INSTALL_LIB}/${CLI_BASENAME}"
 cp "${CLI_JAR}" "${INSTALL_LIB}/${CLI_BASENAME}"
 echo "  ${INSTALL_LIB}/${CLI_BASENAME}"
 
@@ -139,9 +160,25 @@ echo "  ${SYSTEMD_DIR}/unidrive.service"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
-    if [[ "${SERVICE_WAS_ACTIVE}" == "1" ]]; then
-        systemctl --user start unidrive.service
+    if [[ ${#ACTIVE_UNITS[@]} -gt 0 ]]; then
+        systemctl --user start "${ACTIVE_UNITS[@]}"
+        echo "Restarted: ${ACTIVE_UNITS[*]}"
     fi
+fi
+
+# Anything still running from this install was not started by a service. It is safe (it holds the old jar's
+# inode) but keeps the old code until restarted.
+STALE_PIDS=()
+for cmdline in /proc/[0-9]*/cmdline; do
+    pid="${cmdline#/proc/}"; pid="${pid%/cmdline}"
+    if [[ "${pid}" != "$$" ]] && { tr '\0' ' ' < "${cmdline}"; } 2>/dev/null | grep -qF -- "-jar ${INSTALL_LIB}/unidrive"; then
+        STALE_PIDS+=("${pid}")
+    fi
+done
+if [[ ${#STALE_PIDS[@]} -gt 0 ]]; then
+    echo ""
+    echo "NOTE: still running the previous jar (pid ${STALE_PIDS[*]}); restart it to pick up the new code:"
+    echo "  unidrive -p <profile> daemon stop   # then start it again; stop any manual mount first"
 fi
 
 echo ""
