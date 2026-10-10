@@ -57,7 +57,14 @@ UNIDRIVE_MOUNTPOINT=/home/me/Drive
 ```
 
 Before each start and after each stop it runs `fusermount3 -uz` on the mount point, so a crashed mount does
-not block the next one. The JVM exits 143 on a stop, which the units count as success.
+not block the next one. That detaches whatever is mounted there, so do not point two mounts (or a mount you
+started by hand) at the same directory. The JVM exits 143 on a stop and 78 for a permanent refusal (a wrong-mode
+or modeless profile, or no `unidrive-mount` binary installed); the units count both as a clean stop instead of
+restarting. `fusermount3` is expected at `/usr/bin/fusermount3` (FUSE 3); a system with only FUSE 2's
+`fusermount` needs the unit edited.
+
+If the profile's credential vault needs a passphrase, put `UNIDRIVE_VAULT_PASS=...` in
+`~/.config/unidrive/vault-env` (read by the sync units if it exists) and keep that file mode `0600`.
 
 The sync units run with `NoNewPrivileges`, a seccomp-based restriction set, and the address families the
 daemon needs (Unix sockets, IPv4/IPv6, netlink). They deliberately leave the filesystem unrestricted: the
