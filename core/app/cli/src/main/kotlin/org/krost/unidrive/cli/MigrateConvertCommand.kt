@@ -221,6 +221,8 @@ internal object LegacyConversion {
         val dbPath: Path,
         val configFile: Path,
         val engineVersion: String,
+        /** The hydration cache to inventory; null = the profile's canonical cache directory. */
+        val cacheDir: Path? = null,
     )
 
     private data class Refusal(val message: String)
@@ -376,10 +378,11 @@ internal object LegacyConversion {
         // before the journal is created so a refusal below leaves nothing behind (not even a PLAN
         // journal that would pin a later, different --mode to this attempt).
         val cacheDir =
-            org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(
-                org.krost.unidrive.sync.SyncEngine.defaultHydrationCacheRoot(),
-                setup.profileName,
-            )
+            setup.cacheDir
+                ?: org.krost.unidrive.sync.SyncEngine.hydrationCacheRoot(
+                    org.krost.unidrive.sync.SyncEngine.defaultHydrationCacheRoot(),
+                    setup.profileName,
+                )
         val inventory =
             when (val outcome = LegacyInventory.collect(legacyInventoryInputs(setup, cacheDir))) {
                 is LegacyInventory.Outcome.Refused -> {
@@ -390,19 +393,30 @@ internal object LegacyConversion {
             }
 
         // Refusal 3: a legacy hybrid profile cannot become a mirror. Its hydrated rows whose bytes
-        // live only in the hydration cache (cache_backed true or NULL) are absent from the sync root,
-        // so the first mirror sync would read them as local deletes and plan DeleteRemote. Mirror and
-        // mount profiles are independent and no migration of hybrid state is supported (#459, #680).
+        // live only in the hydration cache are absent from the sync root, so the first mirror sync
+        // would read them as local deletes and plan DeleteRemote. Mirror and mount profiles are
+        // independent and no migration of hybrid state is supported (#459, #680).
+        // Which rows count: cache_backed = true always (the mount wrote the bytes to the cache). A
+        // NULL row only when its cache copy exists and its sync_root file is missing: only the
+        // mount engine writes cache_backed, so every row a plain mirror profile ever hydrated is
+        // NULL, and with its sync_root file present it is a mirror row (#706). cache_backed = false
+        // (a sync-root baseline the mount adopted) passes, as before.
         // A conversion that already published its mode (resume) passed this check before.
         if (targetMode == "mirror" && (loaded == null || "PUBLISH" !in loaded.phases)) {
-            val cacheBackedHydrated = inventory.db?.cacheBacked?.let { (it["true"] ?: 0) + (it["null"] ?: 0) } ?: 0
+            val flagged = inventory.db?.cacheBacked?.get("true") ?: 0
+            val unflaggedCacheOnly =
+                inventory.files.count {
+                    it.cls == PathClass.CACHE_ONLY && it.hydrated == true && it.cacheBacked == null
+                }
+            val cacheBackedHydrated = flagged + unflaggedCacheOnly
             if (cacheBackedHydrated > 0) {
                 System.err.println(
-                    "Error: profile '${setup.profileName}' is a legacy hybrid profile with $cacheBackedHydrated cache-backed " +
-                        "hydrated file(s) whose bytes live only in the hydration cache. Converting such a profile to a mirror " +
-                        "is unsupported: mirror and mount profiles are independent, and no migration of hybrid state is " +
-                        "supported in this phase. Convert it to a mount instead ('migrate convert --mode mount'), or create a " +
-                        "new mirror profile. Nothing was changed.",
+                    "Error: profile '${setup.profileName}' is a legacy hybrid profile with $cacheBackedHydrated hydrated " +
+                        "file(s) whose bytes live only in the hydration cache (marked cache-backed, or present in the cache " +
+                        "and missing from the sync_root). Converting such a profile to a mirror is unsupported: the first " +
+                        "mirror sync would read them as local deletes, mirror and mount profiles are independent, and no " +
+                        "migration of hybrid state is supported in this phase. Convert it to a mount instead " +
+                        "('migrate convert --mode mount'), or create a new mirror profile. Nothing was changed.",
                 )
                 return 1
             }
