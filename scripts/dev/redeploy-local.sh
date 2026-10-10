@@ -55,7 +55,7 @@ die() {
 warn_if_running() {
   local mounts daemons codaemons
   mounts="$(findmnt -rn -t fuse,fuse.unidrive -S unidrive -o TARGET 2>/dev/null || true)"
-  daemons="$(pgrep -f 'unidrive.*\.jar.* daemon' 2>/dev/null || true)"
+  daemons="$(pgrep -f 'unidrive[^ ]*\.jar.* (daemon run|autostart)' 2>/dev/null || true)"
   codaemons="$(pgrep -x unidrive-mount 2>/dev/null || true)"
   if [[ -n "${mounts}" ]]; then
     log "WARNING: active unidrive FUSE mount(s): $(tr '\n' ' ' <<<"${mounts}")"
