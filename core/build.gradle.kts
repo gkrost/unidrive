@@ -1,8 +1,6 @@
 plugins {
     kotlin("jvm") version libs.versions.kotlin.get() apply false
     kotlin("plugin.serialization") version libs.versions.kotlin.get() apply false
-    // UD-706: ktlint lint, warn-only. Applied to every Kotlin subproject below.
-    alias(libs.plugins.ktlint) apply false
     // Needed at root for the `jacocoMergedReport` task registered below —
     // JacocoReport requires the jacoco classpath to be resolvable on its owner
     // project.
@@ -61,13 +59,6 @@ allprojects {
         }
     }
 }
-
-// UD-774: temporary disable. ktlint costs ~20–30 s per `./gradlew build` and
-// was the dominant per-iteration cost during the UD-240g/UD-240i sessions on
-// 2026-05-02. Flip back to `true` to restore the UD-706 / UD-706b setup.
-// Re-enable plan: run `scripts/dev/ktlint-sync.sh` after flip to absorb any
-// baseline drift, then `./gradlew build` to confirm green, then close UD-774.
-val ktlintEnabled = false
 
 // detekt runs as a plain process instead of a JavaExec task: Gradle 9 removed
 // JavaExec's ignoreExitValue, and this integration is report-only — findings
@@ -130,24 +121,6 @@ subprojects {
     configure<JacocoPluginExtension> {
         toolVersion = jacocoToolVersion
     }
-    // UD-706: ktlint lint + format tasks on every subproject (warn-only).
-    if (ktlintEnabled) {
-        apply(plugin = "org.jlleitschuh.gradle.ktlint")
-
-        extensions.configure<org.jlleitschuh.gradle.ktlint.KtlintExtension> {
-            android.set(false)
-            // UD-706b: strict — per-project baseline.xml (under <project>/config/ktlint/)
-            // freezes the current set of violations so `ktlintCheck` fails only on
-            // *new* violations. Gradual-improvement path: delete baseline entries
-            // once the underlying file is cleaned up.
-            ignoreFailures.set(false)
-            reporters {
-                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.PLAIN)
-                reporter(org.jlleitschuh.gradle.ktlint.reporter.ReporterType.CHECKSTYLE)
-            }
-        }
-    }
-
     // detekt: report-only. The existing findings are not yet triaged, so they are
     // printed and written to build/reports/detekt/ on every `check` without failing
     // it. Flipping to failing (or a baseline so only new findings fail) is an owner
