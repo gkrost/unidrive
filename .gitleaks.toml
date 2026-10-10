@@ -26,12 +26,6 @@ regexes = [
 
 # Path allowlist — files where substring matches above are expected by design.
 paths = [
-    # Sample docker-compose with commented-out `password = "testpass"` lines
-    # used to document override syntax.
-    '''core/docker/docker-compose\.integration\.yml''',
-    # SftpApiService documents the OpenSSH private-key header format
-    # (`-----BEGIN OPENSSH PRIVATE KEY-----`) in a block comment.
-    '''core/providers/sftp/src/main/kotlin/.*/SftpApiService\.kt''',
     # Token-shape validation tests: synthetic MSA opaque + JWS fixtures
     # constructed inline ("EwBIBMl6BAAU9Batlg" + "x".repeat(50), and a
     # base64-decodes-to-"hello" JWS). No real tokens.
@@ -41,5 +35,4 @@ paths = [
     # type unions, win32cryptcon CMSG_KEY_* constants) that trigger the
     # generic-api-key entropy rule. Belt-and-braces.
     '''scripts/dev/.*\.venv.*''',
-    '''scripts/dev/oauth-mcp/\.venv/.*''',
 ]

@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the existing BuildInfo.kt generator (which calls
           # `git rev-parse --short HEAD` and `git diff HEAD --numstat`) finds
@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: '21'
@@ -38,7 +38,7 @@ jobs:
       # Cache ~/.gradle (same 429 rationale as build.yml; see
       # core/settings.gradle.kts for the mirror set).
       - name: Set up Gradle dependency cache
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # The gate runs on the tagged commit itself, before anything is built,
       # signed or published. A failing check stops the job here, so an
@@ -118,9 +118,9 @@ jobs:
           gpg --verify "unidrive-${ver}.jar.sha256.asc" "unidrive-${ver}.jar.sha256"
 
       - name: Create GitHub Release
-        # Pin to a SHA -- `v2` is a moving tag. Update the SHA when bumping
-        # the action. As of writing, v2.0.8 = 01570a1f39cb168c169c802c3bceb9e93fb10974
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        # Pinned by SHA like every action here; the trailing comment names the
+        # release it resolves to. Dependabot updates both together.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

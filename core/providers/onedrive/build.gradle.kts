@@ -10,9 +10,7 @@ kotlin {
 dependencies {
     implementation(project(":app:core"))
 
-    implementation(libs.kotlin.reflect)
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.coroutines.jdk8)
     implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.ktor.client.core)
