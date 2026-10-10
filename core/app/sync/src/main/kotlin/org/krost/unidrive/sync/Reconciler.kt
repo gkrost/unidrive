@@ -57,6 +57,20 @@ class Reconciler(
         recorded: String?,
     ): Boolean = remote != null && recorded != null && remote != recorded
 
+    // A folder can carry a newer modified time with no content change: its mtime moves whenever a child
+    // is added or removed (the uploads of a first sync touch the remote folder after its row was
+    // recorded). The no-op metadata update that would follow is suppressed in resolveAction, not here:
+    // the same MODIFIED classification must still raise a delete-vs-modify conflict instead of letting
+    // a local folder delete propagate as a recursive DeleteRemote (#694). A file turning into a folder,
+    // or the reverse, is a change either way.
+    private fun remoteMetadataChanged(
+        remoteItem: CloudItem,
+        entry: SyncEntry,
+    ): Boolean =
+        remoteItem.isFolder != entry.isFolder ||
+            remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
+            remoteItem.modified != entry.remoteModified
+
     var lastUnhydratedFolderDeletes: List<String> = emptyList()
         private set
 
@@ -211,8 +225,7 @@ class Reconciler(
                     // branch can adopt-or-download instead of falling through to the
                     // unhandled (NEW, MODIFIED) case and silently dropping the action.
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
-                        remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
+                    remoteMetadataChanged(remoteItem, entry) -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
 
@@ -457,8 +470,7 @@ class Reconciler(
                     remoteItem.deleted -> ChangeState.DELETED
                     entry == null -> ChangeState.NEW
                     entry.remoteId == null && entry.remoteHash == null -> ChangeState.NEW
-                    remoteHashChanged(remoteItem.hash, entry.remoteHash) ||
-                        remoteItem.modified != entry.remoteModified -> ChangeState.MODIFIED
+                    remoteMetadataChanged(remoteItem, entry) -> ChangeState.MODIFIED
                     else -> ChangeState.UNCHANGED
                 }
 
@@ -834,7 +846,12 @@ class Reconciler(
                 }
             localState == ChangeState.UNCHANGED && remoteState == ChangeState.MODIFIED && remoteItem != null ->
                 if (remoteItem.isFolder) {
-                    SyncAction.UpdatePlaceholder(path, remoteItem, wasHydrated = false)
+                    // #694: a folder's modified time moves with its children (the first sync's uploads
+                    // touch the remote folder after its row was recorded). There is nothing to apply
+                    // and no content to fetch, so this is a no-op rather than a metadata-only update;
+                    // updateRemoteEntries records the new metadata. A tracked FILE that the remote
+                    // replaced with a folder is a real change and keeps its update.
+                    if (entry?.isFolder == true) null else SyncAction.UpdatePlaceholder(path, remoteItem, wasHydrated = false)
                 } else {
                     SyncAction.DownloadContent(path, remoteItem)
                 }

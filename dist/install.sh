@@ -6,6 +6,8 @@
 #   ~/.local/lib/unidrive/unidrive-<ver>.jar       (fat shadowJar, CLI)
 #   ~/.local/bin/unidrive                          (wrapper -> CLI)
 #   ~/.config/systemd/user/unidrive.service        (user-mode systemd unit)
+#   ~/.config/systemd/user/unidrive@.service       (per-profile template)
+#   ~/.config/systemd/user/unidrive-mount@.service (per-profile FUSE mount template)
 #   ~/.local/share/unidrive/                       (log dir)
 #
 # Usage:
@@ -87,6 +89,17 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
+# Processes still running the previous jar from this install, not started by a unit. Captured while the
+# active units are stopped: a service daemon restarted further down must not be mistaken for one of
+# these. A hand-started JVM is safe (it holds the old jar's inode) but keeps the old code until restarted.
+STALE_PIDS=()
+for cmdline in /proc/[0-9]*/cmdline; do
+    pid="${cmdline#/proc/}"; pid="${pid%/cmdline}"
+    if [[ "${pid}" != "$$" ]] && { tr '\0' ' ' < "${cmdline}"; } 2>/dev/null | grep -qF -- "-jar ${INSTALL_LIB}/unidrive"; then
+        STALE_PIDS+=("${pid}")
+    fi
+done
+
 echo "Installing UniDrive..."
 
 # JAR
@@ -155,8 +168,10 @@ fi
 
 # Systemd user unit
 mkdir -p "${SYSTEMD_DIR}"
-cp "${SCRIPT_DIR}/unidrive.service" "${SYSTEMD_DIR}/unidrive.service"
-echo "  ${SYSTEMD_DIR}/unidrive.service"
+for unit in unidrive.service unidrive@.service unidrive-mount@.service; do
+    cp "${SCRIPT_DIR}/${unit}" "${SYSTEMD_DIR}/${unit}"
+    echo "  ${SYSTEMD_DIR}/${unit}"
+done
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload || true
@@ -166,15 +181,6 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 fi
 
-# Anything still running from this install was not started by a service. It is safe (it holds the old jar's
-# inode) but keeps the old code until restarted.
-STALE_PIDS=()
-for cmdline in /proc/[0-9]*/cmdline; do
-    pid="${cmdline#/proc/}"; pid="${pid%/cmdline}"
-    if [[ "${pid}" != "$$" ]] && { tr '\0' ' ' < "${cmdline}"; } 2>/dev/null | grep -qF -- "-jar ${INSTALL_LIB}/unidrive"; then
-        STALE_PIDS+=("${pid}")
-    fi
-done
 if [[ ${#STALE_PIDS[@]} -gt 0 ]]; then
     echo ""
     echo "NOTE: still running the previous jar (pid ${STALE_PIDS[*]}); restart it to pick up the new code:"
@@ -186,6 +192,8 @@ echo "Done. Usage:"
 echo "  unidrive --help                                  # CLI help"
 echo "  unidrive auth                                    # authenticate first"
 echo "  unidrive autostart                              # start the selected profile's mode"
-echo "  systemctl --user enable --now unidrive.service   # auto-start on login"
+echo "  systemctl --user enable --now unidrive.service   # auto-start on login (default profile)"
+echo "  systemctl --user enable --now unidrive@<profile>.service         # ... or one unit per profile"
+echo "  systemctl --user enable --now unidrive-mount@<profile>.service   # FUSE mount, see dist/README.md"
 echo "  systemctl --user status unidrive.service         # check daemon status"
 echo "  journalctl --user -u unidrive.service -f         # follow logs"

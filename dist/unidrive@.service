@@ -1,11 +1,11 @@
 [Unit]
-Description=UniDrive profile background process
+Description=UniDrive background process for profile %i
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/unidrive autostart
+ExecStart=%h/.local/bin/unidrive -p %i autostart
 SuccessExitStatus=78 143
 Restart=on-failure
 RestartSec=30

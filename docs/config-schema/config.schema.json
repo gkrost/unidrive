@@ -41,6 +41,7 @@
         "properties": {
           "type": { "type": "string" },
           "mode": { "type": "string", "enum": ["mirror", "mount"], "description": "#603 (U4): the profile's hosting mode, chosen at creation and fixed. A profile without one is refused." },
+          "label": { "type": "string", "description": "Free display text for front-ends, stored as typed. Display only: the profile name stays the identity, and changing the label renames nothing." },
           "sync_root": { "type": "string" },
           "root_path": { "type": "string" },
           "pin_patterns": {

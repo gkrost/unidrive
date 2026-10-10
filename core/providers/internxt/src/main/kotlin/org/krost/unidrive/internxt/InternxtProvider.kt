@@ -30,6 +30,17 @@ class InternxtProvider(
     private val log = org.slf4j.LoggerFactory.getLogger(InternxtProvider::class.java)
     private val crypto = InternxtCrypto()
     private val authService = AuthService(config)
+
+    // #730: mnemonicToSeed is PBKDF2-HMAC-SHA512 (2048 iterations) and used to run once per
+    // download and upload — 8.2 % of the Java execution samples in the live JFR. The seed is
+    // a pure function of the mnemonic, so the last derived value is held for the life of this
+    // provider: a JWT refresh keeps the mnemonic and hits the cache, a re-auth that changes it
+    // derives a fresh seed and zeroes the replaced bytes. Memory only — never persisted, never
+    // logged.
+    private val seedLock = Any()
+
+    private var cachedSeed: CachedSeed? = null
+
     private val api = InternxtApiService(config, credentialsProvider = { forceRefresh -> authService.getValidCredentials(forceRefresh) })
     private val secureRandom = java.security.SecureRandom()
 
@@ -147,14 +158,48 @@ class InternxtProvider(
     override suspend fun logout() {
         notificationsClient?.disconnect()
         notificationsClient = null
+        clearCachedSeed()
         authService.logout()
     }
 
     override fun close() {
         notificationsClient?.disconnect()
         notificationsClient = null
+        clearCachedSeed()
         authService.close()
         api.close()
+    }
+
+    private class CachedSeed(
+        val mnemonic: String,
+        val seed: ByteArray,
+    )
+
+    /**
+     * #730: the BIP39 seed for [mnemonic], derived at most once per mnemonic for the life of
+     * this provider. Every caller gets a fresh copy of the held bytes, and every read or write
+     * of those bytes happens under [seedLock] — a transfer that received a seed before a
+     * credentials change or a close can therefore neither read zeroed key material nor corrupt
+     * the cache, and a burst of transfers on a cold cache still derives once.
+     */
+    private fun seedFor(mnemonic: String): ByteArray =
+        synchronized(seedLock) {
+            val current = cachedSeed
+            if (current != null && current.mnemonic == mnemonic) {
+                current.seed.copyOf()
+            } else {
+                val fresh = crypto.mnemonicToSeed(mnemonic)
+                current?.seed?.fill(0)
+                cachedSeed = CachedSeed(mnemonic, fresh)
+                fresh.copyOf()
+            }
+        }
+
+    private fun clearCachedSeed() {
+        synchronized(seedLock) {
+            cachedSeed?.seed?.fill(0)
+            cachedSeed = null
+        }
     }
 
     override fun onRemoteChangeHint(callback: () -> Unit) {
@@ -392,7 +437,7 @@ class InternxtProvider(
                     val iv = indexBytes.copyOfRange(0, 16)
 
                     val creds = authService.getValidCredentials()
-                    val seed = crypto.mnemonicToSeed(creds.mnemonic)
+                    val seed = seedFor(creds.mnemonic)
                     val bucketKey = crypto.deriveBucketKey(seed, bucket)
                     val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 
@@ -766,7 +811,7 @@ class InternxtProvider(
                 throw ProviderException("No bucket in credentials — re-authenticate with 'unidrive auth --provider internxt'")
             }
 
-        val seed = crypto.mnemonicToSeed(creds.mnemonic)
+        val seed = seedFor(creds.mnemonic)
         val bucketKey = crypto.deriveBucketKey(seed, bucket)
         val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
 

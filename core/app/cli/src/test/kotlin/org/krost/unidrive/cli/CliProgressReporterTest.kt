@@ -49,6 +49,20 @@ class CliProgressReporterTest {
         assertTrue(output.contains("(2.2s)"), "Expected '(2.2s)' in output; got: $output")
     }
 
+    @Test
+    fun `sync_complete_line_names_the_deletes_and_mkdirs_it_applied`() {
+        val reporter = CliProgressReporter()
+
+        reporter.onSyncComplete(0, 0, 0, 1000L, mapOf("del-remote" to 1, "mkdir-remote" to 2, "up" to 3))
+
+        val output = captured.toString(Charsets.UTF_8)
+        assertTrue(
+            output.contains("0 conflicts, 1 del-remote, 2 mkdir-remote (1.0s)"),
+            "Expected the applied deletes and mkdirs in the summary; got: $output",
+        )
+        assertFalse(output.contains("3 up"), "transfers keep their headline counts; got: $output")
+    }
+
     // UD-238: the formatter's math is binary (divisors 2^10 / 2^20 / 2^30), so the
     // suffix must be IEC binary (KiB/MiB/GiB). Prior labelling as KB/MB/GB implied
     // decimal-SI and under-reported by ~7% against raw Graph / Internxt numbers.

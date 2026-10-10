@@ -340,33 +340,10 @@ class LocalScanner(
     }
 
     // UD-209b: detect sparse-file leftovers (interrupted-sync placeholders) so they
-    // don't get classified as fully-hydrated. Posix-only, returns false on Windows
-    // and on any error so the safer "assume hydrated" default applies. Only worth
-    // checking files larger than one filesystem page (4 KiB), since smaller files
-    // can't be reliably detected as sparse on tmpfs/ext4 (minimum allocation unit).
-    // Mirrors the production check in PlaceholderManager.isSparse.
+    // don't get classified as fully-hydrated. In-process content probe, same on every
+    // platform; files of one filesystem page or less are never flagged.
     private fun isSparseLeftover(
         path: Path,
         size: Long,
-    ): Boolean {
-        if (size <= 4096L) return false
-        val os = System.getProperty("os.name", "").lowercase()
-        if (os.contains("win")) return false
-        return try {
-            val proc =
-                ProcessBuilder("stat", "--format=%b", path.toAbsolutePath().toString())
-                    .redirectErrorStream(true)
-                    .start()
-            val output =
-                proc.inputStream
-                    .bufferedReader()
-                    .readLine()
-                    ?.trim() ?: return false
-            proc.waitFor()
-            val blocks = output.toLongOrNull() ?: return false
-            blocks * 512 < size
-        } catch (_: Exception) {
-            false
-        }
-    }
+    ): Boolean = SparseProbe.isStub(path, size)
 }

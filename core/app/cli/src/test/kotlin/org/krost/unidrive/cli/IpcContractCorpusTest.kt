@@ -534,7 +534,10 @@ class IpcContractCorpusTest {
     }
 
     companion object {
-        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id", "engine_version")
+        // cache.bytes: the cache size is measured off the request path, so right after the start it is
+        // either not measured yet (null) or already measured (0 for the empty corpus daemon); the corpus
+        // pins that it is a number-or-null literal, not which of the two a fresh daemon shows.
+        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id", "engine_version", "bytes")
         private const val FIXED_MTIME_MS = 1234567890123L
         private const val FIXED_REMOTE_MS = 1234567890000L
     }

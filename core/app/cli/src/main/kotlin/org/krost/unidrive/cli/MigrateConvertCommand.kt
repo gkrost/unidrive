@@ -397,25 +397,29 @@ internal object LegacyConversion {
         // would read them as local deletes and plan DeleteRemote. Mirror and mount profiles are
         // independent and no migration of hybrid state is supported (#459, #680).
         // Which rows count: cache_backed = true always (the mount wrote the bytes to the cache). A
-        // NULL row only when its cache copy exists and its sync_root file is missing: only the
-        // mount engine writes cache_backed, so every row a plain mirror profile ever hydrated is
-        // NULL, and with its sync_root file present it is a mirror row (#706). cache_backed = false
-        // (a sync-root baseline the mount adopted) passes, as before.
+        // NULL row counts unless its sync_root file is present: only the mount engine writes
+        // cache_backed, so every row a plain mirror profile ever hydrated is NULL, and with its
+        // sync_root file present it is a mirror row (#706). A NULL row with no copy in the sync
+        // root - whether its bytes sit in the cache or are gone entirely - is absent from the sync
+        // root, so the first mirror sync would read it as a local delete and plan DeleteRemote.
+        // cache_backed = false (a sync-root baseline the mount adopted) passes, as before.
         // A conversion that already published its mode (resume) passed this check before.
         if (targetMode == "mirror" && (loaded == null || "PUBLISH" !in loaded.phases)) {
             val flagged = inventory.db?.cacheBacked?.get("true") ?: 0
-            val unflaggedCacheOnly =
+            val nullHydrated = inventory.db?.cacheBacked?.get("null") ?: 0
+            // NULL rows the mirror re-adopts: their sync_root file is present, so no local byte is missing.
+            val nullWithSyncRoot =
                 inventory.files.count {
-                    it.cls == PathClass.CACHE_ONLY && it.hydrated == true && it.cacheBacked == null
+                    it.hydrated == true && it.cacheBacked == null && it.syncRootBytes != null
                 }
-            val cacheBackedHydrated = flagged + unflaggedCacheOnly
+            val cacheBackedHydrated = flagged + (nullHydrated - nullWithSyncRoot).coerceAtLeast(0)
             if (cacheBackedHydrated > 0) {
                 System.err.println(
                     "Error: profile '${setup.profileName}' is a legacy hybrid profile with $cacheBackedHydrated hydrated " +
-                        "file(s) whose bytes live only in the hydration cache (marked cache-backed, or present in the cache " +
-                        "and missing from the sync_root). Converting such a profile to a mirror is unsupported: the first " +
-                        "mirror sync would read them as local deletes, mirror and mount profiles are independent, and no " +
-                        "migration of hybrid state is supported in this phase. Convert it to a mount instead " +
+                        "file(s) whose bytes are absent from the sync_root (marked cache-backed, or a NULL row with no " +
+                        "sync_root copy). Converting such a profile to a mirror is unsupported: the first mirror sync " +
+                        "would read them as local deletes, mirror and mount profiles are independent, and no migration " +
+                        "of hybrid state is supported in this phase. Convert it to a mount instead " +
                         "('migrate convert --mode mount'), or create a new mirror profile. Nothing was changed.",
                 )
                 return 1

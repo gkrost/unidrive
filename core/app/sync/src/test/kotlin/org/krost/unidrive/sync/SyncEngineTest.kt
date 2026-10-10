@@ -918,6 +918,8 @@ class SyncEngineTest {
         // UD-745: capture failed count for tests asserting summary semantics.
         var lastFailed: Int = 0
             private set
+        var lastActionCounts: Map<String, Int> = emptyMap()
+            private set
 
         override fun onSyncComplete(
             downloaded: Int,
@@ -928,6 +930,7 @@ class SyncEngineTest {
             failed: Int,
         ) {
             lastFailed = failed
+            lastActionCounts = actionCounts
         }
 
         override fun onWarning(message: String) {
@@ -1180,6 +1183,41 @@ class SyncEngineTest {
                 provider.deletedPaths.contains(filePath),
                 "bidirectional locally-deleted hydrated row must propagate as DeleteRemote; deleted=${provider.deletedPaths}",
             )
+        }
+
+    @Test
+    fun `sync_summary_counts_the_deletes_that_were_applied`() =
+        runTest {
+            val now = Instant.parse("2026-01-01T00:00:00Z")
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/gone.txt",
+                    remoteId = "id-gone",
+                    remoteHash = "hash-x",
+                    remoteSize = 50,
+                    remoteModified = now,
+                    localMtime = now.toEpochMilli(),
+                    localSize = 50,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = now,
+                ),
+            )
+            db.setSyncState("delta_cursor", "existing-cursor")
+            provider.deltaItems = emptyList()
+            Files.writeString(syncRoot.resolve("other.txt"), "keep")
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = false)
+            assertEquals(1, reporter.lastActionCounts["del-remote"], "counts=${reporter.lastActionCounts}")
+        }
+
+    @Test
+    fun `sync_summary_does_not_count_a_delete_that_was_not_applied`() =
+        runTest {
+            val reporter = RecordingReporter()
+            engineWithReporter(reporter).syncOnce(dryRun = false)
+            assertEquals(null, reporter.lastActionCounts["del-remote"], "counts=${reporter.lastActionCounts}")
         }
 
     @Test
@@ -3416,9 +3454,133 @@ class SyncEngineTest {
                 }
             assertEquals(1, sideCopies.size, "exactly one conflict-local side copy must exist; got $sideCopies")
             assertEquals("MINE", Files.readString(sideCopies.single()), "the side copy must hold the user's own edit")
-            // The side copy is NOT the tracked entity, so a later delete of the
-            // canonical by another actor cannot reap the user's edit.
-            assertNull(db.getEntry(sideCopies.single().fileName.toString()), "the side copy must be untracked")
+            // The side copy is uploaded in this same pass and tracked at its own path, so a later
+            // delete of the canonical by another actor cannot reap the user's edit.
+            assertNotNull(
+                db.getEntry("/" + sideCopies.single().fileName.toString()),
+                "the uploaded side copy must be tracked at its own path",
+            )
+        }
+
+    private fun seedBothModifiedConflict() {
+        val now = Instant.parse("2026-01-01T00:00:00Z")
+        db.upsertEntry(
+            org.krost.unidrive.sync.model.SyncEntry(
+                path = "/c.txt",
+                remoteId = "id-c",
+                remoteHash = "base",
+                remoteSize = 4,
+                remoteModified = now,
+                localMtime = now.toEpochMilli(),
+                localSize = 4,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = now,
+            ),
+        )
+        db.setSyncState("delta_cursor", "existing-cursor")
+        Files.writeString(syncRoot.resolve("c.txt"), "MINE")
+        Files.setLastModifiedTime(
+            syncRoot.resolve("c.txt"),
+            java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000),
+        )
+        provider.files["/c.txt"] = "THEIRS".toByteArray()
+        provider.deltaItems = listOf(cloudItem("/c.txt", size = 6))
+    }
+
+    @Test
+    fun `keep_both_conflict_copy_is_uploaded_in_the_same_pass`() =
+        runTest {
+            seedBothModifiedConflict()
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            val copy = provider.uploadedPaths.singleOrNull { it.contains(".conflict-local-") }
+            assertNotNull(copy, "the side copy must be uploaded in this pass; uploaded=${provider.uploadedPaths}")
+            assertEquals("MINE", String(provider.files[copy]!!), "the uploaded copy holds the user's own edit")
+            assertNotNull(db.getEntry(copy), "the uploaded copy is recorded so the next scan does not re-upload it")
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "the canonical path still holds the remote version")
+        }
+
+    @Test
+    fun `keep_both_conflict_copy_stays_local_when_its_upload_fails`() =
+        runTest {
+            seedBothModifiedConflict()
+            provider.uploadFailCount = 1
+
+            engineWithDirection(SyncDirection.BIDIRECTIONAL).syncOnce(dryRun = false)
+
+            assertEquals("THEIRS", Files.readString(syncRoot.resolve("c.txt")), "the conflict is still resolved")
+            val copies = Files.list(syncRoot).use { st -> st.filter { it.fileName.toString().contains(".conflict-local-") }.toList() }
+            assertEquals("MINE", Files.readString(copies.single()), "the user's edit survives a failed copy upload")
+        }
+
+    @Test
+    fun `keep_both_conflict_copy_is_not_uploaded_by_a_download_only_sync`() =
+        runTest {
+            seedBothModifiedConflict()
+
+            engineWithDirection(SyncDirection.DOWNLOAD).syncOnce(dryRun = false)
+
+            assertTrue(provider.uploadedPaths.none { it.contains(".conflict-local-") }, "uploaded=${provider.uploadedPaths}")
+        }
+
+    @Test
+    fun `keep_both_conflict_copy_under_a_locale_alias_is_uploaded_next_to_the_canonical_remote_file`() =
+        runTest {
+            // Local /Bilder is the locale alias of the remote /Pictures (#115): rows are keyed at the
+            // real-local path and carry the canonical remote path.
+            val now = Instant.parse("2026-03-28T12:00:00Z")
+            fun row(
+                path: String,
+                remotePath: String,
+                isFolder: Boolean,
+            ) = org.krost.unidrive.sync.model.SyncEntry(
+                path = path,
+                remotePath = remotePath,
+                remoteId = "id-$remotePath",
+                remoteHash = if (isFolder) null else "base",
+                remoteSize = if (isFolder) 0 else 4,
+                remoteModified = now,
+                localMtime = now.toEpochMilli(),
+                localSize = if (isFolder) null else 4,
+                isFolder = isFolder,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = now,
+            )
+            db.upsertEntry(row("/Bilder", "/Pictures", isFolder = true))
+            db.upsertEntry(row("/Bilder/c.txt", "/Pictures/c.txt", isFolder = false))
+            db.setSyncState("delta_cursor", "existing-cursor")
+            Files.createDirectories(syncRoot.resolve("Bilder"))
+            val local = syncRoot.resolve("Bilder/c.txt")
+            Files.writeString(local, "MINE")
+            Files.setLastModifiedTime(local, java.nio.file.attribute.FileTime.fromMillis(now.toEpochMilli() + 60_000))
+            provider.files["/Pictures/c.txt"] = "THEIRS".toByteArray()
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/Pictures", size = 0, isFolder = true).copy(hash = null),
+                    cloudItem("/Pictures/c.txt", size = 6),
+                )
+
+            SyncEngine(
+                provider = provider,
+                db = db,
+                syncRoot = syncRoot,
+                conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                reporter = ProgressReporter.Silent,
+                syncDirection = SyncDirection.BIDIRECTIONAL,
+                xdgUserDirsOverridesForTest = mapOf("XDG_PICTURES_DIR" to "Bilder"),
+            ).syncOnce(dryRun = false)
+
+            val copies = provider.uploadedPaths.filter { it.contains(".conflict-local-") }
+            assertEquals(1, copies.size, "the side copy must be uploaded once; uploaded=${provider.uploadedPaths}")
+            assertTrue(
+                copies.single().startsWith("/Pictures/c.conflict-local-"),
+                "the copy goes next to the canonical remote file, not under the local alias; uploaded=${provider.uploadedPaths}",
+            )
+            assertEquals("MINE", String(provider.files[copies.single()]!!), "the uploaded copy holds the user's own edit")
         }
 
     @Test

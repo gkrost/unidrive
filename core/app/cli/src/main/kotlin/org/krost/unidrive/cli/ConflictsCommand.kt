@@ -9,6 +9,9 @@ import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
 import java.nio.file.Paths
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @Command(
     name = "conflicts",
@@ -88,7 +91,7 @@ class ConflictsListCommand : Runnable {
         val ellipsis = GlyphRenderer.ellipsis()
         val dash = GlyphRenderer.dash()
         for (entry in entries) {
-            val ts = entry.timestamp.take(19).replace('T', ' ')
+            val ts = formatConflictTimestamp(entry.timestamp)
             val path = if (entry.path.length > 38) ellipsis + entry.path.takeLast(37) else entry.path
             val backup = if (entry.backupFile != null) AnsiHelper.green(GlyphRenderer.tick()) else AnsiHelper.dim(dash)
             println("%-24s %-40s %-16s %s".format(ts, path, entry.policy, backup))
@@ -153,3 +156,16 @@ class ConflictsClearCommand : Runnable {
         println("Conflict history cleared.")
     }
 }
+
+private val CONFLICT_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+/** The log stores UTC instants; show them in local time like `status` and `log` do. */
+internal fun formatConflictTimestamp(
+    raw: String,
+    zone: ZoneId = ZoneId.systemDefault(),
+): String =
+    try {
+        CONFLICT_TIME_FORMAT.format(Instant.parse(raw).atZone(zone))
+    } catch (_: Exception) {
+        raw.take(19).replace('T', ' ')
+    }

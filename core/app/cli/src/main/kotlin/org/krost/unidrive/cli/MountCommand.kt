@@ -95,17 +95,20 @@ class MountCommand : Runnable {
                     "reinstall it (`unidrive-mount --version` must report ipc-protocol 2).",
             )
         } else if (exit != 0) {
-            // Per spec §3.4 "Daemon-not-running error path": the co-daemon's
-            // inherited stderr already prints "failed to connect IPC at ...:
-            // Connection refused". Augment with the operator hint.
-            System.err.println(
-                "unidrive mount: co-daemon exited with code $exit. If the cause was " +
-                    "Connection refused, the daemon for profile '${profile.name}' is " +
-                    "not running. Start it with: `unidrive -p ${profile.name} daemon run`.",
-            )
+            // The co-daemon's inherited stderr already says why it stopped. Ask the daemon before
+            // blaming it: only a failed status check may claim it is not running (#202).
+            val daemonStatus =
+                resolveDaemonStatus(
+                    answers = DaemonAutospawn.daemonAnswers(profile.name, socketPath, parent.providerConfigDir()),
+                    socketExists = Files.exists(socketPath),
+                )
+            System.err.println(coDaemonExitMessage(exit, profile.name, daemonStatus))
         }
         System.exit(exit)
     }
+
+    /** What the daemon's own status check found after the co-daemon exited. */
+    enum class DaemonStatus { ANSWERING, SOCKET_NOT_ANSWERING, NOT_RUNNING }
 
     companion object {
         const val EX_CONFIG: Int = 78
@@ -146,6 +149,38 @@ class MountCommand : Runnable {
                 "--profile",
                 profileName,
             )
+
+        /** Maps the status check onto the exit hint's wording: only a missing socket claims "not running". */
+        internal fun resolveDaemonStatus(
+            answers: Boolean,
+            socketExists: Boolean,
+        ): DaemonStatus =
+            when {
+                answers -> DaemonStatus.ANSWERING
+                socketExists -> DaemonStatus.SOCKET_NOT_ANSWERING
+                else -> DaemonStatus.NOT_RUNNING
+            }
+
+        /** The operator hint for a non-zero co-daemon exit; claims "not running" only when the status check said so. */
+        fun coDaemonExitMessage(
+            exit: Int,
+            profileName: String,
+            daemonStatus: DaemonStatus,
+        ): String {
+            val head = "unidrive mount: co-daemon exited with code $exit."
+            return when (daemonStatus) {
+                DaemonStatus.ANSWERING ->
+                    "$head The daemon for profile '$profileName' is running and answering, so the cause is the " +
+                        "co-daemon's own (see its output above; run again with RUST_LOG=debug for more)."
+                DaemonStatus.SOCKET_NOT_ANSWERING ->
+                    "$head The daemon for profile '$profileName' has a socket but did not answer: it may still be " +
+                        "starting (run the mount again in a moment) or a killed daemon left a stale socket " +
+                        "(check `unidrive -p $profileName daemon status`)."
+                DaemonStatus.NOT_RUNNING ->
+                    "$head The daemon for profile '$profileName' is not running. " +
+                        "Start it with: `unidrive -p $profileName daemon run`."
+            }
+        }
 
         fun checkBinaryExists(binary: Path): Int =
             if (Files.isExecutable(binary) || Files.exists(binary)) 0 else EX_CONFIG
