@@ -420,10 +420,9 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN local_hash TEXT",
                 )
             }
-            // #449: where the row's local baseline lives. NULL = unknown (every row written before
-            // this column), 1 = the hydration cache copy, 0 = the sync-root file. Same additive
-            // pattern, no schema_version bump; NULL keeps the cache-presence guard of the
-            // Reconciler for old rows. The CREATE TABLE above includes it for fresh installs.
+            // #449: where the row's local baseline lives (see SyncEntry.cacheBacked). NULL = unknown, 1 = the
+            // hydration cache copy, 0 = not the cache copy. Same additive pattern, no schema_version bump.
+            // The CREATE TABLE above includes it for fresh installs.
             if (!columnExists("sync_entries", "cache_backed")) {
                 stmt.executeUpdate(
                     "ALTER TABLE sync_entries ADD COLUMN cache_backed INTEGER",
@@ -1151,13 +1150,15 @@ class StateDatabase(
 
     /**
      * Paths of alive FILE rows holding local content that has never reached
-     * the cloud (`local:` synthetic remote_id, hydrated — created or written
-     * through the mount whose upload has not landed, whether or not an
-     * attempt has failed yet). This is the durable pending-upload set the
-     * daemon replays at startup: rows created by [org.krost.unidrive.sync.LocalScanner]
-     * (is_hydrated=0, content in the sync root, no cache copy) are excluded —
-     * the daemon serves a mount, and only hydration rows have a cache file to
-     * upload from. Ordered by path for deterministic replay.
+     * the cloud (`local:` synthetic remote_id, hydrated, whether or not an
+     * attempt has failed yet): the rows [SyncEntry.isPendingUpload] names.
+     * The query does not tell the two writers apart. In a mount profile the
+     * rows are the mount's (create / open_write, bytes in the hydration cache)
+     * and this is the durable pending-upload set the daemon replays at startup;
+     * rows [org.krost.unidrive.sync.LocalScanner] wrote (is_hydrated=1, bytes in
+     * the sync root) match too, which a legacy profile converted to a mount can
+     * still hold, and the replay drops them because they have no cache copy
+     * (`HydrationImpl.replayable`). Ordered by path for deterministic replay.
      */
     @Synchronized
     fun pendingUploadPaths(): List<String> {

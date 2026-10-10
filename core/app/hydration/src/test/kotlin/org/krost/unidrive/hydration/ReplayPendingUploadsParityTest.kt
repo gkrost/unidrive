@@ -18,7 +18,8 @@ import kotlin.test.assertTrue
  * #560 U1: which pending rows the start-up replay picks. `StateDatabase.pendingUploadPaths()` returns every alive,
  * hydrated, never-uploaded file row — rows LocalScanner wrote for files in the sync root as well as rows the mount
  * wrote. `HydrationImpl.replayPendingUploads` then keeps only rows with a hydration cache copy, so a sync-root file
- * the scanner found is left to the rescan / a sync and is never uploaded from a cache it does not have.
+ * the scanner found (a mirror profile's row, or one a legacy profile converted to a mount kept) is never uploaded
+ * from a cache it does not have.
  */
 class ReplayPendingUploadsParityTest {
     @Test
