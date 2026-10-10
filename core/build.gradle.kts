@@ -416,39 +416,3 @@ tasks.register("generateNotice") {
         )
     }
 }
-
-// UD-709: resolve the right bash interpreter. On Windows, `PATH` lookup of
-// plain `bash` typically hits `C:\Windows\System32\bash.exe`, which is the
-// WSL relay and fails without a WSL distribution installed. Prefer Git for
-// Windows' `bash.exe`, then MSYS2, then fall through to plain `bash` on
-// Linux/macOS.
-fun resolveBashExecutable(): String {
-    if (!org.gradle.internal.os.OperatingSystem.current().isWindows) return "bash"
-    val candidates = listOfNotNull(
-        System.getenv("PROGRAMFILES")?.let { "$it/Git/bin/bash.exe" },
-        System.getenv("PROGRAMFILES(X86)")?.let { "$it/Git/bin/bash.exe" },
-        "C:/Program Files/Git/bin/bash.exe",
-        "C:/msys64/usr/bin/bash.exe",
-    )
-    return candidates.firstOrNull { file(it).exists() }
-        ?: error(
-            "No usable bash found on Windows. Install Git for Windows (or MSYS2) " +
-                "and retry, or run tests/integration-test.sh directly from git-bash.",
-        )
-}
-
-tasks.register<Exec>("integrationTest") {
-    description = "Run integration test suite (requires configured providers and network)"
-    group = "verification"
-    dependsOn(":app:cli:shadowJar")
-    workingDir = projectDir
-    commandLine(resolveBashExecutable(), "tests/integration-test.sh")
-}
-
-tasks.register<Exec>("integrationTestOffline") {
-    description = "Run integration tests without network (subset)"
-    group = "verification"
-    dependsOn(":app:cli:shadowJar")
-    workingDir = projectDir
-    commandLine(resolveBashExecutable(), "tests/integration-test.sh", "--skip-network")
-}
