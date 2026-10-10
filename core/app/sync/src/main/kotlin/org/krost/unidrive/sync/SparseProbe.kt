@@ -14,7 +14,9 @@ import java.nio.file.StandardOpenOption
  * of the evenly spaced pages in between. Works the same on every platform and spawns no process.
  *
  * A file whose content is genuinely all zeros in every sampled page is indistinguishable from a
- * stub and is reported as one.
+ * stub and is reported as one. Conversely, a file that is a partial write (real content in the head,
+ * a zero-filled tail) is not reported as a stub: the probe flags a file only when every sampled page
+ * reads as zeros, whereas the replaced allocated-block check flagged any file with a hole.
  */
 internal object SparseProbe {
     const val PAGE: Int = 4096
