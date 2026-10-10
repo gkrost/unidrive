@@ -14,6 +14,7 @@ import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.concurrent.Callable
 
 @Command(
     name = "profile",
@@ -45,12 +46,70 @@ internal fun newAccountHint(metadata: ProviderMetadata?): List<String> {
     return listOf("No ${metadata.displayName} account yet? Creating one through this link supports the project:", "  $url")
 }
 
-@Command(name = "add", description = ["Add a new provider profile (interactive wizard)"], mixinStandardHelpOptions = true)
-class ProfileAddCommand : Runnable {
+@Command(
+    name = "add",
+    description = [
+        "Add a new provider profile: the interactive wizard, or with --type a non-interactive creation " +
+            "(no console, no prompt, no daemon; credentials never come from arguments).",
+    ],
+    mixinStandardHelpOptions = true,
+)
+class ProfileAddCommand : Callable<Int> {
     @ParentCommand
     lateinit var profileCmd: ProfileCommand
 
-    override fun run() {
+    @Option(names = ["--type"], description = ["Provider type; selects the non-interactive creation"])
+    var type: String? = null
+
+    @Option(names = ["--name"], description = ["Profile name, the immutable id (default: the type)"])
+    var nameOption: String? = null
+
+    @Option(names = ["--mode"], description = ["mount or mirror, fixed after creation (required with --type)"])
+    var modeOption: String? = null
+
+    @Option(names = ["--sync-root"], description = ["Sync root of a mirror profile (default: the provider's)"])
+    var syncRootOption: String? = null
+
+    @Option(names = ["--label"], description = ["Free display text (the name stays the id)"])
+    var labelOption: String? = null
+
+    @Option(
+        names = ["--option"],
+        description = ["key=value for a non-secret setting of the provider type (repeatable); secrets are refused"],
+    )
+    var options: MutableList<String> = mutableListOf()
+
+    @Option(names = ["--make-default"], description = ["Make the new profile the default profile"])
+    var makeDefault: Boolean = false
+
+    @Option(names = ["--json"], description = ["Print the result (or the refusal) as one JSON object on stdout"])
+    var json: Boolean = false
+
+    override fun call(): Int {
+        if (type == null && !json) {
+            run()
+            return 0
+        }
+        return try {
+            val t = type ?: throw LifecycleError("missing_type", "--type is required for a non-interactive creation")
+            val result =
+                ProfileCreator.create(
+                    profileCmd.parent.configBaseDir(),
+                    NewProfile(t, nameOption, modeOption, syncRootOption, labelOption, options, makeDefault),
+                )
+            if (json) {
+                emitJson(result)
+            } else {
+                println("Profile '${nameOption?.takeIf { it.isNotBlank() } ?: t}' added.")
+            }
+            0
+        } catch (e: LifecycleError) {
+            if (json) emitJson(lifecycleErrorJson(e)) else System.err.println("Error: ${e.message}")
+            1
+        }
+    }
+
+    private fun run() {
         val console = System.console()
         if (console == null) {
             System.err.println("Error: 'profile add' requires an interactive terminal.")
@@ -247,13 +306,7 @@ class ProfileAddCommand : Runnable {
         console: java.io.Console,
         type: String,
     ): String {
-        val computed = SyncConfig.defaultSyncRoot(type)
-        val defaultRoot =
-            if (isOfficialInternxtClientFolder(computed.fileName.toString())) {
-                computed.parent.resolve("InternxtSync").toString()
-            } else {
-                computed.toString()
-            }
+        val defaultRoot = mirrorSyncRootDefault(type)
         print("Sync root [$defaultRoot]: ")
         val rootInput = console.readLine()?.trim()
         val syncRoot = if (rootInput.isNullOrBlank()) defaultRoot else rootInput

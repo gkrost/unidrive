@@ -25,6 +25,8 @@ internal data class OneDriveDeviceFlowState(
     val deviceCode: String,
     val expiresAtMillis: Long,
     val oauthService: OAuthService,
+    /** The profile folder holding the flow's [PendingDeviceFlow] file, so a cancel can delete it too. */
+    val profileDir: java.nio.file.Path? = null,
 )
 
 internal object OneDriveDeviceFlowRegistry {
@@ -36,6 +38,14 @@ internal object OneDriveDeviceFlowRegistry {
         return handle
     }
 
+    /** Re-registers a flow under the [handle] it was issued with (rebuilt from [PendingDeviceFlow] in a later process). */
+    fun putWithHandle(
+        handle: String,
+        state: OneDriveDeviceFlowState,
+    ) {
+        states[handle] = state
+    }
+
     fun get(handle: String): OneDriveDeviceFlowState? = states[handle]
 
     fun remove(handle: String): OneDriveDeviceFlowState? = states.remove(handle)
@@ -44,3 +54,19 @@ internal object OneDriveDeviceFlowRegistry {
      *  the registry-is-empty-after-each-terminal-outcome invariant. */
     internal fun sizeForTest(): Int = states.size
 }
+
+/**
+ * The device-code flow as it survives the process that began it: `auth begin` and `auth complete` of the
+ * CLI are separate processes, so the registry above cannot carry the flow between them. Kept in the
+ * profile folder through [org.krost.unidrive.auth.CredentialStore] (atomic write, owner-only folder and
+ * file, like the token itself) and deleted at every terminal outcome. The device code is the secret
+ * that redeems the token once the user has approved the sign-in.
+ */
+@kotlinx.serialization.Serializable
+internal data class PendingDeviceFlow(
+    val handle: String,
+    val deviceCode: String,
+    val expiresAtMillis: Long,
+)
+
+internal const val PENDING_DEVICE_FLOW_FILE = "device-flow.json"
