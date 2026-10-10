@@ -1225,6 +1225,9 @@ open class SyncEngine(
         // (mkdir/move/delete/conflict). Combined with `transferFailures`
         // below for the headline `failed` count in onSyncComplete.
         val passOneFailures = AtomicInteger(0)
+        // Pass 1 actions that were applied (mkdir, delete, move, ...), by label, for the sync summary;
+        // transfers are reported through the downloaded/uploaded counts.
+        val appliedCounts = mutableMapOf<String, Int>()
         // #419: paths this pass has already deleted on the remote, so the empty-directory
         // reaper below leaves them alone instead of re-probing a folder it just trashed.
         val remoteDeletedPaths = mutableSetOf<String>()
@@ -1276,6 +1279,7 @@ open class SyncEngine(
                         // failed run signals an outage (trips the hard cap below),
                         // any success resets the streak. Mirrors the single-action
                         // path's reset-on-success / increment-on-failure semantic.
+                        if (run.size > failures) appliedCounts.merge("mkdir-remote", run.size - failures, Int::plus)
                         if (failures >= run.size) {
                             consecutiveFailures += failures
                             if (consecutiveFailures >= CONSECUTIVE_SYNC_FAILURE_HARD_CAP) {
@@ -1297,7 +1301,9 @@ open class SyncEngine(
                         continue
                     }
                     val action = head
+                    val label = actionLabel(action)
                     try {
+                        var applied = true
                         when (action) {
                             is SyncAction.CreatePlaceholder -> {
                                 applyCreatePlaceholder(action)
@@ -1314,6 +1320,8 @@ open class SyncEngine(
                                 if (!deleteBlockedByFailedMove(action, failedMoveSources)) {
                                     applyDeleteRemote(action)
                                     remoteDeletedPaths += action.path
+                                } else {
+                                    applied = false
                                 }
                             is SyncAction.Conflict -> {
                                 applyConflict(action)
@@ -1322,6 +1330,7 @@ open class SyncEngine(
                             is SyncAction.RemoveEntry -> applyRemoveEntry(action)
                             else -> {}
                         }
+                        if (applied) appliedCounts.merge(label, 1, Int::plus)
                         consecutiveFailures = 0
                     } catch (e: AuthenticationException) {
                         // UD-253: include exception class + full stack for auth failures.
@@ -1613,6 +1622,7 @@ open class SyncEngine(
             uploaded.get(),
             conflicts.get(),
             duration,
+            actionCounts = appliedCounts,
             failed = passOneFailures.get() + transferFailures.get(),
         )
     }
@@ -3117,23 +3127,43 @@ open class SyncEngine(
         if (action.remoteItem != null && !action.remoteItem.deleted) {
             // Both sides diverged: preserve the local edit as a side copy, then
             // let the remote take the canonical path.
+            var keptCopyPath: String? = null
             if ((action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) &&
                 Files.exists(localPath)
             ) {
                 val conflictPath = "$base$conflictSuffix"
                 val conflictLocal = placeholder.resolveLocal(conflictPath)
-                // Move the user's edit aside under the conflict-local name. It is a
-                // local-only file (untracked, never uploaded) — the user's recoverable
-                // copy of their own work.
+                // Move the user's edit aside under the conflict-local name. It is uploaded in this same
+                // pass (below) and tracked at its own path, so a later delete of the canonical cannot
+                // reap the user's recoverable copy of their own work.
                 withEchoSuppression(conflictPath) {
                     Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
+                keptCopyPath = conflictPath
             }
             // The remote version takes the canonical path and becomes the tracked
             // entity (real bytes, not a NUL stub).
             applyCreatePlaceholder(
                 SyncAction.CreatePlaceholder(action.path, action.remoteItem, shouldHydrate = !action.remoteItem.isFolder),
             )
+            // #694: the side copy goes up in this pass, not on the next one (the plan was made before the copy
+            // existed). Best effort: a failed upload leaves the copy local-only, and the next scan uploads it.
+            if (keptCopyPath != null && syncDirection != SyncDirection.DOWNLOAD) {
+                // #115: keptCopyPath is real-local. Under a locale alias (/Bilder <-> /Pictures) the copy
+                // belongs next to the canonical remote file, as the reconciler's own Upload would target it.
+                val canonicalCopy =
+                    action.remoteItem.path.substringBeforeLast('/') + "/" + keptCopyPath.substringAfterLast('/')
+                val copyTarget = if (canonicalCopy != keptCopyPath) canonicalCopy else null
+                try {
+                    applyUpload(SyncAction.Upload(keptCopyPath, remoteTarget = copyTarget))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: AuthenticationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.warn("Conflict copy {} was kept locally but not uploaded yet: {}", keptCopyPath, e.message)
+                }
+            }
         } else if (action.localState == ChangeState.DELETED && action.remoteItem != null) {
             // UD-222: remote wins the conflict — download real bytes, not a NUL stub.
             applyCreatePlaceholder(
