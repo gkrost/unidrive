@@ -2,17 +2,27 @@
 # pre-push — run gitleaks against the current working tree before a push.
 #
 # Scope: the working tree only, not history. Pre-push is about what is
-# about to leave this machine; a full-history scan lives in CI
-# (scripts/ci/gitleaks.sh).
+# about to leave this machine. No CI job runs gitleaks; this hook is the
+# only secret scan, so it fails closed.
 #
-# If gitleaks is not installed, warn but do not block the push.
+# Enable it once per clone:
+#   git config core.hooksPath scripts/hooks
+#
+# If gitleaks is not installed the push is refused. To push anyway
+# (for example on a machine without gitleaks), set
+# UNIDRIVE_SKIP_SECRET_SCAN=1 for that one push.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 if ! command -v gitleaks >/dev/null 2>&1; then
-    echo "pre-push: gitleaks not found on PATH; skipping secret scan." >&2
+    if [ "${UNIDRIVE_SKIP_SECRET_SCAN:-}" = "1" ]; then
+        echo "pre-push: gitleaks not found; UNIDRIVE_SKIP_SECRET_SCAN=1, skipping secret scan." >&2
+        exit 0
+    fi
+    echo "pre-push: gitleaks not found on PATH; refusing to push without a secret scan." >&2
     echo "pre-push: install: https://github.com/gitleaks/gitleaks" >&2
-    exit 0
+    echo "pre-push: or push once with UNIDRIVE_SKIP_SECRET_SCAN=1 to skip it." >&2
+    exit 1
 fi
 
 exec gitleaks detect \
