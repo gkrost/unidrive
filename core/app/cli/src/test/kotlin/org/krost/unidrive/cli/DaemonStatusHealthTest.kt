@@ -166,7 +166,7 @@ class DaemonStatusHealthTest {
                 error("unreachable")
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            error("status never showed $what; last: $last")
+            throw IllegalStateException("status never showed $what; last: $last", e)
         }
     }
 
