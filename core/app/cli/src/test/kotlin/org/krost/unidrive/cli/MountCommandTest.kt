@@ -227,4 +227,25 @@ class MountCommandTest {
         // Accept any non-zero exit OR a successful destroy (return any int).
         assertTrue(exit != Int.MIN_VALUE, "supervisor must return a real exit code, got sentinel")
     }
+
+    @Test
+    fun `co_daemon_log_level_defaults_to_warn_when_the_operator_set_none`() {
+        val env = mutableMapOf("PATH" to "/usr/bin")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("warn", env["RUST_LOG"])
+    }
+
+    @Test
+    fun `co_daemon_log_level_keeps_the_operators_choice`() {
+        val env = mutableMapOf("RUST_LOG" to "unidrive_mount=debug")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("unidrive_mount=debug", env["RUST_LOG"])
+    }
+
+    @Test
+    fun `co_daemon_log_level_replaces_a_blank_value`() {
+        val env = mutableMapOf("RUST_LOG" to " ")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("warn", env["RUST_LOG"])
+    }
 }

@@ -147,11 +147,19 @@ class MountCommand : Runnable {
                 profileName,
             )
 
+        /** The co-daemon's log filter when the operator set none: its teardown breadcrumbs are warnings (#150). */
+        const val DEFAULT_RUST_LOG: String = "warn"
+
+        fun applyDefaultCoDaemonLogLevel(env: MutableMap<String, String>) {
+            if (env["RUST_LOG"].isNullOrBlank()) env["RUST_LOG"] = DEFAULT_RUST_LOG
+        }
+
         fun checkBinaryExists(binary: Path): Int =
             if (Files.isExecutable(binary) || Files.exists(binary)) 0 else EX_CONFIG
 
         fun superviseProcess(argv: List<String>): Int {
             val pb = ProcessBuilder(argv).inheritIO()
+            applyDefaultCoDaemonLogLevel(pb.environment())
             val proc = pb.start()
             val hook = Thread {
                 if (proc.isAlive) {
