@@ -99,11 +99,77 @@ next poll).
 - **Code:** `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtConfig.kt`,
   `InternxtProvider.ensureNotificationsClient`.
 
-The feed is only a latency optimisation; polling alone is always correct. If
-the host (`INTERNXT_NOTIFICATIONS_URL`, default `https://notifications.internxt.com`)
-does not accept connections, the client logs one WARN per outage and keeps
-reconnecting in the background with socket.io's own backoff (1 s up to 60 s);
-set this to `off` to stop even that.
+The feed is only a latency optimisation; polling alone is always correct.
+Only a process that consumes remote-change hints opens the socket (today
+`sync --watch`); one-shot commands and `daemon run` never contact the host.
+If the host (`INTERNXT_NOTIFICATIONS_URL`, default
+`https://notifications.internxt.com`) is merely unreachable (offline, timeout,
+refused, 5xx), the client logs one WARN per outage and keeps reconnecting in
+the background with socket.io's own backoff (1 s up to 60 s). If the endpoint
+cannot be the notifications server (its TLS certificate is not valid for the
+host name or not trusted, or the websocket upgrade is answered with a
+non-upgrade status: 2xx, 3xx, 404, 410), the client logs one WARN and stays off
+for the rest of the process; restart the process to try again. Set this
+variable to `off` to stop even the attempt.
+
+### `INTERNXT_NOTIFICATIONS_URL`, `INTERNXT_CLIENT_NAME`, `INTERNXT_CLIENT_VERSION`, `INTERNXT_DESKTOP_HEADER`, `INTERNXT_CRYPTO_KEY`
+
+Overrides for the identity unidrive presents to the Internxt gateway; leave
+them unset. `INTERNXT_NOTIFICATIONS_URL` is the websocket host above.
+`INTERNXT_CLIENT_NAME` / `INTERNXT_CLIENT_VERSION` replace the client name and
+version headers. `INTERNXT_DESKTOP_HEADER` is sent as the desktop-client token
+header only when set (unidrive has no such token and does not invent one; the
+override is for testing). `INTERNXT_CRYPTO_KEY` replaces the application key
+used to wrap the login password.
+- **Code:** `core/providers/internxt/src/main/kotlin/org/krost/unidrive/internxt/InternxtConfig.kt`, `InternxtHeaders.kt`.
+
+## Launchers and the JVM
+
+Read by the launchers (`unidrive`, `unidrive.ps1`) and by `DaemonAutospawn`
+when a command starts a daemon; the static flags themselves are in
+`dist/launcher/jvm-flags.txt` (the single source for the launchers, `install.sh`
+and the Windows client's `EngineHost.JvmFlags`).
+
+### `UNIDRIVE_XMX`
+
+The maximum heap as a bare size without the `-Xmx` prefix (`512m`, `2g`).
+- **Default:** `2g`. A blank value counts as unset.
+
+### `UNIDRIVE_LOCALE`
+
+`xx` or `xx_YY` (also `xx-YY`): sets `-Duser.language` and `-Duser.country` of
+the JVM; the `--locale=xx_YY` command-line option wins over it. A daemon that a
+command autospawns inherits the parent's locale.
+
+### `UNIDRIVE_DIAG_DIR`
+
+The folder for post-mortem diagnostics: fatal-crash `hs_err_pid<pid>.log`
+files, the OOM heap dump and the daemon's bounded GC log (`gc.log`, 5 files of
+10 MB, only for `daemon run`, `sync --watch` and `autostart`).
+- **Default:** `%LOCALAPPDATA%` + `/unidrive/diagnostics` on Windows,
+  `~/.local/share/unidrive/diagnostics` on Linux. Created on start.
+
+### `UNIDRIVE_COROUTINE_DEBUG`
+
+`1` (any non-blank value other than `0`) arms the daemon's coroutine-dump
+facility: the launcher adds the probe jar beside the fat jar as a `-javaagent`
+(a running JVM cannot be armed), and creating `coroutine-dump.trigger` in the
+profile folder makes the daemon write every live coroutine to
+`coroutine-dump.txt` next to it. A debugging-session cost; leave it off.
+- **Code:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/CoroutineDebug.kt`.
+
+### `UNIDRIVE_JAVA`, `UNIDRIVE_JVM_DIR` (Linux launcher)
+
+`UNIDRIVE_JAVA=/path/to/bin/java` picks the runtime. Otherwise the launcher uses
+`java` on `PATH` when it is 25 or newer, else the newest 25+ JDK under
+`UNIDRIVE_JVM_DIR` (default `/usr/lib/jvm`), else `java` on `PATH`; it refuses
+Java below 21. See `dist/README.md`.
+
+### `UNIDRIVE_ASCII`
+
+`1` (any non-empty value other than `0`) forces the ASCII fallback for the
+status glyphs; useful for CI and log-scraping pipelines.
+- **Code:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt`.
 
 ## Other env vars in use (not yet documented in this file)
 

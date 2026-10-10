@@ -93,7 +93,7 @@ Key refs name symbols (class, function), not line numbers — the code moves fas
 |---|---|---|
 | `updatedAt` modified-since poll | used | `InternxtApiService.listFiles`/`listFolders` (`updatedAt`) |
 | Sync-token / cursor | used | cursor listing above (`nextCursor`) |
-| WebSocket gateway integration | partial | `NotificationsClient` (socket.io wake signal, off with `INTERNXT_NOTIFICATIONS=off`); live endpoint unverified, #244 |
+| WebSocket gateway integration | partial | `NotificationsClient` (socket.io wake signal, opened only by `sync --watch`, off with `INTERNXT_NOTIFICATIONS=off`); stops for the process when the endpoint is the wrong server (TLS identity or non-upgrade answer, #679); as of 2026-10-09 `notifications.internxt.com` presents a certificate for another host, so it never connects; #244 |
 | WebSocket reconnect / replay | partial | reconnect with exponential backoff by socket.io; no replay of missed events |
 
 ### Upload
