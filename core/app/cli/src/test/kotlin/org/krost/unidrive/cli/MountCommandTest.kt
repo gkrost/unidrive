@@ -229,10 +229,10 @@ class MountCommandTest {
     }
 
     @Test
-    fun `co_daemon_log_level_defaults_to_warn_when_the_operator_set_none`() {
+    fun `co_daemon_log_level_defaults_to_info_when_the_operator_set_none`() {
         val env = mutableMapOf("PATH" to "/usr/bin")
         MountCommand.applyDefaultCoDaemonLogLevel(env)
-        assertEquals("warn", env["RUST_LOG"])
+        assertEquals("info", env["RUST_LOG"])
     }
 
     @Test
@@ -246,6 +246,6 @@ class MountCommandTest {
     fun `co_daemon_log_level_replaces_a_blank_value`() {
         val env = mutableMapOf("RUST_LOG" to " ")
         MountCommand.applyDefaultCoDaemonLogLevel(env)
-        assertEquals("warn", env["RUST_LOG"])
+        assertEquals("info", env["RUST_LOG"])
     }
 }

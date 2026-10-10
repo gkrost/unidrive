@@ -147,8 +147,13 @@ class MountCommand : Runnable {
                 profileName,
             )
 
-        /** The co-daemon's log filter when the operator set none: its teardown breadcrumbs are warnings (#150). */
-        const val DEFAULT_RUST_LOG: String = "warn"
+        /**
+         * The co-daemon's log filter when the operator set none or a blank one (#150). Its start and
+         * teardown breadcrumbs ("co-daemon starting", "co-daemon shutting down (signal|session ended)")
+         * are info-level, so a `warn` default would drop exactly the lines a teardown needs; `info` is
+         * also the co-daemon's own default when RUST_LOG is unset.
+         */
+        const val DEFAULT_RUST_LOG: String = "info"
 
         fun applyDefaultCoDaemonLogLevel(env: MutableMap<String, String>) {
             if (env["RUST_LOG"].isNullOrBlank()) env["RUST_LOG"] = DEFAULT_RUST_LOG
