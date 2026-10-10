@@ -97,6 +97,19 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `a_synced_file_the_remote_replaced_with_a_folder_is_planned_in_the_main_pass`() {
+        // Hydrated, so the unhydrated-row recovery loop does not plan anything for /x on its own:
+        // the type change itself must produce the action.
+        db.upsertEntry(dbEntry("/x", isHydrated = true))
+        val remoteChanges = mapOf("/x" to folderItem("/x", "2026-03-28T12:05:00Z"))
+        val actions = reconciler.reconcile(remoteChanges, emptyMap())
+        assertTrue(
+            actions.any { it.path == "/x" && it is SyncAction.UpdatePlaceholder },
+            "a file turning into a folder must not be swallowed with the folder-mtime no-op; got $actions",
+        )
+    }
+
+    @Test
     fun `a locally deleted folder whose remote modified time moved is a conflict not a remote delete`() {
         db.upsertEntry(folderEntry("/docs"))
         val remoteChanges = mapOf("/docs" to folderItem("/docs", "2026-03-28T12:05:00Z"))

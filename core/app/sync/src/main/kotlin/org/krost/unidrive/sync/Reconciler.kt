@@ -848,8 +848,10 @@ class Reconciler(
                 if (remoteItem.isFolder) {
                     // #694: a folder's modified time moves with its children (the first sync's uploads
                     // touch the remote folder after its row was recorded). There is nothing to apply
-                    // and no content to fetch, so this is a no-op rather than a metadata-only update.
-                    null
+                    // and no content to fetch, so this is a no-op rather than a metadata-only update;
+                    // updateRemoteEntries records the new metadata. A tracked FILE that the remote
+                    // replaced with a folder is a real change and keeps its update.
+                    if (entry?.isFolder == true) null else SyncAction.UpdatePlaceholder(path, remoteItem, wasHydrated = false)
                 } else {
                     SyncAction.DownloadContent(path, remoteItem)
                 }
