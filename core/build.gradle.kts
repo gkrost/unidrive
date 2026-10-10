@@ -26,7 +26,7 @@ configure<JacocoPluginExtension> {
 
 allprojects {
     group = "org.krost.unidrive"
-    // Greenfield monorepo restart baseline. Next planned release: 0.0.1. See docs/CHANGELOG.md.
+    // Greenfield monorepo restart baseline. Next planned release: 0.0.1.
     version = "0.0.1"
 
     repositories {
