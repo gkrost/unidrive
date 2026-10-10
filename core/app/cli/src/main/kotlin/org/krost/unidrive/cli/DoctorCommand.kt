@@ -136,15 +136,34 @@ class DoctorCommand : Runnable {
         // cost per-check on a 200k-entry profile.
         val stateDb = profileDir.resolve("state.db")
         if (Files.exists(stateDb)) {
-            val db = StateDatabase(stateDb)
+            // Read-only (mode=ro): no schema stamp or migration, so state.db stays byte-identical.
+            val db = StateDatabase(stateDb, readOnly = true)
             try {
-                db.initialize()
-                results += checkCursorFreshness(db, now)
-                results += checkHydrationDrift(db, syncRoot, full)
-                results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
-                results += checkEffectiveScope(db)
-                results += checkQuotaFreshness(db, now)
-                results += checkWriteUploadFailures(db)
+                val marker = results.size
+                val outcome =
+                    runCatching {
+                        db.initialize()
+                        results += checkCursorFreshness(db, now)
+                        results += checkHydrationDrift(db, syncRoot, full)
+                        results += checkLocalOrphans(db, syncRoot, full, excludePatterns)
+                        results += checkEffectiveScope(db)
+                        results += checkQuotaFreshness(db, now)
+                        results += checkWriteUploadFailures(db)
+                    }
+                if (outcome.isFailure) {
+                    // A read-only open does not run the additive migrations createTables() applies on a
+                    // normal open, so a state.db stamped at the current version but missing a later
+                    // additive column passes initialize() and the first read throws. Report it as a
+                    // state-db error instead of aborting doctor with a stack trace.
+                    results.subList(marker, results.size).clear()
+                    results += CheckResult(
+                        "state-db",
+                        Severity.ERR,
+                        "state.db could not be read read-only (an older schema or a corrupt file): " +
+                            "${outcome.exceptionOrNull()?.message}",
+                        emptyList(),
+                    )
+                }
             } finally {
                 db.close()
             }
