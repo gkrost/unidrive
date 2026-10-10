@@ -9,8 +9,8 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
-// #552: the rescan takes its pending uploads from pendingUploadPaths() instead of filtering every row of
-// state.db; the two must name the same file rows.
+// pendingUploadPaths() is the SQL form of SyncEntry.isPendingUpload: the two must name the same file rows
+// (#552 moved its callers from filtering every row of state.db to this query).
 class PendingUploadPathsTest {
     private lateinit var db: StateDatabase
 
@@ -62,11 +62,11 @@ class PendingUploadPathsTest {
         assertEquals(expected, db.pendingUploadPaths())
     }
 
-    // #560 U1: the KDoc of pendingUploadPaths says rows LocalScanner writes are excluded. They are not: a new file in
-    // the sync root gets a hydrated `local:` row, which the query returns. The replay drops it later only because it
-    // has no hydration cache copy (HydrationImpl.replayable); the rescan (#504) relies on getting it.
+    // #560: the query does not tell the two writers apart. A new file in the sync root gets a hydrated `local:`
+    // row, which the query returns like a mount-written one; the mount's replay drops it only because it has no
+    // hydration cache copy (HydrationImpl.replayable, pinned by ReplayPendingUploadsParityTest).
     @Test
-    fun `current behaviour - a LocalScanner row for a new sync-root file is a pending upload path`() {
+    fun `a LocalScanner row for a new sync-root file is a pending upload path`() {
         val syncRoot = Files.createTempDirectory("unidrive-pending-root")
         Files.writeString(syncRoot.resolve("dropped.txt"), "from a backup")
 

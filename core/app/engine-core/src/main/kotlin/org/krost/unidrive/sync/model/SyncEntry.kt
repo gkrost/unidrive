@@ -49,22 +49,31 @@ data class SyncEntry(
     // touched-but-unchanged file (mtime bumped by a shell handler, indexer, antivirus...)
     // from a real edit. Null = unknown, which keeps the plain mtime+size behaviour.
     val localHash: String? = null,
-    // #449: which file the local baseline (localMtime, localSize, localHash) describes.
-    // true  = the hydration cache copy: the bytes were written or downloaded into the cache and the
-    //         sync root holds no file the row describes (mount mode, or a mirror into the sync root
-    //         that failed or was skipped). A missing sync-root file is then NOT a local delete.
-    // false = the sync-root file: a missing sync-root file IS a deliberate local delete, whatever
-    //         copy the cache still holds.
-    // null  = unknown (rows written before the column): treated like true while a cache copy exists.
+    // #449: which file the local baseline (localMtime, localSize, localHash) describes. Written by the
+    // mount (MountEngine); the mirror engine never sets it.
+    // true  = the hydration cache copy: the bytes were written or downloaded into the cache.
+    // false = not the cache copy: the mount's cache sweep found a cache copy that is not the baseline
+    //         (MountEngine.evictCacheCopy), or a legacy hybrid row whose baseline was the sync-root file.
+    // null  = unknown: rows written before the column, and every row the mirror engine writes. The
+    //         mount's cache sweep treats the cache copy as the baseline only while its mtime and size
+    //         match the row (MountEngine.cacheDisposition).
     // Only meaningful while [isHydrated]; the database stores null for a row without local bytes.
+    // The mirror's Reconciler does not read it (#680): in a mirror profile a missing sync-root file is
+    // a local delete whatever this column holds.
     val cacheBacked: Boolean? = null,
 ) {
     // UD-901 / #136: the pending-upload predicate, assembled in ONE place. A pending
-    // upload is a file whose only copy is the local/cache bytes and which has never
+    // upload is a file whose only copy is the local bytes and which has never
     // reached the cloud. Consumers used to re-assemble the predicate from halves
     // (`remoteId == null` here, `isHydrated` there), and rows in the gap — a sparse
     // partial-download row (remoteId == null, isHydrated == false) has no real bytes
     // to upload — were counted or re-uploaded by whichever half the consumer checked.
+    // Where the local bytes are follows from the profile's mode (#560): a mirror
+    // profile's pending rows are LocalScanner's (bytes in the sync root, uploaded by
+    // the next sync), a mount profile's are the mount's (bytes in the hydration cache,
+    // replayed by the daemon). A legacy profile converted to a mount can still hold
+    // scanner rows whose bytes were quarantined; the replay skips a row without a cache
+    // copy (HydrationImpl.replayable).
     // Deliberately a computed property: derived from two stored columns, so it takes
     // no part in equals/copy.
     val isPendingUpload: Boolean
