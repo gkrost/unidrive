@@ -250,6 +250,18 @@ class IpcServer(
         pendingPostReply[connectionId] = action
     }
 
+    /** True when this server authenticates its connections (an [IpcAuth] was given); false only for the bare server of the unit tests. */
+    val authEnabled: Boolean
+        get() = auth != null
+
+    /**
+     * The scope the connection's handshake granted, as its wire word (`full` or `read`); null when it has none:
+     * the server has no [IpcAuth], the handshake is not complete, or the connection is gone. A verb handler
+     * only runs for an authenticated connection, so with [authEnabled] a null here means "not known to be
+     * full" and callers deciding whether to start work on the client's behalf must treat it as read.
+     */
+    fun scopeOf(connectionId: String): String? = authSessions[connectionId]?.scope?.wire
+
     /**
      * Test-only accessor used by IpcSyncSubscriberSetTest to assert that
      * disconnected connections are removed from the subscriber set (T4 in

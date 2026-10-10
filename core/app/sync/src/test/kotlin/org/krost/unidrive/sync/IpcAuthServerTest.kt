@@ -149,6 +149,44 @@ class IpcAuthServerTest {
     }
 
     @Test
+    fun `scopeOf names the scope the handshake granted`() {
+        IpcAuth.issue(profileDir, "p1", "test-engine")
+        val auth =
+            IpcAuth(
+                "p1",
+                IpcAuth.readToken(IpcAuth.tokenFile(profileDir, IpcAuth.Scope.FULL)),
+                IpcAuth.readToken(IpcAuth.tokenFile(profileDir, IpcAuth.Scope.READ)),
+                "test-engine",
+            )
+        val server = IpcServer(socketPath, auth = auth)
+        // READ-class verb: reachable with either scope; it reports what the server knows of its connection.
+        server.registerHandler("hydration.list") { connId, _ -> """{"ok":true,"scope":${server.scopeOf(connId)?.let { "\"$it\"" }}}""" }
+        server.start(scope)
+        servers.add(server)
+        assertTrue(server.authEnabled)
+
+        IpcAuthClient.connect(endpoint, IpcAuth.Scope.READ).use { ch ->
+            ch.configureBlocking(false)
+            assertEquals("""{"ok":true,"scope":"read"}""", ch.ask("""{"verb":"hydration.list"}"""))
+        }
+        IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL).use { ch ->
+            ch.configureBlocking(false)
+            assertEquals("""{"ok":true,"scope":"full"}""", ch.ask("""{"verb":"hydration.list"}"""))
+        }
+        assertEquals(null, server.scopeOf("no-such-connection"))
+    }
+
+    @Test
+    fun `a server without authentication reports no scope`() {
+        val server = IpcServer(socketPath)
+        server.registerHandler("hydration.list") { connId, _ -> """{"ok":true,"scope":${server.scopeOf(connId)}}""" }
+        server.start(scope)
+        servers.add(server)
+        assertTrue(!server.authEnabled)
+        raw().use { ch -> assertEquals("""{"ok":true,"scope":null}""", ch.ask("""{"verb":"hydration.list"}""")) }
+    }
+
+    @Test
     fun `requests before the handshake get auth_required and daemon status the minimal reply`() {
         issueAndStart()
         raw().use { ch ->
