@@ -18,14 +18,25 @@ import java.nio.file.Path
 /** Validate profile name: TOML bare key (letters, digits, hyphens, underscores). */
 fun isValidProfileName(name: String): Boolean = name.isNotBlank() && name.matches(Regex("[a-zA-Z0-9_-]+"))
 
-/** Escape characters that are special inside TOML basic strings. */
+/**
+ * Escape characters that are special inside TOML basic strings. Every other control character
+ * (U+0000..U+001F, U+007F) is written as `\uXXXX`: the TOML spec forbids them raw, and a strict
+ * reader of the same config.toml would reject the whole file over one label.
+ */
 fun escapeTomlValue(value: String): String =
-    value
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
+    buildString(value.length + 8) {
+        for (c in value) {
+            when {
+                c == '\\' -> append("\\\\")
+                c == '"' -> append("\\\"")
+                c == '\n' -> append("\\n")
+                c == '\r' -> append("\\r")
+                c == '\t' -> append("\\t")
+                c < ' ' || c == '\u007f' -> append("\\u").append("%04X".format(c.code))
+                else -> append(c)
+            }
+        }
+    }
 
 /**
  * #646: set `[general] default_profile` in config text. The value is inserted directly under
@@ -236,6 +247,9 @@ fun isProfileAuthenticated(
                     "client_id" to rp.client_id,
                     "client_secret" to rp.client_secret,
                     "rclone_remote" to rp.rclone_remote,
+                    // localfs answers isAuthenticated from this key; without it every localfs
+                    // profile reads as "none" regardless of its root.
+                    "root_path" to rp.root_path,
                 )
             factory.isAuthenticated(properties, profileDir)
         } else {
@@ -244,4 +258,62 @@ fun isProfileAuthenticated(
     } catch (_: Exception) {
         false
     }
+}
+
+/** The outcome of [editProfileKey]. */
+sealed interface ProfileKeyEdit {
+    data class Edited(
+        val text: String,
+    ) : ProfileKeyEdit
+
+    /** The config has no `[providers.<name>]` section. */
+    data object NoSuchProfile : ProfileKeyEdit
+
+    /**
+     * The key exists in a layout this line-oriented editor will not rewrite (a multi-line array or
+     * string): replacing its first line would leave the rest behind as garbage.
+     */
+    data object UnsupportedLayout : ProfileKeyEdit
+}
+
+/**
+ * Set (or, with a null [tomlLine], remove) one key of the `[providers.<name>]` section. [tomlLine] is
+ * the complete `key = value` line. An existing line for the key is replaced in place; otherwise the
+ * line goes after the last non-blank line of the section's own body (before any sub-table such as
+ * `[providers.<name>.pin_patterns]`, so the key cannot land in the wrong table). Everything else —
+ * comments, ordering, other sections and the file's line-ending style — is preserved. Unlike
+ * [updateProfileKey], sub-tables are never treated as part of the section body.
+ */
+fun editProfileKey(
+    configText: String,
+    name: String,
+    key: String,
+    tomlLine: String?,
+): ProfileKeyEdit {
+    val crlf = configText.contains("\r\n")
+    val eol = if (crlf) "\r" else ""
+    val lines = configText.split("\n").toMutableList()
+    val start = lines.indexOfFirst { it.substringBefore('#').filterNot(Char::isWhitespace) == "[providers.$name]" }
+    if (start < 0) return ProfileKeyEdit.NoSuchProfile
+    val end =
+        (start + 1 until lines.size).firstOrNull { lines[it].trim().startsWith("[") } ?: lines.size
+
+    val existing =
+        (start + 1 until end).firstOrNull { i ->
+            val t = lines[i].trim()
+            t.startsWith(key) && t.drop(key.length).trimStart().startsWith("=")
+        }
+    if (existing != null) {
+        val value = lines[existing].substringAfter('=').trim()
+        val unterminated =
+            (value.startsWith("[") && !value.contains("]")) ||
+                (value.startsWith("\"\"\"") && !value.drop(3).contains("\"\"\"")) ||
+                (value.startsWith("'''") && !value.drop(3).contains("'''"))
+        if (unterminated) return ProfileKeyEdit.UnsupportedLayout
+        if (tomlLine == null) lines.removeAt(existing) else lines[existing] = tomlLine + eol
+    } else if (tomlLine != null) {
+        val lastBody = (end - 1 downTo start + 1).firstOrNull { lines[it].isNotBlank() } ?: start
+        lines.add(lastBody + 1, tomlLine + eol)
+    }
+    return ProfileKeyEdit.Edited(lines.joinToString("\n"))
 }

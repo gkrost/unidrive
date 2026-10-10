@@ -14,6 +14,10 @@ type = "internxt"
 # ("C:\\Users\\me\\Internxt") or a single-quoted literal string ('C:\Users\me\Internxt').
 sync_root = "~/Internxt"
 
+# Free display text for front-ends, stored as typed. Display only: the profile name above stays the
+# identity (state folder, socket, sync-root id), and changing the label renames nothing.
+# label = "Work Internxt"
+
 # Sync only these remote subtrees. Nothing else materializes under sync_root.
 # A single path or a list; entries are absolute remote paths starting with "/".
 # Absent = the whole drive. `unidrive sync --sync-path ...` overrides it for one run.

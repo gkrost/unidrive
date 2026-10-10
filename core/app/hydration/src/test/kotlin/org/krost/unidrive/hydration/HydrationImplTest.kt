@@ -329,6 +329,8 @@ internal class MinimalFakeProvider(
  * - [syncEngine] — exposes seedRemoteContent
  * - [hydration] — the [HydrationImpl] under test
  */
+// The harness threads each HydrationImpl tuning knob through as its own parameter.
+@Suppress("LongParameterList")
 internal class HydrationTestEnv(
     /** Optional scope for recovery uploads. Pass the [runTest] scope to control
      *  background-job dispatch in recovery-path tests; null uses the default. */
@@ -352,6 +354,8 @@ internal class HydrationTestEnv(
     val uploadProgressMinIntervalMs: Long = 400,
     /** #493: delay of the replay of rows whose last upload failed; 0 = at once. */
     val failedReplayDelayMs: Long = HydrationImpl.DEFAULT_FAILED_REPLAY_DELAY_MS,
+    /** #658: the cache budget in bytes; 0 = unlimited. */
+    val cacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
     providerId: String = "fake-hydration",
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
@@ -398,6 +402,7 @@ internal class HydrationTestEnv(
             uploadStallTimeoutMs = uploadStallTimeoutMs,
             uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
             failedReplayDelayMs = failedReplayDelayMs,
+            cacheMaxBytes = cacheMaxBytes,
         )
     }
 
@@ -499,7 +504,7 @@ internal class HydrationTestEnv(
          * the shape HydrationImpl.create writes for a file made through the
          * mount before its upload runs.
          */
-        fun insertCreatedRow(path: String) {
+        fun insertCreatedRow(path: String, lastSynced: Instant = Instant.now()) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
@@ -512,7 +517,7 @@ internal class HydrationTestEnv(
                     isFolder = false,
                     isPinned = false,
                     isHydrated = true,
-                    lastSynced = Instant.now(),
+                    lastSynced = lastSynced,
                 ),
             )
         }
@@ -555,6 +560,9 @@ internal class HydrationTestEnv(
 
         fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
 
+        /** Runs [block] holding the database's monitor, as a long batch (an enumeration's save) does. */
+        fun <T> holdingDatabase(block: () -> T): T = synchronized(db) { block() }
+
         fun countWriteUploadFailed(): Int = db.countWriteUploadFailed()
     }
 
@@ -573,6 +581,9 @@ internal class HydrationTestEnv(
 
         /** Resolves a path to its cache location. */
         fun resolveCachePath(path: String): Path = syncEngine.resolveCachePath(path)
+
+        /** #658: the mount's last real provider round trip (a warm-cache serve does not move it). */
+        fun lastProviderContactAtMs(): Long? = syncEngine.mount.lastProviderContactAtMs
 
         /** Folders the provider was asked to create (scope-guard assertions). */
         fun createdFolders(): List<String> = fakeProvider.createdFolders
@@ -1276,6 +1287,22 @@ class HydrationImplTest {
 
         assertEquals(HydrateResult.Ok, r)
         assertEquals(true, env.stateDb.isHydrated("/foo.txt"))
+    }
+
+    @Test
+    fun `a warm hydrate does not move the provider contact but a real download does`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/foo.txt", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/foo.txt", "hello")
+        assertNull(env.syncEngine.lastProviderContactAtMs(), "no round trip yet: unknown, never a default")
+
+        assertEquals(HydrateResult.Ok, env.hydration.hydrate("/foo.txt"))
+        val afterDownload = assertNotNull(env.syncEngine.lastProviderContactAtMs(), "a real download is a provider contact")
+
+        // The row is hydrated now; a second hydrate serves the warm cache with no provider call, so
+        // daemon.status must not report a fresh contact (an outage would otherwise look healthy).
+        assertEquals(HydrateResult.Ok, env.hydration.hydrate("/foo.txt"))
+        assertEquals(afterDownload, env.syncEngine.lastProviderContactAtMs(), "a warm-cache serve is not a round trip")
     }
 
     @Test

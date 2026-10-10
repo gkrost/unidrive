@@ -583,9 +583,12 @@ open class Main : Runnable {
     fun checkCredentialHealth(
         profile: ProfileInfo,
         configDir: Path,
+        useVault: Boolean = true,
     ): CredentialHealth {
         val factory = ProviderRegistry.get(profile.type) ?: return CredentialHealth.Missing("Unknown provider type: ${profile.type}")
-        val rp = mergeVaultCreds(profile)
+        // useVault = false is the non-interactive callers' (`profile list --json`): reading the vault
+        // may prompt for a passphrase on a terminal, which a front-end cannot answer.
+        val rp = if (useVault) mergeVaultCreds(profile) else profile.rawProvider
         val properties = rawProviderToProperties(rp)
         return factory.checkCredentialHealth(properties, configDir)
     }
