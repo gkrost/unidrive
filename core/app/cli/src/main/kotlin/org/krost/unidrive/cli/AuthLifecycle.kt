@@ -247,8 +247,18 @@ class AuthLoginCommand : Callable<Int> {
             }
         }
 
-    /** The first line of standard input without its line terminator; spaces in the password are kept. */
+    /**
+     * On a terminal: the prompt on stderr (stdout stays clean for --json) and a masked read. Otherwise the
+     * first line of standard input without its line terminator, no prompt. Spaces in the password are kept.
+     */
     private fun readPasswordLine(): String {
+        val terminal = LifecycleHooks.terminalPassword()
+        if (terminal != null) {
+            System.err.print("Password: ")
+            System.err.flush()
+            val typed = terminal.readPassword() ?: return ""
+            return String(typed).also { typed.fill('\u0000') }
+        }
         val bytes = java.io.ByteArrayOutputStream()
         while (true) {
             val b = System.`in`.read()

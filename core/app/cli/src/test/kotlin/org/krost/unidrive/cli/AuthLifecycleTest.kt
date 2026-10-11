@@ -114,6 +114,7 @@ class AuthLifecycleTest {
         System.setIn(originalIn)
         LifecycleHooks.factoryFor = { ProviderRegistry.get(it) }
         LifecycleHooks.sleepSeconds = { Thread.sleep(it * 1000) }
+        LifecycleHooks.terminalPassword = { null }
         dir.toFile().deleteRecursively()
     }
 
@@ -330,6 +331,63 @@ class AuthLifecycleTest {
         for (secret in listOf("pass word 1", "123456", "JWT-SECRET", "MNEMONIC-SECRET")) {
             assertFalse(secret in seen, "'$secret' must not appear in stdout or stderr")
         }
+    }
+
+    /** A fake terminal: counts the masked reads and answers with [typed] (null: end of input). */
+    private class FakeTerminal(
+        private val typed: String?,
+    ) : MaskedPasswordReader {
+        var reads = 0
+
+        override fun readPassword(): CharArray? {
+            reads++
+            return typed?.toCharArray()
+        }
+    }
+
+    @Test
+    fun `login on a terminal reads the password masked, prompts on stderr only and prints no secret`() {
+        val calls = mutableListOf<LoginCall>()
+        fakeLogin(calls)
+        val terminal = FakeTerminal(" pass word 2 ")
+        LifecycleHooks.terminalPassword = { terminal }
+
+        // Whatever is on System.in is ignored: on a terminal the console reads, not the stream.
+        val code = run("auth", "login", "--profile", "ix", "--email", "me@example.test", "--password-stdin", "--json", stdin = "from-the-stream\n")
+
+        assertEquals(0, code, err.toString())
+        assertEquals(1, terminal.reads, "one masked read")
+        assertEquals(" pass word 2 ", calls.single().password, "the masked line as typed, spaces kept")
+        assertEquals("authenticated", json().getValue("status").jsonPrimitive.content, "stdout is still exactly one JSON line")
+        assertTrue(err.toString(Charsets.UTF_8).contains("Password"), "the prompt goes to stderr")
+        assertFalse("Password" in out.toString(Charsets.UTF_8), "the prompt stays off stdout")
+        for (secret in listOf("pass word 2", "from-the-stream", "JWT-SECRET", "MNEMONIC-SECRET")) {
+            assertFalse(secret in everything(), "'$secret' must not appear in stdout or stderr")
+        }
+    }
+
+    @Test
+    fun `login on a terminal with nothing typed is an empty_password refusal`() {
+        val calls = mutableListOf<LoginCall>()
+        fakeLogin(calls)
+        for (typed in listOf("", null)) {
+            LifecycleHooks.terminalPassword = { FakeTerminal(typed) }
+            assertEquals(1, run("auth", "login", "--profile", "ix", "--email", "a@b.test", "--password-stdin", "--json", stdin = "pw\n"))
+            assertEquals("empty_password", errorToken())
+        }
+        assertTrue(calls.isEmpty(), "no login attempt without a password")
+    }
+
+    @Test
+    fun `login without a terminal reads standard input silently`() {
+        val calls = mutableListOf<LoginCall>()
+        fakeLogin(calls)
+        LifecycleHooks.terminalPassword = { null }
+
+        assertEquals(0, run("auth", "login", "--profile", "ix", "--email", "a@b.test", "--password-stdin", "--json", stdin = "pw\r\n"))
+
+        assertEquals("pw", calls.single().password)
+        assertEquals("", err.toString(Charsets.UTF_8), "no prompt when the password is piped in")
     }
 
     @Test
